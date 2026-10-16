@@ -146,6 +146,7 @@
     }
     restoreDrafts();
     updateTimes();
+    notifyTurns();
     markActiveTreeItem();
     markLines(false);
     restoreExpanded().then(restoreDrafts);
@@ -1187,6 +1188,52 @@
     }
   });
 
+  // -------------------------------------------------------- notifications
+  // Opt in on a list page: a desktop notification when a pull request becomes your turn. The
+  // page knows after each live refresh, so it works while a list page is open in some tab.
+
+  let yourTurn = null; // the pull ids whose turn was yours when the page last rendered
+
+  function notifying() {
+    try {
+      return !!window.Notification && Notification.permission === 'granted' && localStorage.getItem('laatsux:notify') === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function notifyTurns() {
+    const button = $('.js-notify');
+    if (!button) return void (yourTurn = null);
+    button.hidden = !window.Notification || Notification.permission === 'denied';
+    $('.js-notify-label', button).textContent = notifying() ? 'Notifying' : 'Notify me';
+    button.classList.toggle('selected', notifying());
+    // The server lists them whatever the tab shows: { id, title, url, reasons }.
+    const list = $('[data-your-turn]');
+    const turns = list ? JSON.parse(list.dataset.yourTurn) : [];
+    if (yourTurn && notifying()) {
+      for (const t of turns.filter((t) => !yourTurn.has(t.id))) {
+        // The tag keeps other tabs showing a list from notifying twice.
+        const n = new Notification(`Your turn: ${t.title}`, { body: t.reasons, tag: `laatsux-turn-${t.id}`, icon: '/static/favicon.svg' });
+        n.onclick = () => {
+          window.focus();
+          location.href = t.url;
+        };
+      }
+    }
+    yourTurn = new Set(turns.map((t) => t.id));
+  }
+
+  document.addEventListener('click', async (e) => {
+    const button = e.target.closest && e.target.closest('.js-notify');
+    if (!button) return;
+    try {
+      if (notifying()) localStorage.removeItem('laatsux:notify');
+      else if ((await Notification.requestPermission()) === 'granted') localStorage.setItem('laatsux:notify', '1');
+    } catch {}
+    notifyTurns();
+  });
+
   // ------------------------------------------------------------- times
 
   function ago(d) {
@@ -1201,8 +1248,19 @@
     return 'on ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   }
 
+  /** How long since `d`, as html.ts's duration: "3 min", "5 h", "4 days". */
+  function duration(d) {
+    const m = Math.max(1, Math.round((Date.now() - d.getTime()) / 60000));
+    if (m < 60) return `${m} min`;
+    const h = Math.round(m / 60);
+    return h < 48 ? `${h} h` : `${Math.round(h / 24)} days`;
+  }
+
   function updateTimes() {
-    for (const el of $$('relative-time')) el.textContent = ago(new Date(el.getAttribute('datetime')));
+    for (const el of $$('relative-time')) {
+      const d = new Date(el.getAttribute('datetime'));
+      el.textContent = el.dataset.format === 'duration' ? duration(d) : ago(d);
+    }
   }
 
   // ------------------------------------------------------------- avatars

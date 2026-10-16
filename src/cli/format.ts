@@ -73,6 +73,18 @@ function reviewersLine(pr: GhPull): string {
 // As gh describes them.
 const MERGE_METHOD: Record<string, string> = { MERGE: 'a merge commit', REBASE: 'rebase and merge', SQUASH: 'squash and merge' };
 
+const WHOSE: Record<string, string> = {
+  AUTHOR: "the author's turn",
+  REVIEWER_AGENTS: "the reviewer agents' turn",
+  REVIEWER: "the reviewer's turn",
+  NONE: 'nothing waiting',
+};
+
+/** Whose move it is and why: "the reviewer's turn: claude is waiting for review, 3 min; codex found nothing in 8c64534". */
+export function turnLine(turn: { whose: string; reasons: string[] }): string {
+  return `${WHOSE[turn.whose] ?? turn.whose.toLowerCase()}${turn.reasons.length ? `: ${turn.reasons.join('; ')}` : ''}`;
+}
+
 /** `gh pr view` without a TTY: key/value header, "--", body. */
 export function viewPlain(pr: GhPull, images?: ImageRef): string {
   const lines = [
@@ -98,12 +110,23 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
     `unresolved threads:\t${pr.reviewThreads.filter((t: any) => !t.isResolved).length}`,
   ];
   if (pr.publishedUrl) lines.push(`published:\t${pr.publishedUrl}`);
+  // A server older than the CLI has neither field.
+  if (pr.unpublishedChanges?.length) lines.push(`unpublished:\t${unpublished(pr)}`);
+  if (pr.turn) lines.push(`turn:\t${pr.turn.whose.toLowerCase()}\t${pr.turn.reasons.join('; ')}`);
   return `${lines.join('\n')}\n--\n${withImages(pr.body, images)}\n`;
 }
 
 export function viewTTY(pr: GhPull, images?: ImageRef): string {
   const state =
-    pr.state === 'OPEN' ? (pr.isDraft ? c.gray('Draft') : c.green('Open')) : pr.state === 'PUBLISHED' ? c.magenta('Published') : c.red('Closed');
+    pr.state === 'OPEN'
+      ? pr.isDraft
+        ? c.gray('Draft')
+        : c.green('Open')
+      : pr.state === 'PUBLISHED'
+        ? pr.unpublishedChanges?.length
+          ? c.green('Update not published')
+          : c.magenta('Published')
+        : c.red('Closed');
   const out = [
     `${c.bold(pr.title)} ${c.gray('#' + pr.number)}`,
     `${state} • ${pr.author.login} wants to merge ${pr.commits.length} commit${pr.commits.length === 1 ? '' : 's'} into ${pr.baseRefName} from ${pr.headRefName} • ${c.green('+' + pr.additions)} ${c.red('-' + pr.deletions)}`,
@@ -117,10 +140,16 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   }
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved).length;
   if (unresolved) out.push(c.yellow(`${unresolved} unresolved review thread${unresolved === 1 ? '' : 's'}`));
+  if (pr.turn && pr.turn.whose !== 'NONE') out.push(`${c.bold('Turn:')} ${turnLine(pr.turn)}`);
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');
-  if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}`);
+  if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}${pr.unpublishedChanges?.length ? c.yellow(` (update not published: ${unpublished(pr)})`) : ''}`);
   out.push(c.gray(`View this pull request in laatsux: ${pr.url}`));
   return out.join('\n') + '\n';
+}
+
+/** "commits, title": what GitHub does not have yet. */
+function unpublished(pr: GhPull): string {
+  return pr.unpublishedChanges.map((x: string) => (x === 'BODY' ? 'description' : x.toLowerCase())).join(', ');
 }
 
 function location(t: any, pr?: GhPull): string {

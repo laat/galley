@@ -1,11 +1,11 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
-import { publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread } from '../service.ts';
-import { avatarUrl, reviewDecision } from '../github.ts';
+import { publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
-import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
+import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, since, type Safe } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
 import { closingIssues, pullReferences, type ReferenceContext } from './references.ts';
 import {
@@ -40,40 +40,87 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   const base = opts.repo ? `/${opts.repo.owner}/${opts.repo.name}` : '/';
   const tab = (key: string, iconName: string, label: string, n: number) =>
     html`<a class="list-tab${state === key ? ' selected' : ''}" href="${base}?state=${key}">${icon(iconName)} ${n} ${label}</a>`;
-  const viewer = s.viewer();
-  const rows = shown.map((p) => {
+  const turns = new Map(all.map((p) => [p.id, s.turn(p)]));
+  const turn = (p: PullRow) => turns.get(p.id)!;
+  const yours = all.filter((p) => turn(p).whose === 'reviewer');
+  const href = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
+    return `/${repo.owner}/${repo.name}/pull/${p.number}`;
+  };
+  const apiBase = (p: PullRow) => {
+    const repo = s.repoById(p.repo_id);
+    return `/api/repos/${repo.owner}/${repo.name}/pulls/${p.number}`;
+  };
+  // What notifications follow (notifyTurns in app.js): your turn in every repository, whatever this page lists.
+  const notify = (opts.repo ? s.pulls(null, { state: 'open' }) : all)
+    .map((p) => ({ p, t: turns.get(p.id) ?? s.turn(p) }))
+    .filter(({ t }) => t.whose === 'reviewer')
+    .map(({ p, t }) => ({ id: p.id, title: p.title, url: href(p), reasons: t.reasons.map(reasonText).join(' · ') }));
+  const heading = (p: PullRow) => {
+    const repo = s.repoById(p.repo_id);
+    return html`${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
+    <a class="pr-row-title" href="${href(p)}">${p.title}</a>`;
+  };
+  const published = (p: PullRow) =>
+    p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
+
+  /** A pull request with what it waits for: whose turn it is and why, the decision, and what GitHub does not have yet. */
+  const row = (p: PullRow) => {
+    const t = turn(p);
     const author = s.db.actorById(p.author_id);
-    const reviews = s.reviews(p, viewer).filter((r) => r.state !== 'PENDING');
-    const decision = reviews.length ? reviewDecision(reviews) : null;
+    const unpublished = t.reasons.find((r) => r.kind === 'unpublished');
     const comments = s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE pull_id = ? AND ' + "(review_id IS NULL OR review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))", p.id)!.n;
-    const waiting = (s.waiters.get(p.id) ?? 0) > 0;
     return html`<div class="Box-row pr-row">
-  <span class="pr-row-icon">${pullIcon(p)}</span>
+  <span class="pr-row-icon">${pullIcon(p, !!unpublished)}</span>
   <div class="pr-row-main">
-    ${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
-    <a class="pr-row-title" href="/${repo.owner}/${repo.name}/pull/${p.number}">${p.title}</a>
+    ${heading(p)}
     ${p.draft && p.state === 'open' ? html`<span class="Label">Draft</span>` : ''}
-    ${waiting ? html`<span class="Label Label--success">${icon('dot-fill')} ${author.login} is waiting for review</span>` : ''}
-    <div class="pr-row-meta">#${p.number} opened ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${
-      decision === 'CHANGES_REQUESTED'
-        ? html` · <span class="color-fg-danger">Changes requested</span>`
-        : decision === 'APPROVED'
-          ? html` · <span class="color-fg-success">Approved</span>`
-          : ''
-    }${p.published_url ? html` · <a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : ''}</div>
+    ${t.reasons.some((r) => r.kind === 'approved') ? html`<span class="Label Label--success">${icon('check')} Approved</span>` : ''}
+    ${t.reasons.some((r) => r.kind === 'changes_requested') ? html`<span class="Label Label--danger">${icon('file-diff')} Changes requested</span>` : ''}
+    ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
+    ${turnReasons(t, apiBase(p))}
+    <div class="pr-row-meta">#${p.number} opened ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
-  <div class="pr-row-side">${comments ? html`<a class="link-muted" href="/${repo.owner}/${repo.name}/pull/${p.number}">${icon('comment')} ${comments}</a>` : ''}</div>
+  <div class="pr-row-side">${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
 </div>`;
-  });
+  };
+
+  /** One line: the title, and what the agents are doing. */
+  const compactRow = (p: PullRow) => {
+    const t = turn(p);
+    const unpublished = t.reasons.some((r) => r.kind === 'unpublished');
+    return html`<div class="Box-row pr-row pr-row--compact">
+  <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
+  <div class="pr-row-main">
+    <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
+    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
+  </div>
+</div>`;
+  };
+
+  let rows: Safe[] = shown.map(row);
+  if (state === 'open' && shown.length) {
+    const group = (iconName: string, title: string, n: number, note = '') =>
+      html`<div class="Box-row turn-group">${icon(iconName)} <h2 class="turn-group-title">${title}</h2> <span class="Counter">${n}</span>${note ? html` <span class="turn-group-note">${note}</span>` : ''}</div>`;
+    const mine = shown.filter((p) => turn(p).whose === 'reviewer').sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+    const agents = shown.filter((p) => turn(p).whose === 'author' || turn(p).whose === 'reviewer_agents');
+    const done = shown.filter((p) => turn(p).whose === 'none');
+    rows = [
+      group('inbox', 'Your turn', mine.length, mine.length > 1 ? 'oldest first' : ''),
+      ...(mine.length ? mine.map(row) : [html`<div class="Box-row turn-empty">Nothing is waiting for you.</div>`]),
+      ...(agents.length ? [group('hubot', 'With agents', agents.length), ...agents.map(compactRow)] : []),
+      ...(done.length ? [group('mark-github', 'Published', done.length, 'nothing new since'), ...done.map(compactRow)] : []),
+    ];
+  }
   const empty = html`<div class="blankslate">
   ${icon('git-pull-request', { size: 24 })}
   <h3>No ${state === 'all' ? '' : state + ' '}staged pull requests${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
   <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
 </div>`;
   const body = html`<div class="container container-lg">
-  <div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1></div>
-  <div class="Box pr-list">
+  <div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>
+    <button type="button" class="btn btn-sm notify-toggle js-notify" hidden title="A desktop notification when a pull request becomes your turn, while a page like this is open">${icon('bell')} <span class="js-notify-label">Notify me</span></button></div>
+  <div class="Box pr-list" data-your-turn="${JSON.stringify(notify)}">
     <div class="Box-header list-tabs">
       ${tab('open', 'git-pull-request', 'Open', counts.open)}
       ${tab('published', 'mark-github', 'Published', counts.published)}
@@ -82,13 +129,43 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${rows.length ? rows : empty}
   </div>
 </div>`;
+  // The tab's title counts the pull requests waiting for you, as a mail client counts unread mail.
+  const title = opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux';
   return layout(s, {
-    title: opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux',
+    title: yours.length ? `(${yours.length}) ${title}` : title,
     crumbs: opts.repo ? repoCrumbs(opts.repo) : undefined,
     subnav: opts.repo ? repoNav(s, opts.repo) : undefined,
     body,
     live: 'all',
   });
+}
+
+/**
+ * The reasons of a Turn as a line of the list, those of the given kinds (by default all but the
+ * labels). A failed reviewer agent gets a Retry button, which asks it to review at `apiBase`.
+ */
+function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads']): Safe {
+  const shown = t.reasons.filter((r) => kinds.includes(r.kind));
+  if (!shown.length) return raw('');
+  return html`<div class="pr-row-turn">${shown.map((r) => {
+    const cls = reasonClass(r);
+    const mark =
+      cls === 'failed' ? icon('x-circle-fill') : cls === 'running' || cls === 'waiting' ? icon('dot-fill', { cls: 'turn-pulse' }) : cls === 'working' ? icon('dot-fill') : '';
+    return html`<span class="turn-reason${cls ? ` turn-reason--${cls}` : ''}">${mark}${r.text}${r.since ? html`<span class="turn-since">, ${since(r.since)}</span>` : ''}${
+      cls === 'failed' && r.engine ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.engine}">Retry</button>` : ''
+    }</span>`;
+  })}</div>`;
+}
+
+/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, or unresolved threads. */
+function reasonClass(r: TurnReason): string {
+  if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' ? '' : 'working';
+  if (r.kind === 'reviewer_agent') return r.state === 'reviewing' || r.state === 'queued' ? 'running' : r.state === 'failed' ? 'failed' : '';
+  return r.kind === 'threads' ? 'threads' : '';
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 // ------------------------------------------------------------ pull pages
@@ -143,6 +220,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
   const additions = files.reduce((n, f) => n + f.additions, 0);
   const deletions = files.reduce((n, f) => n + f.deletions, 0);
   const conversationCount = s.issueComments(pull).length + p.threads.filter((t) => !t.pending).reduce((n, t) => n + 1 + t.replies.length, 0);
+  const unpublished = s.unpublishedChanges(pull).length > 0;
   const tabLink = (key: string, href: string, iconName: string, label: string, count: number) =>
     html`<a class="tabnav-tab${tab === key ? ' selected' : ''}" href="${href}">${icon(iconName)} ${label} <span class="Counter">${count}</span></a>`;
   const header = html`<div class="pr-header">
@@ -160,9 +238,9 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
       <button type="button" class="btn-link js-title-cancel">Cancel</button>
     </form>
     <div class="gh-header-meta">
-      ${stateBadge(pull)}
+      ${stateBadge(pull, 'md', unpublished)}
       <div class="gh-header-meta-text">
-        ${authorLink(s, author)} ${pull.state === 'published' ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
+        ${authorLink(s, author)} ${pull.state === 'published' && !unpublished ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
         <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
       </div>
     </div>
@@ -349,14 +427,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     </div>`;
   }
 
-  // What was published, in terms of the staged commits (GitHub may have signed copies of them).
-  const publishedSource = pull.published_source_sha ?? pull.published_head_sha;
-  const changed: string[] = [];
-  if (pull.published_url) {
-    if (publishedSource !== pull.head_sha) changed.push('commits');
-    if (pull.published_title !== pull.title) changed.push('title');
-    if (pull.published_body !== pull.body) changed.push('description');
-  }
+  const changed = s.unpublishedChanges(pull);
   const unsigned = await s.unsignedCommits(p.ctx, p.commits);
   const signer = unsigned.length ? await s.signer(p.ctx) : null;
   const signByDefault = unsigned.length ? await s.signsByDefault(p.ctx) : false;

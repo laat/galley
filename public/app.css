@@ -305,6 +305,8 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .Label--done { color: var(--done); border-color: var(--done); }
 .Label--success { color: var(--success); border-color: var(--success); }
 .Label--success .octicon { width: 10px; }
+.Label--danger { color: var(--danger); border-color: var(--danger); }
+.Label--attention .octicon, .Label--danger .octicon { width: 12px; }
 .Label--priority { font-weight: 600; }
 .Label--priority-high { color: var(--danger); border-color: var(--danger); background: var(--danger-subtle); }
 .Label--priority-medium { color: var(--attention); border-color: var(--attention-muted); background: var(--attention-subtle); }
@@ -434,6 +436,31 @@ kbd {
 .pr-row-meta { margin-top: 4px; font-size: 12px; color: var(--fg-muted); }
 .pr-row-meta a { color: inherit; }
 .pr-row-side { font-size: 12px; white-space: nowrap; padding-top: 2px; }
+.pr-row-number { color: var(--fg-muted); font-size: 12px; }
+.pr-row--compact { padding: 6px 16px; }
+.pr-row--compact .pr-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.pr-row--compact .pr-row-title, .pr-row--compact .pr-row-repo { font-size: 14px; }
+.pr-row--compact .pr-row-turn { margin-top: 0; }
+.notify-toggle { margin-left: auto; }
+.notify-toggle.selected { color: var(--accent); border-color: var(--accent); }
+
+/* Whose turn: groups on the front page, and each row's reasons. */
+.turn-group { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--bg-subtle); color: var(--fg-muted); }
+.turn-group-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--fg); }
+.turn-group-note { margin-left: auto; font-size: 12px; }
+.turn-empty { padding: 12px 16px; color: var(--fg-muted); }
+.pr-row-turn { margin-top: 4px; font-size: 12px; color: var(--fg-muted); }
+.pr-row-turn a { color: inherit; }
+.turn-reason + .turn-reason::before { content: '·'; margin: 0 6px; color: var(--fg-muted); font-weight: 400; }
+.turn-reason .octicon { width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; }
+.turn-reason .btn-link { display: inline; margin-left: 6px; font-weight: 600; }
+.turn-reason--waiting { color: var(--success); font-weight: 600; }
+.turn-reason--running { color: var(--accent); font-weight: 600; }
+.turn-reason--working { color: var(--attention); }
+.turn-reason--failed { color: var(--danger); font-weight: 600; }
+.turn-reason--threads { color: var(--attention); }
+.turn-since { color: var(--fg-muted); font-weight: 400; white-space: nowrap; }
+.turn-pulse { animation: pulse 1.6s ease-in-out infinite; }
 .blankslate { padding: 48px 32px; text-align: center; color: var(--fg-muted); }
 .blankslate h3 { margin: 16px 0 4px; font-size: 20px; color: var(--fg); font-weight: 600; }
 .blankslate p { margin: 8px 0; }

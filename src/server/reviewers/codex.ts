@@ -318,15 +318,16 @@ export class CodexReviewer {
    */
   headStatus(pull: PullRow): HeadStatus {
     const work = this.atWork(pull);
-    if (work) return { state: work.status === 'QUEUED' ? 'queued' : 'reviewing', done: false, commit: work.head_sha };
+    if (work) return { state: work.status === 'QUEUED' ? 'queued' : 'reviewing', done: false, commit: work.head_sha, startedAt: work.started_at };
     const commit = pull.head_sha;
     const last = this.attempt(pull);
-    if (last?.status === 'failed') return { state: 'failed', done: false, commit };
+    if (last?.status === 'failed') return { state: 'failed', done: false, commit, failedAt: last.finished_at };
     if (last?.status === 'done' && last.findings === 0) return { state: 'clean', done: true, commit };
     if (!this.enabled(pull)) return { state: 'off', done: true, commit };
-    if (this.automaticReviews(pull) >= this.limit(pull)) return { state: 'capped', done: true, commit };
+    const automatic = { used: this.automaticReviews(pull), limit: this.limit(pull) };
+    if (automatic.used >= automatic.limit) return { state: 'capped', done: true, commit, automatic };
     // It found something in this commit and reviews the author's next one, or it reviews this one when the author waits.
-    return { state: last ? 'findings' : 'unreviewed', done: false, commit };
+    return { state: last ? 'findings' : 'unreviewed', done: false, commit, automatic };
   }
 
   /** How many automatic reviews this pull request gets: its own limit, or the setting. */

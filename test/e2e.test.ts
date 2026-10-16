@@ -2382,3 +2382,323 @@ test('the file tree counts the unresolved conversations on each file in the diff
   assert.deepEqual(await tree(), { 'one.js': [resolved.id, lower.id, about.id], 'two.js': [] });
   assert.deepEqual(await tree('?diff=split'), { 'one.js': [resolved.id, lower.id, about.id], 'two.js': [] });
 });
+
+test('whose turn it is: the author agent, the reviewer agents, or the reviewer', async (t) => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/turns');
+  writeFileSync(join(repo, 'turns.js'), 'export const turns = 1;\n');
+  git('add', 'turns.js');
+  git('commit', '-qm', 'Add turns');
+  const created = await cli(['pr', 'create', '--title', 'Take turns', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const sha = () => git('rev-parse', '--short=7', 'HEAD');
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  /** Whose turn it is, and the reasons' text, as the API has them. */
+  const turn = async (): Promise<{ whose: string; reasons: string[] }> => {
+    const { turn } = await human('GET', base);
+    return { whose: turn.whose, reasons: turn.reasons.map((r: any) => r.text) };
+  };
+  /** The group the front page shows this pull request in. */
+  const group = async () => {
+    const groups = (await page('/')).split('<div class="Box-row turn-group">').slice(1);
+    return groups.find((g) => g.includes(`href="/acme/widgets/pull/${number}"`))?.match(/<h2 class="turn-group-title">([^<]+)<\/h2>/)?.[1];
+  };
+  const until = async (done: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400 && !(await done()); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(await done(), what);
+  };
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  /** What a list page notifies about: your turn in every repository (data-your-turn). */
+  const yourTurn = (html: string): { id: number; title: string; url: string; reasons: string }[] =>
+    JSON.parse(html.match(/data-your-turn="([^"]*)"/)![1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+  /** This pull request's row on a list page. */
+  const rowOf = (html: string) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/widgets/pull/${number}"`));
+  /** A wait counts for a few seconds after it ends, as pages show it (Service.setWaiting); until then the author still waits. */
+  const waitEnded = () => until(() => !server.service.waiters.has(id) && !server.service['waitingStopped'].has(id), 'the wait is over');
+  const threadId = async () => JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewThreads'])).stdout).reviewThreads[0].databaseId;
+  const gate = join(dir, 'turn-gate');
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 2 });
+  try {
+    await t.test("staged and not waiting: the reviewer's, with Codex still to come", async () => {
+      assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'no review from reviewer yet', `codex reviews ${sha()} when agent waits for review`] });
+    });
+
+    let waiting: ReturnType<typeof cli>;
+    await t.test("waiting while Codex reviews: the reviewer agents'", async () => {
+      process.env.FAKE_CODEX_GATE = gate;
+      process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'turns.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name it.' }] });
+      waiting = cli(['pr', 'wait', String(number), '--timeout', '20s']);
+      await until(() => server.service.codex!.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
+      const { turn } = await human('GET', base);
+      assert.equal(turn.whose, 'reviewer_agents');
+      const { since, ...reviewing } = turn.reasons[0];
+      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', text: `codex is reviewing ${sha()}`, engine: 'codex' });
+      assert.ok(Date.now() - Date.parse(since) < 20_000);
+      assert.equal(turn.reasons[1].text, 'agent is waiting for review');
+      // gh JSON says it in words, with how long it has been so.
+      const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
+      assert.deepEqual(view, { turn: { whose: 'REVIEWER_AGENTS', reasons: [`codex is reviewing ${sha()}, 1 min`, 'agent is waiting for review, 1 min'] } });
+      assert.equal(await group(), 'With agents');
+      assert.match(await page('/'), new RegExp(`<span class="turn-reason turn-reason--running">.*?codex is reviewing ${sha()}<span class="turn-since">, <relative-time [^>]*data-format="duration"`));
+    });
+
+    await t.test("handed Codex's findings: the author's, until it acts", async () => {
+      writeFileSync(gate, '');
+      const r = await waiting;
+      assert.match(r.stdout, /codex reviewed: commented/);
+      delete process.env.FAKE_CODEX_GATE;
+      rmSync(gate);
+      await server.service.codex!.settle(id);
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex commented on ${sha()}`, '1 unresolved thread'] });
+      assert.equal(await group(), 'With agents');
+    });
+
+    await t.test("answered and not waiting: the reviewer's", async () => {
+      await waitEnded();
+      const reply = await cli(['pr', 'comment', String(number), '--reply-to', String(await threadId()), '-b', 'It is named after what it counts.']);
+      assert.equal(reply.code, 0, reply.stderr);
+      assert.deepEqual(await turn(), {
+        whose: 'reviewer',
+        reasons: ['agent is not waiting', 'no review from reviewer yet', 'agent answered 1 thread', `codex commented on ${sha()}`, '1 unresolved thread'],
+      });
+      const front = await page('/');
+      assert.equal(await group(), 'Your turn');
+      assert.deepEqual(yourTurn(front).find((x) => x.id === id), {
+        id,
+        title: 'Take turns',
+        url: `/acme/widgets/pull/${number}`,
+        reasons: `agent is not waiting, 1 min · no review from reviewer yet · agent answered 1 thread · codex commented on ${sha()} · 1 unresolved thread`,
+      });
+      // The tab's title counts the pull requests waiting for the reviewer.
+      assert.match(front, new RegExp(`<title>\\(${yourTurn(front).length}\\) Staged pull requests · laatsux</title>`));
+      assert.match((await cli(['pr', 'status'])).stdout, /^ {4}- the reviewer's turn: agent is not waiting, 1 min; no review from reviewer yet; agent answered 1 thread;/m);
+    });
+
+    await t.test("feedback the author does not wait for: still the reviewer's, saying so", async () => {
+      await human('POST', `${base}/reviews`, { event: 'REQUEST_CHANGES', body: 'Count something else.' });
+      assert.deepEqual(await turn(), {
+        whose: 'reviewer',
+        reasons: ['agent has not seen the latest feedback', 'agent is not waiting', `codex commented on ${sha()}`, 'changes requested', '1 unresolved thread'],
+      });
+      // While a wait hands it over, it is the author's.
+      server.service.waiters.set(id, 1);
+      try {
+        assert.equal(server.service.turn(row()).whose, 'author');
+      } finally {
+        server.service.waiters.delete(id);
+      }
+      // Reading it is being handed it.
+      await cli(['pr', 'view', String(number), '--comments']);
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex commented on ${sha()}`, 'changes requested', '1 unresolved thread'] });
+    });
+
+    await t.test("a push, and a review from Codex that finds nothing: the reviewer's", async () => {
+      process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine now.', comments: [] });
+      assert.equal((await cli(['pr', 'comment', String(number), '--reply-to', String(await threadId()), '--resolve', '-b', 'Renamed.'])).code, 0);
+      writeFileSync(join(repo, 'turns.js'), 'export const rounds = 1;\n');
+      git('commit', '-qam', 'Count rounds');
+      const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+      assert.match(r.stdout, /Fine now\./);
+      await server.service.codex!.settle(id);
+      await waitEnded();
+      // The clean review asks nothing of the author, so its turn does not come back.
+      assert.deepEqual(await turn(), {
+        whose: 'reviewer',
+        reasons: ['agent is not waiting', "1 push since reviewer's review", 'agent answered 1 thread', `codex found nothing in ${sha()}`, 'changes requested'],
+      });
+    });
+
+    await t.test("a failed review of the head: the reviewer's, with Retry", async () => {
+      process.env.FAKE_CODEX_FAIL = '1';
+      await human('POST', `${base}/reviewers/codex`);
+      await server.service.codex!.settle(id);
+      delete process.env.FAKE_CODEX_FAIL;
+      const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
+      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex's review of ${sha()} failed`, engine: 'codex' });
+      assert.match(await page('/'), new RegExp(`codex&#39;s review of ${sha()} failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
+      // Also while the author waits: nothing more is coming from Codex for this commit.
+      const waited = cli(['pr', 'wait', String(number), '--timeout', '2s']);
+      await until(async () => (await human('GET', base)).author_waiting, 'the author waits');
+      const { whose, reasons } = await turn();
+      assert.equal(whose, 'reviewer');
+      assert.equal(reasons[0], 'agent is waiting for review');
+      assert.equal((await waited).code, 124);
+    });
+
+    await t.test("an approval asks nothing of the author: the reviewer's", async () => {
+      await human('POST', `${base}/reviews`, { event: 'APPROVE' });
+      await cli(['pr', 'view', String(number), '--comments']);
+      const { whose, reasons } = await turn();
+      assert.equal(whose, 'reviewer');
+      assert.ok(reasons.includes('approved'));
+      assert.match(rowOf(await page('/'))!, /<span class="Label Label--success">.*?Approved<\/span>/);
+    });
+
+    await t.test("published: nobody's, until an update is not published", async () => {
+      // Codex's review of this commit failed before it was published: that holds nothing up now.
+      await human('POST', `${base}/publish`, {});
+      assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
+      assert.equal(await group(), 'Published');
+      // A review asked for after publishing that fails is the reviewer's to retry, and a retry that finds nothing ends it.
+      process.env.FAKE_CODEX_FAIL = '1';
+      await human('POST', `${base}/reviewers/codex`);
+      await server.service.codex!.settle(id);
+      delete process.env.FAKE_CODEX_FAIL;
+      const failed = await turn();
+      assert.equal(failed.whose, 'reviewer');
+      assert.ok(failed.reasons.includes(`codex's review of ${sha()} failed`));
+      assert.equal(await group(), 'Your turn');
+      assert.match(await page('/'), new RegExp(`data-api="${base}/reviewers/codex">Retry</button>`));
+      await human('POST', `${base}/reviewers/codex`);
+      await server.service.codex!.settle(id);
+      assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
+      // Feedback after publishing that the author, not waiting, has not been handed is the reviewer's to pass on.
+      await waitEnded();
+      await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'One more thing.' });
+      const told = await turn();
+      assert.equal(told.whose, 'reviewer');
+      assert.deepEqual(told.reasons.slice(0, 2), ['agent has not seen the latest feedback', 'agent is not waiting']);
+      assert.equal(await group(), 'Your turn');
+      // Handed over, it is the author's; answered, nobody's again.
+      await cli(['pr', 'view', String(number), '--comments']);
+      assert.equal((await turn()).whose, 'author');
+      assert.equal((await cli(['pr', 'comment', String(number), '-b', 'Noted.'])).code, 0);
+      assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
+      writeFileSync(join(repo, 'turns.js'), 'export const rounds = 2;\n');
+      git('commit', '-qam', 'Count two rounds');
+      assert.equal((await cli(['pr', 'edit', String(number), '--title', 'Take turns, in rounds'])).code, 0);
+      await waitEnded();
+      assert.deepEqual(await turn(), {
+        whose: 'reviewer',
+        reasons: ['agent is not waiting', "1 push since reviewer's review", 'codex used 2 of 2 automatic reviews', 'approved', 'update not published: commits, title'],
+      });
+      // gh's state stays as gh would show it; the update is an extension field.
+      const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'state,unpublishedChanges'])).stdout);
+      assert.deepEqual(view, { state: 'PUBLISHED', unpublishedChanges: ['COMMITS', 'TITLE'] });
+      const plain = (await cli(['pr', 'view', String(number)])).stdout;
+      assert.match(plain, /^unpublished:\tcommits, title$/m);
+      assert.match(plain, /^turn:\treviewer\tagent is not waiting, 1 min; 1 push since reviewer's review;/m);
+      assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="State State--open">.*?Update not published<\/span>/);
+      assert.match(await page('/acme/widgets?state=published'), /<span class="Label Label--attention">.*?Update not published: commits, title<\/span>/);
+      assert.equal(await group(), 'Your turn');
+    });
+
+    await t.test("an update Codex reviews: the reviewer agents', not the reviewer's", async () => {
+      process.env.FAKE_CODEX_GATE = gate;
+      const waited = cli(['pr', 'wait', String(number), '--timeout', '20s']);
+      await until(async () => (await human('GET', base)).author_waiting, 'the author waits');
+      await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 3 });
+      await until(() => server.service.codex!.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
+      const { whose, reasons } = await turn();
+      assert.equal(whose, 'reviewer_agents');
+      assert.deepEqual([reasons[0], reasons.at(-1)], [`codex is reviewing ${sha()}`, 'update not published: commits, title']);
+      writeFileSync(gate, '');
+      assert.equal((await waited).code, 0);
+      await server.service.codex!.settle(id);
+    });
+
+    await t.test("an edit to its own comment is the author's next action", async () => {
+      assert.equal((await cli(['pr', 'comment', String(number), '-b', 'Working on it.'])).code, 0);
+      await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Say what changed in the description.' });
+      await cli(['pr', 'view', String(number), '--comments']);
+      assert.equal((await turn()).whose, 'author');
+      assert.equal((await cli(['pr', 'comment', String(number), '--edit-last', '-b', 'Done: the description says what changed.'])).code, 0);
+      assert.equal((await turn()).whose, 'reviewer');
+    });
+
+    await t.test("waiting again at once ends the author's turn, and pages hear of it once", async () => {
+      const ctx = await server.service.ctx('acme', 'widgets', number);
+      const author = server.service.db.actorById(ctx.pull.author_id);
+      await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'And the README.' });
+      // Handed the comment and confirming it, as `pr wait` does: the author's turn.
+      const handed = await server.service.wait(ctx, author, 5_000);
+      server.service.markSeen(ctx.pull, handed.seenAt!);
+      assert.equal((await turn()).whose, 'author');
+      const events: string[] = [];
+      const listen = (e: { pullId: number | null; type: string }) => e.pullId === id && events.push(e.type);
+      server.service.bus.on('change', listen);
+      const first = new AbortController();
+      const renewal = new AbortController();
+      try {
+        // A wait started within seconds of the last one announces nothing itself (setWaiting) ...
+        const again = server.service.wait(ctx, author, 20_000, first.signal);
+        await until(async () => (await turn()).whose === 'reviewer', "the reviewer's turn");
+        // ... so the wait says that it ended the author's turn.
+        assert.deepEqual(events, ['waiting']);
+        // A renewal that changes nothing says nothing.
+        first.abort();
+        await again;
+        const renewed = server.service.wait(ctx, author, 20_000, renewal.signal);
+        await new Promise((r) => setTimeout(r, 200));
+        renewal.abort();
+        await renewed;
+        assert.deepEqual(events, ['waiting']);
+      } finally {
+        first.abort();
+        renewal.abort();
+        server.service.bus.off('change', listen);
+      }
+    });
+
+    await t.test('notifications follow your turn whatever the list shows, and Retry finds its pull request', async () => {
+      // A second repository, named so that a pull request's path in it has "pull" twice.
+      const other = join(dir, 'pull');
+      execFileSync('git', ['init', '-q', '-b', 'main', other]);
+      const g = (...args: string[]) => execFileSync('git', ['-C', other, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
+      g('remote', 'add', 'origin', 'https://github.com/acme/pull.git');
+      writeFileSync(join(other, 'a.js'), 'export const a = 1;\n');
+      g('add', '.');
+      g('commit', '-qm', 'Initial commit');
+      g('update-ref', 'refs/remotes/origin/main', 'main');
+      g('checkout', '-qb', 'feature');
+      writeFileSync(join(other, 'a.js'), 'export const a = 2;\n');
+      g('commit', '-qam', 'Change a');
+      await human('POST', '/api/repos', { path: other });
+      const res = await fetch(`${server.url}/api/repos/acme/pull/pulls`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+        body: JSON.stringify({ title: 'Change a', head: 'feature', base: 'main' }),
+      });
+      assert.equal(res.status, 201);
+      const { id: otherId, number: otherNumber } = await res.json();
+      process.env.FAKE_CODEX_FAIL = '1';
+      await human('POST', `/api/repos/acme/pull/pulls/${otherNumber}/reviewers/codex`);
+      await server.service.codex!.settle(otherId);
+      delete process.env.FAKE_CODEX_FAIL;
+      assert.match(await page('/acme/pull'), new RegExp(`data-api="/api/repos/acme/pull/pulls/${otherNumber}/reviewers/codex">Retry</button>`));
+      // Every list page carries your turn in every repository, whatever its tab or repository shows.
+      for (const path of ['/', '/?state=closed', '/?state=published', '/acme/pull', '/acme/pull?state=closed']) {
+        const ids = yourTurn(await page(path)).map((x) => x.id);
+        assert.ok(ids.includes(id) && ids.includes(otherId), path);
+      }
+      await human('PATCH', `/api/repos/acme/pull/pulls/${otherNumber}`, { state: 'closed' });
+    });
+
+    await t.test("feedback handed over after a push the author made meanwhile: the author's", async () => {
+      await waitEnded();
+      await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Mention it in the changelog.' });
+      assert.equal((await turn()).whose, 'reviewer');
+      // The author pushes what it was working on, then its wait hands it the comment.
+      writeFileSync(join(repo, 'turns.js'), 'export const rounds = 3;\n');
+      git('commit', '-qam', 'Count three rounds');
+      const r = await cli(['pr', 'wait', String(number), '--timeout', '5s']);
+      assert.match(r.stdout, /Mention it in the changelog\./);
+      const { whose, reasons } = await turn();
+      assert.equal(whose, 'author');
+      assert.equal(reasons[0], 'agent is working on the feedback');
+    });
+
+    await t.test("closed: nobody's", async () => {
+      await human('PATCH', base, { state: 'closed' });
+      assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
+    });
+  } finally {
+    delete process.env.FAKE_CODEX_GATE;
+    delete process.env.FAKE_CODEX_FAIL;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
+  }
+});
