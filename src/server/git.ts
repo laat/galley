@@ -316,6 +316,25 @@ export class Repo {
     return (await this.run(['cat-file', '-e', `${sha}^{commit}`], { allowFail: true })).code === 0;
   }
 
+  /** The full SHA of each name that names exactly one commit; other names are left out. One process for all. */
+  async resolveCommits(names: string[]): Promise<Map<string, string>> {
+    const found = new Map<string, string>();
+    if (!names.length) return found;
+    const r = await this.run(['cat-file', '--batch-check=%(objectname)'], { input: names.map((n) => `${n}^{commit}\n`).join(''), allowFail: true });
+    // One line per name, in order: the SHA, or "<name> missing" (also when it abbreviates several commits).
+    r.stdout.split('\n').forEach((line, i) => {
+      if (i < names.length && SHA_RE.test(line)) found.set(names[i], line);
+    });
+    return found;
+  }
+
+  /** Those of `shas` (full commit SHAs) that no remote-tracking branch of `remote` contains. */
+  async notOnRemote(shas: string[], remote: string): Promise<Set<string>> {
+    if (!shas.length) return new Set();
+    const r = await this.run(['rev-list', '--no-walk', ...shas, '--not', `--remotes=${remote}`], { allowFail: true });
+    return new Set(r.code === 0 ? r.stdout.split('\n').filter(Boolean) : shas);
+  }
+
   /** A config value as git resolves it for this repository (repository, global and system files). */
   async config(key: string, type?: 'bool'): Promise<string | null> {
     const r = await this.run(['config', ...(type ? [`--type=${type}`] : []), '--get', key], { allowFail: true });

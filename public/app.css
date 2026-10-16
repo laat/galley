@@ -926,6 +926,9 @@ body.selecting { user-select: none; cursor: ns-resize; }
 .markdown-body img { max-width: 100%; }
 .markdown-body img[src^="/uploads/"] { cursor: zoom-in; }
 .markdown-body a { text-decoration: underline; text-underline-offset: 0.2rem; }
+.markdown-body a.user-mention { font-weight: 600; color: var(--fg); text-decoration: none; }
+.markdown-body a.user-mention:hover { text-decoration: underline; }
+.markdown-body a.commit-link code { padding: 0; color: inherit; background: none; }
 .markdown-body details summary { cursor: pointer; }
 .markdown-body kbd { font-size: 11px; }
 

@@ -232,6 +232,52 @@ export class Service {
     return loading;
   }
 
+  private githubIssueCache = new Map<string, { at: number; value: IssueSummary | null; loading?: boolean }>();
+  private githubIssueQueue: Map<string, Set<number>> | null = null;
+
+  /**
+   * The title and state of an issue or pull request on GitHub, for links to it. Like `githubCounts`, it
+   * never waits on the network: the lookups one page render asks for go out together, afterwards.
+   * `lookUp: false` answers from the cache alone.
+   */
+  githubIssue(slug: string, number: number, opts: { lookUp?: boolean } = {}): IssueSummary | null {
+    const key = `${slug}#${number}`;
+    const hit = this.githubIssueCache.get(key);
+    if (opts.lookUp !== false && (!hit || (Date.now() - hit.at > 5 * 60_000 && !hit.loading))) {
+      this.githubIssueCache.set(key, { at: hit?.at ?? 0, value: hit?.value ?? null, loading: true });
+      if (!this.githubIssueQueue) {
+        const queue = (this.githubIssueQueue = new Map());
+        setImmediate(() => {
+          this.githubIssueQueue = null;
+          for (const [repo, numbers] of queue) void this.refreshGithubIssues(repo, [...numbers]);
+        });
+      }
+      this.githubIssueQueue.set(slug, (this.githubIssueQueue.get(slug) ?? new Set()).add(number));
+    }
+    return hit?.value ?? null;
+  }
+
+  async refreshGithubIssues(slug: string, numbers: number[]): Promise<void> {
+    const [owner, name] = slug.split('/');
+    // Numbers are digits (references.ts), so they can go into the query itself.
+    const fields = numbers.map((n) => `i${n}:issueOrPullRequest(number:${n}){__typename ...on Issue{title state stateReason} ...on PullRequest{title state isDraft}}`);
+    const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${fields.join(' ')}}}`;
+    // An unknown number fails the query but still answers for the others.
+    const found = await run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
+      .then((r) => JSON.parse(r.stdout).data.repository as Record<string, any>)
+      .catch(() => null);
+    let changed = false;
+    for (const n of numbers) {
+      const key = `${slug}#${n}`;
+      const before = this.githubIssueCache.get(key)?.value ?? null;
+      const value = found ? issueSummary(found[`i${n}`]) : before;
+      this.githubIssueCache.set(key, { at: Date.now(), value });
+      if (JSON.stringify(value) !== JSON.stringify(before)) changed = true;
+    }
+    // Pages rendered before the answer came link without titles; let them refresh.
+    if (changed) this.bus.emit('change', { pullId: null, type: 'github_issues', actor: 'github' } satisfies ChangeEvent);
+  }
+
   // ----------------------------------------------------------------- repos
 
   async registerRepo(path: string): Promise<RepoRow> {
@@ -1393,6 +1439,26 @@ export function fillFromCommits(commits: Commit[], branch: string, mode: 'defaul
     return { title, body: commits.map((c) => `- ${c.message.trim().replace(/\n/g, '\n  ')}`).join('\n') };
   }
   return { title, body: commits.map((c) => `- ${split(c).subject}`).join('\n') };
+}
+
+/** An issue or pull request on GitHub, as links to it show it on hover. */
+export interface IssueSummary {
+  title: string;
+  /** "Open issue", "Merged pull request" and so on. */
+  state: string;
+}
+
+/** An `issueOrPullRequest` from GitHub's GraphQL API as an `IssueSummary`; null when there is none. */
+export function issueSummary(node: { __typename?: string; title?: string; state?: string; stateReason?: string | null; isDraft?: boolean } | null | undefined): IssueSummary | null {
+  if (!node?.title || !node.state) return null;
+  if (node.__typename === 'PullRequest') {
+    const state = node.state === 'OPEN' ? (node.isDraft ? 'Draft' : 'Open') : node.state === 'MERGED' ? 'Merged' : 'Closed';
+    return { title: node.title, state: `${state} pull request` };
+  }
+  if (node.state === 'OPEN') return { title: node.title, state: 'Open issue' };
+  if (node.stateReason === 'NOT_PLANNED') return { title: node.title, state: 'Closed as not planned' };
+  if (node.stateReason === 'DUPLICATE') return { title: node.title, state: 'Closed as duplicate' };
+  return { title: node.title, state: 'Closed issue' };
 }
 
 /** Identifies what a publish would send, so the UI can refuse to publish something the reviewer has not seen. */

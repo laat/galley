@@ -7,6 +7,7 @@ import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
 import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
+import { closingIssues, pullReferences, type ReferenceContext } from './references.ts';
 import {
   authorLink,
   copyButton,
@@ -104,6 +105,8 @@ interface PullPage {
   threads: Thread[];
   reviews: ReviewRow[];
   pending: ReviewRow | undefined;
+  /** What `#N`, `@user` and SHAs in the page's Markdown link to. */
+  references: ReferenceContext;
   apiBase: string;
   htmlBase: string;
 }
@@ -113,6 +116,10 @@ export async function loadPull(s: Service, owner: string, name: string, number: 
   const viewer = s.viewer();
   const files = await s.files(ctx);
   const commits = await s.commits(ctx);
+  const threads = await s.threads(ctx, viewer, files, commits);
+  const reviews = s.reviews(ctx.pull, viewer);
+  // Every Markdown text the pull request's pages show, for the commit SHAs in them.
+  const texts = [ctx.pull.body, ...s.issueComments(ctx.pull).map((c) => c.body), ...reviews.map((r) => r.body), ...threads.flatMap((t) => [t.root, ...t.replies].map((c) => c.body))];
   return {
     s,
     ctx,
@@ -122,9 +129,10 @@ export async function loadPull(s: Service, owner: string, name: string, number: 
     author: s.db.actorById(ctx.pull.author_id),
     files,
     commits,
-    threads: await s.threads(ctx, viewer, files, commits),
-    reviews: s.reviews(ctx.pull, viewer),
+    threads,
+    reviews,
     pending: s.pendingReview(ctx.pull, viewer),
+    references: await pullReferences(s, ctx, commits, texts),
     apiBase: `/api/repos/${owner}/${name}/pulls/${number}`,
     htmlBase: `/${owner}/${name}/pull/${number}`,
   };
@@ -178,7 +186,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
 
 function threadOpts(p: PullPage, standalone: boolean) {
   const titles = new Map(p.commits.map((c) => [c.sha, c.message.split('\n')[0]]));
-  return { standalone, apiBase: p.apiBase, viewer: p.viewer, pull: p.pull, commitTitle: (sha: string) => titles.get(sha) };
+  return { standalone, apiBase: p.apiBase, viewer: p.viewer, pull: p.pull, commitTitle: (sha: string) => titles.get(sha), references: p.references };
 }
 
 // ----------------------------------------------------------- conversation
@@ -337,6 +345,12 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   const forceNeeded = await s.forceNeeded(p.ctx, signByDefault);
   const target = repo.github_slug;
   const auto = s.autoPublish(pull);
+  const closes = target ? closingIssues(pull.body, p.references) : [];
+  if (closes.length) {
+    const links = closes.map((c, i) => html`${i ? ', ' : ''}<a href="${c.href}" target="_blank" rel="noopener"${c.title ? html` title="${c.title}"` : ''}>${c.text}</a>`);
+    const them = closes.length === 1 ? 'it' : 'them';
+    rows.push(html`<div class="merge-row">${icon('issue-closed', { cls: 'color-fg-done' })}<div><strong>Merging on GitHub closes ${links}</strong><div class="color-fg-muted">The description names ${them} after a closing keyword. GitHub closes ${them} when it merges the pull request into the default branch.</div></div></div>`);
+  }
   let publishRow: Safe;
   let publishable = false;
   if (!target) {
@@ -567,6 +581,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
         editPath: c.author_id === viewer.id ? `/api/repos/${p.repo.owner}/${p.repo.name}/issues/comments/${c.id}` : undefined,
         isAuthor: c.author_id === pull.author_id,
         anchor: `issuecomment-${c.id}`,
+        markdownCtx: { references: p.references },
       }),
     });
   }
@@ -585,7 +600,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
       html: html`<div class="timeline-review" id="pullrequestreview-${r.id}">
         ${timelineBadge(single ? 'comment' : meta.icon, html`${who} ${text} <a class="link-muted" href="#pullrequestreview-${r.id}">${relTime(r.submitted_at)}</a>`, { cls: single ? '' : meta.cls })}
         <div class="timeline-review-body">
-          ${r.body.trim() ? html`<div class="review-summary"><div class="comment-body markdown-body">${raw(renderMarkdown(r.body))}</div></div>` : ''}
+          ${r.body.trim() ? html`<div class="review-summary"><div class="comment-body markdown-body">${raw(renderMarkdown(r.body, { references: p.references }))}</div></div>` : ''}
           ${threads.map((t) => reviewThread(s, t, opts))}
         </div>
       </div>`,
@@ -605,6 +620,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
       deletable: false,
       isAuthor: true,
       anchor: 'pullrequest-description',
+      markdownCtx: { references: p.references },
     },
     html`${authorLink(p.author)} opened this pull request ${relTime(pull.created_at)}`,
   );

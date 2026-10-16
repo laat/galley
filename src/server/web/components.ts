@@ -3,6 +3,7 @@ import type { Service, Thread } from '../service.ts';
 import { avatarUrl } from '../github.ts';
 import { avatar, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
+import type { ReferenceContext } from './references.ts';
 
 export function layout(s: Service, opts: { title: string; crumbs?: Safe; subnav?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
@@ -216,6 +217,7 @@ export interface ThreadOpts {
   pull: PullRow;
   commitTitle?: (sha: string) => string | undefined;
   suggestionLines?: string[];
+  references?: ReferenceContext;
 }
 
 /** The lines of one side of a stored diff hunk between two line numbers (what a suggestion replaces). */
@@ -250,7 +252,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     pending: t.pending,
     isAuthor: c.author_id === o.pull.author_id,
     anchor: `discussion_r${c.id}`,
-    markdownCtx: { suggestionLines, suggestionLang: lang },
+    markdownCtx: { suggestionLines, suggestionLang: lang, references: o.references },
     priority: c.priority,
   });
   const range = root.start_line && root.start_line !== root.line ? `lines ${root.start_line} to ${root.line}` : root.line ? `line ${root.line}` : '';
