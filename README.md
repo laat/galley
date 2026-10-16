@@ -134,9 +134,10 @@ turns all of them on), and is refused together with a reviewer agent in `reviewe
 out, the settings decide.
 
 Requests carry the caller's identity in `X-Laatsux-Actor`. The CLI sets it to
-`LAATSUX_ACTOR`, or to the detected agent (`claude` in Claude Code, `codex` in Codex), or to
-`agent` when it runs without a terminal. Run at a terminal with none of those, and in the web
-UI, you act as yourself. Agents cannot publish or delete staged pull requests.
+`LAATSUX_ACTOR`, or to the detected agent (`claude` in Claude Code, `codex-agent` in Codex,
+`opencode` in opencode), or to `agent` when it runs without a terminal. Run at a terminal
+with none of those, and in the web UI, you act as yourself. Agents cannot publish or delete
+staged pull requests.
 
 ## How it works
 

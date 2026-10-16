@@ -119,5 +119,6 @@ setting, unless they say otherwise when they ask you to stage:
 `laatsux api` speaks the GitHub REST shapes for pulls, review comments, reviews and issue
 comments, with `-f`, `-F`, `-X`, `--input` and `--jq`. GraphQL is not supported.
 
-Comments you make are attributed to your agent name (`claude` in Claude Code). Set
-`LAATSUX_ACTOR` to use another name, for example when acting as a reviewer agent.
+Comments you make are attributed to your agent name: `claude` in Claude Code, `codex-agent`
+in Codex (`codex` is the Codex reviewer), `opencode` in opencode. Set `LAATSUX_ACTOR` to use
+another name, for example when acting as a reviewer agent.

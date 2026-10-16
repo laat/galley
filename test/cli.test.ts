@@ -58,15 +58,33 @@ test('fillFromCommits mirrors gh pr create --fill', () => {
   assert.equal(fillFromCommits([commit('One'), commit('Two\n\nMore')], 'b', 'verbose').body, '- One\n- Two\n  \n  More');
 });
 
-test('an author agent running in Codex is not named like the Codex reviewer', () => {
+/** cliActor() with only these agent variables set. */
+function actorWith(env: Record<string, string>) {
   const saved = { ...process.env };
   try {
-    for (const k of ['LAATSUX_ACTOR', 'CLAUDECODE', 'AI_AGENT', 'CODEX_MANAGED_BY_NPM']) delete process.env[k];
-    process.env.CODEX_SANDBOX = 'seatbelt';
-    assert.deepEqual(cliActor(), { login: 'codex-agent', type: 'Bot' });
+    for (const k of ['LAATSUX_ACTOR', 'CLAUDECODE', 'AI_AGENT', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_MANAGED_BY_NPM', 'OPENCODE']) {
+      delete process.env[k];
+    }
+    Object.assign(process.env, env);
+    return cliActor();
   } finally {
     process.env = saved;
   }
+}
+
+test('an author agent running in Codex is not named like the Codex reviewer', () => {
+  assert.deepEqual(actorWith({ CODEX_SANDBOX: 'seatbelt' }), { login: 'codex-agent', type: 'Bot' });
+  // Installed without npm and run with its own sandbox off, Codex still sets its thread id.
+  assert.deepEqual(actorWith({ CODEX_THREAD_ID: '01a1463b-126d-75c0-bff2-6194ba586de8' }), { login: 'codex-agent', type: 'Bot' });
+});
+
+test('the CLI detects the agent running it, also when Claude Code started that agent', () => {
+  assert.deepEqual(actorWith({ CLAUDECODE: '1', AI_AGENT: 'claude-code_2-1-301_agent' }), { login: 'claude', type: 'Bot' });
+  assert.deepEqual(actorWith({ OPENCODE: '1' }), { login: 'opencode', type: 'Bot' });
+  assert.deepEqual(actorWith({ OPENCODE: '1', CLAUDECODE: '1', AI_AGENT: 'claude-code_2-1-301_agent' }), { login: 'opencode', type: 'Bot' });
+  assert.deepEqual(actorWith({ CODEX_THREAD_ID: 'x', CLAUDECODE: '1', AI_AGENT: 'claude-code_2-1-301_agent' }), { login: 'codex-agent', type: 'Bot' });
+  assert.deepEqual(actorWith({ AI_AGENT: 'gemini_1_agent' }), { login: 'gemini', type: 'Bot' });
+  assert.deepEqual(actorWith({ OPENCODE: '1', LAATSUX_ACTOR: 'reviewer' }), { login: 'reviewer', type: 'Bot' });
 });
 
 test('pr create --reviewer takes repeats and commas like gh, and a number of reviews', () => {
