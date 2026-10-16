@@ -438,6 +438,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(`New feedback on ${url} (review decision: ${pr.reviewDecision})\n`);
       out(items.map((i) => i.text).join('\n\n') + '\n');
     }
+    const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     if (r.status === 'published') {
       out(`Published to GitHub: ${r.published_url}`);
       out(items.length ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
@@ -447,14 +448,17 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(`The reviewer closed ${url} without publishing it.`);
       return 0;
     }
-    const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
-    out(
-      c.gray(
-        `Address the feedback, reply to threads with \`laatsux pr comment ${t.number} --reply-to <thread> -b "…"\`, ` +
-          `then run \`laatsux pr wait ${t.number}\` again.`,
-      ),
-    );
+    if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
+      out(c.gray(`Approved with nothing left open. Run \`laatsux pr wait ${t.number}\` to wait until the reviewer publishes it.`));
+    } else {
+      out(
+        c.gray(
+          `Address the feedback, reply to threads with \`laatsux pr comment ${t.number} --reply-to <thread> -b "…"\`, ` +
+            `then run \`laatsux pr wait ${t.number}\` again.`,
+        ),
+      );
+    }
     return 0;
   }
 }

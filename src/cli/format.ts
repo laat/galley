@@ -103,7 +103,8 @@ export function conversationItems(pr: GhPull, opts: { reviews?: Set<number>; com
   for (const r of pr.reviews) {
     if (filter && !opts.reviews?.has(r.databaseId)) continue;
     const threads = pr.reviewThreads.filter((t: any) => t.reviewDatabaseId === r.databaseId);
-    if (!r.body.trim() && threads.length === 0) continue;
+    // An approval or a change request is feedback even without text; an empty comment is not.
+    if (!r.body.trim() && threads.length === 0 && r.state === 'COMMENTED') continue;
     const parts = [`${c.bold(r.author.login)} reviewed: ${REVIEW_STATE[r.state] ?? r.state} (review ${r.databaseId}, ${r.submittedAt})`];
     if (r.body.trim()) parts.push(indent(r.body.trim()));
     for (const t of threads) {

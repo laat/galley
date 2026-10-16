@@ -135,6 +135,18 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(again.code, 124);
   });
 
+  await t.test('an approval without text still reaches the agent', async () => {
+    const waiting = cli(['pr', 'wait', '--timeout', '20s']);
+    await new Promise((r) => setTimeout(r, 300));
+    const review = await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', { event: 'APPROVE' });
+    const r = await waiting;
+    assert.match(r.stdout, /reviewer reviewed: approved/);
+    // Put the decision back to "changes requested" for the tests that follow.
+    await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', { event: 'REQUEST_CHANGES', body: 'Actually, not yet.' });
+    await cli(['pr', 'view', '--comments']);
+    assert.ok(review.id);
+  });
+
   await t.test('threads follow their lines when the agent rewrites history', async () => {
     writeFileSync(join(repo, 'math.js'), '// math\n\nexport function add(a, b) {\n  return a + b;\n}\n\n/** Multiply. */\nexport function mul(a, b) {\n  return a * b;\n}\n');
     git('commit', '-q', '--amend', '-am', 'Add mul');
