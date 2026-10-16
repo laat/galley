@@ -36,10 +36,11 @@ dir="${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-laatsux"
 mkdir -p "$dir" && ln -s "$PWD/bin/laatsux.ts" "$dir/gh-laatsux"
 ```
 
-Teach your agents the workflow with the skill in [`skills/laatsux/SKILL.md`](skills/laatsux/SKILL.md):
+Teach your agents the workflow with the `stage-pr` skill in [`skills/stage-pr/SKILL.md`](skills/stage-pr/SKILL.md).
+Agents use it when you say "stage a PR", or when you run `/stage-pr`:
 
 ```sh
-ln -s "$PWD/skills/laatsux" ~/.claude/skills/laatsux
+ln -s "$PWD/skills/stage-pr" ~/.claude/skills/stage-pr
 ```
 
 ## Run

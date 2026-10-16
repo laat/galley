@@ -1,9 +1,9 @@
 ---
-name: laatsux
-description: Stage pull requests in laatsux instead of opening them on GitHub. laatsux is a local review server with a CLI that mirrors `gh pr` and `gh api`; the user reviews in a GitHub-like web UI and publishes to GitHub themselves. Use whenever you would run `gh pr create`, or when the user says stage, laatsux, or "open a PR for review".
+name: stage-pr
+description: Stage a pull request in laatsux, the user's local review server, instead of opening it on GitHub. Use when the user says "stage PR" or "stage a PR". The CLI mirrors `gh pr` and `gh api`; the user reviews in a GitHub-like web UI, you address the feedback, and the user publishes to GitHub.
 ---
 
-# laatsux
+# Stage a PR
 
 The user reviews your pull requests locally before anything reaches GitHub. You stage the
 pull request, the user comments on lines, commits and the description, you address the
