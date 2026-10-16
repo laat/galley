@@ -68,21 +68,24 @@ const RUN_TIMEOUT_MS = 30 * 60 * 1000;
 const CODEX_AUTHOR = 'codex-agent';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 
+/** A review Codex is running on a pull request, or one it is about to start. */
+export interface ReviewAtWork {
+  status: 'IN_PROGRESS' | 'QUEUED';
+  head_sha: string;
+  /** Null while queued. */
+  started_at: string | null;
+}
+
 export class CodexReviewer {
   /** What review_runs.reviewer calls this kind of reviewer; the name people see is a setting. */
   readonly engine = 'codex';
   private s: Service;
   private bin: string;
-  private jobs = new Map<number, { done: Promise<void>; abort: AbortController }>();
-  /** Automatic reviews still deciding whether to start; shutdown waits for them too. */
-  private deciding = new Set<Promise<void>>();
+  private jobs = new Map<number, { runId: number; done: Promise<void>; abort: AbortController }>();
+  /** Automatic reviews still deciding whether to start, and for which pull; shutdown waits for them too. */
+  private deciding = new Map<Promise<void>, number>();
   private stopped = false;
-  private onWaiting = (pullId: number) => {
-    const p = this.maybeReview(pullId)
-      .catch((e) => console.error('codex review:', e))
-      .finally(() => this.deciding.delete(p));
-    this.deciding.add(p);
-  };
+  private onWaiting = (pullId: number) => this.consider(pullId);
   private catalog: { at: number; models: ModelInfo[] } | null = null;
 
   constructor(s: Service, bin = 'codex') {
@@ -204,7 +207,7 @@ export class CodexReviewer {
   async stop(): Promise<void> {
     this.stopped = true;
     this.s.bus.off('author-waiting', this.onWaiting);
-    await Promise.allSettled([...this.deciding]);
+    await Promise.allSettled([...this.deciding.keys()]);
     const jobs = [...this.jobs.values()];
     for (const job of jobs) job.abort.abort();
     await Promise.allSettled(jobs.map((j) => j.done));
@@ -216,6 +219,18 @@ export class CodexReviewer {
 
   isRunning(pullId: number): boolean {
     return this.jobs.has(pullId);
+  }
+
+  /**
+   * The review running on this pull request, or the automatic one about to start: the author
+   * started waiting, the decision is still being made, and nothing stands in its way.
+   */
+  atWork(pull: PullRow): ReviewAtWork | null {
+    const job = this.jobs.get(pull.id);
+    const run = job && this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', job.runId);
+    if (run?.status === 'running') return { status: 'IN_PROGRESS', head_sha: run.head_sha, started_at: run.started_at };
+    if ([...this.deciding.values()].includes(pull.id) && this.wouldReview(pull)) return { status: 'QUEUED', head_sha: pull.head_sha, started_at: null };
+    return null;
   }
 
   runs(pull: PullRow): ReviewRunRow[] {
@@ -237,7 +252,7 @@ export class CodexReviewer {
     }
     this.s.db.update('pulls', ctx.pull.id, { codex_max_iterations: limit });
     this.s.emit(ctx.pull.id, 'updated', this.s.viewer());
-    if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.onWaiting(ctx.pull.id);
+    if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.consider(ctx.pull.id);
     return limit ?? this.settings().maxIterations;
   }
 
@@ -245,20 +260,32 @@ export class CodexReviewer {
     return this.s.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND trigger = 'auto' AND status = 'done'", pull.id, this.engine)!.n;
   }
 
+  /** Decide in the background whether to review automatically (see maybeReview). */
+  consider(pullId: number): void {
+    const p = this.maybeReview(pullId)
+      .catch((e) => console.error('codex review:', e))
+      .finally(() => this.deciding.delete(p));
+    this.deciding.set(p, pullId);
+  }
+
   /** Review automatically if Codex is on, this head has not been tried, and the cap is not reached. */
   async maybeReview(pullId: number): Promise<void> {
-    const settings = this.settings();
-    if (this.stopped || !settings.enabled || this.jobs.has(pullId)) return;
+    if (this.stopped || !this.settings().enabled || this.jobs.has(pullId)) return;
     const stale = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
     if (!stale || stale.state === 'closed') return;
     if (stale.author_id === this.actor().id) return;
     const repo = this.s.repoById(stale.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, stale.number);
-    if (this.stopped || this.jobs.has(pullId)) return;
-    // One attempt per head, failed or not: a failure is retried by asking from the page.
-    if (this.s.db.get('SELECT 1 FROM review_runs WHERE pull_id = ? AND reviewer = ? AND head_sha = ?', pullId, this.engine, ctx.pull.head_sha)) return;
-    if (this.automaticReviews(ctx.pull) >= this.limit(ctx.pull)) return;
+    if (this.jobs.has(pullId) || !this.wouldReview(ctx.pull)) return;
     this.launch(ctx, 'auto');
+  }
+
+  /** Whether an automatic review of the pull request's head would start now. */
+  private wouldReview(pull: PullRow): boolean {
+    if (this.stopped || !this.settings().enabled || pull.state === 'closed' || pull.author_id === this.actor().id) return false;
+    // One attempt per head, failed or not: a failure is retried by asking from the page.
+    if (this.s.db.get('SELECT 1 FROM review_runs WHERE pull_id = ? AND reviewer = ? AND head_sha = ?', pull.id, this.engine, pull.head_sha)) return false;
+    return this.automaticReviews(pull) < this.limit(pull);
   }
 
   /** Review now, whatever the settings say about automatic reviews. */
@@ -284,17 +311,14 @@ export class CodexReviewer {
     });
     this.s.emit(ctx.pull.id, 'codex_started', actor);
     const abort = new AbortController();
-    const done = this.review(ctx, settings, trigger, abort.signal)
-      .then((reviewId) => {
-        this.s.db.update('review_runs', runId, { status: 'done', review_id: reviewId, finished_at: now() });
-        this.s.emit(ctx.pull.id, 'codex_finished', actor);
-      })
+    const done = this.review(ctx, runId, settings, trigger, abort.signal)
+      .then(() => this.s.emit(ctx.pull.id, 'codex_finished', actor))
       .catch((e: Error) => {
         this.s.db.update('review_runs', runId, { status: 'failed', error: e.message.slice(0, 4000), finished_at: now() });
         this.s.emit(ctx.pull.id, 'codex_failed', actor);
       })
       .finally(() => this.jobs.delete(ctx.pull.id));
-    this.jobs.set(ctx.pull.id, { done, abort });
+    this.jobs.set(ctx.pull.id, { runId, done, abort });
     return runId;
   }
 
@@ -303,7 +327,7 @@ export class CodexReviewer {
     await this.jobs.get(pullId)?.done;
   }
 
-  private async review(ctx: Ctx, settings: CodexSettings, trigger: 'auto' | 'manual', signal: AbortSignal): Promise<number> {
+  private async review(ctx: Ctx, runId: number, settings: CodexSettings, trigger: 'auto' | 'manual', signal: AbortSignal): Promise<void> {
     const { git } = ctx;
     const pull = ctx.pull;
     const dir = mkdtempSync(join(tmpdir(), 'laatsux-review-'));
@@ -332,7 +356,7 @@ export class CodexReviewer {
       } catch {
         throw new Error(`codex did not write a review:\n${lastLines(r.stderr || r.stdout, 15)}`);
       }
-      return await this.post(ctx, result, settings, trigger);
+      await this.post(ctx, runId, result, settings, trigger);
     } finally {
       await git.run(['worktree', 'remove', '--force', checkout], { allowFail: true });
       rmSync(dir, { recursive: true, force: true });
@@ -340,7 +364,7 @@ export class CodexReviewer {
   }
 
   /** Post the findings as one review. Lines outside the diff cannot carry a comment, so they go in the body. */
-  private async post(ctx: Ctx, result: Result, settings: CodexSettings, trigger: 'auto' | 'manual'): Promise<number> {
+  private async post(ctx: Ctx, runId: number, result: Result, settings: CodexSettings, trigger: 'auto' | 'manual'): Promise<void> {
     const { pull, git } = ctx;
     const rev = this.s.db.get<{ base_sha: string }>('SELECT base_sha FROM revisions WHERE pull_id = ? AND head_sha = ? ORDER BY seq DESC', pull.id, pull.head_sha);
     const files = await git.diff(rev?.base_sha ?? pull.base_sha, pull.head_sha);
@@ -379,7 +403,8 @@ export class CodexReviewer {
       },
       this.actor(),
     );
-    return review.id;
+    // Done as soon as the review is in, so nobody is told Codex is still at it while its checkout is removed.
+    this.s.db.update('review_runs', runId, { status: 'done', review_id: review.id, finished_at: now() });
   }
 
   private async prompt(ctx: Ctx, trigger: 'auto' | 'manual', settings: CodexSettings): Promise<string> {

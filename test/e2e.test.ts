@@ -92,7 +92,8 @@ before(async () => {
   );
   chmodSync(gh, 0o755);
 
-  // A stand-in for the Codex CLI: a model catalog, and `exec` answering with FAKE_CODEX_REVIEW.
+  // A stand-in for the Codex CLI: a model catalog, and `exec` answering with FAKE_CODEX_REVIEW,
+  // after FAKE_CODEX_SLEEP milliseconds or once the file FAKE_CODEX_GATE exists.
   const codex = join(dir, 'codex');
   process.env.FAKE_CODEX_LOG = join(dir, 'codex.log');
   writeFileSync(
@@ -111,7 +112,11 @@ if (args[0] !== 'exec') process.exit(2);
 const prompt = fs.readFileSync(0, 'utf8');
 fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args, prompt, sawFile: fs.existsSync('codex.js') }) + '\\n');
 if (process.env.FAKE_CODEX_FAIL) { console.error('model overloaded'); process.exit(3); }
-setTimeout(() => fs.writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_CODEX_REVIEW), Number(process.env.FAKE_CODEX_SLEEP || 0));
+const answer = () => fs.writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_CODEX_REVIEW);
+const gate = process.env.FAKE_CODEX_GATE;
+if (gate) {
+  const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t), answer()), 20);
+} else setTimeout(answer, Number(process.env.FAKE_CODEX_SLEEP || 0));
 `,
   );
   chmodSync(codex, 0o755);
@@ -496,6 +501,94 @@ test('codex reviews when the author waits, within the limits in settings', async
   assert.equal(waited.code, 0, waited.stderr);
   assert.match(waited.stdout, /codex reviewed: commented/);
   await human('PUT', '/api/settings/codex', { enabled: false });
+});
+
+test('a review still running shows in pr view and pr wait, and publishing before it needs a confirmation', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/slow-review');
+  writeFileSync(join(repo, 'slow.js'), 'export const slow = true;\n');
+  git('add', 'slow.js');
+  git('commit', '-qm', 'Add slow');
+  const created = await cli(['pr', 'create', '--title', 'Add slow', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  const head = git('rev-parse', 'HEAD');
+  const sha = head.slice(0, 7);
+  const gate = join(dir, 'codex-gate');
+  process.env.FAKE_CODEX_GATE = gate;
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({
+    summary: 'One thing.',
+    comments: [{ path: 'slow.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name it after what it means.' }],
+  });
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1 });
+  try {
+    // An author starting to wait queues an automatic review, which shows before it runs.
+    const pull = await human('GET', base);
+    const codex = server.service.codex!;
+    const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', pull.id);
+    codex.consider(pull.id);
+    assert.deepEqual(codex.atWork(row()), { status: 'QUEUED', head_sha: head, started_at: null });
+    for (let i = 0; i < 200 && codex.atWork(row())?.status !== 'IN_PROGRESS'; i++) await new Promise((r) => setTimeout(r, 25));
+
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    const { reviewRequests } = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewRequests'])).stdout);
+    assert.equal(reviewRequests.length, 1);
+    const { startedAt, ...request } = reviewRequests[0];
+    assert.deepEqual(request, { __typename: 'Bot', login: 'codex', status: 'IN_PROGRESS', commit: { oid: head } });
+    assert.ok(Date.now() - Date.parse(startedAt) < 20_000);
+    const view = await cli(['pr', 'view', String(number)]);
+    assert.match(view.stdout, new RegExp(`^reviewers:\tcodex \\(reviewing ${sha}, started just now\\)$`, 'm'));
+    const box = await page();
+    assert.match(box, /<strong>Codex is still reviewing this commit<\/strong>/);
+    assert.match(box, /class="btn btn-primary btn-publish" data-confirm="Click again to publish anyway"/);
+
+    // The reviewer approves while Codex works: the agent hears that Codex is not done.
+    for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
+    await human('POST', `${base}/reviews`, { event: 'APPROVE' });
+    const approved = await waiting;
+    assert.equal(approved.code, 0, approved.stderr);
+    assert.match(approved.stdout, /reviewer reviewed: approved/);
+    assert.match(approved.stdout, new RegExp(`^codex is reviewing ${sha} \\(started just now\\)\\.$`, 'm'));
+    assert.match(approved.stdout, new RegExp(`codex is still reviewing; run \`laatsux pr wait ${number}\` to get its review\\.`));
+    assert.doesNotMatch(approved.stdout, /nothing left open/);
+
+    // Its review wakes the next wait, which says the approval came before it.
+    writeFileSync(gate, '');
+    const reviewed = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    assert.equal(reviewed.code, 0, reviewed.stderr);
+    assert.match(reviewed.stdout, /codex reviewed: commented/);
+    assert.match(reviewed.stdout, /^The approval from reviewer came before this review from codex\.$/m);
+    assert.doesNotMatch(reviewed.stdout, /codex is (still )?reviewing/);
+    await codex.settle(pull.id);
+    assert.deepEqual(JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewRequests'])).stdout), { reviewRequests: [] });
+    const stale = await page();
+    assert.doesNotMatch(stale, /Codex is still reviewing/);
+    assert.doesNotMatch(stale, /data-confirm/);
+
+    // A page loaded before a review started does not know of it, so the server asks: publishing
+    // with that page's fingerprint is refused while Codex works, unless it says to go ahead.
+    const expected = stale.match(/name="expected" value="([^"]+)"/)![1];
+    rmSync(gate);
+    await human('POST', `${base}/reviewers/codex`);
+    const refused = await fetch(`${server.url}${base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected }) });
+    assert.equal(refused.status, 428);
+    assert.match((await refused.json()).message, /^codex is still reviewing this commit, and its review may ask for changes\.$/);
+    const fromTerminal = await cli(['pr', 'publish', String(number)], { actor: 'reviewer' });
+    assert.equal(fromTerminal.code, 1);
+    assert.match(fromTerminal.stderr, new RegExp(`Run \`laatsux pr publish ${number} --during-review\` to publish anyway\\.`));
+    const agent = await cli(['pr', 'publish', String(number), '--during-review']);
+    assert.match(agent.stderr, /publishing is for the reviewer/);
+    const published = await human('POST', `${base}/publish`, { expected, during_review: true });
+    assert.equal(published.staging_state, 'published');
+    writeFileSync(gate, '');
+    await codex.settle(pull.id);
+  } finally {
+    delete process.env.FAKE_CODEX_GATE;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false });
+  }
 });
 
 test('closing the server stops a running review and records why', async () => {

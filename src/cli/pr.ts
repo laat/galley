@@ -3,14 +3,14 @@ import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson } from './output.ts';
-import { conversationItems, formatConversation, viewPlain, viewTTY } from './format.ts';
+import { conversationItems, formatConversation, reviewersAtWork, stillReviewing, viewPlain, viewTTY } from './format.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
   'additions', 'author', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
   'createdAt', 'deletions', 'files', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'number', 'publishedUrl',
-  'reviewDecision', 'reviewThreads', 'reviews', 'state', 'title', 'updatedAt', 'url', 'waiting',
+  'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'updatedAt', 'url', 'waiting',
 ];
 
 // gh flags that have no meaning here. They are accepted so habitual invocations keep working.
@@ -406,13 +406,37 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     force: { type: 'boolean', short: 'f' },
     sign: { type: 'boolean' },
     'no-sign': { type: 'boolean' },
+    'during-review': { type: 'boolean' },
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   err(`Publishing ${t.repo.owner}/${t.repo.name}#${t.number} to GitHub…`);
   const sign = v.sign ? true : v['no-sign'] ? false : undefined;
-  const pr = await client.json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign });
+  const pr = await client
+    .json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'] })
+    .catch((e) => {
+      // A reviewer is at work: the server asks whether to publish anyway.
+      if (e instanceof ApiError && e.status === 428) throw new CliError(`${e.message}\nRun \`laatsux pr publish ${t.number} --during-review\` to publish anyway.`);
+      throw e;
+    });
   out(pr.published_url);
   return 0;
+}
+
+/**
+ * "The approval from laat came before this review from codex.": an approval that still holds
+ * was given before a new review from someone else, so it does not take that review into account.
+ */
+function approvedBefore(pr: any, fresh: Set<number>): string[] {
+  if (pr.reviewDecision !== 'APPROVED') return [];
+  const decisions = new Map<string, any>();
+  for (const rv of pr.reviews) if (rv.state === 'APPROVED' || rv.state === 'CHANGES_REQUESTED') decisions.set(rv.author.login, rv);
+  const lines: string[] = [];
+  for (const approval of [...decisions.values()].filter((rv) => rv.state === 'APPROVED')) {
+    const later = pr.reviews.filter((rv: any) => fresh.has(rv.databaseId) && rv.author.login !== approval.author.login && rv.submittedAt > approval.submittedAt);
+    const who = [...new Set(later.map((rv: any) => rv.author.login))];
+    if (who.length) lines.push(`The approval from ${approval.author.login} came before this review from ${who.join(' and ')}.`);
+  }
+  return lines;
 }
 
 /** The server is down or restarting: worth asking again shortly. */
@@ -455,7 +479,11 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(`New feedback on ${url} (review decision: ${pr.reviewDecision})\n`);
       out(items.map((i) => i.text).join('\n\n') + '\n');
     }
+    for (const line of approvedBefore(pr, new Set(r.reviews))) out(line);
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
+    // Reviewers still at work will be heard from: their review wakes the next wait.
+    const atWork = reviewersAtWork(pr);
+    const getIt = `run \`laatsux pr wait ${t.number}\` to get ${atWork.length > 1 ? 'their reviews' : 'its review'}.`;
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
@@ -471,7 +499,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if (r.status === 'published') {
       out(`Published to GitHub: ${r.published_url}`);
-      out(items.length ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
+      if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
+      else out(items.length ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
       return 0;
     }
     if (r.status === 'closed') {
@@ -479,7 +508,10 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       return 0;
     }
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
-    if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
+    for (const line of atWork) out(`${line}.`);
+    if (pr.reviewDecision === 'APPROVED' && !unresolved.length && atWork.length) {
+      out(c.gray(`${stillReviewing(pr)}; ${getIt}`));
+    } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
       out(c.gray(`Approved with nothing left open. Run \`laatsux pr wait ${t.number}\` to wait until the reviewer publishes it.`));
     } else {
       out(

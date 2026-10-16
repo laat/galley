@@ -275,6 +275,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   const decision = submitted.length ? reviewDecision(submitted) : null;
   const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
   const waiting = (s.waiters.get(pull.id) ?? 0) > 0;
+  // A review still to come may ask for changes, so publishing before it takes a second click.
+  const work = pull.state === 'closed' ? null : (s.codex?.atWork(pull) ?? null);
   const rows: Safe[] = [];
 
   if (decision === 'CHANGES_REQUESTED') {
@@ -312,12 +314,14 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   const signByDefault = unsigned.length ? await s.signsByDefault(p.ctx) : false;
   const target = repo.github_slug;
   let publishRow: Safe;
+  let publishable = false;
   if (!target) {
     publishRow = html`<div class="merge-row merge-actions">${icon('alert', { cls: 'color-fg-attention' })}<div><strong>No GitHub remote</strong><div class="color-fg-muted">Remote <code>${repo.remote}</code> is not a github.com repository, so this pull request can not be published.</div></div></div>`;
   } else if (pull.published_url && changed.length === 0) {
     publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-done' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version.</div></div>
       <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div>`;
   } else {
+    publishable = true;
     const verb = pull.published_url ? 'Publish update' : 'Publish pull request';
     const what = pull.published_url
       ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.`
@@ -339,8 +343,18 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         </div>
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
-      <button type="submit" class="btn btn-primary btn-publish">${icon('mark-github')} ${verb}</button>
+      <button type="submit" class="btn btn-primary btn-publish"${work ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>
     </form>`;
+  }
+  if (work) {
+    const what =
+      work.status === 'QUEUED'
+        ? 'Codex is about to review this commit'
+        : work.head_sha === pull.head_sha
+          ? 'Codex is still reviewing this commit'
+          : html`Codex is still reviewing an earlier commit, <code>${shortSha(work.head_sha)}</code>`;
+    const note = html`${work.started_at ? html`Started ${relTime(work.started_at)}. ` : ''}Its review will show up here.${publishable ? ' Publishing before it arrives takes a second click.' : ''}`;
+    rows.push(html`<div class="merge-row">${icon('dot-fill', { cls: 'color-fg-attention' })}<div><strong>${what}</strong><div class="color-fg-muted">${note}</div></div></div>`);
   }
   return html`<div class="merge-box${pull.state === 'published' ? ' merge-box--published' : ''}">
     <span class="merge-box-icon">${pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
@@ -396,10 +410,13 @@ function codexSidebar(p: PullPage): Safe {
   const runs = codex.runs(p.pull);
   const last = runs[runs.length - 1];
   const running = codex.isRunning(p.pull.id);
+  const work = codex.atWork(p.pull);
   const actor = codex.actor();
   let status: Safe;
-  if (running && last) {
-    status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} Reviewing <code>${shortSha(last.head_sha)}</code>, started ${relTime(last.started_at)}</p>`;
+  if (work?.status === 'IN_PROGRESS') {
+    status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} Reviewing <code>${shortSha(work.head_sha)}</code>, started ${relTime(work.started_at)}</p>`;
+  } else if (work) {
+    status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} About to review <code>${shortSha(work.head_sha)}</code></p>`;
   } else if (last?.status === 'done') {
     status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">Reviewed <code>${shortSha(last.head_sha)}</code></a> ${relTime(last.finished_at)}</p>`;
   } else if (last?.status === 'failed') {

@@ -1006,7 +1006,7 @@ export class Service {
     return { head: memo.get(pull.head_sha) ?? pull.head_sha, signed };
   }
 
-  async publish(ctx: Ctx, opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean }, actor: Actor): Promise<PullRow> {
+  async publish(ctx: Ctx, opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean }, actor: Actor): Promise<PullRow> {
     const { repo, git } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from laatsux');
     const pull = await this.sync(ctx.pull);
@@ -1015,6 +1015,12 @@ export class Service {
     }
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before publishing it');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
+    // Decided here, not by the page: a page loaded before the review started does not know of it.
+    const work = this.codex?.atWork(pull);
+    if (work && !opts.duringReview) {
+      const what = work.head_sha === pull.head_sha ? 'this commit' : `an earlier commit (${work.head_sha.slice(0, 7)})`;
+      throw new HttpError(428, `${this.codex!.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what}, and its review may ask for changes.`);
+    }
     const cwd = repo.work_dir ?? tmpdir();
     const env = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
 
