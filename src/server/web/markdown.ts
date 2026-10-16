@@ -3,6 +3,7 @@ import sanitizeHtml from 'sanitize-html';
 import hljs from 'highlight.js';
 import { esc } from './html.ts';
 import { UPLOAD_PATH } from '../uploads.ts';
+import { REFERENCE_CLASSES, referenceExtension, type ReferenceContext } from './references.ts';
 
 const ALLOWED_TAGS = [
   ...sanitizeHtml.defaults.allowedTags,
@@ -36,7 +37,7 @@ const SANITIZE: sanitizeHtml.IOptions = {
     '*': ['class', 'aria-hidden', 'dir'],
   },
   allowedClasses: {
-    '*': ['hljs*', 'language-*', 'suggestion*', 'blob-*', 'task-list-item*', 'contains-task-list', 'markdown-alert*', 'anchor'],
+    '*': ['hljs*', 'language-*', 'suggestion*', 'blob-*', 'task-list-item*', 'contains-task-list', 'markdown-alert*', 'anchor', ...REFERENCE_CLASSES],
   },
   allowedSchemes: ['http', 'https', 'mailto'],
   transformTags: {
@@ -104,6 +105,8 @@ export interface MarkdownContext {
   suggestionLang?: string;
   /** Keep every image URL, for a caller that points them somewhere safe itself (the repository browser). */
   keepImageUrls?: boolean;
+  /** Link `#N`, `@user` and commit SHAs as GitHub does (see references.ts). */
+  references?: ReferenceContext;
 }
 
 const KEEP_IMAGE_URLS: sanitizeHtml.IOptions = { ...SANITIZE, transformTags: { ...SANITIZE.transformTags, img: (tag, attribs) => ({ tagName: 'img', attribs }) } };
@@ -120,6 +123,7 @@ function makeMarked(ctx: MarkdownContext): Marked {
       },
     },
   });
+  if (ctx.references) m.use(referenceExtension(ctx.references));
   return m;
 }
 

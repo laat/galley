@@ -16,6 +16,7 @@ import {
   userJson,
 } from './github.ts';
 import { renderMarkdown } from './web/markdown.ts';
+import { pullReferences } from './web/references.ts';
 import { nextSettings, readSettings, saveSettings } from './settings.ts';
 
 /**
@@ -103,8 +104,14 @@ export function api(s: Service): Hono {
   app.get('/user', (c) => c.json(userJson(s, actor(c))));
 
   app.post('/markdown', async (c) => {
-    const { text, suggestion_lines } = await body(c);
-    return c.html(renderMarkdown(String(text ?? ''), { suggestionLines: Array.isArray(suggestion_lines) ? suggestion_lines.map(String) : undefined }));
+    const { text, suggestion_lines, pull } = await body(c);
+    const markdown = String(text ?? '');
+    // Extension: `pull`, the pull request's API path, links references as its pages do.
+    const m = typeof pull === 'string' ? pull.match(/^\/api\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/) : null;
+    const x = m ? await s.ctx(m[1], m[2], Number(m[3]), { sync: false }) : null;
+    // Issue titles only from the cache: when a lookup's answer came, the page would refresh under the preview.
+    const references = x ? await pullReferences(s, x, await s.commits(x), [markdown], { lookUp: false }) : undefined;
+    return c.html(renderMarkdown(markdown, { suggestionLines: Array.isArray(suggestion_lines) ? suggestion_lines.map(String) : undefined, references }));
   });
 
   // ------------------------------------------------------------------ repos

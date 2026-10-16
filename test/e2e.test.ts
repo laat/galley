@@ -91,7 +91,7 @@ before(async () => {
   writeFileSync(
     gh,
     // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error.
-    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n  "api graphql") echo '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2}}}}' ;;\nesac\n`,
+    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *) echo '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2}}}}' ;;\n  esac ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -399,6 +399,61 @@ test('the agent loop, from staging to publishing', async (t) => {
     const cross = await fetch(server.url + '/api/repos/acme/widgets/pulls/1/publish', { method: 'POST', headers: { origin: 'https://evil.example' } });
     assert.equal(cross.status, 403);
   });
+});
+
+test('Markdown links issues, mentions and commits the way GitHub does', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/links');
+  writeFileSync(join(repo, 'links.js'), 'export {};\n');
+  git('add', 'links.js');
+  git('commit', '-qm', 'First try');
+  const replaced = git('rev-parse', 'HEAD');
+  git('commit', '-q', '--amend', '-m', 'Add links.js');
+  const own = git('rev-parse', 'HEAD');
+  const pushed = git('rev-parse', 'origin/main');
+  const body = `Fixes #12. Thanks @laat. Builds on ${pushed.slice(0, 7)}; ${own.slice(0, 7)} replaces ${replaced.slice(0, 7)}, not deadbeef. \`#13\``;
+  const created = await cli(['pr', 'create', '--title', 'Links', '--body', body]);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  const events: string[] = [];
+  const listen = (e: { type: string }) => events.push(e.type);
+  server.service.bus.on('change', listen);
+
+  // "#12" is issue 12 on GitHub, not staged pull request 12; the page never waits for its title.
+  const first = await page();
+  assert.match(first, /Fixes <a class="issue-link" href="https:\/\/github\.com\/acme\/widgets\/issues\/12" target="_blank" rel="noopener noreferrer">#12<\/a>\./);
+  assert.match(first, /<a class="user-mention" href="https:\/\/github\.com\/laat" target="_blank" rel="noopener noreferrer">@laat<\/a>/);
+  assert.match(first, new RegExp(`<a class="commit-link" href="https://github\\.com/acme/widgets/commit/${pushed}" target="_blank" rel="noopener noreferrer"><code>${pushed.slice(0, 7)}</code></a>`));
+  assert.match(first, new RegExp(`<a class="commit-link" href="/acme/widgets/pull/${number}/files\\?commit=${own}" title="Add links\\.js"><code>${own.slice(0, 7)}</code></a>`));
+  assert.match(first, new RegExp(`replaces <a class="commit-link" href="/acme/widgets/pull/${number}/files\\?commit=${replaced}"><code>`));
+  assert.match(first, /, not deadbeef\. <code>#13<\/code>/);
+  // The publish box says what merging on GitHub closes (its title may have come in by the time the box renders).
+  assert.match(first, /<strong>Merging on GitHub closes <a href="https:\/\/github\.com\/acme\/widgets\/issues\/12" target="_blank" rel="noopener"( title="[^"]*")?>#12<\/a><\/strong>/);
+
+  // The title arrives in the background, and open pages hear about it.
+  const titled = /<a class="issue-link" href="https:\/\/github\.com\/acme\/widgets\/issues\/12" title="Widgets wobble · Open issue"/;
+  assert.doesNotMatch(first, titled);
+  let later = first;
+  for (let i = 0; i < 100 && !titled.test(later); i++) {
+    await new Promise((r) => setTimeout(r, 20));
+    later = await page();
+  }
+  server.service.bus.off('change', listen);
+  assert.match(later, titled);
+  assert.ok(events.includes('github_issues'), 'a change event when titles arrive');
+  assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^api graphql -f query=.*i12:issueOrPullRequest\(number:12\).* -f owner=acme -f name=widgets$/m);
+
+  // The editor's preview links the same way when it says which pull request it is on.
+  const preview = async (text: string, pull?: string) =>
+    (await fetch(`${server.url}/api/markdown`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, pull }) })).text();
+  const api = `/api/repos/acme/widgets/pulls/${number}`;
+  assert.match(await preview(`Fixes #12 in ${own.slice(0, 7)}`, api), new RegExp(`Fixes <a class="issue-link" href="https://github\\.com/acme/widgets/issues/12" title="Widgets wobble · Open issue"[^>]*>#12</a> in <a class="commit-link" href="/acme/widgets/pull/${number}/files\\?commit=${own}"`));
+  assert.equal(await preview(`Fixes #12 in ${own.slice(0, 7)}`), `<p>Fixes #12 in ${own.slice(0, 7)}</p>\n`);
+  // It takes titles from the cache alone: the answer to a lookup would refresh the page under the preview.
+  assert.match(await preview('See #77', api), /<a class="issue-link" href="https:\/\/github\.com\/acme\/widgets\/issues\/77"/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.doesNotMatch(readFileSync(join(dir, 'gh.log'), 'utf8'), /issueOrPullRequest\(number:77\)/);
 });
 
 test('codex reviews when the author waits, within the limits in settings', async () => {

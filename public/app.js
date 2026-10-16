@@ -400,7 +400,7 @@
       const res = await fetch('/api/markdown', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: ta.value, suggestion_lines: holder ? JSON.parse(holder.dataset.suggestion) : undefined }),
+        body: JSON.stringify({ text: ta.value, suggestion_lines: holder ? JSON.parse(holder.dataset.suggestion) : undefined, pull: ds().apiBase }),
       });
       const htmlText = await res.text();
       if (previews.get(editor) === request) preview.innerHTML = htmlText || '<p class="color-fg-muted">Nothing to preview</p>';

@@ -105,6 +105,7 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
   `/blob/<sha>/<path>` and `/raw/<sha>/<path>`
 - Comment on a line, or drag across the `+` buttons to comment on a range; single comments or a pending review submitted as Comment, Approve or Request changes
 - ```` ```suggestion ```` blocks rendered as a diff
+- References linked as on GitHub: `#12`, `GH-12` and `owner/repo#12` go to issues and pull requests on GitHub (with their title on hover once looked up), `@user` to the profile, and commit SHAs to the commit. `#12` means number 12 on GitHub, since descriptions are written for GitHub. The publish box lists the issues that "Fixes #12" and the like close once merged
 - Comments on a commit, for asking the agent to reword its message
 - Images in every comment box: paste, drop or attach PNG, JPEG, GIF or WebP files of up to 10 MB. Under a comment with images, `pr wait` and `pr view --comments` print each image's URL, or with `--download-images <dir>` the file it was saved to, for agents that read image files
 - Edit the title and description yourself; description edits show as a diff in the timeline
