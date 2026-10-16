@@ -375,7 +375,9 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         { cls: 'timeline-badge--danger' },
       );
     case 'auto_publish_disabled':
-      if (data.reason === 'merged') return timelineBadge('clock', html`Auto-publish turned itself off when the pull request was merged on GitHub ${when}`);
+      if (data.reason === 'merged' || data.reason === 'closed_on_github') {
+        return timelineBadge('clock', html`Auto-publish turned itself off when the pull request was ${data.reason === 'merged' ? 'merged' : 'closed'} on GitHub ${when}`);
+      }
       return timelineBadge('clock', html`${who} disabled auto-publish${AUTO_PUBLISH_OFF[data.reason] ?? ''} ${when}`);
     case 'auto_publish_failed':
       return timelineBadge(
@@ -531,7 +533,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
       <div class="merge-buttons">
-        ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above">${icon('clock')} Publish when reviews are done</button>`}
+        ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above, and keep publishing updates that way until the pull request is merged">${icon('clock')} Publish when reviews are done</button>`}
         <button type="submit" class="btn btn-primary btn-publish"${work ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>
       </div>
     </form>`;
@@ -644,9 +646,11 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const r = s.readiness(pull);
   const by = s.db.actorById(auto.by);
   const options = [auto.sign ? 'signed' : null, auto.draft && !pull.published_url ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
+  const upToDate = !!pull.published_url && !s.unpublishedChanges(pull).length;
   const item = (state: 'done' | 'waiting' | 'failed', text: Safe | string) =>
     html`<li>${state === 'done' ? icon('check', { cls: 'color-fg-success' }) : state === 'failed' ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' })} <span>${text}</span></li>`;
-  const items = r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
+  const items = upToDate ? [item('waiting', `GitHub has the latest commit: the next one pushed to ${pull.head_ref} is published once the agents are done with it`)] : [];
+  items.push(...r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author))));
   items.push(
     r.authorWaiting && !r.unseen
       ? item('done', `${author.login} is waiting for review, with all feedback seen`)
@@ -659,8 +663,8 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   if (merging && !merging.autoMerge) items.push(item('failed', `${p.repo.github_slug} does not allow auto-merge, so publishing will fail`));
   else if (merging && method && !merging.methods.includes(method)) items.push(item('failed', `${p.repo.github_slug} does not allow ${method} merges, so publishing will fail`));
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-done' })}<div class="flex-auto">
-    <strong>Auto-publish is on</strong>
-    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the latest commit${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them.${auto.autoMerge ? ` Then it enables auto-merge on GitHub (${method}).` : ''}</div>
+    <strong>Auto-publish is on until the pull request is merged</strong>
+    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes each update${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method}) after each` : ''}. Publishing by hand leaves it on.</div>
     <ul class="merge-checks">${items}</ul>
   </div>
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;

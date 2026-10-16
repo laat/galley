@@ -200,7 +200,7 @@ export interface AutoMerge {
   error?: string;
 }
 
-export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed' | 'merged';
+export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed' | 'merged' | 'closed_on_github';
 
 /** A repository on GitHub, as laatsux shows it: the counts on the repo tabs, and what merging there allows. */
 export interface GithubRepo {
@@ -485,11 +485,12 @@ export class Service {
       const commit = node.mergeCommit?.oid ?? null;
       const ts = now();
       this.db.update('pulls', pull.id, { github_state: state, github_closed_at: at, github_closed_by: by, github_merge_sha: commit, updated_at: ts });
+      // Approved for a pull request open on GitHub, also when this close is one seen before.
+      this.autoPublishOff(pull, viewer, merged ? 'merged' : 'closed_on_github', ts);
       // Published again after it was closed on GitHub, and still closed there: that close is in the timeline already.
       if (!merged && pull.github_closed_at === at) return 'github_state';
       // The event says when laatsux learned of it, so `pr wait` delivers it like any news; `at` says when it happened.
       this.addEvent(pull, viewer, merged ? 'merged' : 'closed_on_github', { url: pull.published_url, by, at, commit }, ts);
-      if (merged) this.autoPublishOff(pull, viewer, 'merged', ts);
       return merged ? 'merged' : 'closed_on_github';
     });
     if (type) this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
@@ -1503,9 +1504,14 @@ export class Service {
 
   // ------------------------------------------------------------ auto-publish
 
-  /** Auto-publish is on and may publish now: the agents are done, and none of the reviewer's threads is open. */
+  /**
+   * Auto-publish is on and may publish now: there is something GitHub does not have yet, the agents
+   * are done, and none of the reviewer's threads is open. It stays on after publishing, for the
+   * next update, until the pull request is merged or closed (see AutoPublishOff).
+   */
   autoPublishReady(pull: PullRow): boolean {
     if (!pull.auto_publish || pull.state === 'closed') return false;
+    if (pull.published_url && !this.unpublishedChanges(pull).length) return false;
     const r = this.readiness(pull);
     return r.agentsDone && r.openThreads === 0;
   }
@@ -1820,10 +1826,7 @@ export class Service {
         // Closed on GitHub and published again: follow it again, in case it was reopened there.
         ...(pull.github_state === 'closed' ? { github_state: null } : {}),
       });
-      // Auto-publish is one publish: whoever published, it is done. An auto-publish ends only
-      // the approval it acted on, not one given while it was publishing.
-      if (auto) this.db.run('UPDATE pulls SET auto_publish = NULL WHERE id = ? AND auto_publish = ?', pull.id, opts.approval!);
-      else this.db.update('pulls', pull.id, { auto_publish: null });
+      // Auto-publish stays on, whoever published: it publishes the next update too, until the merge.
       this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force, auto }, ts);
     });
     this.emit(pull.id, auto ? 'auto_published' : 'published', actor);

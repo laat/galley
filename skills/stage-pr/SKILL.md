@@ -127,7 +127,8 @@ feedback, and the loop repeats until the user publishes it.
    - `Merged on GitHub as e468a4e by laat: <url>`: clean up, as in [After the merge](#after-the-merge).
    - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
      user says otherwise.
-   - New feedback: address it as in step 4 and wait again. The user publishes the update.
+   - New feedback: address it as in step 4 and wait again. The user publishes the update, or
+     auto-publish does once the reviewer agents are done with it and you are waiting.
 
 ## After the merge
 

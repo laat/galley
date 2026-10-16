@@ -1057,7 +1057,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.match(first.stdout, /Auto-publish is on \(reviewer turned it on\): laatsux publishes this pull request once the reviewer agents are done/);
       assert.equal(pr.created(), false);
       const box = await pr.page();
-      assert.match(box, /<strong>Auto-publish is on<\/strong>/);
+      assert.match(box, /<strong>Auto-publish is on until the pull request is merged<\/strong>/);
       assert.match(box, /codex has used up its automatic reviews/);
       assert.match(box, /agent is working \(not waiting for review\)/);
       assert.match(box, /js-auto-publish-cancel/);
@@ -1074,9 +1074,12 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.equal(published.auto, true);
       assert.equal(published.source, git('rev-parse', 'HEAD'));
       assert.equal(published.signed, 2);
-      // It publishes once, and then it is off.
-      assert.equal((await human('GET', pr.base)).auto_publish, null);
-      assert.match(await pr.page(), /published this pull request to <a [^>]*>acme\/widgets#7<\/a> at <code>[0-9a-f]{7}<\/code> \(signed 2 commits\) with auto-publish/);
+      // It stays on for the next update, and has nothing to publish until there is one.
+      assert.ok((await human('GET', pr.base)).auto_publish);
+      const after = await pr.page();
+      assert.match(after, /published this pull request to <a [^>]*>acme\/widgets#7<\/a> at <code>[0-9a-f]{7}<\/code> \(signed 2 commits\) with auto-publish/);
+      assert.match(after, /GitHub has the latest commit: the next one pushed to feature\/auto is published once the agents are done with it/);
+      assert.match(second.stdout, /Auto-publish stays on until the merge/);
     } finally {
       await human('PUT', '/api/settings/codex', defaults);
     }
@@ -1530,7 +1533,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.equal(JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'autoPublishRequest'])).stdout).autoPublishRequest.autoMerge, 'squash');
     await human('PUT', '/api/settings/publish', { mergeMethod: 'rebase' });
     try {
-      assert.match(await pr.page(), /Then it enables auto-merge on GitHub \(squash\)\./);
+      assert.match(await pr.page(), /and enables auto-merge on GitHub \(squash\) after each\./);
       const calls = ghCalls();
       const waited = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       assert.match(waited.stdout, /Published to GitHub/);
@@ -2871,10 +2874,14 @@ test('published pull requests are followed until they are merged or closed on Gi
 
     await t.test('closed on GitHub without merging, and followed again when published again', async () => {
       const pr = await published('feature/follow-close', 'close.js');
+      // On, with nothing new to publish: it waits for an update, until the close turns it off.
+      await human('PUT', `${pr.base}/auto-publish`, { sign: false });
       const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       await untilWaiting(pr.base);
       await githubSays({ [pr.id]: closed });
       const r = await waiting;
+      assert.equal((await human('GET', pr.base)).auto_publish, null);
+      assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_disabled').reason, 'closed_on_github');
       assert.match(r.stdout, /^Closed on GitHub without merging by octocat: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
       assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Closed on GitHub without merging/m);
       const view = await cli(['pr', 'view', String(pr.number), '--json', 'state,closed,closedAt,mergedAt,turn']);
@@ -2890,11 +2897,15 @@ test('published pull requests are followed until they are merged or closed on Gi
       await human('POST', `${pr.base}/publish`, { sign: false });
       assert.equal((await human('GET', pr.base)).github_state, null);
       assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Published to GitHub/m);
+      // Auto-publish on again, for a pull request GitHub still has closed: that close turns it off too.
+      await human('PUT', `${pr.base}/auto-publish`, { sign: false });
       const asked = pr.asked();
       await githubSays({ [pr.id]: closed });
       assert.equal(pr.asked(), asked + 1);
       assert.equal((await human('GET', pr.base)).github_state, 'closed');
       assert.equal((await pr.timeline()).filter((e) => e.event === 'closed_on_github').length, 1);
+      assert.equal((await human('GET', pr.base)).auto_publish, null);
+      assert.deepEqual((await pr.timeline()).filter((e) => e.event === 'auto_publish_disabled').map((e) => e.reason), ['closed_on_github', 'closed_on_github']);
     });
 
     await t.test('how it stands on GitHub is shown to the reviewer, and makes it their turn; the agent waits on', async () => {
@@ -2998,6 +3009,114 @@ test('published pull requests are followed until they are merged or closed on Gi
       const heard = (await waiting).stdout;
       assert.match(heard, /The test fails on GitHub; please fix it\./);
       assert.doesNotMatch(heard, /Export a function|Checks failed|Conflicts/);
+    });
+
+    await t.test('auto-publish stays on: it publishes the fix for a failed check, until a merge turns it off', async () => {
+      git('checkout', '-q', 'main');
+      git('checkout', '-qb', 'feature/follow-auto');
+      writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = true;\n');
+      git('add', 'auto-fix.js');
+      git('commit', '-qm', 'Add auto-fix.js');
+      const created = await cli(['pr', 'create', '--title', 'Add auto-fix.js', '--body', 'x']);
+      assert.equal(created.code, 0, created.stderr);
+      const n = created.stdout.trim().split('/').pop()!;
+      const base = `/api/repos/acme/widgets/pulls/${n}`;
+      const remoteHead = () => execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/follow-auto'], { encoding: 'utf8' }).trim();
+      const updates = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.startsWith('pr edit https://github.com/acme/widgets/pull/7 ')).length;
+      const wait = async (expect: RegExp) => {
+        const r = await cli(['pr', 'wait', n, '--timeout', '20s']);
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, expect);
+        return r.stdout;
+      };
+      process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Looks right.', comments: [] });
+      await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+      try {
+        // With auto-merge, which it asks for again after each update it publishes.
+        await human('PUT', `${base}/auto-publish`, { sign: false, auto_merge: true, merge_method: 'squash' });
+        const merges = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.startsWith('pr merge https://github.com/acme/widgets/pull/7 --auto --squash --match-head-commit ')).length;
+        const mergesBefore = merges();
+        // Codex finds nothing; once the agent has seen that and waits, the first publish.
+        await wait(/Looks right\./);
+        assert.match(await wait(/^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m), /Auto-publish stays on until the merge/);
+        const { id } = await human('GET', base);
+        assert.ok((await human('GET', base)).auto_publish, 'still on after publishing');
+        assert.equal(remoteHead(), git('rev-parse', 'HEAD'));
+        // Publishing by hand leaves it on too.
+        assert.equal((await cli(['pr', 'edit', n, '--title', 'Add auto-fix.js, retitled'])).code, 0);
+        await human('POST', `${base}/publish`, { sign: false });
+        assert.ok((await human('GET', base)).auto_publish, 'still on after publishing by hand');
+        await wait(/^Published to GitHub/m);
+        assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text(), /<strong>Auto-publish is on until the pull request is merged<\/strong>[^]*Publishing by hand leaves it on\./);
+
+        // A check fails on GitHub: the reviewer's turn. The reviewer hands it to the agent, which pushes a fix.
+        const check = { __typename: 'CheckRun', databaseId: 21, name: 'test', status: 'COMPLETED', conclusion: 'FAILURE', detailsUrl: 'https://github.com/acme/widgets/actions/runs/2/job/21', checkSuite: { workflowRun: { workflow: { name: 'CI' } } } };
+        await githubSays({ [id]: { ...open, headRefOid: remoteHead(), mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [check] } }, checkSuites: { nodes: [] } } }] } } });
+        assert.equal(JSON.parse((await cli(['pr', 'view', n, '--json', 'turn'])).stdout).turn.whose, 'REVIEWER');
+        await comment(Number(n), 'The test fails on GitHub; please fix it.');
+        await wait(/The test fails on GitHub; please fix it\./);
+        const before = updates();
+        writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = false;\n');
+        git('commit', '-qam', 'Fix auto-fix.js');
+
+        // Codex reviews the fix and finds nothing; the agent waits, and laatsux publishes the update.
+        await wait(/Looks right\./);
+        await wait(/^Published to GitHub/m);
+        assert.equal(updates(), before + 1);
+        assert.equal(remoteHead(), git('rev-parse', 'HEAD'));
+        assert.equal(merges(), mergesBefore + 2, 'auto-merge asked for after the first publish and after the update');
+        const published = (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'published');
+        assert.deepEqual([published.auto, published.first], [true, false]);
+
+        // Merged on GitHub: auto-publish turns off, and the agent's next push goes nowhere.
+        await githubSays({ [id]: merged });
+        assert.equal((await human('GET', base)).auto_publish, null);
+        const off = (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'auto_publish_disabled');
+        assert.equal(off.reason, 'merged');
+        writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = 0;\n');
+        git('commit', '-qam', 'After the merge');
+        await wait(/^Merged on GitHub as e468a4e by laat/m);
+        await new Promise((r) => setTimeout(r, 500));
+        assert.equal(updates(), before + 1);
+        assert.notEqual(remoteHead(), git('rev-parse', 'HEAD'));
+      } finally {
+        await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
+      }
+    });
+
+    await t.test('auto-merge that merges at once ends auto-publish: the next commit is not published', async () => {
+      git('checkout', '-q', 'main');
+      git('checkout', '-qb', 'feature/follow-merged-at-once');
+      writeFileSync(join(repo, 'at-once.js'), 'export const once = 1;\n');
+      git('add', 'at-once.js');
+      git('commit', '-qm', 'Add at-once.js');
+      const created = await cli(['pr', 'create', '--title', 'Add at-once.js', '--body', 'x', '--no-review']);
+      assert.equal(created.code, 0, created.stderr);
+      const n = created.stdout.trim().split('/').pop()!;
+      const base = `/api/repos/acme/widgets/pulls/${n}`;
+      const remoteHead = () => execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/follow-merged-at-once'], { encoding: 'utf8' }).trim();
+      // GitHub has nothing to wait for: gh merges as soon as auto-merge is asked for.
+      process.env.FAKE_GH_VIEW = JSON.stringify({ state: 'MERGED', mergedAt: '2026-10-17T11:00:00Z', mergedBy: { login: 'reviewer' }, mergeCommit: { oid: mergeCommit } });
+      try {
+        await human('PUT', `${base}/auto-publish`, { sign: false, auto_merge: true, merge_method: 'squash' });
+        // The agent waits, auto-publish publishes, and gh merges: the agent hears of the merge (the
+        // publish may reach it first, a moment before laatsux has asked GitHub about the merge).
+        let heard = (await cli(['pr', 'wait', n, '--timeout', '20s'])).stdout;
+        if (/^Published to GitHub/m.test(heard)) heard = (await cli(['pr', 'wait', n, '--timeout', '20s'])).stdout;
+        assert.match(heard, /^Merged on GitHub as e468a4e by reviewer/m);
+        const pull = await human('GET', base);
+        assert.deepEqual([pull.github_state, pull.auto_publish], ['merged', null]);
+        assert.equal((await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'auto_publish_disabled').reason, 'merged');
+        // Another commit, and the agent waits again: nothing is pushed over the merge.
+        const pushed = remoteHead();
+        writeFileSync(join(repo, 'at-once.js'), 'export const once = 2;\n');
+        git('commit', '-qam', 'After the merge');
+        assert.match((await cli(['pr', 'wait', n, '--timeout', '5s'])).stdout, /^Merged on GitHub/m);
+        await new Promise((r) => setTimeout(r, 500));
+        assert.equal(remoteHead(), pushed);
+      } finally {
+        delete process.env.FAKE_GH_VIEW;
+      }
     });
 
     await t.test('pr wait on several pull requests returns the first with news, and says which', async () => {

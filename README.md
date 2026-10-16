@@ -351,10 +351,15 @@ The box shows what it is waiting for.
   Codex again, or publish by hand.
 - Signing, the push and each `gh` call get two minutes, since nobody is there to answer a
   prompt. A failure is shown on the pull request and turns auto-publish off.
-- With "Enable auto-merge on GitHub" checked, it enables [auto-merge](#auto-merge) after publishing,
+- With "Enable auto-merge on GitHub" checked, it enables [auto-merge](#auto-merge) after each publish,
   with the merge method set when it was turned on.
-- It publishes once, then turns off. Cancel, closing the pull request, your own "Request
-  changes" and a new base turn it off too; the agent editing the title or description does not.
+- It stays on until the pull request is merged: after publishing, it publishes each later
+  update pushed to the staged branch (say, a fix for a check that failed on GitHub) under the
+  same rules.
+  Publishing by hand leaves it on. A merge or close on GitHub turns it off, and so do Cancel,
+  closing the pull request here, your own "Request changes" and a new base; the agent editing
+  the title or description does not. The options (signing, force, auto-merge and its method)
+  apply to every update; draft only to the first publish.
 - Agents see it in `pr view` and in `pr wait`'s output, but only you can turn it on:
   `laatsux pr publish --auto` (with `--sign`, `--no-sign`, `--draft`, `--force`, `--auto-merge`) and
   `laatsux pr publish --disable-auto`, after `gh pr merge --auto`.

@@ -628,6 +628,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
       else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
       out(c.gray(`Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      if (pr.autoPublishRequest) out(c.gray('Auto-publish stays on until the merge: it publishes each update once the reviewer agents are done with it and you are waiting.'));
       return 0;
     }
     if (r.status === 'closed') {
@@ -656,8 +657,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(
         c.gray(
           `Auto-publish is on (${auto.enabledBy.login} turned it on): laatsux publishes this pull request once the reviewer agents are done with ` +
-            `your latest commit and you are waiting in \`laatsux pr wait ${all}\` with the feedback addressed` +
-            `${auto.autoMerge ? ', and turns on auto-merge on GitHub' : ''}.`,
+            `your latest commit and you are waiting in \`laatsux pr wait ${all}\` with the feedback addressed, and each update after that until it is merged` +
+            `${auto.autoMerge ? ', turning on auto-merge on GitHub each time' : ''}.`,
         ),
       );
     }

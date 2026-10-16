@@ -1,6 +1,7 @@
 // Auto-publish, after GitHub's auto-merge. The reviewer approves publishing in advance, and
 // laatsux publishes on its own once the agents are done with the pull request: the reviewer
-// agents with its head, and the author with their feedback (Service.readiness).
+// agents with its head, and the author with their feedback (Service.readiness). It stays on and
+// publishes each later update the same way, until the pull request is merged or closed.
 import type { PullRow } from './db.ts';
 import { HttpError, publishFingerprint, type ChangeEvent, type Service } from './service.ts';
 
