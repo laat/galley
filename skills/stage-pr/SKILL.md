@@ -82,19 +82,31 @@ feedback, and the loop repeats until the user publishes it.
    For the whole conversation, run `laatsux pr view --comments`. For JSON, run
    `laatsux pr view --json reviewThreads,reviews,comments`.
 
-4. Address everything:
+4. Address every thread, with a change or a reply:
    - Change the code and commit. Amend or fix up the commit the feedback is about, so the
      history stays the way the user wants it published.
    - Change the title or description with `laatsux pr edit --title "..." --body-file -`.
-   - Reply to every thread you handled, saying what you did or why you did not, and resolve
-     the ones you fixed:
+   - Reply to every thread, saying what you did or why you did not, and resolve the ones you
+     fixed:
 
      ```sh
      laatsux pr comment --reply-to 12 --resolve -b "Switched to backoff() in 3f2a1c9."
      laatsux pr comment --reply-to 14 -b "Kept the loop: backoff() can't retry here because …"
+     laatsux pr comment --reply-to 15 -b "Out of scope: the parser did this before this change. Follow-up issue?"
      ```
 
    - For anything that needs the user's input, ask in a reply or with `laatsux pr comment -b "..."`.
+
+   The pull request does one thing: what its title and description say.
+   - Fix what the feedback finds in that change. A finding outside it (a bug that was already
+     there, an improvement next to the change, a case far from it) does not belong here: reply
+     that it is out of scope, propose a follow-up issue or pull request, and leave the thread
+     open so the user decides. The user may ask for it anyway.
+   - Do not add features, refactors or cleanups nobody asked for. Mention them in a reply or
+     the description instead.
+   - If each round finds new cases in the same area, the approach may be wrong. Say so and
+     propose the structural fix to the user before you rewrite, instead of patching case after
+     case.
 
 5. Run `laatsux pr wait` again. Repeat until it prints `Published to GitHub: <url>` (you are
    done; tell the user the GitHub URL) or reports that the pull request was closed. If it says
