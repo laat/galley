@@ -102,7 +102,11 @@ export interface MarkdownContext {
   /** The lines a review comment points at; turns ```suggestion blocks into a diff. */
   suggestionLines?: string[];
   suggestionLang?: string;
+  /** Keep every image URL, for a caller that points them somewhere safe itself (the repository browser). */
+  keepImageUrls?: boolean;
 }
+
+const KEEP_IMAGE_URLS: sanitizeHtml.IOptions = { ...SANITIZE, transformTags: { ...SANITIZE.transformTags, img: (tag, attribs) => ({ tagName: 'img', attribs }) } };
 
 function makeMarked(ctx: MarkdownContext): Marked {
   const m = new Marked({ gfm: true, breaks: true });
@@ -134,5 +138,5 @@ function suggestion(text: string, ctx: MarkdownContext): string {
 export function renderMarkdown(text: string, ctx: MarkdownContext = {}): string {
   if (!text.trim()) return '';
   const rendered = makeMarked(ctx).parse(text, { async: false }) as string;
-  return sanitizeHtml(rendered, SANITIZE);
+  return sanitizeHtml(rendered, ctx.keepImageUrls ? KEEP_IMAGE_URLS : SANITIZE);
 }

@@ -1,7 +1,7 @@
-import type { DiffLine, FileDiff, Hunk } from '../diff.ts';
+import { gaps, type DiffLine, type FileDiff, type Gap, type Hunk } from '../diff.ts';
 import type { Side } from '../db.ts';
 import type { Thread } from '../service.ts';
-import { fileAnchor, html, icon, raw, type Safe } from './html.ts';
+import { fileAnchor, html, icon, raw, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor } from './markdown.ts';
 import { copyButton } from './components.ts';
 
@@ -15,6 +15,17 @@ export interface DiffViewOpts {
   viewed: Map<string, string>;
   /** Threads about a whole file, keyed by path. */
   fileThreads?: Map<string, Thread[]>;
+  /** The repository's URL and the commits on each side, for "View file" and the unfold arrows. */
+  browse?: { repo: string; base: string; head: string };
+  /** Lines in each file on the new side, keyed by path, for the arrows after the last hunk. */
+  totals?: Map<string, number>;
+}
+
+type RowOpts = Pick<DiffViewOpts, 'mode' | 'threadsAt' | 'renderThread'>;
+
+/** A file or directory in the repository browser: `kind` is tree, blob or raw. */
+export function browseUrl(repo: string, kind: 'tree' | 'blob' | 'raw', sha: string, path: string): string {
+  return `${repo}/${kind}/${sha}${path ? '/' + path.split('/').map(encodeURIComponent).join('/') : ''}`;
 }
 
 export const threadKey = (path: string, side: Side, line: number) => `${path}\0${side}\0${line}`;
@@ -53,7 +64,7 @@ function codeCell(l: DiffLine | null, side: Side | null, code: string, path: str
   return html`<td class="blob-code blob-code-${l.type} ${extraCls}" data-side="${side}" data-line="${line}" data-path="${path}"><button type="button" class="add-line-comment" aria-label="Comment on line ${side === 'RIGHT' ? 'R' : 'L'}${line}">${icon('plus')}</button><span class="blob-marker">${MARK[l.type]}</span><span class="blob-code-inner">${raw(code)}</span>${l.noNewline ? html`<span class="no-newline" title="No newline at end of file">${icon('no-entry')}</span>` : ''}</td>`;
 }
 
-function threadsFor(o: DiffViewOpts, path: string, l: DiffLine): { left: Thread[]; right: Thread[] } {
+function threadsFor(o: RowOpts, path: string, l: DiffLine): { left: Thread[]; right: Thread[] } {
   const right = l.type !== 'del' && l.newLine !== null ? (o.threadsAt.get(threadKey(path, 'RIGHT', l.newLine)) ?? []) : [];
   const left = l.type !== 'add' && l.oldLine !== null ? (o.threadsAt.get(threadKey(path, 'LEFT', l.oldLine)) ?? []) : [];
   return { left, right };
@@ -74,11 +85,11 @@ function suggestionSource(f: FileDiff, t: Thread): string[] {
   return out;
 }
 
-function unifiedRows(f: FileDiff, o: DiffViewOpts, lang: string | undefined): Safe[] {
+function unifiedRows(f: FileDiff, o: RowOpts, lang: string | undefined, header: (h: Hunk) => Safe): Safe[] {
   const rows: Safe[] = [];
   for (const h of f.hunks) {
     const hl = highlightHunk(h, lang);
-    rows.push(html`<tr class="hunk-row"><td class="blob-num blob-num-hunk" colspan="2"></td><td class="blob-code blob-code-hunk">@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@${h.section ? ' ' + h.section : ''}</td></tr>`);
+    rows.push(header(h));
     for (const l of h.lines) {
       const side: Side = l.type === 'del' ? 'LEFT' : 'RIGHT';
       rows.push(html`<tr class="line ${l.type}"><td class="blob-num blob-num-${l.type}" data-num="${l.oldLine ?? ''}"></td><td class="blob-num blob-num-${l.type}" data-num="${l.newLine ?? ''}"></td>${codeCell(l, side, hl.get(l) ?? '', f.path)}</tr>`);
@@ -92,11 +103,11 @@ function unifiedRows(f: FileDiff, o: DiffViewOpts, lang: string | undefined): Sa
   return rows;
 }
 
-function splitRows(f: FileDiff, o: DiffViewOpts, lang: string | undefined): Safe[] {
+function splitRows(f: FileDiff, o: RowOpts, lang: string | undefined, header: (h: Hunk) => Safe): Safe[] {
   const rows: Safe[] = [];
   for (const h of f.hunks) {
     const hl = highlightHunk(h, lang);
-    rows.push(html`<tr class="hunk-row"><td class="blob-num blob-num-hunk"></td><td class="blob-code blob-code-hunk" colspan="3">@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@${h.section ? ' ' + h.section : ''}</td></tr>`);
+    rows.push(header(h));
     const pairs: [DiffLine | null, DiffLine | null][] = [];
     for (let i = 0; i < h.lines.length; ) {
       const l = h.lines[i];
@@ -128,6 +139,34 @@ function splitRows(f: FileDiff, o: DiffViewOpts, lang: string | undefined): Safe
   return rows;
 }
 
+/** Rows for lines without a hunk header, like the unchanged lines behind an unfold arrow. */
+export function lineRows(f: FileDiff, h: Hunk, o: RowOpts): Safe[] {
+  const one = { ...f, hunks: [h] };
+  const none = () => raw('');
+  return o.mode === 'split' ? splitRows(one, o, languageFor(f.path), none) : unifiedRows(one, o, languageFor(f.path), none);
+}
+
+/** Lines one click on an unfold arrow shows, as on GitHub. */
+const EXPAND_STEP = 20;
+
+/**
+ * A hunk header, or the row after the last hunk, with GitHub's unfold arrows for the unchanged
+ * lines (the gap) above it: "down" shows the lines under the previous hunk, "up" those over this
+ * one, and "all" the whole gap when it is short. public/app.js keeps them up to date as lines load.
+ */
+function gapRow(mode: DiffMode, h: Hunk | null, gap: Gap | undefined): Safe {
+  const size = gap ? gap.newTo - gap.newFrom + 1 : 0;
+  const show = { all: size > 0 && size <= EXPAND_STEP, down: size > EXPAND_STEP && gap!.newFrom > 1, up: size > EXPAND_STEP && h !== null };
+  const button = (dir: 'down' | 'up' | 'all', iconName: string, label: string) =>
+    html`<button type="button" class="hunk-expand js-expand" data-dir="${dir}" aria-label="${label}" title="${label}"${show[dir] ? '' : raw(' hidden')}>${icon(iconName)}</button>`;
+  const buttons = gap ? html`${button('down', 'fold-down', 'Expand down')}${button('up', 'fold-up', 'Expand up')}${button('all', 'unfold', 'Expand all')}` : '';
+  const attrs = gap ? html` data-gap-from="${gap.newFrom}" data-gap-to="${gap.newTo}" data-delta="${gap.newFrom - gap.oldFrom}"` : '';
+  const text = h ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@${h.section ? ' ' + h.section : ''}` : '';
+  return mode === 'split'
+    ? html`<tr class="hunk-row${h ? '' : ' hunk-row-end'}"${attrs} data-section="${h?.section ?? ''}"><td class="blob-num blob-num-hunk">${buttons}</td><td class="blob-code blob-code-hunk" colspan="3">${text}</td></tr>`
+    : html`<tr class="hunk-row${h ? '' : ' hunk-row-end'}"${attrs} data-section="${h?.section ?? ''}"><td class="blob-num blob-num-hunk" colspan="2">${buttons}</td><td class="blob-code blob-code-hunk">${text}</td></tr>`;
+}
+
 export function renderFile(f: FileDiff, o: DiffViewOpts): Safe {
   const lang = languageFor(f.path);
   const blob = fileBlob(f);
@@ -136,7 +175,8 @@ export function renderFile(f: FileDiff, o: DiffViewOpts): Safe {
   const generated = LOCKFILES.test(f.path);
   const large = changes > 1500;
   const collapsed = viewed || generated || large;
-  const maxLine = Math.max(1, ...f.hunks.map((h) => Math.max(h.oldStart + h.oldLines, h.newStart + h.newLines)));
+  // Room for the numbers of lines the unfold arrows may load, up to the end of the file.
+  const maxLine = Math.max(1, o.totals?.get(f.path) ?? 0, ...f.hunks.map((h) => Math.max(h.oldStart + h.oldLines, h.newStart + h.newLines)));
   const numWidth = Math.max(3, String(maxLine).length) * 8 + 22;
   let body: Safe;
   if (f.binary) body = html`<div class="file-note">Binary file not shown.</div>`;
@@ -147,11 +187,28 @@ export function renderFile(f: FileDiff, o: DiffViewOpts): Safe {
       o.mode === 'split'
         ? html`<colgroup><col style="width:${numWidth}px"><col><col style="width:${numWidth}px"><col></colgroup>`
         : html`<colgroup><col style="width:${numWidth}px"><col style="width:${numWidth}px"><col></colgroup>`;
-    body = html`<table class="diff-table diff-${o.mode}">${cols}<tbody>${o.mode === 'split' ? splitRows(f, o, lang) : unifiedRows(f, o, lang)}</tbody></table>`;
+    // Unfold arrows need the file on the new side to load lines from.
+    const total = o.totals?.get(f.path) ?? null;
+    const gs = o.browse && f.newPath ? gaps(f, total) : [];
+    const header = (h: Hunk) => gapRow(o.mode, h, gs.find((g) => g.newTo === (h.newLines === 0 ? h.newStart : h.newStart - 1)));
+    const last = gs[gs.length - 1];
+    const end = last && last.newTo === total ? gapRow(o.mode, null, last) : '';
+    body = html`<table class="diff-table diff-${o.mode}">${cols}<tbody>${o.mode === 'split' ? splitRows(f, o, lang, header) : unifiedRows(f, o, lang, header)}${end}</tbody></table>`;
   }
   const statusLabel =
     f.status === 'added' ? 'New file' : f.status === 'removed' ? 'Deleted' : f.status === 'renamed' ? 'Renamed' : f.status === 'copied' ? 'Copied' : f.status === 'changed' ? 'Mode changed' : '';
-  return html`<div class="file" id="${fileAnchor(f.path)}" data-path="${f.path}" data-blob="${blob}">
+  const b = o.browse;
+  const excerpt = b && f.newPath ? html` data-excerpt="${b.repo}/blob_excerpt/${b.head}?path=${encodeURIComponent(f.newPath)}"` : '';
+  const menu = b
+    ? html`<details class="dropdown details-reset file-menu">
+      <summary class="btn-octicon" aria-label="File options" title="File options">${icon('kebab-horizontal')}</summary>
+      <div class="dropdown-menu dropdown-menu-sw">
+        ${f.newPath ? html`<a class="dropdown-item" href="${browseUrl(b.repo, 'blob', b.head, f.newPath)}">View file<span class="dropdown-item-desc">at <code>${shortSha(b.head)}</code></span></a>` : ''}
+        ${f.oldPath ? html`<a class="dropdown-item" href="${browseUrl(b.repo, 'blob', b.base, f.oldPath)}">View old version<span class="dropdown-item-desc">${f.oldPath !== f.newPath && f.newPath ? html`${f.oldPath} ` : ''}at <code>${shortSha(b.base)}</code></span></a>` : ''}
+      </div>
+    </details>`
+    : '';
+  return html`<div class="file" id="${fileAnchor(f.path)}" data-path="${f.path}" data-blob="${blob}"${excerpt}>
   <div class="file-header">
     <button type="button" class="btn-octicon file-toggle js-file-toggle" aria-label="Toggle diff" aria-expanded="${!collapsed}">${icon('chevron-down', { cls: 'when-expanded' })}${icon('chevron-right', { cls: 'when-collapsed' })}</button>
     <span class="file-diffstat" title="${f.additions} additions & ${f.deletions} deletions">${changes} ${diffstatBlocks(f.additions, f.deletions)}</span>
@@ -161,6 +218,7 @@ export function renderFile(f: FileDiff, o: DiffViewOpts): Safe {
     <span class="flex-auto"></span>
     <button type="button" class="btn btn-sm js-file-comment" title="Comment on this file">${icon('comment')}</button>
     <label class="viewed-check"><input type="checkbox" class="js-viewed"${viewed ? raw(' checked') : ''}> Viewed</label>
+    ${menu}
   </div>
   <div class="file-body"${collapsed ? raw(' hidden') : ''}>${body}</div>
   ${collapsed && !viewed ? html`<div class="file-note file-collapsed-note">${generated ? 'Generated files are not rendered by default.' : 'Large diffs are not rendered by default.'} <button type="button" class="btn-link js-file-toggle">Load diff</button></div>` : ''}

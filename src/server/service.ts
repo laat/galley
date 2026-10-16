@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Repo, run, githubSlug, type Commit } from './git.ts';
-import { diffHunkFor, lineInDiff, mapLine, rangeTouched, type FileDiff } from './diff.ts';
+import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
 import {
   Db,
@@ -622,13 +622,16 @@ export class Service {
     }
     const side: Side = input.side ?? 'RIGHT';
     const line = Number(input.line);
-    if (!Number.isInteger(line) || !lineInDiff(file, side, line)) {
+    if (!Number.isInteger(line) || !(await this.commentable(git, head, file, side, line))) {
       throw new HttpError(422, `line ${input.line} (${side}) of ${input.path} is not part of the diff`);
     }
     let startLine: number | null = input.start_line ? Number(input.start_line) : null;
     const startSide: Side | null = startLine ? (input.start_side ?? side) : null;
     if (startLine === line && startSide === side) startLine = null;
-    if (startLine && !lineInDiff(file, startSide!, startLine)) throw new HttpError(422, `start_line ${startLine} is not part of the diff`);
+    if (startLine && !(await this.commentable(git, head, file, startSide!, startLine))) throw new HttpError(422, `start_line ${startLine} is not part of the diff`);
+    // On lines a reviewer expanded, the stored hunk is the expanded one, so it shows the lines commented on.
+    const span = { side, line, startSide, startLine };
+    const shown = lineInDiff(file, side, line) && (!startLine || lineInDiff(file, startSide!, startLine)) ? file : withContext(file, (await git.lines(head, file.path)) ?? [], [span]);
     return {
       subject_type: 'line',
       commit_id: head,
@@ -638,8 +641,20 @@ export class Service {
       side,
       start_line: startLine,
       start_side: startLine ? startSide : null,
-      diff_hunk: diffHunkFor(file, side, line, startLine ? { side: startSide!, line: startLine } : null),
+      diff_hunk: diffHunkFor(shown, side, line, startLine ? { side: startSide!, line: startLine } : null),
     };
+  }
+
+  /**
+   * Whether a line can carry a comment: a line of the diff, or an unchanged line around it that a
+   * reviewer can expand to (GitHub's unfold arrows). Validation and placement both ask this, so a
+   * comment on an expanded line is not outdated the moment it is made.
+   */
+  private async commentable(git: Repo, head: string, file: FileDiff, side: Side, line: number): Promise<boolean> {
+    if (lineInDiff(file, side, line)) return true;
+    if (!file.newPath || file.hunks.length === 0) return false;
+    const total = (await git.lineCounts(head, [file.newPath])).get(file.newPath);
+    return total !== undefined && expandedLine(file, side, line, total) !== null;
   }
 
   private insertReviewComment(pull: PullRow, actor: Actor, reviewId: number | null, body: string, anchor: Record<string, string | number | null>, inReplyTo: number | null = null): number {
@@ -836,7 +851,9 @@ export class Service {
       if (a && b) [startLine, line] = [a[0], b[0]];
     }
     const outdated =
-      line === null || !lineInDiff(file, side, line) || (root.start_line !== null && (startLine === null || !lineInDiff(file, root.start_side!, startLine)));
+      line === null ||
+      !(await this.commentable(git, pull.head_sha, file, side, line)) ||
+      (root.start_line !== null && (startLine === null || !(await this.commentable(git, pull.head_sha, file, root.start_side!, startLine))));
     return outdated ? { line: null, startLine: null, outdated: true } : { line, startLine, outdated: false };
   }
 

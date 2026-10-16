@@ -94,6 +94,13 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 
 - Pull request list, and per pull request the Conversation, Commits and Files changed tabs
 - Unified and split diffs with syntax highlighting, a file tree, and per-file "Viewed"
+- Unfold arrows on hunk headers load more lines of the file above and below a hunk, as on GitHub
+- The repository at any commit, read from git's objects without a checkout: "View file" (and the old
+  version) in each file's menu on Files changed, "Browse files" (`<>`) on each commit and revision.
+  Directories list their files and show their README; files show with line numbers and syntax
+  highlighting, and a click on a line number (shift-click for a range) links to it as `#L12-L20`.
+  Markdown and SVG render, with a Code toggle. The URLs are GitHub's: `/:owner/:repo/tree/<sha>/<path>`,
+  `/blob/<sha>/<path>` and `/raw/<sha>/<path>`
 - Comment on a line, or drag across the `+` buttons to comment on a range; single comments or a pending review submitted as Comment, Approve or Request changes
 - ```` ```suggestion ```` blocks rendered as a diff
 - Comments on a commit, for asking the agent to reword its message
@@ -161,7 +168,9 @@ staged pull requests.
   survive rebases and garbage collection.
 - **Comments** are anchored to the commit and line they were made on. To place them on the
   current head, the server maps the line through `git diff -U0`; if the line itself
-  changed, the comment is outdated.
+  changed, the comment is outdated. Besides the lines of the diff, a comment can sit on an
+  unchanged line of a changed file, the lines the unfold arrows load (an extension; the API
+  takes them too). The Files changed tab shows such a thread with the lines around it.
 - **Publishing** pushes the reviewed commit (`git push origin <sha>:refs/heads/<branch>`)
   and runs `gh pr create`, or `gh pr edit` when the pull request already exists. The Publish
   button sends a fingerprint of the commits, title and description on screen; if the agent
@@ -184,6 +193,9 @@ staged pull requests.
   shows images from the web and from `/uploads/`, and no other local URL.
 - **Security**: the server listens on 127.0.0.1 only, rejects requests whose `Host` is not
   localhost (DNS rebinding) and writes with a foreign `Origin` (cross-site requests).
+  `/raw` never serves a committed file as something that runs: HTML, SVG and other text are
+  `text/plain`, binaries other than images are downloads, and every response has `nosniff`,
+  a sandboxing `Content-Security-Policy` and `Cross-Origin-Resource-Policy: same-origin`.
   Anything running as you on this machine can use it.
 
 ## Configuration

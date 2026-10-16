@@ -280,3 +280,114 @@ export function diffHunkFor(
 export function lineInDiff(file: FileDiff, side: 'LEFT' | 'RIGHT', line: number): boolean {
   return file.hunks.some((h) => h.lines.some((l) => (side === 'RIGHT' ? l.newLine === line && l.type !== 'del' : l.oldLine === line && l.type !== 'add')));
 }
+
+// ------------------------------------------------------- expanded context
+
+type Side = 'LEFT' | 'RIGHT';
+
+/** Unchanged lines between hunks, or before the first or after the last: what a reviewer can expand. */
+export interface Gap {
+  /** First and last line on the new side. */
+  newFrom: number;
+  newTo: number;
+  /** First line on the old side. */
+  oldFrom: number;
+}
+
+/** Where a hunk's lines begin on one side; a hunk with no lines on a side sits after `start`. */
+const begin = (start: number, count: number) => (count === 0 ? start + 1 : start);
+
+/** The gaps around a file's hunks. The one after the last hunk needs `total`, the new side's line count. */
+export function gaps(file: FileDiff, total: number | null): Gap[] {
+  const out: Gap[] = [];
+  let oldNext = 1;
+  let newNext = 1;
+  for (const h of file.hunks) {
+    const nb = begin(h.newStart, h.newLines);
+    if (nb > newNext) out.push({ newFrom: newNext, newTo: nb - 1, oldFrom: oldNext });
+    newNext = nb + h.newLines;
+    oldNext = begin(h.oldStart, h.oldLines) + h.oldLines;
+  }
+  if (file.hunks.length && total !== null && total >= newNext) out.push({ newFrom: newNext, newTo: total, oldFrom: oldNext });
+  return out;
+}
+
+/** The new-side number of an unchanged line outside the hunks, or null for a line of the diff or past the end. */
+export function expandedLine(file: FileDiff, side: Side, line: number, total: number): number | null {
+  for (const g of gaps(file, total)) {
+    const n = side === 'RIGHT' ? line : line - g.oldFrom + g.newFrom;
+    if (n >= g.newFrom && n <= g.newTo) return n;
+  }
+  return null;
+}
+
+/** Where a line sits on the new side: its number there, or for a removed line, the number of the line after it. */
+function newPosition(file: FileDiff, gs: Gap[], side: Side, line: number): number | null {
+  if (side === 'RIGHT') return line;
+  for (const g of gs) {
+    const n = line - g.oldFrom + g.newFrom;
+    if (n >= g.newFrom && n <= g.newTo) return n;
+  }
+  for (const h of file.hunks) {
+    let n = begin(h.newStart, h.newLines);
+    for (const l of h.lines) {
+      if (l.type !== 'add' && l.oldLine === line) return n;
+      if (l.type !== 'del') n++;
+    }
+  }
+  return null;
+}
+
+/** Lines a review comment covers: `line` on `side`, from `startLine` on `startSide` for a range. */
+export interface Span {
+  side: Side;
+  line: number;
+  startSide?: Side | null;
+  startLine?: number | null;
+}
+
+/**
+ * The diff with unchanged lines added as context, as when a reviewer expands a hunk: the lines
+ * of each span that lie outside the hunks, with `context` lines around them. Hunks that end up
+ * touching are joined. `text` is the file on the new side.
+ */
+export function withContext(file: FileDiff, text: string[], spans: Span[], context = 3): FileDiff {
+  const gs = gaps(file, text.length);
+  const inGap = (n: number) => gs.some((g) => n >= g.newFrom && n <= g.newTo);
+  // New-side ranges to add, per gap, so that hunks with no new lines between two gaps are kept.
+  const ranges: [number, number, Gap][] = [];
+  for (const s of spans) {
+    const a = newPosition(file, gs, s.startSide ?? s.side, s.startLine ?? s.line);
+    const b = newPosition(file, gs, s.side, s.line);
+    if (a === null || b === null) continue;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const from = inGap(lo) ? lo - context : lo;
+    const to = inGap(hi) ? hi + context : hi;
+    for (const g of gs) if (Math.max(from, g.newFrom) <= Math.min(to, g.newTo)) ranges.push([Math.max(from, g.newFrom), Math.min(to, g.newTo), g]);
+  }
+  if (ranges.length === 0) return file;
+  const extra: Hunk[] = ranges.map(([from, to, g]) => {
+    const oldStart = from - g.newFrom + g.oldFrom;
+    const lines = text.slice(from - 1, to).map((t, i): DiffLine => ({ type: 'context', oldLine: oldStart + i, newLine: from + i, text: t }));
+    return { oldStart, oldLines: lines.length, newStart: from, newLines: lines.length, section: '', lines };
+  });
+  const sorted = [...file.hunks, ...extra].sort((x, y) => begin(x.newStart, x.newLines) - begin(y.newStart, y.newLines) || begin(x.oldStart, x.oldLines) - begin(y.oldStart, y.oldLines));
+  const hunks: Hunk[] = [];
+  for (const h of sorted) {
+    const prev = hunks[hunks.length - 1];
+    const prevOldEnd = prev ? begin(prev.oldStart, prev.oldLines) + prev.oldLines : 0;
+    const prevNewEnd = prev ? begin(prev.newStart, prev.newLines) + prev.newLines : 0;
+    if (prev && prevNewEnd >= begin(h.newStart, h.newLines) && prevOldEnd >= begin(h.oldStart, h.oldLines)) {
+      // Overlapping context (two spans in one gap) is dropped; touching hunks are joined.
+      const seen = new Set(prev.lines.map((l) => l.newLine));
+      const add = h.lines.filter((l) => l.type !== 'context' || !seen.has(l.newLine));
+      const oldLines = prev.oldLines + add.filter((l) => l.type !== 'add').length;
+      const newLines = prev.newLines + add.filter((l) => l.type !== 'del').length;
+      const ob = begin(prev.oldStart, prev.oldLines);
+      const nb = begin(prev.newStart, prev.newLines);
+      hunks[hunks.length - 1] = { oldStart: oldLines ? ob : ob - 1, oldLines, newStart: newLines ? nb : nb - 1, newLines, section: prev.section || h.section, lines: [...prev.lines, ...add] };
+    } else hunks.push(h);
+  }
+  return { ...file, hunks };
+}

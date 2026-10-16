@@ -13,6 +13,8 @@ export class GitError extends Error {
 
 export interface RunResult {
   stdout: string;
+  /** stdout as bytes, for output that is not text (blobs). */
+  bytes: Buffer;
   stderr: string;
   /** Exit code; null when the process was killed (by a signal, a timeout or an abort). */
   code: number | null;
@@ -78,8 +80,10 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
       settled = true;
       clearTimeout(deadline);
       opts.signal?.removeEventListener('abort', onAbort);
+      const bytes = Buffer.concat(out);
       const res: RunResult = {
-        stdout: Buffer.concat(out).toString('utf8'),
+        stdout: bytes.toString('utf8'),
+        bytes,
         stderr: Buffer.concat(err).toString('utf8'),
         // Whatever a killed process exits with, it did not finish its work.
         code: killed ? null : code,
@@ -140,6 +144,19 @@ function remember(key: string, value: string): string {
   if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
   cache.set(key, value);
   return value;
+}
+
+/** Line counts of files at full commit SHAs, which never change. */
+const lineCountCache = new Map<string, number>();
+
+export interface TreeEntry {
+  mode: string;
+  /** "commit" is a submodule. */
+  type: 'blob' | 'tree' | 'commit';
+  oid: string;
+  /** Bytes, for blobs. */
+  size: number | null;
+  name: string;
 }
 
 export interface Commit {
@@ -310,6 +327,82 @@ export class Repo {
     if (r.code !== 0) return null;
     const key = `${this.gitDir}\0blob\0${sha}\0${path}`;
     return remember(key, r.stdout);
+  }
+
+  /**
+   * The entries of the directory at `path` ("" for the root) in a commit, or null when there is
+   * no directory there. Paths are only ever looked up in git's objects, never on disk.
+   */
+  async tree(sha: string, path: string): Promise<TreeEntry[] | null> {
+    const r = await this.run(['ls-tree', '-z', '-l', `${sha}:${path}`], { allowFail: true });
+    if (r.code !== 0) return null;
+    return r.stdout
+      .split('\0')
+      .filter(Boolean)
+      .map((rec) => {
+        const tab = rec.indexOf('\t');
+        const [mode, type, oid, size] = rec.slice(0, tab).split(/ +/);
+        return { mode, type: type as TreeEntry['type'], oid, size: size === '-' ? null : Number(size), name: rec.slice(tab + 1) };
+      });
+  }
+
+  /** The entry for `path` in a commit's tree, or null when nothing is there. */
+  async entry(sha: string, path: string): Promise<TreeEntry | null> {
+    if (path === '') return { mode: '040000', type: 'tree', oid: '', size: null, name: '' };
+    const slash = path.lastIndexOf('/');
+    const entries = await this.tree(sha, slash === -1 ? '' : path.slice(0, slash));
+    return entries?.find((e) => e.name === path.slice(slash + 1)) ?? null;
+  }
+
+  /** The bytes of the file at `path` in a commit, or null when there is no file there. */
+  async blob(sha: string, path: string): Promise<Buffer | null> {
+    const r = await this.run(['cat-file', 'blob', `${sha}:${path}`], { allowFail: true });
+    return r.code === 0 ? r.bytes : null;
+  }
+
+  /** The lines of a text file at `path` in a commit, numbered from 1 as in diffs (index 0 is line 1). */
+  async lines(sha: string, path: string): Promise<string[] | null> {
+    const bytes = await this.blob(sha, path);
+    if (!bytes) return null;
+    const lines = bytes.toString('utf8').split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    return lines;
+  }
+
+  /** How many lines each file has in a commit, read with one `git cat-file --batch`. Paths with no file are left out. */
+  async lineCounts(sha: string, paths: string[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    const key = (p: string) => `${this.gitDir}\0${sha}\0${p}`;
+    const todo: string[] = [];
+    for (const p of paths) {
+      const hit = SHA_RE.test(sha) ? lineCountCache.get(key(p)) : undefined;
+      if (hit !== undefined) counts.set(p, hit);
+      // --batch reads one object name per line.
+      else if (!p.includes('\n')) todo.push(p);
+    }
+    if (todo.length === 0) return counts;
+    const r = await this.run(['cat-file', '--batch'], { input: todo.map((p) => `${sha}:${p}\n`).join(''), allowFail: true });
+    let at = 0;
+    for (const p of todo) {
+      const eol = r.bytes.indexOf(10, at);
+      if (eol === -1) break;
+      // "<oid> <type> <size>", then the content; or "<name> missing".
+      const m = r.bytes.subarray(at, eol).toString('utf8').match(/^[0-9a-f]+ (\w+) (\d+)$/);
+      at = eol + 1;
+      if (!m) continue;
+      const body = r.bytes.subarray(at, at + Number(m[2]));
+      at += body.length + 1;
+      if (m[1] !== 'blob') continue;
+      let n = 0;
+      for (let i = body.indexOf(10); i !== -1; i = body.indexOf(10, i + 1)) n++;
+      if (body.length > 0 && body[body.length - 1] !== 10) n++;
+      counts.set(p, n);
+      if (SHA_RE.test(sha)) {
+        if (lineCountCache.size >= 5000) lineCountCache.delete(lineCountCache.keys().next().value!);
+        lineCountCache.set(key(p), n);
+      }
+    }
+    return counts;
   }
 
   async updateRef(ref: string, sha: string): Promise<void> {

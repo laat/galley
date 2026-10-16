@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseRawCommit } from '../src/server/git.ts';
-import { diffHunkFor, lineInDiff, mapLine, parseDiff, parseHunkRanges, rangeTouched, unquote } from '../src/server/diff.ts';
+import { diffHunkFor, expandedLine, gaps, lineInDiff, mapLine, parseDiff, parseHunkRanges, rangeTouched, unquote, withContext } from '../src/server/diff.ts';
 
 const DIFF = `diff --git a/math.js b/math.js
 index 1111111..2222222 100644
@@ -85,6 +85,45 @@ test('lineInDiff knows which side a line is on', () => {
   assert.equal(lineInDiff(math, 'RIGHT', 3), true);
   assert.equal(lineInDiff(math, 'LEFT', 2), true);
   assert.equal(lineInDiff(math, 'RIGHT', 7), false);
+});
+
+test('gaps are the unchanged lines around the hunks, and expandedLine finds lines in them', () => {
+  // math.js: hunks at new lines 1-5 and 11-12; 15 lines in all on the new side.
+  const [math] = parseDiff(DIFF);
+  assert.deepEqual(gaps(math, 15), [
+    { newFrom: 6, newTo: 10, oldFrom: 5 },
+    { newFrom: 13, newTo: 15, oldFrom: 12 },
+  ]);
+  assert.deepEqual(gaps(math, null), [{ newFrom: 6, newTo: 10, oldFrom: 5 }]);
+  assert.equal(expandedLine(math, 'RIGHT', 8, 15), 8);
+  assert.equal(expandedLine(math, 'LEFT', 7, 15), 8);
+  assert.equal(expandedLine(math, 'RIGHT', 3, 15), null);
+  assert.equal(expandedLine(math, 'RIGHT', 16, 15), null);
+  assert.equal(expandedLine(math, 'LEFT', 14, 15), 15);
+});
+
+test('withContext adds the lines around a span as context, joining hunks that touch', () => {
+  const [math] = parseDiff(DIFF);
+  const text = ['a', 'B', 'B2', 'c', 'd', 'l6', 'l7', 'l8', 'l9', 'l10', 'x', 'y', 'l13', 'l14', 'l15'];
+  const one = withContext(math, text, [{ side: 'RIGHT', line: 8 }], 1);
+  assert.deepEqual(
+    one.hunks.map((h) => [h.oldStart, h.oldLines, h.newStart, h.newLines]),
+    [
+      [1, 4, 1, 5],
+      [6, 3, 7, 3],
+      [10, 2, 11, 2],
+    ],
+  );
+  assert.deepEqual(one.hunks[1].lines.map((l) => [l.oldLine, l.newLine, l.text]), [[6, 7, 'l7'], [7, 8, 'l8'], [8, 9, 'l9']]);
+  // With three lines around line 8 the gap is gone: one hunk from line 1 to 12.
+  const joined = withContext(math, text, [{ side: 'LEFT', line: 7 }]);
+  assert.deepEqual(joined.hunks.map((h) => [h.oldStart, h.oldLines, h.newStart, h.newLines]), [[1, 11, 1, 12]]);
+  assert.equal(diffHunkFor(joined, 'RIGHT', 8)!.split('\n')[0], '@@ -3,5 +4,5 @@ header');
+  // A range from a removed line into the gap shows every line between them.
+  const range = withContext(math, text, [{ startSide: 'LEFT', startLine: 2, side: 'RIGHT', line: 7 }], 0);
+  assert.deepEqual(range.hunks.map((h) => [h.newStart, h.newLines]), [[1, 7], [11, 2]]);
+  // Spans inside the hunks change nothing.
+  assert.equal(withContext(math, text, [{ side: 'RIGHT', line: 3 }]), math);
 });
 
 test('mapLine carries lines across insertions and marks changed lines', () => {
