@@ -151,6 +151,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     const r = await cli(['pr', 'view', '--json', 'number,title,state,author,headRefName,isDraft']);
     assert.deepEqual(JSON.parse(r.stdout), { number: 1, title: 'Add multiplication', state: 'OPEN', author: { login: 'agent', is_bot: true }, headRefName: 'feature/mul', isDraft: false });
     const jq = await cli(['pr', 'view', '1', '--json', 'commits', '--jq', '.commits[].messageHeadline']);
+    assert.equal(jq.code, 0, jq.stderr);
     assert.equal(jq.stdout.trim(), 'Add mul');
     const list = await cli(['pr', 'list']);
     assert.match(list.stdout, /^1\tAdd multiplication\tfeature\/mul\tOPEN\t/);
@@ -236,6 +237,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     const edit = await cli(['pr', 'edit', '--title', 'Add multiplication helper']);
     assert.equal(edit.code, 0, edit.stderr);
     const api = await cli(['api', 'repos/{owner}/{repo}/pulls/1/comments', '--jq', '.[] | "\\(.user.login): \\(.body)"']);
+    assert.equal(api.code, 0, api.stderr);
     assert.equal(api.stdout, 'reviewer: Add a doc comment.\nreviewer: Range.\nagent: Done.\n');
     // The reply is feedback for nobody: it is the agent's own.
     const pr = await human('GET', '/api/repos/acme/widgets/pulls/1');
