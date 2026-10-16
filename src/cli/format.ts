@@ -86,6 +86,7 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
     `additions:\t${pr.additions}`,
     `deletions:\t${pr.deletions}`,
     `auto-merge:\tdisabled`,
+    `auto-publish:\t${pr.autoPublishRequest ? `enabled\t${pr.autoPublishRequest.enabledBy.login}` : 'disabled'}`,
     `base:\t${pr.baseRefName}`,
     `head:\t${pr.headRefName} (${String(pr.headRefOid).slice(0, 7)})`,
     `commits:\t${pr.commits.length}`,
@@ -106,6 +107,7 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   ];
   const reviewers = reviewersLine(pr);
   if (reviewers) out.push(`Reviewers: ${reviewers}`);
+  if (pr.autoPublishRequest) out.push(`${c.bold('Auto-publish:')} ${c.green('enabled')} by ${pr.autoPublishRequest.enabledBy.login}, when the reviews are done`);
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved).length;
   if (unresolved) out.push(c.yellow(`${unresolved} unresolved review thread${unresolved === 1 ? '' : 's'}`));
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');

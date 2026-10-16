@@ -24,4 +24,5 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 - `src/server/git.ts`: git plumbing, cached when all inputs are full SHAs.
 - `src/server/api.ts`: REST routes under `/api`.
 - `src/server/reviewers/codex.ts`: Codex as a reviewer agent: triggered by the `author-waiting` bus event, runs `codex exec` in a temporary read-only checkout, posts a review as the reviewer bot. Its name is a setting (default `codex`); it is one actor (`meta.codex_actor_id`) whose login follows the setting, and the API refuses CLI callers that claim it. The CLI calls author agents running in Codex `codex-agent`. Settings live in `src/server/settings.ts`.
+- `src/server/auto-publish.ts`: auto-publish (after GitHub's auto-merge): publishes a pull request the reviewer approved in advance once `Service.readiness` says the agents are done with it.
 - `src/server/web/`: server-rendered pages; `public/app.js` adds the interactive parts (event delegation, soft refresh that keeps drafts).

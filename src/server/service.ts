@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Repo, run, githubSlug, type Commit } from './git.ts';
+import { Repo, run, githubSlug, type Commit, type RawCommit, type RunResult } from './git.ts';
 import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
 import {
@@ -89,6 +89,49 @@ export interface WaitResult {
   /** What the author confirms with markSeen once it has shown this feedback. */
   seenAt?: string;
 }
+
+/** Where a reviewer agent stands with a pull request's head commit. */
+export interface HeadStatus {
+  state: 'reviewing' | 'queued' | 'unreviewed' | 'findings' | 'failed' | 'clean' | 'capped' | 'off';
+  /** Nothing more is coming from the reviewer for this commit. */
+  done: boolean;
+  /** The commit this is about: the head, or the earlier commit a running review started on. */
+  commit: string;
+}
+
+/** A reviewer agent such as Codex: one actor that reviews on its own. */
+export interface ReviewerAgent {
+  actor(): Actor;
+  headStatus(pull: PullRow): HeadStatus;
+}
+
+/** Whether the agents are done with a pull request, so the reviewer can take it from here. */
+export interface Readiness {
+  reviewers: { login: string; status: HeadStatus }[];
+  /** The author is running `pr wait`. */
+  authorWaiting: boolean;
+  /** Reviews and comments the author has not been shown. */
+  unseen: number;
+  /** Unresolved threads a person started (agents' threads do not count). */
+  openThreads: number;
+  /** Every reviewer agent is done with the head, and the author is waiting with all feedback seen. */
+  agentsDone: boolean;
+}
+
+/** Auto-publish, while it is on: who turned it on, when, and the publish options fixed then. */
+export interface AutoPublish {
+  by: number;
+  at: string;
+  sign: boolean;
+  draft: boolean;
+  /** Force-push if publishing needs it. */
+  force: boolean;
+}
+
+export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed';
+
+/** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
+export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
 export interface ServiceOptions {
   db: Db;
@@ -483,6 +526,7 @@ export class Service {
       if (input.base !== undefined && input.base !== pull.base_ref) {
         changes.base_ref = input.base;
         this.addEvent(pull, actor, 'base_changed', { from: pull.base_ref, to: input.base }, ts);
+        this.autoPublishOff(pull, actor, 'base_changed', ts);
       }
       if (input.draft !== undefined && (input.draft ? 1 : 0) !== pull.draft) {
         changes.draft = input.draft ? 1 : 0;
@@ -492,6 +536,7 @@ export class Service {
         changes.state = 'closed';
         changes.closed_at = ts;
         this.addEvent(pull, actor, 'closed', {}, ts);
+        this.autoPublishOff(pull, actor, 'closed', ts);
       } else if (input.state === 'open' && pull.state === 'closed') {
         changes.state = pull.published_url ? 'published' : 'open';
         changes.closed_at = null;
@@ -781,6 +826,7 @@ export class Service {
         submitted_at: event ? ts : null,
       });
       for (const a of anchors) this.insertReviewComment(pull, actor, reviewId, a.body, a.anchor);
+      if (event === 'REQUEST_CHANGES' && actor.type === 'User') this.autoPublishOff(pull, actor, 'changes_requested', ts);
       return reviewId;
     });
     if (event) this.touch(pull);
@@ -801,6 +847,7 @@ export class Service {
     this.db.update('reviews', review.id, { state: EVENT_STATE[event], body: body ?? review.body, submitted_at: ts, commit_id: ctx.pull.head_sha });
     // Comments written while the review was pending count as made now.
     this.db.run('UPDATE comments SET created_at = ?, updated_at = ? WHERE review_id = ?', ts, ts, review.id);
+    if (event === 'REQUEST_CHANGES' && actor.type === 'User') this.autoPublishOff(ctx.pull, actor, 'changes_requested', ts);
     this.touch(ctx.pull, ts);
     this.emit(ctx.pull.id, 'review', actor);
     return this.review(review.id);
@@ -942,9 +989,13 @@ export class Service {
     }
   }
 
-  async wait(ctx: Ctx, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
+  async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
     const id = ctx.pull.id;
     const author = this.db.actorById(ctx.pull.author_id);
+    // Waiting says the author is ready for review, which starts reviewer agents and lets auto-publish go ahead.
+    if (actor.id !== author.id) {
+      throw new HttpError(403, `only the author of this pull request (${author.login}) can wait for its feedback, not ${actor.login}. An agent carrying on the author's work sets LAATSUX_ACTOR=${author.login}.`);
+    }
     this.setWaiting(id, 1, author);
     const deadline = Date.now() + timeoutMs;
     try {
@@ -983,6 +1034,101 @@ export class Service {
     }
   }
 
+  /** The reviewer agents this server runs. */
+  reviewerAgents(): ReviewerAgent[] {
+    return this.codex ? [this.codex] : [];
+  }
+
+  /**
+   * Whether the agents are done with the pull request: every reviewer agent is done with the
+   * head, and the author is waiting with all feedback seen. Auto-publish also needs none of
+   * the threads the reviewer started to be open.
+   */
+  readiness(pull: PullRow): Readiness {
+    const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
+    const authorWaiting = (this.waiters.get(pull.id) ?? 0) > 0;
+    const fb = this.unseenFeedback(pull);
+    const unseen = fb.reviews.length + fb.comments.length;
+    const openThreads = this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM comments c JOIN actors a ON a.id = c.author_id
+       WHERE c.pull_id = ? AND c.kind = 'review' AND c.in_reply_to_id IS NULL AND c.resolved_at IS NULL AND a.type = 'User'
+         AND (c.review_id IS NULL OR c.review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`,
+      pull.id,
+    )!.n;
+    const agentsDone = reviewers.every((r) => r.status.done) && authorWaiting && unseen === 0;
+    return { reviewers, authorWaiting, unseen, openThreads, agentsDone };
+  }
+
+  // ------------------------------------------------------------ auto-publish
+
+  /** Auto-publish is on and may publish now: the agents are done, and none of the reviewer's threads is open. */
+  autoPublishReady(pull: PullRow): boolean {
+    if (!pull.auto_publish || pull.state === 'closed') return false;
+    const r = this.readiness(pull);
+    return r.agentsDone && r.openThreads === 0;
+  }
+
+  /** Auto-publish's options while it is on, or null. */
+  autoPublish(pull: PullRow): AutoPublish | null {
+    return pull.auto_publish ? (JSON.parse(pull.auto_publish) as AutoPublish) : null;
+  }
+
+  /**
+   * Approve publishing in advance: laatsux publishes on its own once the agents are done (see
+   * readiness), even commits pushed after this. The options are fixed now, as the publish box
+   * shows them: signing and draft as checked, and force if it was checked and turns out to be needed.
+   */
+  async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean }, actor: Actor): Promise<AutoPublish> {
+    const { pull, repo } = ctx;
+    if (actor.type === 'Bot') throw new HttpError(403, 'auto-publish is for the reviewer, like publishing; ask the user to turn it on from laatsux');
+    if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
+    if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
+    const auto: AutoPublish = {
+      by: actor.id,
+      at: now(),
+      sign: opts.sign ?? (await this.signsByDefault(ctx)),
+      draft: opts.draft ?? !!pull.draft,
+      force: !!opts.force,
+    };
+    this.db.transaction(() => {
+      this.db.update('pulls', pull.id, { auto_publish: JSON.stringify(auto) });
+      this.addEvent(pull, actor, 'auto_publish_enabled', { sign: auto.sign, draft: auto.draft, force: auto.force }, auto.at);
+    });
+    this.emit(pull.id, 'auto_publish', actor);
+    return auto;
+  }
+
+  disableAutoPublish(ctx: Ctx, actor: Actor): void {
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can turn off auto-publish');
+    if (this.db.transaction(() => this.autoPublishOff(ctx.pull, actor, 'cancelled'))) this.emit(ctx.pull.id, 'auto_publish', actor);
+  }
+
+  /**
+   * Auto-publish could not publish under `approval` (pulls.auto_publish as the attempt read it):
+   * record why, and turn it off. Not when that approval has been turned off or replaced since:
+   * the failure belonged to it, and a newer approval makes its own attempt.
+   */
+  autoPublishFailed(pull: PullRow, actor: Actor, error: string, approval: string): void {
+    const failed = this.db.transaction(() => {
+      if (this.db.run('UPDATE pulls SET auto_publish = NULL WHERE id = ? AND auto_publish = ?', pull.id, approval).changes === 0) return false;
+      this.addEvent(pull, actor, 'auto_publish_failed', { error: error.slice(0, 4000) });
+      return true;
+    });
+    if (failed) this.emit(pull.id, 'auto_publish_failed', actor);
+  }
+
+  /** An auto-publish attempt under `approval` may go on: it is still the approval in force, and the agents are still done. */
+  private stillApproved(pull: PullRow, approval: string): boolean {
+    return pull.auto_publish === approval && this.autoPublishReady(pull);
+  }
+
+  /** Turn auto-publish off, saying why; the caller emits. False when it was not on. */
+  private autoPublishOff(pull: PullRow, actor: Actor, reason: AutoPublishOff, ts = now()): boolean {
+    const off = this.db.run('UPDATE pulls SET auto_publish = NULL WHERE id = ? AND auto_publish IS NOT NULL', pull.id).changes > 0;
+    if (off) this.addEvent(pull, actor, 'auto_publish_disabled', { reason }, ts);
+    return off;
+  }
+
   // ---------------------------------------------------- publishing and signing
 
   /**
@@ -993,6 +1139,38 @@ export class Service {
     const { pull, git } = ctx;
     if (pull.published_head_sha && pull.published_source_sha && pull.published_head_sha !== pull.published_source_sha) return true;
     return (await git.config('commit.gpgsign', 'bool')) === 'true';
+  }
+
+  /**
+   * Whether publishing has to force-push: the push would drop the commit the branch has on
+   * GitHub. Signing pushes copies, so it can need force where the agent's history did not change,
+   * as when the agent's unsigned commits are on GitHub already. Before signing, the copies are
+   * predicted from those made so far; publish decides again on the commit it actually pushes.
+   */
+  async forceNeeded(ctx: Ctx, sign: boolean): Promise<boolean> {
+    const { pull, git } = ctx;
+    const theirs = await this.onGitHub(ctx);
+    if (!theirs) return false;
+    if (!sign) return !(await git.isAncestor(theirs, pull.head_sha));
+    const { shas, versions } = await this.signedVersions(ctx, pull, async () => null);
+    const head = versions.get(pull.head_sha);
+    if (head) return !(await git.isAncestor(theirs, head));
+    // New copies go on top of the known ones and of the base: the push keeps GitHub's commit only if it is among or below them.
+    if (await git.isAncestor(theirs, pull.base_sha)) return false;
+    for (const sha of shas) {
+      const known = versions.get(sha);
+      if (known && (await git.isAncestor(theirs, known))) return false;
+    }
+    return true;
+  }
+
+  /**
+   * The commit the branch has on GitHub, as far as laatsux knows: what it published last or,
+   * before the first publish, the branch as last fetched or pushed. A force-push leases against it.
+   */
+  private async onGitHub(ctx: Ctx): Promise<string | null> {
+    const { repo, pull, git } = ctx;
+    return pull.published_head_sha ?? (await git.resolve(`refs/remotes/${repo.remote}/${pull.head_ref}`));
   }
 
   /** Who signed commits are committed by: the user's git identity. */
@@ -1012,27 +1190,14 @@ export class Service {
   /**
    * Make a signed copy of every commit in the pull request, with the user as committer
    * (GitHub only verifies a signature whose key belongs to the committer). Trees, messages
-   * and authors stay as the agent made them. Copies are remembered per source commit, so
-   * publishing again after the agent added commits reuses them and GitHub sees a fast-forward.
+   * and authors stay as the agent made them.
    */
-  async signCommits(ctx: Ctx, pull: PullRow): Promise<{ head: string; signed: number }> {
+  async signCommits(ctx: Ctx, pull: PullRow, timeoutMs?: number): Promise<{ head: string; signed: number }> {
     const { repo, git } = ctx;
     const signer = await this.signer(ctx);
     if (!signer) throw new HttpError(422, 'set user.name and user.email in git to sign commits');
-    const memo = new Map(
-      this.db.all<{ source_sha: string; signed_sha: string }>('SELECT source_sha, signed_sha FROM signed_commits WHERE repo_id = ?', repo.id).map((r) => [r.source_sha, r.signed_sha]),
-    );
-    const shas = (await git.out(['rev-list', '--reverse', '--topo-order', `${pull.base_sha}..${pull.head_sha}`])).split('\n').filter(Boolean);
     let signed = 0;
-    for (const sha of shas) {
-      const known = memo.get(sha);
-      if (known && (await git.exists(known))) continue;
-      const c = await git.rawCommit(sha);
-      const parents = c.parents.map((p) => memo.get(p) ?? p);
-      if (c.signed && parents.every((p, i) => p === c.parents[i])) {
-        memo.set(sha, sha);
-        continue;
-      }
+    const { versions } = await this.signedVersions(ctx, pull, async (sha, c, parents) => {
       const r = await git.run(['commit-tree', '-S', c.tree, ...parents.flatMap((p) => ['-p', p]), '-F', '-'], {
         input: c.message,
         env: {
@@ -1043,10 +1208,10 @@ export class Service {
           GIT_COMMITTER_EMAIL: signer.email,
         },
         allowFail: true,
+        timeoutMs,
       });
-      if (r.code !== 0) throw new HttpError(502, `signing commit ${sha.slice(0, 7)} failed:\n${r.stderr.trim()}`);
+      if (r.code !== 0) throw new HttpError(502, `signing commit ${sha.slice(0, 7)} failed:\n${failure(r, 'a passphrase or a 1Password prompt nobody answered?')}`);
       const copy = r.stdout.trim();
-      memo.set(sha, copy);
       this.db.run(
         'INSERT INTO signed_commits (repo_id, source_sha, signed_sha) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET signed_sha = excluded.signed_sha',
         repo.id,
@@ -1054,14 +1219,56 @@ export class Service {
         copy,
       );
       signed++;
-    }
-    return { head: memo.get(pull.head_sha) ?? pull.head_sha, signed };
+      return copy;
+    });
+    return { head: versions.get(pull.head_sha) ?? pull.head_sha, signed };
   }
 
-  async publish(ctx: Ctx, opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean }, actor: Actor): Promise<PullRow> {
+  /**
+   * What a signed publish pushes for each commit of the pull request: a copy made before, the
+   * commit itself when it is signed and its parents stay, or a new copy from `copy`. Copies are
+   * remembered per source commit, so publishing again after the agent added commits reuses them
+   * and GitHub sees a fast-forward. To predict without signing, `copy` returns null: a copy
+   * still to be made (and so is every copy on top of it).
+   */
+  private async signedVersions(
+    ctx: Ctx,
+    pull: PullRow,
+    copy: (sha: string, c: RawCommit, parents: string[]) => Promise<string | null>,
+  ): Promise<{ shas: string[]; versions: Map<string, string | null> }> {
+    const { repo, git } = ctx;
+    const versions = new Map<string, string | null>(
+      this.db.all<{ source_sha: string; signed_sha: string }>('SELECT source_sha, signed_sha FROM signed_commits WHERE repo_id = ?', repo.id).map((r) => [r.source_sha, r.signed_sha]),
+    );
+    const shas = (await git.out(['rev-list', '--reverse', '--topo-order', `${pull.base_sha}..${pull.head_sha}`])).split('\n').filter(Boolean);
+    for (const sha of shas) {
+      const known = versions.get(sha);
+      if (known && (await git.exists(known))) continue;
+      const c = await git.rawCommit(sha);
+      const parents = c.parents.map((p) => (versions.has(p) ? (versions.get(p) as string | null) : p));
+      if (c.signed && parents.every((p, i) => p === c.parents[i])) versions.set(sha, sha);
+      else versions.set(sha, parents.includes(null) ? null : await copy(sha, c, parents as string[]));
+    }
+    return { shas, versions };
+  }
+
+  /**
+   * Push the head and open (or update) the pull request on GitHub. `approval` is auto-publish
+   * doing it, under that approval (pulls.auto_publish as the attempt read it): the attempt only
+   * goes ahead while that exact approval is in force, and nobody is there to answer a prompt,
+   * so each step gets UNATTENDED_TIMEOUT_MS.
+   */
+  async publish(
+    ctx: Ctx,
+    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; approval?: string },
+    actor: Actor,
+  ): Promise<PullRow> {
     const { repo, git } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from laatsux');
     const pull = await this.sync(ctx.pull);
+    const auto = opts.approval !== undefined;
+    // Turned off or replaced, or new feedback, since auto-publish decided to go ahead.
+    if (auto && !this.stillApproved(pull, opts.approval!)) throw new HttpError(412, 'auto-publish was turned off or replaced, or the agents are no longer done');
     if (opts.expected && opts.expected !== publishFingerprint(pull)) {
       throw new HttpError(412, 'The pull request changed after this page was loaded (new commits, title, description or base). Refresh and review the latest version before publishing.');
     }
@@ -1075,24 +1282,41 @@ export class Service {
     }
     const cwd = repo.work_dir ?? tmpdir();
     const env = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
+    const timeoutMs = auto ? UNATTENDED_TIMEOUT_MS : undefined;
 
     let pushed = pull.head_sha;
     let signed = 0;
     if (opts.sign ?? (await this.signsByDefault(ctx))) {
-      ({ head: pushed, signed } = await this.signCommits(ctx, pull));
+      ({ head: pushed, signed } = await this.signCommits(ctx, pull, timeoutMs));
       // The signed copies exist only here and on GitHub; keep them from being garbage collected.
       if (pushed !== pull.head_sha) await git.updateRef(`refs/laatsux/pull/${pull.number}/published`, pushed);
     }
 
+    // Force is decided on the commit actually pushed, signed copies and all, and used only when allowed.
+    const theirs = await this.onGitHub(ctx);
+    const force = !!theirs && !(await git.isAncestor(theirs, pushed));
+    if (force && !opts.force) {
+      throw new HttpError(
+        409,
+        `The branch on GitHub has commits this push would replace (a rewritten history, or the agent's unsigned commits that signing replaces with copies), and ${auto ? 'force-pushing was not chosen when auto-publish was turned on' : 'force-pushing was not chosen'}.`,
+      );
+    }
     const branch = `refs/heads/${pull.head_ref}`;
     const args = ['push'];
-    if (opts.force) {
-      // Overwrite only what we published last (or what we last fetched), never commits added on GitHub since.
-      const expect = pull.published_head_sha ?? (await git.resolve(`refs/remotes/${repo.remote}/${pull.head_ref}`)) ?? '';
-      args.push(`--force-with-lease=${branch}:${expect}`);
-    }
+    // Overwrite only the commit seen on GitHub, never commits added there since.
+    if (force) args.push(`--force-with-lease=${branch}:${theirs}`);
     args.push(repo.remote, `${pushed}:${branch}`);
-    const push = await git.run(args, { cwd, env, allowFail: true });
+    if (auto) {
+      // Every await above (signing can wait minutes for a prompt) lets a cancel, a replaced
+      // approval, new feedback or a starting review come in. So the last check comes after all
+      // of them: the approval is the same, the agents are still done, the pull request is unchanged.
+      const latest = await this.sync(pull);
+      if (publishFingerprint(latest) !== publishFingerprint(pull) || !this.stillApproved(latest, opts.approval!)) {
+        throw new HttpError(412, 'the pull request or auto-publish changed before the push');
+      }
+    }
+    // No await may come between the check above and this call, which starts the push at once.
+    const push = await git.run(args, { cwd, env, allowFail: true, timeoutMs });
     if (push.code !== 0) {
       const stale = /stale info/.test(push.stderr);
       const rejected = stale || /\[rejected\]|non-fast-forward|fetch first/.test(push.stderr);
@@ -1101,7 +1325,7 @@ export class Service {
         : rejected
           ? ' (the remote branch has commits that are not in this pull request)'
           : '';
-      throw new HttpError(rejected ? 409 : 502, `git push failed${why}:\n${push.stderr.trim()}`);
+      throw new HttpError(rejected ? 409 : 502, `git push failed${why}:\n${failure(push)}`);
     }
 
     let url = pull.published_url;
@@ -1110,17 +1334,17 @@ export class Service {
     if (!url) {
       const args = ['pr', 'create', '--repo', repo.github_slug, '--base', pull.base_ref, '--head', pull.head_ref, '--title', pull.title, '--body-file', '-'];
       if (opts.draft ?? pull.draft) args.push('--draft');
-      const r = await run(this.ghBin, args, { cwd, env, input: pull.body, allowFail: true });
+      const r = await run(this.ghBin, args, { cwd, env, input: pull.body, allowFail: true, timeoutMs });
       const existing = r.stderr.match(/already exists:?\s*(https:\/\/\S+)/);
       if (r.code === 0) url = r.stdout.trim().split('\n').pop()!.trim();
       else if (existing) {
         url = existing[1];
         update = true;
-      } else throw new HttpError(502, `gh pr create failed:\n${(r.stderr || r.stdout).trim()}`);
+      } else throw new HttpError(502, `gh pr create failed:\n${failure(r)}`);
     }
     if (update) {
-      const r = await run(this.ghBin, ['pr', 'edit', url, '--title', pull.title, '--body-file', '-', '--base', pull.base_ref], { cwd, env, input: pull.body, allowFail: true });
-      if (r.code !== 0) throw new HttpError(502, `gh pr edit failed:\n${(r.stderr || r.stdout).trim()}`);
+      const r = await run(this.ghBin, ['pr', 'edit', url, '--title', pull.title, '--body-file', '-', '--base', pull.base_ref], { cwd, env, input: pull.body, allowFail: true, timeoutMs });
+      if (r.code !== 0) throw new HttpError(502, `gh pr edit failed:\n${failure(r)}`);
     }
 
     const ts = now();
@@ -1136,11 +1360,21 @@ export class Service {
         published_body: pull.body,
         updated_at: ts,
       });
-      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force: !!opts.force }, ts);
+      // Auto-publish is one publish: whoever published, it is done. An auto-publish ends only
+      // the approval it acted on, not one given while it was publishing.
+      if (auto) this.db.run('UPDATE pulls SET auto_publish = NULL WHERE id = ? AND auto_publish = ?', pull.id, opts.approval!);
+      else this.db.update('pulls', pull.id, { auto_publish: null });
+      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force, auto }, ts);
     });
-    this.emit(pull.id, 'published', actor);
+    this.emit(pull.id, auto ? 'auto_published' : 'published', actor);
     return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
   }
+}
+
+/** Why a command failed: its output, or that it ran out of time (and, given, what it may have waited for). */
+function failure(r: RunResult, waitedFor?: string): string {
+  if (r.timedOut) return `timed out after ${UNATTENDED_TIMEOUT_MS / 1000} seconds${waitedFor ? ` (${waitedFor})` : ''}`;
+  return (r.stderr || r.stdout).trim();
 }
 
 /** Title and body from the branch's commits, like `gh pr create --fill`. */

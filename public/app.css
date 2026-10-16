@@ -637,6 +637,11 @@ kbd {
 .merge-actions { align-items: center; background: var(--bg-subtle); border-radius: 0 0 6px 6px; }
 .merge-options { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 13px; }
 .merge-options label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.merge-buttons { display: flex; flex-direction: column; gap: 8px; }
+.merge-buttons .btn { justify-content: center; }
+.merge-checks { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; }
+.merge-checks li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.merge-error { margin: 8px 0 0; max-height: 200px; overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
 .btn-publish { background: var(--done-emphasis); }
 .btn-publish:hover { background: #7b47d8; }
 

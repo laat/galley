@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { run } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
-import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type ReviewColumns, type Service } from '../service.ts';
+import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, type CodexSettings } from '../settings.ts';
 
 export interface ModelInfo {
@@ -77,6 +77,8 @@ const SCHEMA = {
 };
 
 const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+/** Heads the list of findings on lines outside the diff in a review's body. */
+const OUTSIDE_THE_DIFF = '**Comments on lines outside the diff**';
 /** What the CLI calls an author agent running in Codex (see cliActor in src/config.ts). */
 const CODEX_AUTHOR = 'codex-agent';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
@@ -207,6 +209,14 @@ export class CodexReviewer {
         this.s.db.run('UPDATE review_runs SET reviewer = ? WHERE reviewer = ?', this.engine, reviewer);
       });
     }
+    // Runs from before findings were counted: count them from the review each posted, its
+    // comments and the findings its body lists. Without a review the count stays unknown.
+    for (const run of this.s.db.all<{ id: number; review_id: number }>("SELECT id, review_id FROM review_runs WHERE status = 'done' AND findings IS NULL AND review_id IS NOT NULL")) {
+      const review = this.s.db.get<{ body: string }>('SELECT body FROM reviews WHERE id = ?', run.review_id);
+      if (!review) continue;
+      const inline = this.s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE review_id = ?', run.review_id)!.n;
+      this.s.db.update('review_runs', run.id, { findings: inline + outsideTheDiff(review.body) });
+    }
     // Earlier reviews carried the priority in the text ("[P1] ..."); move it into the field.
     const me = this.actor();
     for (const c of this.s.db.all<Pick<CommentRow, 'id' | 'body'>>('SELECT id, body FROM comments WHERE author_id = ? AND priority IS NULL', me.id)) {
@@ -248,6 +258,24 @@ export class CodexReviewer {
 
   runs(pull: PullRow): ReviewRunRow[] {
     return this.s.db.all<ReviewRunRow>('SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? ORDER BY id', pull.id, this.engine);
+  }
+
+  /**
+   * Whether Codex is done with the pull request's head: its latest review of the commit found
+   * nothing, it has used up its automatic reviews, or it is off for the pull request. A failed
+   * review of the commit holds things up until someone asks for another one.
+   */
+  headStatus(pull: PullRow): HeadStatus {
+    const work = this.atWork(pull);
+    if (work) return { state: work.status === 'QUEUED' ? 'queued' : 'reviewing', done: false, commit: work.head_sha };
+    const commit = pull.head_sha;
+    const last = this.attempt(pull);
+    if (last?.status === 'failed') return { state: 'failed', done: false, commit };
+    if (last?.status === 'done' && last.findings === 0) return { state: 'clean', done: true, commit };
+    if (!this.enabled(pull)) return { state: 'off', done: true, commit };
+    if (this.automaticReviews(pull) >= this.limit(pull)) return { state: 'capped', done: true, commit };
+    // It found something in this commit and reviews the author's next one, or it reviews this one when the author waits.
+    return { state: last ? 'findings' : 'unreviewed', done: false, commit };
   }
 
   /** How many automatic reviews this pull request gets: its own limit, or the setting. */
@@ -334,8 +362,22 @@ export class CodexReviewer {
   private wouldReview(pull: PullRow): boolean {
     if (this.stopped || !this.enabled(pull) || pull.state === 'closed' || pull.author_id === this.actor().id) return false;
     // One attempt per head, failed or not: a failure is retried by asking from the page.
-    if (this.s.db.get('SELECT 1 FROM review_runs WHERE pull_id = ? AND reviewer = ? AND head_sha = ?', pull.id, this.engine, pull.head_sha)) return false;
+    if (this.attempt(pull)) return false;
     return this.automaticReviews(pull) < this.limit(pull);
+  }
+
+  /**
+   * The latest review of the pull request's head, running, done or failed. A review whose
+   * findings were never counted (one from an older version that could not be counted later)
+   * does not count, so Codex reviews the commit again.
+   */
+  private attempt(pull: PullRow): ReviewRunRow | undefined {
+    return this.s.db.get<ReviewRunRow>(
+      "SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? AND head_sha = ? AND NOT (status = 'done' AND findings IS NULL) ORDER BY id DESC",
+      pull.id,
+      this.engine,
+      pull.head_sha,
+    );
   }
 
   /** Review now, whatever the settings say about automatic reviews. */
@@ -439,7 +481,7 @@ export class CodexReviewer {
     const n = trigger === 'auto' ? this.automaticReviews(pull) + 1 : null;
     const parts = [String(result.summary ?? '').trim() || (inline.length || loose.length ? 'Codex left comments.' : 'Codex found nothing to comment on.')];
     if (loose.length) {
-      parts.push('**Comments on lines outside the diff**', loose.map((c) => `- \`${c.path}:${c.start_line ? `${c.start_line}-` : ''}${c.line}\`${c.priority ? ` (${c.priority} priority)` : ''}: ${c.body.trim().replace(/\n/g, '\n  ')}`).join('\n'));
+      parts.push(OUTSIDE_THE_DIFF, loose.map((c) => `- \`${c.path}:${c.start_line ? `${c.start_line}-` : ''}${c.line}\`${c.priority ? ` (${c.priority} priority)` : ''}: ${c.body.trim().replace(/\n/g, '\n  ')}`).join('\n'));
     }
     const model = [settings.model || 'default model', settings.effort ? `${settings.effort} effort` : null].filter(Boolean).join(', ');
     parts.push(`<sub>Codex (${model}) reviewed \`${pull.head_sha.slice(0, 7)}\`${n ? `, automatic review ${n} of ${this.limit(pull)}` : ', on request'}.</sub>`);
@@ -454,7 +496,7 @@ export class CodexReviewer {
       this.actor(),
     );
     // Done as soon as the review is in, so nobody is told Codex is still at it while its checkout is removed.
-    this.s.db.update('review_runs', runId, { status: 'done', review_id: review.id, finished_at: now() });
+    this.s.db.update('review_runs', runId, { status: 'done', review_id: review.id, findings: inline.length + loose.length, finished_at: now() });
   }
 
   private async prompt(ctx: Ctx, trigger: 'auto' | 'manual', settings: CodexSettings): Promise<string> {
@@ -539,6 +581,15 @@ export class CodexReviewer {
     const get = (key: string) => top.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, 'm'))?.[1];
     return { model: get('model'), effort: get('model_reasoning_effort') };
   }
+}
+
+/** How many findings a review's body lists under OUTSIDE_THE_DIFF, one "- `path:line`" item each. */
+function outsideTheDiff(body: string): number {
+  const at = body.indexOf(OUTSIDE_THE_DIFF);
+  if (at < 0) return 0;
+  // The list is the paragraph after the heading; a finding's own lines are indented.
+  const list = body.slice(at).split('\n\n')[1] ?? '';
+  return list.split('\n').filter((l) => l.startsWith('- `')).length;
 }
 
 function lastLines(text: string, n: number): string {
