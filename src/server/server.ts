@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hono } from 'hono';
@@ -8,6 +9,7 @@ import { Service, type ChangeEvent } from './service.ts';
 import { api } from './api.ts';
 import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
+import { CodexReviewer } from './reviewers/codex.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
 const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -77,6 +79,7 @@ export interface StartOptions {
   host?: string;
   dataDir: string;
   ghBin?: string;
+  codexBin?: string;
   viewerLogin?: string;
   pollMs?: number;
 }
@@ -88,14 +91,27 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
 
   let server: ServerType;
   let app: Hono | null = null;
+  let inflight = 0;
+  const drained = new EventEmitter();
   const port = await new Promise<number>((resolve, reject) => {
-    const fetch = (req: Request) => (app ? app.fetch(req) : new Response('starting', { status: 503 }));
+    const fetch = async (req: Request) => {
+      if (!app) return new Response('starting', { status: 503 });
+      // Count handlers that are still running, so closing can let them finish with the database.
+      inflight++;
+      try {
+        return await app.fetch(req);
+      } finally {
+        if (--inflight === 0) drained.emit('idle');
+      }
+    };
     server = serve({ fetch, port: opts.port, hostname: host }, (info) => resolve(info.port));
     server.once('error', reject);
   });
   const url = `http://localhost:${port}`;
   const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER });
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
+  service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
+  service.codex.start();
   app = createApp(service, { allowedHosts });
   if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
 
@@ -117,14 +133,25 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     url,
     port,
     service,
-    close: () =>
-      new Promise<void>((resolve) => {
-        clearInterval(timer);
-        server.close(() => {
-          db.sql.close();
-          resolve();
-        });
+    close: async () => {
+      clearInterval(timer);
+      // Running reviews write to the database when they end, so they go first.
+      await service.codex?.stop();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
         (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
-      }),
+      });
+      // Dropped requests (an open `pr wait`) still finish their handlers; give them a moment.
+      if (inflight > 0) {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 5000);
+          drained.once('idle', () => {
+            clearTimeout(t);
+            resolve();
+          });
+        });
+      }
+      db.sql.close();
+    },
   };
 }

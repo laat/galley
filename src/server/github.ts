@@ -127,6 +127,7 @@ export function reviewCommentJson(s: Service, repo: RepoRow, pull: PullRow, c: C
     html_url: `${s.pullUrl(repo, pull)}#discussion_r${c.id}`,
     pull_request_url: `${apiBase(s, repo)}/pulls/${pull.number}`,
     // laatsux extensions:
+    priority: c.priority,
     outdated: placement?.outdated ?? null,
     resolved: !!root.resolved_at,
   };
@@ -290,6 +291,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
         databaseId: t.root.id,
         reviewDatabaseId: t.root.review_id,
         isResolved: t.resolved,
+        priority: t.root.priority,
         isOutdated: t.placement.outdated,
         subjectType: (t.root.subject_type ?? 'line').toUpperCase(),
         path: t.root.path,

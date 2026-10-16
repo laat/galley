@@ -74,7 +74,8 @@ function location(t: any, pr?: GhPull): string {
 
 export function formatThread(t: any, newIds?: Set<number>, pr?: GhPull): string {
   const flags = [t.isResolved ? 'resolved' : 'unresolved', t.isOutdated ? 'outdated' : null].filter(Boolean).join(', ');
-  const out = [c.bold(`thread ${t.databaseId}`) + ` on ${location(t, pr)} [${flags}]`];
+  const priority = t.priority ? ` (${t.priority === 'high' ? c.red('high priority') : `${t.priority} priority`})` : '';
+  const out = [c.bold(`thread ${t.databaseId}`) + ` on ${location(t, pr)} [${flags}]${priority}`];
   if (t.diffHunk) {
     const hunk = t.diffHunk.split('\n');
     const shown = hunk.length > 5 ? hunk.slice(-4) : hunk;

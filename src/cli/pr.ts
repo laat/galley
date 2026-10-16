@@ -279,6 +279,7 @@ async function comment(client: Client, cwd: string, args: string[]): Promise<num
     body: { type: 'string', short: 'b' },
     'body-file': { type: 'string', short: 'F' },
     'reply-to': { type: 'string' },
+    resolve: { type: 'boolean' },
     'edit-last': { type: 'boolean' },
     'create-if-none': { type: 'boolean' },
     'delete-last': { type: 'boolean' },
@@ -306,10 +307,14 @@ async function comment(client: Client, cwd: string, args: string[]): Promise<num
     }
     if (!v['create-if-none']) throw new CliError('no comments found for current user');
   }
+  if (v.resolve && !v['reply-to']) throw new CliError('--resolve needs --reply-to <thread>');
   if (body === undefined) throw new CliError('--body or --body-file required when not running interactively');
   if (v['reply-to']) {
     const id = String(v['reply-to']).replace(/^\D+/, '');
-    out((await client.json('POST', `${pullPath(t)}/comments/${id}/replies`, { body })).html_url);
+    const reply = await client.json('POST', `${pullPath(t)}/comments/${id}/replies`, { body });
+    // Say what was done, then close the thread: the reviewer can reopen it.
+    if (v.resolve) await client.json('PUT', `${pullPath(t)}/threads/${id}/resolved`);
+    out(reply.html_url);
     return 0;
   }
   out((await client.json('POST', `${repoPath(t.repo)}/issues/${t.number}/comments`, { body })).html_url);
@@ -410,6 +415,11 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
   return 0;
 }
 
+/** The server is down or restarting: worth asking again shortly. */
+function transient(e: unknown): boolean {
+  return (e instanceof TypeError && e.message === 'fetch failed') || (e instanceof CliError && /not running/.test(e.message));
+}
+
 async function wait(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v, positionals } = parse(args, { timeout: { type: 'string' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
@@ -425,8 +435,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     try {
       r = await client.get(`${pullPath(t)}/wait?timeout=${Math.min(left, 240)}`);
     } catch (e) {
-      if (e instanceof CliError && /not running/.test(e.message)) {
-        // The server restarted; give it a moment and keep waiting.
+      // The server went away (refused) or restarted under us (the open request was dropped):
+      // give it a moment and keep waiting.
+      if (transient(e)) {
         await new Promise((res) => setTimeout(res, 3000));
         continue;
       }
@@ -434,7 +445,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if (r.status === 'timeout') continue;
     const url = `${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`;
-    const pr = await client.get(ghPath(t, []));
+    const pr = r.pr;
     const items = conversationItems(pr, {
       reviews: new Set(r.reviews),
       comments: new Set(r.comments.filter((cm: any) => cm.kind === 'issue').map((cm: any) => cm.id)),
@@ -445,6 +456,19 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(items.map((i) => i.text).join('\n\n') + '\n');
     }
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
+    // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at });
+        break;
+      } catch (e) {
+        if (!transient(e) || attempt === 10) {
+          err('Could not confirm the feedback as seen; the next `laatsux pr wait` will show it again.');
+          break;
+        }
+        await new Promise((res) => setTimeout(res, 3000));
+      }
+    }
     if (r.status === 'published') {
       out(`Published to GitHub: ${r.published_url}`);
       out(items.length ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
@@ -460,8 +484,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     } else {
       out(
         c.gray(
-          `Address the feedback, reply to threads with \`laatsux pr comment ${t.number} --reply-to <thread> -b "…"\`, ` +
-            `then run \`laatsux pr wait ${t.number}\` again.`,
+          `Address the feedback. Reply to each thread and resolve the ones you fixed with ` +
+            `\`laatsux pr comment ${t.number} --reply-to <thread> --resolve -b "…"\` ` +
+            `(leave out --resolve to keep a thread open for the reviewer), then run \`laatsux pr wait ${t.number}\` again.`,
         ),
       );
     }
@@ -482,7 +507,7 @@ COMMANDS (same flags as gh)
   view:        Show a pull request (--comments for reviews and review threads)
   diff:        Show the diff
   edit:        Change title, body or base
-  comment:     Comment, or reply to a review thread with --reply-to <id>
+  comment:     Comment, or reply to a review thread with --reply-to <id> [--resolve]
   review:      Approve, comment or request changes
   close:       Close a pull request
   reopen:      Reopen a pull request

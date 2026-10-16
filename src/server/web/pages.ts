@@ -3,6 +3,7 @@ import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
 import { publishFingerprint, type Ctx, type Service, type Thread } from '../service.ts';
 import { avatarUrl, reviewDecision } from '../github.ts';
+import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
 import {
@@ -358,6 +359,7 @@ function sidebar(p: PullPage): Safe {
   const revisions = s.revisions(pull);
   return html`<aside class="layout-sidebar">
   <div class="sidebar-item"><h3 class="sidebar-heading">Reviewers</h3><ul class="sidebar-list">${reviewers}</ul></div>
+  ${codexSidebar(p)}
   <div class="sidebar-item"><h3 class="sidebar-heading">Author</h3>
     <ul class="sidebar-list"><li class="sidebar-person">${avatar(avatarUrl(s, p.author), p.author.login, 20, p.author.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${p.author.login}</span></li></ul>
     <p class="agent-status ${waiting ? 'agent-status--waiting' : ''}">${icon('dot-fill')} ${waiting ? 'Waiting for your review' : 'Not waiting (working, or done)'}</p>
@@ -376,6 +378,44 @@ function sidebar(p: PullPage): Safe {
     <button type="button" class="btn-link color-fg-danger js-delete-pull" data-api="${p.apiBase}" data-next="/${repo.owner}/${repo.name}">${icon('trash')} Delete staged pull request</button>
   </div>
 </aside>`;
+}
+
+/** Codex's state on this pull request: reviewing, last result or error, and a button to ask for a review. */
+function codexSidebar(p: PullPage): Safe {
+  const codex = p.s.codex;
+  if (!codex) return raw('');
+  const settings = codex.settings();
+  const runs = codex.runs(p.pull);
+  const last = runs[runs.length - 1];
+  const running = codex.isRunning(p.pull.id);
+  const actor = codex.actor();
+  let status: Safe;
+  if (running && last) {
+    status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} Reviewing <code>${shortSha(last.head_sha)}</code>, started ${relTime(last.started_at)}</p>`;
+  } else if (last?.status === 'done') {
+    status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">Reviewed <code>${shortSha(last.head_sha)}</code></a> ${relTime(last.finished_at)}</p>`;
+  } else if (last?.status === 'failed') {
+    status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}
+      <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${last.error ?? ''}</pre></details></div>`;
+  } else {
+    status = html`<p class="codex-status color-fg-muted">Has not reviewed this pull request.</p>`;
+  }
+  const used = codex.automaticReviews(p.pull);
+  const limit = codex.limit(p.pull);
+  const own = p.pull.codex_max_iterations !== null;
+  const limitApi = `${p.apiBase}/reviewers/codex`;
+  // The limit is changed in place: −/+ after the number, saved shortly after the last click.
+  const auto = settings.enabled
+    ? html`Automatic reviews: ${used} of <span class="codex-limit" data-api="${limitApi}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><strong class="js-codex-limit">${limit}</strong><button type="button" class="codex-step js-codex-step" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><button type="button" class="codex-step js-codex-step" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>${
+        own ? html` <button type="button" class="btn-link js-codex-limit-reset" data-api="${limitApi}" title="Use the default from Settings (${settings.maxIterations})">reset</button>` : ''
+      }`
+    : html`Automatic reviews are off`;
+  return html`<div class="sidebar-item"><h3 class="sidebar-heading">Codex</h3>
+    <div class="sidebar-person">${avatar(avatarUrl(p.s, actor), actor.login, 20, 'avatar-bot')} <span class="flex-auto">${actor.login}</span></div>
+    ${status}
+    <p class="sidebar-text color-fg-muted">${auto} · <a href="/settings">Settings</a></p>
+    <button type="button" class="btn btn-sm js-run-codex" data-api="${p.apiBase}/reviewers/codex"${running || p.pull.state === 'closed' ? raw(' disabled') : ''}>${icon('sync')} Ask Codex to review</button>
+  </div>`;
 }
 
 export async function conversationPage(p: PullPage): Promise<string> {

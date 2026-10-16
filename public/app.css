@@ -279,6 +279,11 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .Label--done { color: var(--done); border-color: var(--done); }
 .Label--success { color: var(--success); border-color: var(--success); }
 .Label--success .octicon { width: 10px; }
+.Label--priority { font-weight: 600; }
+.Label--priority-high { color: var(--danger); border-color: var(--danger); background: var(--danger-subtle); }
+.Label--priority-medium { color: var(--attention); border-color: var(--attention-muted); background: var(--attention-subtle); }
+.Label--priority-low { color: var(--fg-muted); border-color: var(--border); background: var(--neutral-subtle); }
+.priority-select { width: auto; height: 32px; margin-right: auto; }
 
 .State {
   display: inline-flex;
@@ -443,6 +448,47 @@ kbd {
 .diffstat-block-add { background: var(--success-emphasis); }
 .diffstat-block-del { background: var(--danger-emphasis); }
 .diffstat-block-neutral { background: var(--neutral-muted); outline: 1px solid var(--border-muted); outline-offset: -1px; }
+
+/* ------------------------------------------------------------- settings */
+
+.app-header-actions { display: flex; align-items: center; gap: 12px; }
+.app-header-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; color: var(--fg-muted); border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.app-header-button:hover { color: var(--fg); background: var(--btn-hover); text-decoration: none; }
+.settings-layout { display: flex; gap: 32px; padding-top: 32px; align-items: flex-start; }
+.settings-nav { width: 220px; flex-shrink: 0; }
+.settings-nav-heading { margin: 0 0 12px; font-size: 20px; font-weight: 600; }
+.settings-nav-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; color: var(--fg); border-radius: 6px; }
+.settings-nav-item:hover { background: var(--neutral-muted); text-decoration: none; }
+.settings-nav-item.selected { background: var(--neutral-muted); font-weight: 600; position: relative; }
+.settings-nav-item.selected::before { content: ""; position: absolute; left: -8px; top: 6px; bottom: 6px; width: 4px; border-radius: 6px; background: var(--accent-emphasis); }
+.settings-main { flex: 1; min-width: 0; }
+.Subhead { padding-bottom: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--border-muted); }
+.Subhead-heading { margin: 0; font-size: 24px; font-weight: 400; }
+.Subhead-description { margin: 4px 0 0; color: var(--fg-muted); }
+.settings-form { max-width: 560px; }
+.form-group { margin: 16px 0; }
+.form-label { display: block; margin-bottom: 6px; font-weight: 600; }
+.form-checkbox { margin: 16px 0; }
+.form-checkbox label { font-weight: 600; display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+.form-checkbox .note { margin-left: 24px; }
+.note { margin: 4px 0 0; font-size: 12px; color: var(--fg-muted); }
+.form-select { width: 100%; height: 32px; padding: 0 8px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.input-narrow { width: 100px; }
+.input-medium { width: 240px; }
+.form-actions-left { justify-content: flex-start; }
+.flash-warn { color: var(--fg); background: var(--attention-subtle); border-color: var(--attention-muted); display: flex; gap: 8px; align-items: center; }
+.codex-status { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 8px 0 4px; }
+.codex-status--running { color: var(--accent); font-weight: 600; }
+.codex-status--running .octicon { animation: pulse 1.6s ease-in-out infinite; }
+.codex-error { width: 100%; }
+.codex-limit { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.codex-limit strong { color: var(--fg); min-width: 1ch; margin-right: 2px; }
+.codex-step { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; color: var(--fg-muted); background: var(--btn-bg); border: 1px solid var(--btn-border); border-radius: 4px; cursor: pointer; }
+.codex-step:hover:not(:disabled) { color: var(--fg); background: var(--btn-hover); }
+.codex-step:disabled { opacity: 0.4; cursor: default; }
+.codex-step .octicon { width: 12px; height: 12px; }
+.codex-error pre { max-height: 200px; overflow: auto; padding: 8px; font-size: 11px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
+@media (max-width: 767px) { .settings-layout { flex-direction: column; } .settings-nav { width: 100%; } }
 
 /* ------------------------------------------------------------ timeline */
 

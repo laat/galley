@@ -43,6 +43,8 @@ export interface PullRow {
   published_head_sha: string | null;
   /** The staged head that was published. */
   published_source_sha: string | null;
+  /** This pull request's cap on automatic Codex reviews; null uses the setting. */
+  codex_max_iterations: number | null;
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
@@ -74,6 +76,8 @@ export interface ReviewRow {
 }
 
 export type Side = 'LEFT' | 'RIGHT';
+export type Priority = 'high' | 'medium' | 'low';
+export const PRIORITIES: readonly Priority[] = ['high', 'medium', 'low'];
 export type SubjectType = 'line' | 'file' | 'commit';
 
 export interface CommentRow {
@@ -98,6 +102,8 @@ export interface CommentRow {
   in_reply_to_id: number | null;
   resolved_at: string | null;
   resolved_by_id: number | null;
+  /** How much a review comment matters, when its author said so. */
+  priority: Priority | null;
 }
 
 export interface EventRow {
@@ -211,6 +217,21 @@ CREATE TABLE IF NOT EXISTS viewed (
   blob TEXT NOT NULL,
   PRIMARY KEY (pull_id, path)
 );
+-- Each time a reviewer agent (Codex) reviewed, or tried to review, a pull request.
+CREATE TABLE IF NOT EXISTS review_runs (
+  id INTEGER PRIMARY KEY,
+  pull_id INTEGER NOT NULL REFERENCES pulls(id) ON DELETE CASCADE,
+  reviewer TEXT NOT NULL,
+  head_sha TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  status TEXT NOT NULL,
+  model TEXT,
+  effort TEXT,
+  error TEXT,
+  review_id INTEGER,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
 -- The signed copy made of each agent commit when publishing, so publishing again reuses it.
 CREATE TABLE IF NOT EXISTS signed_commits (
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
@@ -220,8 +241,27 @@ CREATE TABLE IF NOT EXISTS signed_commits (
 );
 `;
 
+export interface ReviewRunRow {
+  id: number;
+  pull_id: number;
+  reviewer: string;
+  head_sha: string;
+  trigger: 'auto' | 'manual';
+  status: 'running' | 'done' | 'failed';
+  model: string | null;
+  effort: string | null;
+  error: string | null;
+  review_id: number | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
 /** Columns added after a table was first created: [table, column, definition]. */
-const ADDED_COLUMNS: [string, string, string][] = [['pulls', 'published_source_sha', 'TEXT']];
+const ADDED_COLUMNS: [string, string, string][] = [
+  ['pulls', 'published_source_sha', 'TEXT'],
+  ['pulls', 'codex_max_iterations', 'INTEGER'],
+  ['comments', 'priority', 'TEXT'],
+];
 
 export class Db {
   sql: DatabaseSync;

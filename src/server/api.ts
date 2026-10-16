@@ -15,6 +15,7 @@ import {
   userJson,
 } from './github.ts';
 import { renderMarkdown } from './web/markdown.ts';
+import { nextSettings, readSettings, saveSettings } from './settings.ts';
 
 /**
  * A GitHub-compatible subset of the REST API, plus a few laatsux extensions
@@ -35,6 +36,10 @@ export function api(s: Service): Hono {
   const actor = (c: Context): Actor => {
     const login = c.req.header('x-laatsux-actor');
     if (!login) return s.viewer();
+    // The reviewer posts from inside the server; anyone else using its name would be mistaken for it.
+    if (s.codex && login === s.codex.actor().login) {
+      throw new HttpError(409, `"${login}" is the name of the Codex reviewer. Set LAATSUX_ACTOR to another name.`);
+    }
     const type = (c.req.header('x-laatsux-actor-type') as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
     return s.db.actor(login, type === 'User' ? 'User' : 'Bot');
   };
@@ -62,6 +67,35 @@ export function api(s: Service): Hono {
     return { repo, pull, comment };
   };
   const fields = (c: Context) => (c.req.query('fields') ?? '').split(',').map((f) => f.trim()).filter(Boolean);
+
+  // ------------------------------------------------- settings (extension)
+
+  /** Settings and reviewer controls belong to the person reviewing, not to agents. */
+  const human = (c: Context): Actor => {
+    const a = actor(c);
+    if (a.type === 'Bot') throw new HttpError(403, 'only the reviewer can do this');
+    return a;
+  };
+
+  app.get('/settings', async (c) => {
+    const codex = s.codex;
+    return c.json({ ...readSettings(s.db), codexModels: codex ? await codex.models() : [], codexDefaults: codex ? codex.defaults() : {} });
+  });
+
+  app.put('/settings/codex', async (c) => {
+    human(c);
+    const b = await body(c);
+    await s.codex?.models(); // so efforts can be checked against the model
+    const settings = nextSettings(s.db, { codex: b }, (model) => s.codex?.efforts(model) ?? null);
+    // Renaming is the one step that can still fail (the name may be taken), so it goes before saving.
+    if (s.codex && b.name !== undefined && settings.codex.name !== s.codex.actor().login) s.codex.rename(settings.codex.name);
+    // The reviewer's actual name is the truth (it may have had to take another one).
+    if (s.codex) settings.codex.name = s.codex.actor().login;
+    saveSettings(s.db, settings);
+    // Turning reviews on should not wait for the author's next `pr wait` cycle.
+    if (settings.codex.enabled) for (const id of s.waiters.keys()) s.codex?.maybeReview(id).catch(() => {});
+    return c.json(settings);
+  });
 
   app.get('/health', (c) => c.json({ ok: true, pid: process.pid, viewer: s.viewer().login }));
   app.get('/user', (c) => c.json(userJson(s, actor(c))));
@@ -257,6 +291,28 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
+  // laatsux extension: ask Codex to review now, and list its runs.
+  app.post('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
+    human(c);
+    if (!s.codex) throw new HttpError(501, 'this server has no Codex reviewer');
+    const x = await ctx(c);
+    return c.json({ run_id: s.codex.request(x) }, 202);
+  });
+  // laatsux extension: this pull request's cap on automatic Codex reviews (null for the setting).
+  app.patch('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
+    human(c);
+    if (!s.codex) throw new HttpError(501, 'this server has no Codex reviewer');
+    const x = await ctx(c);
+    const b = await body(c);
+    const raw = b.max_iterations;
+    const limit = raw === null || raw === '' || raw === undefined ? null : Number(raw);
+    return c.json({ max_iterations: s.codex.setLimit(x, limit), overridden: limit !== null });
+  });
+  app.get('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
+    const x = await ctx(c, { sync: false });
+    return c.json({ running: s.codex?.isRunning(x.pull.id) ?? false, runs: s.codex?.runs(x.pull) ?? [] });
+  });
+
   // laatsux extension: push the branch and open (or update) the pull request on GitHub.
   app.post('/repos/:owner/:repo/pulls/:n/publish', async (c) => {
     const x = await ctx(c);
@@ -275,13 +331,26 @@ export function api(s: Service): Hono {
     const seconds = Number(c.req.query('timeout') ?? 240);
     const timeout = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 240, 3600) * 1000;
     const r = await s.wait(x, timeout, c.req.raw.signal);
-    const pull = s.db.get<any>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
+    const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
     return c.json({
       status: r.status,
       published_url: pull?.published_url ?? null,
       reviews: r.reviews.map((rv) => rv.id),
       comments: r.comments.map((cm) => ({ id: cm.id, kind: cm.kind, in_reply_to_id: cm.in_reply_to_id })),
+      // Everything needed to show the feedback, so no second request can fail in between.
+      pr: r.status !== 'timeout' && pull ? await ghPullJson(s, await s.ctx(x.repo.owner, x.repo.name, pull.number), actor(c), []) : undefined,
+      seen_at: r.seenAt,
     });
+  });
+
+  // laatsux extension: the author confirms it has shown the feedback a wait returned.
+  app.put('/repos/:owner/:repo/pulls/:n/seen', async (c) => {
+    const x = await ctx(c, { sync: false });
+    if (actor(c).id !== x.pull.author_id) throw new HttpError(403, 'only the author marks feedback as seen');
+    const at = String((await body(c)).at ?? '');
+    if (!/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(at)) throw new HttpError(422, 'at must be the seen_at of a wait response');
+    s.markSeen(x.pull, at);
+    return c.body(null, 204);
   });
 
   // ----------------------------------------------------------------- issues

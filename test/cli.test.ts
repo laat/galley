@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
-import { fillFromCommits } from '../src/server/service.ts';
+import { checkPriority, fillFromCommits, splitPriorityPrefix } from '../src/server/service.ts';
+import { cliActor } from '../src/config.ts';
 import type { Commit } from '../src/server/git.ts';
 
 test('setField builds nested bodies like gh api -f/-F', () => {
@@ -54,4 +55,26 @@ test('fillFromCommits mirrors gh pr create --fill', () => {
   });
   assert.equal(fillFromCommits([commit('One'), commit('Two')], 'b', 'first').title, 'One');
   assert.equal(fillFromCommits([commit('One'), commit('Two\n\nMore')], 'b', 'verbose').body, '- One\n- Two\n  \n  More');
+});
+
+test('an author agent running in Codex is not named like the Codex reviewer', () => {
+  const saved = { ...process.env };
+  try {
+    for (const k of ['LAATSUX_ACTOR', 'CLAUDECODE', 'AI_AGENT', 'CODEX_MANAGED_BY_NPM']) delete process.env[k];
+    process.env.CODEX_SANDBOX = 'seatbelt';
+    assert.deepEqual(cliActor(), { login: 'codex-agent', type: 'Bot' });
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('priorities: validated, and moved out of "[P1]"-style prefixes', () => {
+  assert.equal(checkPriority('High'), 'high');
+  assert.equal(checkPriority(''), null);
+  assert.throws(() => checkPriority('urgent'), /priority must be one of high, medium, low/);
+  assert.deepEqual(splitPriorityPrefix('[P1] Fix the guard\n\nDetails.'), { priority: 'high', body: 'Fix the guard\n\nDetails.' });
+  assert.deepEqual(splitPriorityPrefix('[P0] Data loss'), { priority: 'high', body: 'Data loss' });
+  assert.deepEqual(splitPriorityPrefix('[P2] Rename'), { priority: 'medium', body: 'Rename' });
+  assert.deepEqual(splitPriorityPrefix('[P3] Typo'), { priority: 'low', body: 'Typo' });
+  assert.deepEqual(splitPriorityPrefix('No prefix [P1] here'), { priority: null, body: 'No prefix [P1] here' });
 });

@@ -36,9 +36,9 @@
 
   const draftPrefix = () => `laatsux:draft:${ds().pullId || 'global'}:`;
 
-  function saveDraft(key, value, meta) {
+  function saveDraft(key, value, meta, priority) {
     try {
-      if (value.trim()) sessionStorage.setItem(draftPrefix() + key, JSON.stringify({ value, meta }));
+      if (value.trim()) sessionStorage.setItem(draftPrefix() + key, JSON.stringify({ value, meta, priority }));
       else sessionStorage.removeItem(draftPrefix() + key);
     } catch {}
   }
@@ -67,6 +67,8 @@
       if (!ta && d.meta) ta = reopenForm(d.meta);
       if (!ta) continue;
       if (!ta.value || ta.value === ta.defaultValue) ta.value = d.value;
+      const priority = ta.closest('.inline-comment-form') && $('select[name=priority]', ta.closest('.inline-comment-form'));
+      if (priority && d.priority && !priority.value) priority.value = d.priority;
       reveal(ta);
     }
   }
@@ -79,12 +81,22 @@
     if (reply && reply.hidden) openReply(reply.closest('.review-thread-reply'), false);
   }
 
+  /** A draft is its text, where it goes, and for a new review comment its priority. */
+  function saveDraftOf(textarea) {
+    const holder = textarea.closest('[data-draft-meta]');
+    const priority = holder && $('select[name=priority]', holder);
+    saveDraft(textarea.dataset.draftKey, textarea.value, holder ? JSON.parse(holder.dataset.draftMeta) : undefined, priority ? priority.value : undefined);
+  }
+
   document.addEventListener('input', (e) => {
     const t = e.target;
-    if (t.matches && t.matches('textarea[data-draft-key]')) {
-      const holder = t.closest('[data-draft-meta]');
-      saveDraft(t.dataset.draftKey, t.value, holder ? JSON.parse(holder.dataset.draftMeta) : undefined);
-    }
+    if (t.matches && t.matches('textarea[data-draft-key]')) saveDraftOf(t);
+  });
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t.matches || !t.matches('.inline-comment-form select[name=priority]')) return;
+    const textarea = $('textarea[data-draft-key]', t.closest('.inline-comment-form'));
+    if (textarea) saveDraftOf(textarea);
   });
 
   // ------------------------------------------------------------- refresh
@@ -159,6 +171,8 @@
     published: 'published the pull request',
     resolved: 'resolved a conversation',
     comment_edited: 'edited a comment',
+    codex_started: 'started reviewing',
+    codex_failed: 'could not finish its review',
   };
 
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);
@@ -276,6 +290,7 @@
       if (form.dataset.reset) form.reset();
       await refresh();
       if (publishing) toast('Published to GitHub');
+      else if (form.dataset.toast) toast(form.dataset.toast);
     } catch (err) {
       busy(form, false);
       formError(form, err);
@@ -380,6 +395,9 @@
 <form class="js-new-comment-form">
   ${editorHtml({ draftKey: key, suggestion: !!suggestion })}
   <div class="form-actions">
+    <select class="form-select priority-select" name="priority" aria-label="Priority">
+      <option value="">No priority</option><option value="high">High priority</option><option value="medium">Medium priority</option><option value="low">Low priority</option>
+    </select>
     <button type="button" class="btn js-inline-cancel">Cancel</button>
     ${pendingReview ? '' : '<button type="submit" class="btn" value="single">Add single comment</button>'}
     <button type="submit" class="btn btn-primary" value="review">${pendingReview ? 'Add review comment' : 'Start a review'}</button>
@@ -393,7 +411,7 @@
     const meta = JSON.parse(wrap.dataset.draftMeta);
     const body = $('textarea', form).value;
     const mode = submitter ? submitter.value : ds().pendingReview ? 'review' : 'single';
-    const payload = { body };
+    const payload = { body, priority: $('select[name=priority]', form).value || null };
     if (meta.kind === 'commit') Object.assign(payload, { subject_type: 'commit', commit_id: meta.sha });
     else {
       Object.assign(payload, { path: meta.path, commit_id: ds().commitId, base_commit_id: ds().baseCommitId });
@@ -675,6 +693,16 @@
       await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       userState.threads.delete(el.closest('.review-thread').dataset.thread);
       refresh();
+    } else if ((el = on('.js-codex-step'))) {
+      stepCodexLimit(el);
+    } else if ((el = on('.js-codex-limit-reset'))) {
+      el.disabled = true;
+      await api('PATCH', el.dataset.api, { max_iterations: null }).catch((err) => toast(err.message));
+      refresh();
+    } else if ((el = on('.js-run-codex'))) {
+      el.disabled = true;
+      await api('POST', el.dataset.api).catch((err) => toast(err.message));
+      refresh();
     } else if ((el = on('.js-set-state'))) {
       el.disabled = true;
       await api('PATCH', ds().apiBase, { state: el.dataset.state }).catch((err) => toast(err.message));
@@ -719,6 +747,37 @@
       // Let the toggle happen, then remember the choice across refreshes.
       setTimeout(() => userState.threads.set(thread.dataset.thread, thread.open));
     }
+  });
+
+  // The Codex review limit of a pull request: each click moves the number at once, and the
+  // last value is saved shortly after the clicks stop.
+  let limitSave = null;
+  function stepCodexLimit(button) {
+    const box = button.closest('.codex-limit');
+    const max = Number(box.dataset.max);
+    const value = Math.min(max, Math.max(0, Number(box.dataset.limit) + Number(button.dataset.step)));
+    box.dataset.limit = String(value);
+    $('.js-codex-limit', box).textContent = String(value);
+    for (const b of $$('.js-codex-step', box)) b.disabled = Number(b.dataset.step) < 0 ? value <= 0 : value >= max;
+    clearTimeout(limitSave);
+    limitSave = setTimeout(async () => {
+      await api('PATCH', box.dataset.api, { max_iterations: value }).catch((err) => toast(err.message));
+      refresh();
+    }, 500);
+  }
+
+  // Settings: the effort levels on offer depend on the model.
+  document.addEventListener('change', (e) => {
+    const model = e.target;
+    if (!model.matches || !model.matches('.js-codex-model')) return;
+    const option = model.selectedOptions[0];
+    const efforts = (option.dataset.efforts || '').split(',').filter(Boolean);
+    const effort = $('.js-codex-effort', model.form);
+    const current = effort.value;
+    const fallback = option.dataset.defaultEffort;
+    effort.innerHTML =
+      `<option value="">Codex default${fallback ? ` (${esc(fallback)})` : ''}</option>` + efforts.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+    effort.value = efforts.includes(current) ? current : '';
   });
 
   document.addEventListener('change', async (e) => {

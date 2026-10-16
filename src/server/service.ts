@@ -4,10 +4,13 @@ import { basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Repo, run, githubSlug, type Commit } from './git.ts';
 import { diffHunkFor, lineInDiff, mapLine, rangeTouched, type FileDiff } from './diff.ts';
+import type { CodexReviewer } from './reviewers/codex.ts';
 import {
   Db,
   now,
+  PRIORITIES,
   type Actor,
+  type Priority,
   type CommentRow,
   type EventRow,
   type PullRow,
@@ -47,6 +50,8 @@ export interface CommentInput {
   start_line?: number | null;
   start_side?: Side | null;
   subject_type?: SubjectType | null;
+  /** laatsux extension: high, medium or low. */
+  priority?: string | null;
   commit_id?: string | null;
   /** laatsux extension: the left side of the diff the comment was made on (for commit and interdiff views). */
   base_commit_id?: string | null;
@@ -78,6 +83,8 @@ export interface WaitResult {
   status: 'feedback' | 'published' | 'closed' | 'timeout';
   reviews: ReviewRow[];
   comments: CommentRow[];
+  /** What the author confirms with markSeen once it has shown this feedback. */
+  seenAt?: string;
 }
 
 export interface ServiceOptions {
@@ -92,6 +99,8 @@ export class Service {
   baseUrl: string;
   ghBin: string;
   bus = new EventEmitter();
+  /** Codex as a reviewer agent, when the server runs one. */
+  codex: CodexReviewer | null = null;
   /** Number of `pr wait` calls currently blocked, per pull id. */
   waiters = new Map<number, number>();
   private syncing = new Map<number, Promise<PullRow>>();
@@ -115,6 +124,13 @@ export class Service {
   setViewerLogin(login: string): void {
     this.viewerLogin = login;
     this.db.setMeta('viewer_login', login);
+    this.claimViewerLogin();
+  }
+
+  /** The human's login belongs to the human: a reviewer bot holding it moves to another name. */
+  claimViewerLogin(): void {
+    this.codex?.releaseName(this.viewerLogin);
+    this.viewer();
   }
 
   /** Look up the GitHub login of whoever `gh` is authenticated as, so the UI can show their avatar. */
@@ -497,8 +513,13 @@ export class Service {
     this.db.update('pulls', pull.id, { updated_at: ts });
   }
 
-  /** Validate where a new review comment points and build the columns that anchor it. */
+  /** The columns of a new review comment: where it points, and its priority. */
   private async anchor(ctx: Ctx, input: CommentInput): Promise<Record<string, string | number | null>> {
+    return { ...(await this.anchorAt(ctx, input)), priority: checkPriority(input.priority) };
+  }
+
+  /** Validate where a new review comment points and build the columns that anchor it. */
+  private async anchorAt(ctx: Ctx, input: CommentInput): Promise<Record<string, string | number | null>> {
     const { pull, git } = ctx;
     const subject: SubjectType = input.subject_type ?? (input.path ? (input.line ? 'line' : 'file') : 'commit');
     if (subject === 'commit') {
@@ -553,8 +574,17 @@ export class Service {
 
   private insertReviewComment(pull: PullRow, actor: Actor, reviewId: number | null, body: string, anchor: Record<string, string | number | null>, inReplyTo: number | null = null): number {
     if (!body.trim()) throw new HttpError(422, 'body cannot be blank');
+    const columns = { ...anchor };
+    if (inReplyTo === null) {
+      // From any reviewer: a "[P1] ..." prefix becomes the priority, unless one was given.
+      const split = splitPriorityPrefix(body);
+      if (split.priority) {
+        body = split.body;
+        columns.priority ??= split.priority;
+      }
+    }
     const ts = now();
-    return this.db.insert('comments', { pull_id: pull.id, kind: 'review', review_id: reviewId, author_id: actor.id, body, created_at: ts, updated_at: ts, in_reply_to_id: inReplyTo, ...anchor });
+    return this.db.insert('comments', { pull_id: pull.id, kind: 'review', review_id: reviewId, author_id: actor.id, body, created_at: ts, updated_at: ts, in_reply_to_id: inReplyTo, ...columns });
   }
 
   /** POST /pulls/:n/comments: a standalone comment wrapped in its own submitted review, as GitHub does. */
@@ -791,7 +821,8 @@ export class Service {
 
   /** Record that the author has been shown everything up to `at` (taken before reading the feedback). */
   markSeen(pull: PullRow, at: string): void {
-    this.db.update('pulls', pull.id, { author_seen_at: at });
+    // Only forward: a late confirmation must not bring back feedback seen since.
+    this.db.run('UPDATE pulls SET author_seen_at = ? WHERE id = ? AND author_seen_at < ?', at, pull.id, at);
   }
 
   /**
@@ -800,6 +831,8 @@ export class Service {
    */
   private waitingStopped = new Map<number, ReturnType<typeof setTimeout>>();
   private setWaiting(id: number, delta: 1 | -1, author: Actor): void {
+    // Reviewer agents start when the author says it is ready, every time it does.
+    if (delta === 1) this.bus.emit('author-waiting', id);
     const before = this.waiters.get(id) ?? 0;
     const n = before + delta;
     if (n > 0) this.waiters.set(id, n);
@@ -834,9 +867,10 @@ export class Service {
         const fb = this.unseenFeedback(pull);
         const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
         if (pull.state === 'closed' || fb.reviews.length || fb.comments.length || published) {
-          this.markSeen(pull, checkedAt);
+          // Not marked as seen here: the author confirms once it has shown the feedback, so a
+          // response lost on the way (a restart) delivers it again instead of losing it.
           const status = pull.state === 'closed' ? 'closed' : published ? 'published' : 'feedback';
-          return { status, ...fb };
+          return { status, ...fb, seenAt: checkedAt };
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0 || signal?.aborted) return { status: 'timeout', reviews: [], comments: [] };
@@ -1036,4 +1070,22 @@ export function fillFromCommits(commits: Commit[], branch: string, mode: 'defaul
 export function publishFingerprint(pull: PullRow): string {
   const text = createHash('sha256').update(`${pull.base_ref}\0${pull.title}\0${pull.body}`).digest('hex').slice(0, 16);
   return `${pull.head_sha}:${text}`;
+}
+
+export function checkPriority(value: unknown): Priority | null {
+  if (value === null || value === undefined || value === '') return null;
+  const p = String(value).toLowerCase();
+  if (!(PRIORITIES as readonly string[]).includes(p)) throw new HttpError(422, `priority must be one of ${PRIORITIES.join(', ')}`);
+  return p as Priority;
+}
+
+/**
+ * Reviewers that put the priority in the text ("[P1] Title", Codex's habit) get it moved into
+ * the field: P0 and P1 are high, P2 medium, P3 low.
+ */
+export function splitPriorityPrefix(body: string): { priority: Priority | null; body: string } {
+  const m = body.match(/^\s*\[P([0-3])\]\s*/);
+  if (!m) return { priority: null, body };
+  const priority: Priority = m[1] === '2' ? 'medium' : m[1] === '3' ? 'low' : 'high';
+  return { priority, body: body.slice(m[0].length) };
 }

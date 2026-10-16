@@ -22,7 +22,10 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <header class="app-header">
   <a class="app-header-logo" href="/" title="All staged pull requests">${icon('git-pull-request', { size: 24 })}</a>
   <nav class="app-header-context">${opts.crumbs ?? html`<a href="/"><strong>laatsux</strong></a>`}</nav>
-  <div class="app-header-actions">${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}</div>
+  <div class="app-header-actions">
+    <a class="app-header-button" href="/settings" title="Settings" aria-label="Settings">${icon('gear')}</a>
+    ${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}
+  </div>
 </header>
 <div id="main"${data}>${opts.body}</div>
 <div id="toast" class="toast" hidden></div>
@@ -85,6 +88,13 @@ export interface CommentView {
   anchor: string;
   markdownCtx?: Parameters<typeof renderMarkdown>[1];
   deletable?: boolean;
+  priority?: 'high' | 'medium' | 'low' | null;
+}
+
+const PRIORITY_TEXT = { high: 'High', medium: 'Medium', low: 'Low' } as const;
+
+export function priorityPill(priority: CommentView['priority']): Safe {
+  return priority ? html`<span class="Label Label--priority Label--priority-${priority}" title="Priority">${PRIORITY_TEXT[priority]}</span>` : raw('');
 }
 
 /** A full-width comment with avatar, as used in the conversation timeline. */
@@ -141,6 +151,7 @@ export function threadComment(s: Service, c: CommentView): Safe {
     ${c.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}
     ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
     <span class="flex-auto"></span>
+    ${priorityPill(c.priority)}
     ${c.editPath ? commentMenu(c) : ''}
   </div>
   <div class="review-comment-body">${commentBodyAndEditor(c)}</div>
@@ -218,6 +229,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     isAuthor: c.author_id === o.pull.author_id,
     anchor: `discussion_r${c.id}`,
     markdownCtx: { suggestionLines, suggestionLang: lang },
+    priority: c.priority,
   });
   const range = root.start_line && root.start_line !== root.line ? `lines ${root.start_line} to ${root.line}` : root.line ? `line ${root.line}` : '';
   let title: Safe;
