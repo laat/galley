@@ -49,8 +49,17 @@ feedback, and the loop repeats until the user publishes it.
    laatsux pr wait
    ```
 
-   In Claude Code, run it with `run_in_background` so you are woken when it returns, and
-   tell the user you are waiting. `--timeout 10m` bounds it (exit code 124 on timeout).
+   It can block for hours, longer than most shell tools let a command run. Tell the user you
+   are waiting, and run it the way your agent allows:
+
+   - In Claude Code, run it with `run_in_background` so you are woken when it returns.
+   - In Codex, the command keeps running when the tool call returns a session ID. Poll that
+     session (`write_stdin` with no input, `yield_time_ms` up to 300000) until it exits.
+   - Where the shell tool kills a command after a time limit (opencode's does after 2 minutes,
+     unless you pass a larger `timeout`), add `--timeout` under that limit, for example
+     `laatsux pr wait --timeout 9m` with a tool timeout of 10 minutes. On exit code 124 it
+     timed out with no feedback: run it again. Nothing is lost between runs, because feedback
+     counts as seen only once a wait has printed it.
 
 3. Read what it printed. Each review thread looks like this:
 

@@ -37,11 +37,16 @@ mkdir -p "$dir" && ln -s "$PWD/bin/laatsux.ts" "$dir/gh-laatsux"
 ```
 
 Teach your agents the workflow with the `stage-pr` skill in [`skills/stage-pr/SKILL.md`](skills/stage-pr/SKILL.md).
-Agents use it when you say "stage a PR", or when you run `/stage-pr`:
+Agents use it when you say "stage a PR", or when you run `/stage-pr` in Claude Code. Codex
+and opencode read skills from `~/.agents/skills`, Claude Code from `~/.claude/skills`:
 
 ```sh
-ln -s "$PWD/skills/stage-pr" ~/.claude/skills/stage-pr
+mkdir -p ~/.agents/skills ~/.claude/skills
+ln -s "$PWD/skills/stage-pr" ~/.agents/skills/stage-pr       # Codex, opencode
+ln -s ~/.agents/skills/stage-pr ~/.claude/skills/stage-pr    # Claude Code
 ```
+
+opencode reads `~/.claude/skills` too, and loads a skill it finds in both once.
 
 ## Run
 
@@ -73,7 +78,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` |
+| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` gives up after 10 minutes with exit code 124 |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux serve` | Run the server and web UI |
