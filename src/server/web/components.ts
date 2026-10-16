@@ -4,7 +4,7 @@ import { avatarUrl } from '../github.ts';
 import { avatar, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 
-export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
+export function layout(s: Service, opts: { title: string; crumbs?: Safe; subnav?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
   const data = Object.entries(opts.data ?? {}).map(([k, v]) => html` data-${raw(k)}="${v}"`);
   return (
@@ -19,19 +19,40 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <script src="/static/app.js" defer></script>
 </head>
 <body data-live="${opts.live ?? ''}" data-viewer="${viewer.login}">
-<header class="app-header">
+<header class="app-header-wrap">
+<div class="app-header">
   <a class="app-header-logo" href="/" title="All staged pull requests">${icon('git-pull-request', { size: 24 })}</a>
   <nav class="app-header-context">${opts.crumbs ?? html`<a href="/"><strong>laatsux</strong></a>`}</nav>
   <div class="app-header-actions">
     <a class="app-header-button" href="/settings" title="Settings" aria-label="Settings">${icon('gear')}</a>
     ${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}
   </div>
+</div>
+${opts.subnav ?? ''}
 </header>
 <div id="main"${data}>${opts.body}</div>
 <div id="toast" class="toast" hidden></div>
 </body>
 </html>`.value
   );
+}
+
+/**
+ * The repository's tabs, as on GitHub: the staged pull requests here, and the pull requests
+ * and issues of the repository on GitHub (opening there).
+ */
+export function repoNav(s: Service, repo: RepoRow): Safe {
+  const staged = s.pulls(repo, { state: 'open' }).length;
+  const slug = repo.github_slug;
+  const counts = slug ? s.githubCounts(slug) : null;
+  const counter = (n: number | undefined) => (n === undefined ? '' : html` <span class="Counter">${n}</span>`);
+  const external = (path: string, iconName: string, label: string, n: number | undefined) =>
+    html`<a class="UnderlineNav-item" href="https://github.com/${slug}/${path}" target="_blank" rel="noopener" title="${label} on GitHub">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
+  return html`<nav class="UnderlineNav" aria-label="Repository">
+  <a class="UnderlineNav-item selected" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} Staged${counter(staged)}</a>
+  ${slug ? external('pulls', 'mark-github', 'Pull requests', counts?.pulls) : ''}
+  ${slug ? external('issues', 'issue-opened', 'Issues', counts?.issues) : ''}
+</nav>`;
 }
 
 export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {

@@ -153,14 +153,33 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .container-xl { max-width: 1280px; }
 .container-full { max-width: none; }
 
+.app-header-wrap { background: var(--bg-subtle); border-bottom: 1px solid var(--border); }
 .app-header {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 16px 24px;
-  background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border);
 }
+.app-header + .UnderlineNav { margin-top: -8px; }
+.UnderlineNav { display: flex; gap: 8px; padding: 0 16px; overflow-x: auto; }
+.UnderlineNav-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  height: 48px;
+  color: var(--fg);
+  white-space: nowrap;
+  isolation: isolate;
+}
+.UnderlineNav-item::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; bottom: 8px; border-radius: 6px; z-index: -1; }
+.UnderlineNav-item:hover { text-decoration: none; }
+.UnderlineNav-item:hover::before { background: var(--neutral-muted); }
+.UnderlineNav-item .octicon { color: var(--fg-muted); }
+.UnderlineNav-item.selected { font-weight: 600; }
+.UnderlineNav-item.selected::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 6px; background: #fd8c73; }
+.UnderlineNav-item .UnderlineNav-external { width: 12px; height: 12px; }
 .app-header-logo {
   display: inline-flex;
   align-items: center;
