@@ -399,11 +399,13 @@ export class Service {
     const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', stale.id)!;
     const repo = this.repoById(pull.repo_id);
     const git = this.git(repo);
+    // Callers that joined this sync get the row as it is when it ends, not as it was when it began.
+    const current = () => this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
     const head = await git.resolve(`refs/heads/${pull.head_ref}`);
-    if (!head) return pull; // Branch deleted locally; keep showing the last known state.
+    if (!head) return current(); // Branch deleted locally; keep showing the last known state.
     const baseTip = await this.baseCommit(repo, pull.base_ref);
     const mergeBase = (baseTip && (await git.mergeBase(baseTip, head))) ?? pull.base_sha;
-    if (head === pull.head_sha && mergeBase === pull.base_sha) return pull;
+    if (head === pull.head_sha && mergeBase === pull.base_sha) return current();
 
     const forced = !(await git.isAncestor(pull.head_sha, head));
     const newCommits = forced ? [] : (await git.log(pull.head_sha, head)).map((c) => c.sha);
@@ -418,7 +420,7 @@ export class Service {
     });
     await this.pin(git, pull, seq, head);
     this.emit(pull.id, 'pushed', author);
-    return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
+    return current();
   }
 
   /** Check every open pull request for pushes. Called on an interval by the server. */
