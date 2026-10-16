@@ -42,6 +42,18 @@ function git(...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
 }
 
+/** A commit on top of `parent` whose short SHA is all digits, as about one commit in 27 has by chance. */
+function digitCommit(parent: string): string {
+  const tree = git('rev-parse', `${parent}^{tree}`);
+  for (let i = 0; ; i++) {
+    const body = `tree ${tree}\nparent ${parent}\nauthor Dev <dev@example.com> 1700000000 +0000\ncommitter Dev <dev@example.com> 1700000000 +0000\n\nDigits ${i}\n`;
+    const sha = createHash('sha1').update(`commit ${Buffer.byteLength(body)}\0${body}`).digest('hex');
+    if (!/^[1-9]\d{6}/.test(sha)) continue;
+    assert.equal(execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'], { cwd: repo, input: body, encoding: 'utf8' }).trim(), sha);
+    return sha;
+  }
+}
+
 async function cli(args: string[], opts: { input?: string; actor?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   const child = execFile(process.execPath, [BIN, ...args], {
     cwd: repo,
@@ -129,6 +141,7 @@ if (gate) {
 after(async () => {
   await server?.close();
   rmSync(dir, { recursive: true, force: true });
+  rmSync(configDir, { recursive: true, force: true });
 });
 
 test('the agent loop, from staging to publishing', async (t) => {
@@ -151,6 +164,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     const r = await cli(['pr', 'view', '--json', 'number,title,state,author,headRefName,isDraft']);
     assert.deepEqual(JSON.parse(r.stdout), { number: 1, title: 'Add multiplication', state: 'OPEN', author: { login: 'agent', is_bot: true }, headRefName: 'feature/mul', isDraft: false });
     const jq = await cli(['pr', 'view', '1', '--json', 'commits', '--jq', '.commits[].messageHeadline']);
+    assert.equal(jq.code, 0, jq.stderr);
     assert.equal(jq.stdout.trim(), 'Add mul');
     const list = await cli(['pr', 'list']);
     assert.match(list.stdout, /^1\tAdd multiplication\tfeature\/mul\tOPEN\t/);
@@ -236,6 +250,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     const edit = await cli(['pr', 'edit', '--title', 'Add multiplication helper']);
     assert.equal(edit.code, 0, edit.stderr);
     const api = await cli(['api', 'repos/{owner}/{repo}/pulls/1/comments', '--jq', '.[] | "\\(.user.login): \\(.body)"']);
+    assert.equal(api.code, 0, api.stderr);
     assert.equal(api.stdout, 'reviewer: Add a doc comment.\nreviewer: Range.\nagent: Done.\n');
     // The reply is feedback for nobody: it is the agent's own.
     const pr = await human('GET', '/api/repos/acme/widgets/pulls/1');
@@ -1821,6 +1836,15 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal(await browse(String(n)), `${server.url}/acme/widgets/pull/${n}`);
     assert.equal(await browse(), `${server.url}/acme/widgets`);
     assert.equal(await browse(head.slice(0, 7)), `${server.url}/acme/widgets/tree/${head}`);
+    // A number is a pull request when there is one; otherwise all digits can be a commit SHA.
+    const digits = digitCommit(head);
+    assert.equal(await browse(digits.slice(0, 7)), `${server.url}/acme/widgets/tree/${digits}`);
+    const none = await cli(['browse', '99999']);
+    assert.equal(none.code, 1);
+    assert.match(none.stderr, /no pull request #99999 in acme\/widgets/);
+    const neither = await cli(['browse', '1234567']);
+    assert.equal(neither.code, 1);
+    assert.match(neither.stderr, /no pull request or commit "1234567" in acme\/widgets/);
     const missing = await cli(['browse', 'doomed.txt']);
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /doomed\.txt does not exist at [0-9a-f]{7}/);

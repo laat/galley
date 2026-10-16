@@ -7,7 +7,8 @@ import { rendersByDefault } from '../rendered.ts';
 
 export const BROWSE_USAGE = `Print the web UI's URL for a staged pull request, a file or a directory, and open it
 in the browser when run at a terminal. Like \`gh browse\`, but the URLs name a commit, so
-they keep pointing at the code you mean.
+they keep pointing at the code you mean. A number is a pull request; when no pull request
+has it, a commit SHA.
 
 USAGE
   laatsux browse [<number> | <path>[:<line>[-<line>]] | <commit-SHA>] [flags]
@@ -138,12 +139,23 @@ async function target(client: Client, cwd: string, arg: string | undefined, v: {
   };
   const rev = v.commit ?? v.branch;
   if (arg === undefined) return rev ? `${base}/tree/${await commitOf(rev)}` : base;
-  if (/^#?\d+$/.test(arg)) return `${base}/pull/${arg.replace('#', '')}`;
+  // A number is a pull request when there is one, as in gh. Otherwise all digits can be a commit SHA.
+  const number = arg.match(/^#?(\d+)$/)?.[1];
+  if (number) {
+    try {
+      await client.get(`${repoPath(repo)}/gh/pulls/${number}?fields=number`);
+      return `${base}/pull/${number}`;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e;
+    }
+  }
   // A commit SHA, unless a file has that name.
-  if (/^[0-9a-f]{7,40}$/.test(arg) && !rev) {
+  const shaLike = /^[0-9a-f]{7,40}$/.test(arg) && !rev;
+  if (shaLike) {
     const sha = await look.commit(arg);
     if (sha) return `${base}/tree/${sha}`;
   }
+  if (number) throw new CliError(`no pull request ${shaLike ? `or commit "${arg}"` : `#${number}`} in ${repo.owner}/${repo.name}`);
 
   const m = arg.match(/^(.*?)(?::(\d+)(?:-(\d+))?)?$/)!;
   const sha = await commitOf(rev ?? 'HEAD');
