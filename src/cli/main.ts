@@ -1,0 +1,93 @@
+import { parseArgs } from 'node:util';
+import { ApiError, CliError, Client } from './client.ts';
+import { pr } from './pr.ts';
+import { api } from './api.ts';
+import { err, out } from './output.ts';
+import { DEFAULT_PORT, VERSION, dataDir } from '../config.ts';
+
+const USAGE = `laatsux: a staging area for pull requests.
+
+Agents stage pull requests with a CLI that mirrors gh. You review them in a
+GitHub-like web UI, loop with the agent, and publish to GitHub when they are right.
+
+USAGE
+  laatsux <command> <subcommand> [flags]
+
+COMMANDS
+  pr:          Work with staged pull requests (like \`gh pr\`)
+  api:         Make an API request (like \`gh api\`)
+  serve:       Run the server and web UI
+  browse:      Open the web UI
+
+ENVIRONMENT
+  LAATSUX_URL     Server URL (default http://localhost:${DEFAULT_PORT})
+  LAATSUX_ACTOR   Who the CLI acts as (default: detected agent, or you)
+  LAATSUX_HOME    Data directory for the server (default ${dataDir()})
+`;
+
+async function serve(args: string[]): Promise<number> {
+  const { values: v } = parseArgs({
+    args,
+    options: {
+      port: { type: 'string', short: 'p' },
+      host: { type: 'string', default: '127.0.0.1' },
+      open: { type: 'boolean' },
+    },
+  });
+  const { startServer } = await import('../server/server.ts');
+  const port = Number(v.port ?? process.env.LAATSUX_PORT ?? DEFAULT_PORT);
+  const server = await startServer({ port, host: String(v.host), dataDir: dataDir() });
+  out(`laatsux is serving ${server.url} (data in ${dataDir()})`);
+  if (v.open) (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore' });
+  await new Promise<void>((resolve) => {
+    const stop = () => server.close().then(resolve);
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+  return 0;
+}
+
+export async function main(argv: string[], cwd = process.cwd()): Promise<number> {
+  const [cmd, ...rest] = argv;
+  const client = new Client();
+  try {
+    switch (cmd) {
+      case 'pr':
+        return await pr(client, cwd, rest);
+      case 'api':
+        return await api(client, cwd, rest);
+      case 'serve':
+      case 'server':
+        return await serve(rest);
+      case 'browse': {
+        const url = client.base;
+        (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { stdio: 'ignore', detached: true }).unref();
+        out(url);
+        return 0;
+      }
+      case '--version':
+      case 'version':
+        out(`laatsux version ${VERSION}`);
+        return 0;
+      case undefined:
+      case 'help':
+      case '--help':
+      case '-h':
+        out(USAGE);
+        return 0;
+      default:
+        err(`unknown command "${cmd}" for "laatsux"\n\n${USAGE}`);
+        return 1;
+    }
+  } catch (e) {
+    if (e instanceof ApiError) {
+      err(e.message);
+      return e.code;
+    }
+    if (e instanceof CliError) {
+      err(e.message);
+      return e.code;
+    }
+    throw e;
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "laatsux",
+  "version": "0.1.0",
+  "description": "A local staging area for pull requests: agents open PRs with a gh-compatible CLI, you review them in a GitHub-like UI, then publish to GitHub.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "laatsux": "./bin/laatsux.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node bin/laatsux.ts serve",
+    "dev": "node --watch bin/laatsux.ts serve",
+    "test": "node --test 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "@primer/octicons": "^19.40.0",
+    "highlight.js": "^11.12.0",
+    "hono": "^4.13.13",
+    "marked": "^18.1.1",
+    "sanitize-html": "^2.18.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/sanitize-html": "^2.16.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,648 @@
+import type { Commit } from '../git.ts';
+import type { FileDiff } from '../diff.ts';
+import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
+import { publishFingerprint, type Ctx, type Service, type Thread } from '../service.ts';
+import { avatarUrl, reviewDecision } from '../github.ts';
+import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
+import { renderMarkdown } from './markdown.ts';
+import {
+  authorLink,
+  copyButton,
+  layout,
+  markdownEditor,
+  pullIcon,
+  repoCrumbs,
+  reviewThread,
+  stateBadge,
+  timelineBadge,
+  timelineComment,
+} from './components.ts';
+import { diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
+
+// ------------------------------------------------------------------ lists
+
+export function pullList(s: Service, opts: { repo: RepoRow | null; state: string }): string {
+  const all = s.pulls(opts.repo, { state: 'all' });
+  // "Open" means not closed: publishing does not end the review loop.
+  const counts = {
+    open: all.filter((p) => p.state !== 'closed').length,
+    published: all.filter((p) => p.state === 'published').length,
+    closed: all.filter((p) => p.state === 'closed').length,
+  };
+  const state = ['open', 'published', 'closed', 'all'].includes(opts.state) ? opts.state : 'open';
+  const shown = state === 'all' ? all : state === 'open' ? all.filter((p) => p.state !== 'closed') : all.filter((p) => p.state === state);
+  const base = opts.repo ? `/${opts.repo.owner}/${opts.repo.name}` : '/';
+  const tab = (key: string, iconName: string, label: string, n: number) =>
+    html`<a class="list-tab${state === key ? ' selected' : ''}" href="${base}?state=${key}">${icon(iconName)} ${n} ${label}</a>`;
+  const viewer = s.viewer();
+  const rows = shown.map((p) => {
+    const repo = s.repoById(p.repo_id);
+    const author = s.db.actorById(p.author_id);
+    const reviews = s.reviews(p, viewer).filter((r) => r.state !== 'PENDING');
+    const decision = reviews.length ? reviewDecision(reviews) : null;
+    const comments = s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE pull_id = ? AND ' + "(review_id IS NULL OR review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))", p.id)!.n;
+    const waiting = (s.waiters.get(p.id) ?? 0) > 0;
+    return html`<div class="Box-row pr-row">
+  <span class="pr-row-icon">${pullIcon(p)}</span>
+  <div class="pr-row-main">
+    ${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
+    <a class="pr-row-title" href="/${repo.owner}/${repo.name}/pull/${p.number}">${p.title}</a>
+    ${p.draft && p.state === 'open' ? html`<span class="Label">Draft</span>` : ''}
+    ${waiting ? html`<span class="Label Label--success">${icon('dot-fill')} ${author.login} is waiting for review</span>` : ''}
+    <div class="pr-row-meta">#${p.number} opened ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${
+      decision === 'CHANGES_REQUESTED'
+        ? html` · <span class="color-fg-danger">Changes requested</span>`
+        : decision === 'APPROVED'
+          ? html` · <span class="color-fg-success">Approved</span>`
+          : ''
+    }${p.published_url ? html` · <a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : ''}</div>
+  </div>
+  <div class="pr-row-side">${comments ? html`<a class="link-muted" href="/${repo.owner}/${repo.name}/pull/${p.number}">${icon('comment')} ${comments}</a>` : ''}</div>
+</div>`;
+  });
+  const empty = html`<div class="blankslate">
+  ${icon('git-pull-request', { size: 24 })}
+  <h3>No ${state === 'all' ? '' : state + ' '}staged pull requests${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
+  <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
+</div>`;
+  const body = html`<div class="container container-lg">
+  <div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1></div>
+  <div class="Box pr-list">
+    <div class="Box-header list-tabs">
+      ${tab('open', 'git-pull-request', 'Open', counts.open)}
+      ${tab('published', 'mark-github', 'Published', counts.published)}
+      ${tab('closed', 'git-pull-request-closed', 'Closed', counts.closed)}
+    </div>
+    ${rows.length ? rows : empty}
+  </div>
+</div>`;
+  return layout(s, { title: opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux', crumbs: opts.repo ? repoCrumbs(opts.repo) : undefined, body, live: 'all' });
+}
+
+// ------------------------------------------------------------ pull pages
+
+interface PullPage {
+  s: Service;
+  ctx: Ctx;
+  repo: RepoRow;
+  pull: PullRow;
+  viewer: Actor;
+  author: Actor;
+  files: FileDiff[];
+  commits: Commit[];
+  threads: Thread[];
+  reviews: ReviewRow[];
+  pending: ReviewRow | undefined;
+  apiBase: string;
+  htmlBase: string;
+}
+
+export async function loadPull(s: Service, owner: string, name: string, number: number): Promise<PullPage> {
+  const ctx = await s.ctx(owner, name, number);
+  const viewer = s.viewer();
+  const files = await s.files(ctx);
+  const commits = await s.commits(ctx);
+  return {
+    s,
+    ctx,
+    repo: ctx.repo,
+    pull: ctx.pull,
+    viewer,
+    author: s.db.actorById(ctx.pull.author_id),
+    files,
+    commits,
+    threads: await s.threads(ctx, viewer, files, commits),
+    reviews: s.reviews(ctx.pull, viewer),
+    pending: s.pendingReview(ctx.pull, viewer),
+    apiBase: `/api/repos/${owner}/${name}/pulls/${number}`,
+    htmlBase: `/${owner}/${name}/pull/${number}`,
+  };
+}
+
+function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', content: Safe, extraData: Record<string, string | number> = {}): string {
+  const { s, repo, pull, author, files, commits } = p;
+  const additions = files.reduce((n, f) => n + f.additions, 0);
+  const deletions = files.reduce((n, f) => n + f.deletions, 0);
+  const conversationCount = s.issueComments(pull).length + p.threads.filter((t) => !t.pending).reduce((n, t) => n + 1 + t.replies.length, 0);
+  const tabLink = (key: string, href: string, iconName: string, label: string, count: number) =>
+    html`<a class="tabnav-tab${tab === key ? ' selected' : ''}" href="${href}">${icon(iconName)} ${label} <span class="Counter">${count}</span></a>`;
+  const header = html`<div class="pr-header">
+  <div class="container container-xl">
+    <div class="gh-header-title-row js-title-view">
+      <h1 class="gh-header-title"><bdi>${pull.title}</bdi> <span class="gh-header-number">#${pull.number}</span></h1>
+      <div class="gh-header-actions">
+        <button type="button" class="btn btn-sm js-title-edit">Edit</button>
+        ${pull.published_url ? html`<a class="btn btn-sm" href="${pull.published_url}" target="_blank" rel="noopener">${icon('mark-github')} View on GitHub</a>` : ''}
+      </div>
+    </div>
+    <form class="gh-header-edit js-api-form js-title-form" hidden data-api="${p.apiBase}" data-method="PATCH">
+      <input class="form-control gh-header-edit-input" name="title" value="${pull.title}" aria-label="Title" autocomplete="off">
+      <button type="submit" class="btn btn-sm">Save</button>
+      <button type="button" class="btn-link js-title-cancel">Cancel</button>
+    </form>
+    <div class="gh-header-meta">
+      ${stateBadge(pull)}
+      <div class="gh-header-meta-text">
+        ${authorLink(author)} ${pull.state === 'published' ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
+        <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
+      </div>
+    </div>
+    <nav class="tabnav">
+      ${tabLink('conversation', p.htmlBase, 'comment-discussion', 'Conversation', conversationCount)}
+      ${tabLink('commits', `${p.htmlBase}/commits`, 'git-commit', 'Commits', commits.length)}
+      ${tabLink('files', `${p.htmlBase}/files`, 'file-diff', 'Files changed', files.length)}
+      <span class="tabnav-extra diffstat"><span class="color-fg-success">+${additions}</span> <span class="color-fg-danger">−${deletions}</span> ${diffstatBlocks(additions, deletions)}</span>
+    </nav>
+  </div>
+</div>`;
+  return layout(s, {
+    title: `${pull.title} by ${author.login} · Pull Request #${pull.number} · ${repo.owner}/${repo.name}`,
+    crumbs: repoCrumbs(repo, html`<span class="crumb-sep">/</span><a href="${p.htmlBase}">#${pull.number}</a>`),
+    body: html`${header}${content}`,
+    live: pull.id,
+    data: { 'api-base': p.apiBase, 'pull-id': pull.id, ...extraData },
+  });
+}
+
+function threadOpts(p: PullPage, standalone: boolean) {
+  const titles = new Map(p.commits.map((c) => [c.sha, c.message.split('\n')[0]]));
+  return { standalone, apiBase: p.apiBase, viewer: p.viewer, pull: p.pull, commitTitle: (sha: string) => titles.get(sha) };
+}
+
+// ----------------------------------------------------------- conversation
+
+const REVIEW_TEXT: Record<string, { text: string; icon: string; cls: string }> = {
+  APPROVED: { text: 'approved these changes', icon: 'check', cls: 'timeline-badge--success' },
+  CHANGES_REQUESTED: { text: 'requested changes', icon: 'file-diff', cls: 'timeline-badge--danger' },
+  COMMENTED: { text: 'reviewed', icon: 'eye', cls: '' },
+  DISMISSED: { text: 'had a review dismissed', icon: 'x', cls: '' },
+};
+
+function commitList(p: PullPage, commits: Commit[]): Safe {
+  return html`<div class="timeline-commits">${commits.map(
+    (c) => html`<div class="timeline-commit">
+    ${icon('git-commit', { cls: 'timeline-commit-icon' })}
+    <a class="timeline-commit-title" href="${p.htmlBase}/files?commit=${c.sha}" title="${c.message}">${c.message.split('\n')[0]}</a>
+    <a class="timeline-commit-sha" href="${p.htmlBase}/files?commit=${c.sha}"><code>${shortSha(c.sha)}</code></a>
+  </div>`,
+  )}</div>`;
+}
+
+async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
+  const actor = p.s.db.actorById(e.actor_id);
+  const who = html`${avatar(avatarUrl(p.s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(actor)}`;
+  const data = JSON.parse(e.data);
+  const when = relTime(e.created_at);
+  switch (e.type) {
+    case 'pushed': {
+      if (data.forced) {
+        return timelineBadge(
+          'repo-push',
+          html`${who} force-pushed the <span class="branch-name branch-name-sm">${p.pull.head_ref}</span> branch from <code>${shortSha(data.before)}</code> to <code>${shortSha(data.after)}</code> ${when}
+          <a class="btn btn-sm btn-compare" href="${p.htmlBase}/files?range=${data.before}..${data.after}">Compare</a>`,
+          { id: `event-${e.id}` },
+        );
+      }
+      const commits = await p.ctx.git.log(data.before, data.after).catch(() => [] as Commit[]);
+      return html`${timelineBadge('repo-push', html`${who} added ${plural(commits.length, 'commit')} ${when}`, { id: `event-${e.id}` })}${commitList(p, commits)}`;
+    }
+    case 'renamed':
+      return timelineBadge('pencil', html`${who} changed the title <del class="color-fg-muted">${data.from}</del> <ins class="title-ins">${data.to}</ins> ${when}`);
+    case 'body_edited':
+      return timelineBadge(
+        'pencil',
+        html`${who} edited the description ${when}
+        <details class="body-diff"><summary class="btn-link">Show changes</summary>${lineDiff(data.from, data.to)}</details>`,
+      );
+    case 'base_changed':
+      return timelineBadge('git-branch', html`${who} changed the base branch from <span class="branch-name branch-name-sm">${data.from}</span> to <span class="branch-name branch-name-sm">${data.to}</span> ${when}`);
+    case 'closed':
+      return timelineBadge('git-pull-request-closed', html`${who} closed this pull request ${when}`, { cls: 'timeline-badge--closed' });
+    case 'reopened':
+      return timelineBadge('git-pull-request', html`${who} reopened this pull request ${when}`, { cls: 'timeline-badge--open' });
+    case 'published':
+      return timelineBadge(
+        'mark-github',
+        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.force ? ' (force-pushed)' : ''} ${when}`,
+        { cls: 'timeline-badge--done' },
+      );
+    case 'convert_to_draft':
+      return timelineBadge('git-pull-request-draft', html`${who} marked this pull request as draft ${when}`);
+    case 'ready_for_review':
+      return timelineBadge('eye', html`${who} marked this pull request as ready for review ${when}`);
+    default:
+      return null;
+  }
+}
+
+/** A small line-based LCS diff, for showing how the description changed. */
+function lineDiff(a: string, b: string): Safe {
+  const x = a.split('\n');
+  const y = b.split('\n');
+  const n = x.length;
+  const m = y.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = x[i] === y[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const rows: Safe[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) {
+      rows.push(html`<tr class="line context"><td class="blob-code blob-code-context"><span class="blob-marker"> </span>${x[i]}</td></tr>`);
+      i++;
+      j++;
+    } else if (j < m && (i === n || dp[i][j + 1] >= dp[i + 1][j])) {
+      rows.push(html`<tr class="line add"><td class="blob-code blob-code-add"><span class="blob-marker">+</span>${y[j++]}</td></tr>`);
+    } else {
+      rows.push(html`<tr class="line del"><td class="blob-code blob-code-del"><span class="blob-marker">-</span>${x[i++]}</td></tr>`);
+    }
+  }
+  return html`<table class="diff-table diff-snippet diff-text"><tbody>${rows}</tbody></table>`;
+}
+
+async function mergeBox(p: PullPage): Promise<Safe> {
+  const { s, pull, repo, viewer } = p;
+  const submitted = p.reviews.filter((r) => r.state !== 'PENDING');
+  const decision = submitted.length ? reviewDecision(submitted) : null;
+  const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
+  const waiting = (s.waiters.get(pull.id) ?? 0) > 0;
+  const rows: Safe[] = [];
+
+  if (decision === 'CHANGES_REQUESTED') {
+    rows.push(html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div><strong>Changes requested</strong><div class="color-fg-muted">${waiting ? `${p.author.login} is waiting for your next review.` : `${p.author.login} has the feedback.`}</div></div></div>`);
+  } else if (decision === 'APPROVED') {
+    rows.push(html`<div class="merge-row">${icon('check-circle-fill', { cls: 'color-fg-success' })}<div><strong>Changes approved</strong><div class="color-fg-muted">You approved the staged changes.</div></div></div>`);
+  } else {
+    rows.push(html`<div class="merge-row">${icon('dot-fill', { cls: 'color-fg-attention' })}<div><strong>Review pending</strong><div class="color-fg-muted">${waiting ? `${p.author.login} is waiting for your review.` : 'Nobody has reviewed these changes yet.'}</div></div></div>`);
+  }
+  rows.push(
+    unresolved
+      ? html`<div class="merge-row">${icon('comment-discussion', { cls: 'color-fg-attention' })}<div><strong>${plural(unresolved, 'unresolved conversation')}</strong><div class="color-fg-muted">Conversations stay in laatsux; they are not published.</div></div></div>`
+      : html`<div class="merge-row">${icon('check-circle-fill', { cls: 'color-fg-success' })}<div><strong>All conversations resolved</strong></div></div>`,
+  );
+
+  if (pull.state === 'closed') {
+    return html`<div class="merge-box merge-box--closed">
+      <span class="merge-box-icon">${icon('git-pull-request-closed', { size: 24 })}</span>
+      <div class="Box">${rows}<div class="merge-row merge-actions"><div><strong>This staged pull request is closed.</strong></div>
+        <button type="button" class="btn js-set-state" data-state="open">Reopen pull request</button></div></div>
+    </div>`;
+  }
+
+  const changed: string[] = [];
+  if (pull.published_url) {
+    if (pull.published_head_sha !== pull.head_sha) changed.push('commits');
+    if (pull.published_title !== pull.title) changed.push('title');
+    if (pull.published_body !== pull.body) changed.push('description');
+  }
+  const forceNeeded = !!pull.published_head_sha && pull.published_head_sha !== pull.head_sha && !(await p.ctx.git.isAncestor(pull.published_head_sha, pull.head_sha));
+  const target = repo.github_slug;
+  let publishRow: Safe;
+  if (!target) {
+    publishRow = html`<div class="merge-row merge-actions">${icon('alert', { cls: 'color-fg-attention' })}<div><strong>No GitHub remote</strong><div class="color-fg-muted">Remote <code>${repo.remote}</code> is not a github.com repository, so this pull request can not be published.</div></div></div>`;
+  } else if (pull.published_url && changed.length === 0) {
+    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-done' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version.</div></div>
+      <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div>`;
+  } else {
+    const verb = pull.published_url ? 'Publish update' : 'Publish pull request';
+    const what = pull.published_url
+      ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.`
+      : html`Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>) to <code>${repo.remote}</code> and opens a pull request on <strong>${target}</strong> with this title and description.`;
+    publishRow = html`<form class="merge-row merge-actions js-api-form js-publish-form" data-api="${p.apiBase}/publish" data-method="POST">
+      <input type="hidden" name="expected" value="${publishFingerprint(pull)}">
+      ${icon('rocket', { cls: 'color-fg-done' })}
+      <div class="flex-auto">
+        <strong>${pull.published_url ? 'Unpublished changes' : 'Ready to publish?'}</strong>
+        <div class="color-fg-muted">${what}</div>
+        <div class="merge-options">
+          ${pull.published_url ? '' : html`<label><input type="checkbox" name="draft"${pull.draft ? raw(' checked') : ''}> Open as a draft on GitHub</label>`}
+          <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (the branch history was rewritten)</label>
+        </div>
+        <div class="flash flash-error js-form-error" hidden></div>
+      </div>
+      <button type="submit" class="btn btn-primary btn-publish">${icon('mark-github')} ${verb}</button>
+    </form>`;
+  }
+  return html`<div class="merge-box${pull.state === 'published' ? ' merge-box--published' : ''}">
+    <span class="merge-box-icon">${pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
+    <div class="Box">${rows}${publishRow}</div>
+  </div>`;
+}
+
+function sidebar(p: PullPage): Safe {
+  const { s, pull, repo } = p;
+  const latest = new Map<number, ReviewRow>();
+  for (const r of p.reviews) if (r.state !== 'PENDING' && r.author_id !== pull.author_id) latest.set(r.author_id, r);
+  const reviewIcon: Record<string, Safe> = {
+    APPROVED: icon('check', { cls: 'color-fg-success' }),
+    CHANGES_REQUESTED: icon('file-diff', { cls: 'color-fg-danger' }),
+    COMMENTED: icon('comment', { cls: 'color-fg-muted' }),
+  };
+  const reviewers = latest.size
+    ? [...latest.values()].map((r) => {
+        const a = s.db.actorById(r.author_id);
+        return html`<li class="sidebar-person">${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${a.login}</span> ${reviewIcon[r.state] ?? ''}</li>`;
+      })
+    : html`<li class="color-fg-muted">No reviews yet</li>`;
+  const waiting = (s.waiters.get(pull.id) ?? 0) > 0;
+  const revisions = s.revisions(pull);
+  return html`<aside class="layout-sidebar">
+  <div class="sidebar-item"><h3 class="sidebar-heading">Reviewers</h3><ul class="sidebar-list">${reviewers}</ul></div>
+  <div class="sidebar-item"><h3 class="sidebar-heading">Author</h3>
+    <ul class="sidebar-list"><li class="sidebar-person">${avatar(avatarUrl(s, p.author), p.author.login, 20, p.author.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${p.author.login}</span></li></ul>
+    <p class="agent-status ${waiting ? 'agent-status--waiting' : ''}">${icon('dot-fill')} ${waiting ? 'Waiting for your review' : 'Not waiting (working, or done)'}</p>
+  </div>
+  <div class="sidebar-item"><h3 class="sidebar-heading">Revisions</h3>
+    <ol class="sidebar-list revision-list">${revisions.map((r, i) => {
+      const prev = revisions[i - 1];
+      return html`<li><a href="${p.htmlBase}/files${prev ? `?range=${prev.head_sha}..${r.head_sha}` : ''}" title="${prev ? 'Changes in this revision' : 'Files at the first revision'}"><code>${shortSha(r.head_sha)}</code></a> ${r.forced ? html`<span class="Label Label--small">force-push</span>` : ''} <span class="color-fg-muted">${relTime(r.created_at)}</span></li>`;
+    })}</ol>
+  </div>
+  <div class="sidebar-item"><h3 class="sidebar-heading">Repository</h3>
+    <p class="sidebar-text"><code class="wrap">${repo.work_dir ?? repo.git_dir}</code></p>
+    <p class="sidebar-text color-fg-muted">${repo.github_slug ? html`Publishes to <a href="https://github.com/${repo.github_slug}" target="_blank" rel="noopener">${repo.github_slug}</a>` : 'No GitHub remote'} · compared with <code>${repo.remote}/${pull.base_ref}</code></p>
+  </div>
+  <div class="sidebar-item">
+    <button type="button" class="btn-link color-fg-danger js-delete-pull" data-api="${p.apiBase}" data-next="/${repo.owner}/${repo.name}">${icon('trash')} Delete staged pull request</button>
+  </div>
+</aside>`;
+}
+
+export async function conversationPage(p: PullPage): Promise<string> {
+  const { s, pull, viewer } = p;
+  const items: { at: string; order: number; html: Safe }[] = [];
+  const revisions = s.revisions(pull);
+
+  if (revisions[0]) {
+    const first = revisions[0];
+    const commits = await p.ctx.git.log(first.base_sha, first.head_sha).catch(() => [] as Commit[]);
+    const who = html`${avatar(avatarUrl(s, p.author), p.author.login, 20, 'avatar-bot avatar-small')} ${authorLink(p.author)}`;
+    items.push({ at: first.created_at, order: 1, html: html`${timelineBadge('repo-push', html`${who} added ${plural(commits.length, 'commit')} ${relTime(first.created_at)}`)}${commitList(p, commits)}` });
+  }
+  for (const e of s.events(pull)) {
+    const h = await eventItem(p, e);
+    if (h) items.push({ at: e.created_at, order: 2, html: h });
+  }
+  for (const c of s.issueComments(pull)) {
+    const a = s.db.actorById(c.author_id);
+    items.push({
+      at: c.created_at,
+      order: 3,
+      html: timelineComment(s, {
+        id: c.id,
+        author: a,
+        body: c.body,
+        createdAt: c.created_at,
+        updatedAt: c.updated_at,
+        editPath: c.author_id === viewer.id ? `/api/repos/${p.repo.owner}/${p.repo.name}/issues/comments/${c.id}` : undefined,
+        isAuthor: c.author_id === pull.author_id,
+        anchor: `issuecomment-${c.id}`,
+      }),
+    });
+  }
+  const opts = threadOpts(p, true);
+  for (const r of p.reviews) {
+    if (r.state === 'PENDING' || !r.submitted_at) continue;
+    const a = s.db.actorById(r.author_id);
+    const threads = p.threads.filter((t) => t.root.review_id === r.id);
+    const meta = REVIEW_TEXT[r.state] ?? REVIEW_TEXT.COMMENTED;
+    const single = r.state === 'COMMENTED' && !r.body.trim() && threads.length === 1;
+    const text = single ? (threads[0].root.subject_type === 'commit' ? 'commented on a commit' : html`commented on <code>${threads[0].root.path}</code>`) : meta.text;
+    const who = html`${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(a)}`;
+    items.push({
+      at: r.submitted_at,
+      order: 4,
+      html: html`<div class="timeline-review" id="pullrequestreview-${r.id}">
+        ${timelineBadge(single ? 'comment' : meta.icon, html`${who} ${text} <a class="link-muted" href="#pullrequestreview-${r.id}">${relTime(r.submitted_at)}</a>`, { cls: single ? '' : meta.cls })}
+        <div class="timeline-review-body">
+          ${r.body.trim() ? html`<div class="review-summary"><div class="comment-body markdown-body">${raw(renderMarkdown(r.body))}</div></div>` : ''}
+          ${threads.map((t) => reviewThread(s, t, opts))}
+        </div>
+      </div>`,
+    });
+  }
+  items.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order);
+
+  const description = timelineComment(
+    s,
+    {
+      id: 0,
+      author: p.author,
+      body: pull.body,
+      createdAt: pull.created_at,
+      updatedAt: pull.created_at,
+      editPath: p.apiBase,
+      deletable: false,
+      isAuthor: true,
+      anchor: 'pullrequest-description',
+    },
+    html`${authorLink(p.author)} opened this pull request ${relTime(pull.created_at)}`,
+  );
+
+  const newComment = html`<div class="timeline-comment-group new-comment">
+  <span class="timeline-avatar">${avatar(avatarUrl(s, viewer), viewer.login, 40, 'avatar-circle')}</span>
+  <form class="timeline-comment js-api-form" data-api="/api/repos/${p.repo.owner}/${p.repo.name}/issues/${pull.number}/comments" data-method="POST" data-reset="true">
+    <div class="timeline-comment-header"><h3 class="timeline-comment-header-text"><strong>Add a comment</strong></h3></div>
+    <div class="new-comment-body">
+      ${markdownEditor({ placeholder: 'Leave a comment. The agent reads it with `laatsux pr view --comments` or `laatsux pr wait`.', draftKey: 'new-comment' })}
+      <div class="flash flash-error js-form-error" hidden></div>
+      <div class="form-actions">
+        ${pull.state === 'closed' ? html`<button type="button" class="btn js-set-state" data-state="open">${icon('git-pull-request')} Reopen pull request</button>` : html`<button type="button" class="btn js-set-state" data-state="closed">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })} Close pull request</button>`}
+        <button type="submit" class="btn btn-primary">Comment</button>
+      </div>
+    </div>
+  </form>
+</div>`;
+
+  const content = html`<div class="container container-xl layout">
+  <div class="layout-main">
+    <div class="timeline">
+      ${description}
+      ${items.map((i) => i.html)}
+    </div>
+    ${await mergeBox(p)}
+    ${newComment}
+  </div>
+  ${sidebar(p)}
+</div>`;
+  return pullLayout(p, 'conversation', content);
+}
+
+// ---------------------------------------------------------------- commits
+
+export function commitsPage(p: PullPage): string {
+  const { s } = p;
+  const groups = Map.groupBy(p.commits, (c) => new Date(c.committerDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
+  const opts = threadOpts(p, false);
+  const commitThreads = (sha: string) => p.threads.filter((t) => t.root.subject_type === 'commit' && t.root.commit_id === sha);
+  const content = html`<div class="container container-xl commits-page" data-commit-id="${p.pull.head_sha}" data-pending-review="${p.pending?.id ?? ''}">
+  ${[...groups].map(
+    ([date, commits]) => html`<div class="commit-group">
+    <h2 class="commit-group-title">${icon('git-commit')} Commits on ${date}</h2>
+    <ol class="Box commit-list">${commits.map((c) => {
+      const [headline, ...rest] = c.message.split('\n');
+      const desc = rest.join('\n').trim();
+      const threads = commitThreads(c.sha);
+      return html`<li class="Box-row commit" id="commit-${c.sha}" data-commit="${c.sha}">
+        <div class="commit-row">
+          <div class="commit-main">
+            <p class="commit-title"><a href="${p.htmlBase}/files?commit=${c.sha}">${headline}</a>${desc ? html` <button type="button" class="ellipsis-expander js-commit-expand" aria-label="Show description">…</button>` : ''}</p>
+            ${desc ? html`<pre class="commit-desc" hidden>${desc}</pre>` : ''}
+            <div class="commit-meta">${avatar(`/avatars/${encodeURIComponent(c.authorName)}.svg`, c.authorName, 16, 'avatar-circle')} <strong>${c.authorName}</strong> committed ${relTime(c.committerDate)}</div>
+          </div>
+          <div class="commit-actions">
+            <button type="button" class="btn btn-sm js-commit-comment" title="Comment on this commit's message">${icon('comment')}${threads.length ? html` ${threads.length}` : ''}</button>
+            <a class="btn btn-sm commit-sha" href="${p.htmlBase}/files?commit=${c.sha}"><code>${shortSha(c.sha)}</code></a>
+            ${copyButton(c.sha, 'Copy full SHA')}
+          </div>
+        </div>
+        <div class="commit-threads">${threads.map((t) => reviewThread(s, t, opts))}</div>
+      </li>`;
+    })}</ol>
+  </div>`,
+  )}
+  <p class="color-fg-muted commits-hint">${icon('info')} Comments on a commit are about its message. The agent sees them as review threads and can reword the commit.</p>
+</div>`;
+  return pullLayout(p, 'commits', content);
+}
+
+// ------------------------------------------------------------------ files
+
+export async function filesPage(p: PullPage, query: { commit?: string; range?: string }, mode: DiffMode): Promise<string> {
+  const { s, pull, ctx } = p;
+  let base = pull.base_sha;
+  let head = pull.head_sha;
+  let label: Safe = html`<strong>all commits</strong>`;
+  let note: Safe | null = null;
+  let files = p.files;
+  if (query.commit) {
+    const sha = await ctx.git.resolve(query.commit);
+    if (sha) {
+      const commit = p.commits.find((c) => c.sha === sha) ?? (await ctx.git.commit(sha));
+      base = (await ctx.git.resolve(`${sha}^`)) ?? sha;
+      head = sha;
+      files = await ctx.git.diff(base === sha ? null : base, sha);
+      label = html`<code>${shortSha(sha)}</code>`;
+      note = html`Showing changes from commit <code>${shortSha(sha)}</code> <strong>${commit?.message.split('\n')[0] ?? ''}</strong>`;
+    }
+  } else if (query.range) {
+    const [from, to] = query.range.split('..');
+    const a = await ctx.git.resolve(from);
+    const b = await ctx.git.resolve(to);
+    if (a && b) {
+      base = a;
+      head = b;
+      files = await ctx.git.diff(a, b);
+      label = html`<code>${shortSha(a)}..${shortSha(b)}</code>`;
+      note = html`Showing changes between <code>${shortSha(a)}</code> and <code>${shortSha(b)}</code>. After a rebase this includes changes from the base branch.`;
+    }
+  }
+  const fullView = base === pull.base_sha && head === pull.head_sha;
+
+  // Threads that belong in this view, keyed by where they sit.
+  const threadsAt = new Map<string, Thread[]>();
+  const fileThreads = new Map<string, Thread[]>();
+  for (const t of p.threads) {
+    const r = t.root;
+    if (r.subject_type === 'commit') continue;
+    let line: number | null = null;
+    if (fullView) {
+      if (t.placement.outdated) continue;
+      line = t.placement.line;
+    } else if (r.commit_id === head && r.base_commit_id === base) {
+      line = r.line;
+    } else continue;
+    if (r.subject_type === 'file') {
+      fileThreads.set(r.path!, [...(fileThreads.get(r.path!) ?? []), t]);
+      continue;
+    }
+    const key = threadKey(r.path!, r.side!, line!);
+    threadsAt.set(key, [...(threadsAt.get(key) ?? []), t]);
+  }
+
+  const viewed = s.viewed(pull);
+  const opts = threadOpts(p, false);
+  const rendered = files.map((f) => renderFile(f, { mode, threadsAt, viewed, fileThreads, renderThread: (t, lines) => reviewThread(s, t, { ...opts, suggestionLines: lines }) }));
+  const viewedCount = fullView ? files.filter((f) => viewed.get(f.path) === (f.newBlob ?? f.oldBlob ?? `${f.additions}-${f.deletions}`)).length : 0;
+
+  const lastReview = [...p.reviews].reverse().find((r) => r.author_id === p.viewer.id && r.state !== 'PENDING');
+  const revisions = s.revisions(pull);
+  const pendingCount = p.pending ? (s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE review_id = ?', p.pending.id)!.n) : 0;
+  const qs = (extra: string) => {
+    const params = new URLSearchParams();
+    if (query.commit) params.set('commit', query.commit);
+    if (query.range) params.set('range', query.range);
+    params.set('diff', extra);
+    return `?${params}`;
+  };
+
+  const menu = html`<details class="dropdown details-reset changes-menu">
+    <summary class="btn btn-sm">Changes from ${label} ${icon('triangle-down')}</summary>
+    <div class="dropdown-menu dropdown-menu-se changes-menu-list">
+      <a class="dropdown-item${fullView ? ' selected' : ''}" href="${p.htmlBase}/files"><strong>Show all changes</strong><span class="dropdown-item-desc">${plural(p.commits.length, 'commit')}</span></a>
+      ${lastReview && lastReview.commit_id !== pull.head_sha ? html`<a class="dropdown-item" href="${p.htmlBase}/files?range=${lastReview.commit_id}..${pull.head_sha}"><strong>Show changes since your last review</strong><span class="dropdown-item-desc">since <code>${shortSha(lastReview.commit_id)}</code></span></a>` : ''}
+      ${revisions.length > 1 ? html`<div class="dropdown-divider"></div><div class="dropdown-header">Revisions (pushes)</div>` : ''}
+      ${revisions.slice(1).map((r, i) => {
+        const prev = revisions[i];
+        return html`<a class="dropdown-item" href="${p.htmlBase}/files?range=${prev.head_sha}..${r.head_sha}">Revision ${r.seq}${r.forced ? ' (force-push)' : ''}<span class="dropdown-item-desc"><code>${shortSha(prev.head_sha)}..${shortSha(r.head_sha)}</code> · ${relTime(r.created_at)}</span></a>`;
+      })}
+      <div class="dropdown-divider"></div><div class="dropdown-header">Commits</div>
+      ${p.commits.map((c) => html`<a class="dropdown-item${query.commit && head === c.sha ? ' selected' : ''}" href="${p.htmlBase}/files?commit=${c.sha}">${c.message.split('\n')[0]}<span class="dropdown-item-desc"><code>${shortSha(c.sha)}</code> · ${c.authorName}</span></a>`)}
+    </div>
+  </details>`;
+
+  const reviewApi = p.pending ? `${p.apiBase}/reviews/${p.pending.id}/events` : `${p.apiBase}/reviews`;
+  const reviewMenu = html`<details class="dropdown details-reset review-menu">
+    <summary class="btn btn-sm btn-primary">${p.pending ? 'Finish your review' : 'Review changes'}${pendingCount ? html` <span class="Counter Counter--primary">${pendingCount}</span>` : ''} ${icon('triangle-down')}</summary>
+    <div class="dropdown-menu dropdown-menu-sw review-dialog">
+      <form class="js-api-form js-review-form" data-api="${reviewApi}" data-method="POST">
+        <div class="review-dialog-header"><strong>Finish your review</strong></div>
+        ${markdownEditor({ placeholder: 'Leave a comment', draftKey: 'review-body', rows: 4 })}
+        <div class="review-dialog-options">
+          <label class="review-option"><input type="radio" name="event" value="COMMENT" checked> <span><strong>Comment</strong><span class="color-fg-muted">Submit general feedback without explicit approval.</span></span></label>
+          <label class="review-option"><input type="radio" name="event" value="APPROVE"> <span><strong>Approve</strong><span class="color-fg-muted">The changes are good to publish.</span></span></label>
+          <label class="review-option"><input type="radio" name="event" value="REQUEST_CHANGES"> <span><strong>Request changes</strong><span class="color-fg-muted">The agent must address this feedback.</span></span></label>
+        </div>
+        <div class="flash flash-error js-form-error" hidden></div>
+        <div class="form-actions">
+          ${p.pending ? html`<button type="button" class="btn btn-sm btn-danger js-discard-review" data-api="${p.apiBase}/reviews/${p.pending.id}">Discard pending review</button>` : ''}
+          <button type="submit" class="btn btn-sm btn-primary">Submit review</button>
+        </div>
+      </form>
+    </div>
+  </details>`;
+
+  const content = html`<div class="files-toolbar">
+  <div class="container container-full files-toolbar-inner">
+    <button type="button" class="btn-octicon js-tree-toggle" aria-label="Toggle file tree">${icon('sidebar-collapse')}</button>
+    ${menu}
+    ${note ? html`<span class="files-note">${note}</span>` : ''}
+    <span class="flex-auto"></span>
+    <div class="BtnGroup">
+      <a class="btn btn-sm BtnGroup-item${mode === 'unified' ? ' selected' : ''}" href="${qs('unified')}">Unified</a>
+      <a class="btn btn-sm BtnGroup-item${mode === 'split' ? ' selected' : ''}" href="${qs('split')}">Split</a>
+    </div>
+    ${fullView ? html`<span class="viewed-progress"><span class="js-viewed-count">${viewedCount}</span> / ${files.length} files viewed</span>` : ''}
+    ${reviewMenu}
+  </div>
+</div>
+<div class="container container-full files-layout">
+  ${files.length ? fileTree(files, fullView ? viewed : new Map()) : ''}
+  <div class="files">
+    ${rendered.length ? rendered : html`<div class="blankslate"><h3>No changes</h3></div>`}
+  </div>
+</div>`;
+  return pullLayout(p, 'files', content, {
+    'commit-id': head,
+    'base-commit-id': base,
+    'pending-review': p.pending?.id ?? '',
+    'full-view': fullView ? '1' : '',
+  });
+}
+
+export function notFoundPage(s: Service, message: string): string {
+  return layout(s, {
+    title: 'Not found · laatsux',
+    body: html`<div class="container container-lg"><div class="blankslate">${icon('alert', { size: 24 })}<h3>${message}</h3><p><a href="/">Back to all staged pull requests</a></p></div></div>`,
+  });
+}
