@@ -129,6 +129,7 @@ if (gate) {
 after(async () => {
   await server?.close();
   rmSync(dir, { recursive: true, force: true });
+  rmSync(configDir, { recursive: true, force: true });
 });
 
 test('the agent loop, from staging to publishing', async (t) => {
