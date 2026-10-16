@@ -73,7 +73,11 @@ export function ago(d: Date, nowMs = Date.now()): string {
 }
 
 export function avatar(src: string, login: string, size = 40, cls = ''): Safe {
-  return html`<img class="avatar ${cls}" src="${src}" width="${size}" height="${size}" alt="@${login}" loading="lazy">`;
+  // An avatar from elsewhere (an agent's logo, the viewer's GitHub avatar) falls back to the
+  // generated one when it can't load, such as offline (public/app.js).
+  const generated = `/avatars/${encodeURIComponent(login)}.svg`;
+  const fallback = src.endsWith(generated) ? '' : html` data-fallback="${generated}"`;
+  return html`<img class="avatar ${cls}" src="${src}"${fallback} width="${size}" height="${size}" alt="@${login}" loading="lazy">`;
 }
 
 /** A deterministic avatar for bots and users without a GitHub login. */

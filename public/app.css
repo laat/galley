@@ -201,7 +201,8 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .crumb-sep { color: var(--fg-muted); }
 .avatar { border-radius: 6px; vertical-align: middle; background: var(--bg-subtle); flex-shrink: 0; box-shadow: 0 0 0 1px var(--border-muted); }
 .avatar-circle { border-radius: 50%; }
-.avatar-bot { border-radius: 6px; }
+/* Agents' logos are drawn for white, and Codex's has no background of its own. */
+.avatar-bot { border-radius: 6px; background: #fff; }
 .avatar-small { width: 20px; height: 20px; }
 
 .layout { display: flex; gap: 24px; margin-top: 24px; align-items: flex-start; }

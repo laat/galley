@@ -5,9 +5,34 @@ import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
 import type { Ctx, Placement, Service, Thread } from './service.ts';
 
+/**
+ * The official logos of the agents we know: the avatar of each vendor's own GitHub App, as
+ * GitHub shows it on the app's comments. Referenced, not bundled, because they are trademarks.
+ * Pages fall back to the generated avatar when one can't load (public/app.js).
+ */
+const LOGOS = {
+  claude: 'https://avatars.githubusercontent.com/in/1236702?s=80&v=4', // the Claude app, by anthropics
+  codex: 'https://avatars.githubusercontent.com/in/1144995?s=80&v=4', // ChatGPT Codex Connector, by openai
+  opencode: 'https://avatars.githubusercontent.com/in/1549082?s=80&v=4', // OpenCode Agent, by anomalyco
+};
+/** Author agents, by the login the CLI gives them (cliActor in src/config.ts). */
+const AUTHOR_LOGOS = new Map([
+  ['claude', LOGOS.claude],
+  ['codex-agent', LOGOS.codex],
+  ['opencode', LOGOS.opencode],
+]);
+/** Reviewer agents, by the meta key holding their actor's id: their logins are settings. */
+const REVIEWER_LOGOS = new Map([['codex_actor_id', LOGOS.codex]]);
+
+function agentLogo(s: Service, a: Actor): string | undefined {
+  if (a.type !== 'Bot') return undefined;
+  for (const [key, logo] of REVIEWER_LOGOS) if (s.db.getMeta(key) === String(a.id)) return logo;
+  return AUTHOR_LOGOS.get(a.login);
+}
+
 export function avatarUrl(s: Service, a: Actor): string {
   if (a.type === 'User' && s.db.getMeta('viewer_login') === a.login) return `https://github.com/${a.login}.png?size=80`;
-  return `${s.baseUrl}/avatars/${encodeURIComponent(a.login)}.svg`;
+  return agentLogo(s, a) ?? `${s.baseUrl}/avatars/${encodeURIComponent(a.login)}.svg`;
 }
 
 export function userJson(s: Service, a: Actor) {
