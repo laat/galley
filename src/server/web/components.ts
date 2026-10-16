@@ -87,11 +87,12 @@ export function markdownEditor(opts: { name?: string; value?: string; placeholde
     </div>
     <div class="md-toolbar">
       ${opts.suggestion ? html`<button type="button" class="md-toolbar-btn js-insert-suggestion" title="Insert a suggestion">${icon('file-diff')}</button>` : ''}
+      <button type="button" class="md-toolbar-btn js-attach-image" title="Attach an image" aria-label="Attach an image">${icon('image')}</button>
     </div>
   </div>
   <textarea class="form-control md-input" name="${opts.name ?? 'body'}" rows="${opts.rows ?? 5}" placeholder="${opts.placeholder ?? 'Leave a comment'}"${opts.draftKey ? html` data-draft-key="${opts.draftKey}"` : ''}${opts.autofocus ? raw(' autofocus') : ''}>${opts.value ?? ''}</textarea>
   <div class="md-preview markdown-body" hidden></div>
-  <p class="md-hint">${icon('markdown')} Markdown is supported. <kbd>⌘</kbd> <kbd>Enter</kbd> submits.</p>
+  <p class="md-hint">${icon('markdown')} Markdown is supported. Paste or drop images. <kbd>⌘</kbd> <kbd>Enter</kbd> submits.</p>
 </div>`;
 }
 

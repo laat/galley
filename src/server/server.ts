@@ -10,11 +10,12 @@ import { api } from './api.ts';
 import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
+import { uploads } from './uploads.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
 const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
 
-export function createApp(s: Service, opts: { allowedHosts: string[] }): Hono {
+export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir: string }): Hono {
   const app = new Hono();
 
   // The API can push to GitHub, so only accept requests addressed to us (no DNS rebinding)
@@ -29,6 +30,8 @@ export function createApp(s: Service, opts: { allowedHosts: string[] }): Hono {
     await next();
   });
 
+  // Before the API and the web routes, whose /:owner/:repo would take /uploads/<file>.
+  app.route('/', uploads(opts.uploadsDir));
   app.route('/api', api(s));
 
   app.get('/static/:file', (c) => {
@@ -112,7 +115,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
   service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
   service.codex.start();
-  app = createApp(service, { allowedHosts });
+  app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
   if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
   // Warm the GitHub counts for the repo tabs, so the first page already has them.
   for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubCounts(repo.github_slug);

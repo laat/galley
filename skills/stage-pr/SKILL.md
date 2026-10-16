@@ -75,6 +75,9 @@ feedback, and the loop repeats until the user publishes it.
    - `thread <id> on commit <sha>` is about that commit's **message**. Reword the commit.
    - A ```` ```suggestion ```` block is a replacement for the commented lines. Apply it as written unless it is wrong.
    - Comments without a thread are about the pull request as a whole, often the title or description.
+   - `Image: <url>` under a comment is a screenshot or other image the user pasted. Look at it:
+     run `laatsux pr view --comments --download-images <dir>` (or give `pr wait` the same flag)
+     and read the files it prints in place of the URLs.
 
    For the whole conversation, run `laatsux pr view --comments`. For JSON, run
    `laatsux pr view --json reviewThreads,reviews,comments`.
@@ -118,7 +121,7 @@ setting, unless they say otherwise when they ask you to stage:
 | gh | laatsux | notes |
 |---|---|---|
 | `gh pr create` | `laatsux pr create` | stages; never pushes. `--reviewer codex[:N]`, `--no-review` |
-| `gh pr view [--comments] [--json f] [--jq q]` | same | `--comments` includes review threads; `--json reviewThreads` exists |
+| `gh pr view [--comments] [--json f] [--jq q]` | same | `--comments` includes review threads; `--json reviewThreads` exists; `--download-images <dir>` saves pasted images as files |
 | `gh pr list`, `diff`, `edit`, `comment`, `checkout`, `status`, `ready`, `close`, `reopen` | same | |
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |
 | `gh api repos/{owner}/{repo}/pulls/N/comments` | same path | REST subset; see `laatsux api --help` |

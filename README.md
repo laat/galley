@@ -72,13 +72,13 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 |---|---|
 | `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` turns automatic Codex reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns them off. Without either, the settings decide |
 | `laatsux pr list` | `--state open\|published\|closed\|all`, `--json`, `--jq` |
-| `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web` |
+| `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web`. `--download-images <dir>` saves the images in them as files |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
 | `laatsux pr edit [<n>]` | `--title`, `--body`, `--body-file`, `--base` |
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` gives up after 10 minutes with exit code 124 |
+| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux serve` | Run the server and web UI |
@@ -97,6 +97,7 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 - Comment on a line, or drag across the `+` buttons to comment on a range; single comments or a pending review submitted as Comment, Approve or Request changes
 - ```` ```suggestion ```` blocks rendered as a diff
 - Comments on a commit, for asking the agent to reword its message
+- Images in every comment box: paste, drop or attach PNG, JPEG, GIF or WebP files of up to 10 MB. Under a comment with images, `pr wait` and `pr view --comments` print each image's URL, or with `--download-images <dir>` the file it was saved to, for agents that read image files
 - Edit the title and description yourself; description edits show as a diff in the timeline
 - Each push is a revision. Force-pushes get a Compare link, and "Changes since your last review" shows what changed since you last submitted a review
 - Comments follow their lines across pushes, or are marked outdated when the code under them changed
@@ -104,6 +105,8 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 - Publish, with an option to open as a draft. Publishing again after changes force-pushes if needed and updates the GitHub pull request with `gh pr edit`
 
 Conversations stay in laatsux. Publishing sends the branch, title and description, not the review.
+Images in the description stay too: GitHub has no API for uploading them, so they would be broken
+there, and the publish box warns about them.
 
 ## The API
 
@@ -128,7 +131,9 @@ Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n
 `POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review; list its runs and this pull
 request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's own `enabled` and
 `max_iterations`; null follows the settings, and fields left out stay as they are),
-`GET /api/settings` and `PUT /api/settings/codex`, and `GET /events` (server-sent events).
+`GET /api/settings` and `PUT /api/settings/codex`, `POST /api/uploads` (an image's bytes; answers
+with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, and `GET /events`
+(server-sent events).
 
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
@@ -173,7 +178,10 @@ staged pull requests.
 - **Git settings** that change diff output (`diff.noprefix`, `diff.mnemonicPrefix`,
   `diff.relative`, `diff.interHunkContext`, `log.showSignature`) are overridden for the
   server's git calls.
-- **Data** lives in SQLite at `~/.local/share/laatsux/laatsux.db` (`$LAATSUX_HOME`).
+- **Data** lives in SQLite at `~/.local/share/laatsux/laatsux.db` (`$LAATSUX_HOME`), and uploaded
+  images in `uploads/` beside it, named by the SHA-256 of their bytes. The server accepts PNG,
+  JPEG, GIF and WebP by their magic bytes, and no SVG, which can carry script. Rendered Markdown
+  shows images from the web and from `/uploads/`, and no other local URL.
 - **Security**: the server listens on 127.0.0.1 only, rejects requests whose `Host` is not
   localhost (DNS rebinding) and writes with a foreign `Origin` (cross-site requests).
   Anything running as you on this machine can use it.
