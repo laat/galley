@@ -10,8 +10,9 @@ type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
   'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
-  'createdAt', 'deletions', 'files', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'mergeCommit', 'mergedAt', 'mergedBy', 'number', 'publishedUrl',
-  'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
+  'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'mergeCommit', 'mergeStateStatus',
+  'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'statusCheckRollup',
+  'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
 ];
 
 // gh flags that have no meaning here. They are accepted so habitual invocations keep working.

@@ -97,7 +97,10 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 `REVIEWER` or `NONE`) and why, as on the [front page](#the-front-page). `unpublishedChanges` lists
 what a published pull request has that GitHub does not yet (`COMMITS`, `TITLE`, `BODY`); `state`
 stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both. `state` becomes
-`MERGED` or `CLOSED` once that happened on GitHub, with `mergedAt`, `mergedBy` and `mergeCommit` as in gh.
+`MERGED` or `CLOSED` once that happened on GitHub, with `mergedAt`, `mergedBy` and `mergeCommit` as
+in gh. While it is open on GitHub, `statusCheckRollup`, `mergeable` and `mergeStateStatus` are
+GitHub's, and `githubStatus` has all laatsux saw there: checks, running workflow runs, a pending
+Copilot review, the review decision and unresolved review threads.
 
 ## The web UI
 
@@ -121,6 +124,7 @@ stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both. `s
 - Comments follow their lines across pushes, or are marked outdated when the code under them changed
 - Live updates while the agent works, and a "waiting for your review" indicator while it runs `pr wait`
 - Publish, with options to open as a draft and to [enable auto-merge on GitHub](#auto-merge). Publishing again after changes force-pushes if needed and updates the GitHub pull request with `gh pr edit`
+- How a published pull request stands on GitHub: its checks, review decision, unresolved review threads and conflicts in the merge box, and a checks icon in the list. What needs you there makes it your turn on the front page
 - A purple Merged badge and a "merged commit e468a4e into main on GitHub" timeline entry once the published pull request is merged on GitHub, and Closed on GitHub when it is closed there
 - Publish when reviews are done: [auto-publish](#auto-publish)
 
@@ -219,14 +223,20 @@ staged pull requests.
   against the last published commit (before the first publish, the branch as last fetched or
   pushed), so commits added on GitHub are never overwritten.
 - **Following GitHub**: once published, a pull request is followed until it is merged or
-  closed on GitHub. Every minute the server asks GitHub about all of them, with one
-  `gh api graphql` query per repository, and records a merge (the merge commit, who merged it,
-  when) or a close on the pull request and in its timeline. It stops asking about one once it is
-  merged or closed there, or closed in laatsux. `pr wait` reports the merge or close, and keeps
-  saying so on later waits. Nothing is published over a merge; publishing one closed on GitHub
-  again updates it there and follows it again. Commits or reviews added on GitHub after
-  publishing are not followed. The pinned `refs/laatsux/pull/<n>/*` stay after a merge, since
-  comments are anchored to those commits.
+  closed on GitHub, to show you how it stands there. The server asks GitHub about all of them
+  with one `gh api graphql` query per repository (about one rate-limit point per pull request),
+  every 20 seconds while checks, workflow runs or a Copilot review are under way there and every
+  minute otherwise, and stops asking about one once it is merged or closed there, or closed in
+  laatsux. It reads the checks on the head, the workflow runs still running, a pending Copilot
+  review (Copilot's last timeline item is a review request), the review decision, unresolved
+  review threads (all of them, page by page) and mergeability. That is for you, not for the
+  author agent: failed checks, changes requested, unresolved threads and a conflict on GitHub
+  make it your turn, with the reason, and `pr wait` hears only of the merge or close, which the
+  agent needs to stop (later waits keep saying so). A merged or closed pull request is nobody's
+  turn, and the merge or close is recorded on the pull request and in its timeline. Nothing is
+  published over a merge; publishing one closed on GitHub again updates it there and follows it
+  again. Following is read-only, and commits added on GitHub are not followed. The pinned
+  `refs/laatsux/pull/<n>/*` stay after a merge, since comments are anchored to those commits.
 - **Signing**: agents commit unsigned; the commits are yours once you publish. Publishing
   can sign them: laatsux makes a signed copy of each commit with `git commit-tree -S`, with
   the same tree, message and author and you as committer (GitHub only verifies a signature

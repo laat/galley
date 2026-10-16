@@ -7,6 +7,7 @@ import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withConte
 import type { CodexReviewer } from './reviewers/codex.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
+import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, prependThreads, present, readGithub, PULL_FIELDS, type GithubPull, type GithubStatus } from './github-follow.ts';
 import {
   Db,
   now,
@@ -146,8 +147,8 @@ export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped';
 
 /** One reason for whose turn it is, as the list row and `pr view` say it. */
 export interface TurnReason {
-  /** The author agent, a reviewer agent, what changed since the reviewer's last review, the decision, unresolved threads, or an update not on GitHub yet. */
-  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished';
+  /** The author agent, a reviewer agent, what changed since the reviewer's last review, the decision, unresolved threads, an update not on GitHub yet, or what GitHub has for the reviewer. */
+  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'github';
   /** A few words. The reviewer is named by login, so it reads the same to the reviewer and to agents. */
   text: string;
   /** Since when it has been so: waiting, reviewing, working on feedback, or stopped. */
@@ -219,6 +220,10 @@ export interface AutoMergeOption {
   methodAllowed: boolean;
   methods: MergeMethod[];
 }
+
+/** How often laatsux asks GitHub about published pull requests: while something runs there, and otherwise. */
+export const FOLLOW_BUSY_MS = 20_000;
+export const FOLLOW_IDLE_MS = 60_000;
 
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
@@ -384,61 +389,99 @@ export class Service {
     return this.db.all<PullRow>("SELECT * FROM pulls WHERE state = 'published' AND COALESCE(github_state, 'open') = 'open'");
   }
 
-  private following: Promise<void> | null = null;
+  private following: Promise<void> = Promise.resolve();
+  /** When laatsux last asked GitHub about each repository's pull requests. */
+  private githubAskedAt = new Map<string, number>();
 
   /**
-   * Ask GitHub whether the published pull requests are still open there, with one query per
-   * repository for all of them, and record the ones merged or closed. The server does this every
-   * minute; pages never wait for it.
+   * Ask GitHub about the published pull requests it follows, with one query per repository for
+   * all of them, and record what changed: merged or closed there, checks, reviews, threads,
+   * conflicts. With `due`, only the repositories due: every 20 seconds while something runs
+   * there (checks, workflow runs, Copilot), every minute otherwise; the server asks so on a
+   * timer. Pages never wait for it. Calls take turns.
    */
-  followGithub(): Promise<void> {
-    this.following ??= this.askGithub(this.followed())
-      .catch((e) => console.error('following GitHub failed:', e))
-      .finally(() => {
-        this.following = null;
-      });
+  followGithub(opts: { due?: boolean } = {}): Promise<void> {
+    this.following = this.following.then(() => this.askGithub(opts.due ?? false).catch((e) => console.error('following GitHub failed:', e)));
     return this.following;
   }
 
-  private async askGithub(pulls: PullRow[]): Promise<void> {
-    const onGithub = pulls.flatMap((pull) => {
+  private async askGithub(due: boolean): Promise<void> {
+    const onGithub = this.followed().flatMap((pull) => {
       const m = pull.published_url?.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
       return m ? [{ pull, slug: m[1], number: Number(m[2]) }] : [];
     });
     for (const [slug, items] of Map.groupBy(onGithub, (x) => x.slug)) {
+      const every = items.some(({ pull }) => githubBusy(githubStatus(pull))) ? FOLLOW_BUSY_MS : FOLLOW_IDLE_MS;
+      // A second of slack, so a timer ticking every 20 seconds does not skip a round.
+      if (due && Date.now() - (this.githubAskedAt.get(slug) ?? 0) < every - 1000) continue;
+      this.githubAskedAt.set(slug, Date.now());
       const [owner, name] = slug.split('/');
       // Aliased by pull id: one GitHub pull request can have been published from several staged ones.
-      const fields = items.map(
-        ({ pull, number }) =>
-          `p${pull.id}:pullRequest(number:${number}){state mergedAt closedAt mergedBy{login} mergeCommit{oid} timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{...on ClosedEvent{actor{login}}}}}`,
-      );
+      const fields = items.map(({ pull, number }) => `p${pull.id}:pullRequest(number:${number}){${PULL_FIELDS}}`);
       const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${fields.join(' ')}}}`;
       const found = await run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
         .then((r) => JSON.parse(r.stdout).data.repository as Record<string, GithubPull | null>)
         .catch(() => null);
       // Those without an answer (gh failed, or the pull request is gone) are asked again next time.
-      for (const { pull } of items) {
+      for (const { pull, number } of items) {
         const node = found?.[`p${pull.id}`];
-        if (node?.state) this.recordGithubState(pull.id, node);
+        if (node?.state) await this.recordGithub(pull.id, node, slug, number);
       }
     }
   }
 
-  /** Record what GitHub says about a published pull request: open, merged or closed there. */
-  recordGithubState(pullId: number, node: GithubPull): void {
-    const state: GithubState = node.state === 'MERGED' ? 'merged' : node.state === 'CLOSED' ? 'closed' : 'open';
+  /** Record what GitHub says about a published pull request: merged or closed there, or how it stands while open. */
+  async recordGithub(pullId: number, node: GithubPull, slug: string, number: number): Promise<void> {
+    if (node.state !== 'OPEN') return this.recordGithubEnd(pullId, node);
+    const complete = await this.readEarlierThreads(slug, number, node);
+    const type = this.db.transaction(() => {
+      const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
+      // Closed here, or merged or closed on GitHub, while gh answered: no longer followed.
+      if (!pull || pull.state !== 'published' || (pull.github_state ?? 'open') !== 'open') return null;
+      // What was seen before, also when a publish followed it again after a close on GitHub.
+      const previous = pull.github_status ? (JSON.parse(pull.github_status) as GithubStatus) : null;
+      // Threads on pages it could not read stay as they were.
+      const status = readGithub(node, previous, now(), complete);
+      this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status) });
+      // Pages show the status; tell them when it changed, not each time laatsux asked.
+      const same = previous && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
+      return pull.github_state === 'open' && same ? null : 'github_status';
+    });
+    // From GitHub, like the counts: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
+    if (type) this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
+  }
+
+  /**
+   * The review threads before the first page, for a pull request with more of them than it holds
+   * (up to 20 pages more). False when some could not be read.
+   */
+  private async readEarlierThreads(slug: string, number: number, node: GithubPull): Promise<boolean> {
+    const [owner, name] = slug.split('/');
+    for (let i = 0; i < 20; i++) {
+      const cursor = earlierThreads(node);
+      if (!cursor) return true;
+      const args = ['api', 'graphql', '-f', `query=${earlierThreadsQuery(number)}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-f', `cursor=${cursor}`];
+      const page = await run(this.ghBin, args, { allowFail: true, timeoutMs: 15_000 })
+        .then((r) => JSON.parse(r.stdout).data.repository.pullRequest.reviewThreads)
+        .catch(() => null);
+      if (!page) return false;
+      prependThreads(node, page);
+    }
+    return !earlierThreads(node);
+  }
+
+  /** Record that a published pull request was merged or closed on GitHub. */
+  private recordGithubEnd(pullId: number, node: GithubPull): void {
+    const state: GithubState = node.state === 'MERGED' ? 'merged' : 'closed';
     const viewer = this.viewer();
     const type = this.db.transaction(() => {
       const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
       // Closed here or deleted while GitHub answered: no longer followed.
       if (!pull || pull.state !== 'published' || pull.github_state === state) return null;
-      if (state === 'open') {
-        this.db.update('pulls', pull.id, { github_state: state });
-        return 'github_state';
-      }
       const merged = state === 'merged';
       const at = (merged ? node.mergedAt : node.closedAt) ?? now();
-      const by = (merged ? node.mergedBy?.login : node.timelineItems?.nodes?.at(-1)?.actor?.login) ?? null;
+      const closer = present(node.timelineItems).findLast((i) => i.__typename === 'ClosedEvent');
+      const by = (merged ? node.mergedBy?.login : closer?.actor?.login) ?? null;
       const commit = node.mergeCommit?.oid ?? null;
       const ts = now();
       this.db.update('pulls', pull.id, { github_state: state, github_closed_at: at, github_closed_by: by, github_merge_sha: commit, updated_at: ts });
@@ -449,7 +492,6 @@ export class Service {
       if (merged) this.autoPublishOff(pull, viewer, 'merged', ts);
       return merged ? 'merged' : 'closed_on_github';
     });
-    // From GitHub, like the counts: pages refresh, and the author's `pr wait` wakes up.
     if (type) this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
   }
 
@@ -1354,6 +1396,9 @@ export class Service {
     const unpublished = this.unpublishedChanges(pull);
     // A review that failed after publishing (asked for by hand) needs the reviewer all the same.
     const failed = r.reviewers.some((x) => x.status.state === 'failed' && !!x.status.failedAt && x.status.failedAt > (pull.published_at ?? ''));
+    // So does what GitHub has once it is published: failed checks, changes requested, threads, a
+    // conflict. It is for the reviewer to act on (or hand to an agent), not feedback for the author.
+    const github = githubAsks(githubStatus(pull), pull.base_ref);
     // Feedback being handed over (the author waits) makes it the author's turn; feedback it is not
     // waiting for is the reviewer's to pass on, published or not.
     const whose: Whose = atWork
@@ -1362,7 +1407,7 @@ export class Service {
         ? 'author'
         : next
           ? 'reviewer_agents'
-          : pull.state === 'published' && !unpublished.length && !failed && !unseen
+          : pull.state === 'published' && !unpublished.length && !failed && !unseen && !github.length
             ? 'none'
             : 'reviewer';
     if (whose === 'none') return { whose, reasons: [] };
@@ -1386,6 +1431,7 @@ export class Service {
     )!.n;
     if (unresolved) reasons.push({ kind: 'threads', text: `${unresolved} unresolved thread${unresolved === 1 ? '' : 's'}` });
     if (unpublished.length) reasons.push({ kind: 'unpublished', text: `update not published: ${unpublished.join(', ')}` });
+    for (const text of github) reasons.push({ kind: 'github', text });
     return { whose, reasons };
   }
 
@@ -1826,7 +1872,7 @@ export class Service {
     this.emit(pull.id, type, actor);
     // Merged at once: record it as following would, before anything else can be published over it
     // (the merge guard before a push, auto-publish turning off, the pull request freezing).
-    if (merged && view) this.recordGithubState(pull.id, view);
+    if (merged && view) this.recordGithubEnd(pull.id, view);
   }
 
   /**
@@ -1921,16 +1967,6 @@ export function fillFromCommits(commits: Commit[], branch: string, mode: 'defaul
   return { title, body: commits.map((c) => `- ${split(c).subject}`).join('\n') };
 }
 
-/** A pull request from GitHub's GraphQL API, as followGithub asks for it. */
-export interface GithubPull {
-  state: 'OPEN' | 'MERGED' | 'CLOSED';
-  mergedAt?: string | null;
-  closedAt?: string | null;
-  mergedBy?: { login: string } | null;
-  mergeCommit?: { oid: string } | null;
-  timelineItems?: { nodes: ({ actor?: { login: string } | null } | null)[] };
-}
-
 /** An issue or pull request on GitHub, as links to it show it on hover. */
 export interface IssueSummary {
   title: string;
@@ -1949,6 +1985,11 @@ export function issueSummary(node: { __typename?: string; title?: string; state?
   if (node.stateReason === 'NOT_PLANNED') return { title: node.title, state: 'Closed as not planned' };
   if (node.stateReason === 'DUPLICATE') return { title: node.title, state: 'Closed as duplicate' };
   return { title: node.title, state: 'Closed issue' };
+}
+
+/** What laatsux last saw of a published pull request on GitHub, while it is open there. */
+export function githubStatus(pull: PullRow): GithubStatus | null {
+  return pull.github_state === 'open' && pull.github_status ? (JSON.parse(pull.github_status) as GithubStatus) : null;
 }
 
 /** Identifies what a publish would send, so the UI can refuse to publish something the reviewer has not seen. */

@@ -63,6 +63,8 @@ export interface PullRow {
   github_closed_by: string | null;
   /** The commit GitHub merged it as. */
   github_merge_sha: string | null;
+  /** How it stands on GitHub while open there: a GithubStatus as JSON (see Service.githubStatus). */
+  github_status: string | null;
 }
 
 export type GithubState = 'open' | 'merged' | 'closed';
@@ -289,6 +291,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'github_closed_at', 'TEXT'],
   ['pulls', 'github_closed_by', 'TEXT'],
   ['pulls', 'github_merge_sha', 'TEXT'],
+  ['pulls', 'github_status', 'TEXT'],
 ];
 
 export class Db {

@@ -1,7 +1,8 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
-import { publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { githubStatus, publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
@@ -10,6 +11,7 @@ import { renderMarkdown } from './markdown.ts';
 import { closingIssues, pullReferences, type ReferenceContext } from './references.ts';
 import {
   authorLink,
+  checksIndicator,
   copyButton,
   layout,
   markdownEditor,
@@ -59,7 +61,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   const heading = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
     return html`${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
-    <a class="pr-row-title" href="${href(p)}">${p.title}</a>`;
+    <a class="pr-row-title" href="${href(p)}">${p.title}</a> ${checksIndicator(p)}`;
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
@@ -148,24 +150,32 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
  * The reasons of a Turn as a line of the list, those of the given kinds (by default all but the
  * labels). A failed reviewer agent gets a Retry button, which asks it to review at `apiBase`.
  */
-function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads']): Safe {
+function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'github']): Safe {
   const shown = t.reasons.filter((r) => kinds.includes(r.kind));
   if (!shown.length) return raw('');
   return html`<div class="pr-row-turn">${shown.map((r) => {
     const cls = reasonClass(r);
     const mark =
-      cls === 'failed' ? icon('x-circle-fill') : cls === 'running' || cls === 'waiting' ? icon('dot-fill', { cls: 'turn-pulse' }) : cls === 'working' ? icon('dot-fill') : '';
+      cls === 'failed'
+        ? icon('x-circle-fill')
+        : cls === 'running' || cls === 'waiting'
+          ? icon('dot-fill', { cls: 'turn-pulse' })
+          : cls === 'working'
+            ? icon('dot-fill')
+            : cls === 'github'
+              ? icon('mark-github')
+              : '';
     return html`<span class="turn-reason${cls ? ` turn-reason--${cls}` : ''}">${mark}${r.text}${r.since ? html`<span class="turn-since">, ${since(r.since)}</span>` : ''}${
       cls === 'failed' && r.engine ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.engine}">Retry</button>` : ''
     }</span>`;
   })}</div>`;
 }
 
-/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, or unresolved threads. */
+/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, unresolved threads, or something on GitHub. */
 function reasonClass(r: TurnReason): string {
   if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' ? '' : 'working';
   if (r.kind === 'reviewer_agent') return r.state === 'reviewing' || r.state === 'queued' ? 'running' : r.state === 'failed' ? 'failed' : '';
-  return r.kind === 'threads' ? 'threads' : '';
+  return r.kind === 'threads' ? 'threads' : r.kind === 'github' ? 'github' : '';
 }
 
 function capitalize(text: string): string {
@@ -457,6 +467,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     </div>`;
   }
 
+  rows.push(...githubRows(p));
   if (pull.github_state === 'closed') {
     rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and laatsux follows it again in case it was reopened.</div></div></div>`);
   }
@@ -571,6 +582,60 @@ function autoMergeRow(p: PullPage, merge: AutoMerge): Safe {
   }
   return html`<div class="merge-row">${icon('git-merge', { cls: 'color-fg-done' })}<div><strong>Auto-merge is on for ${githubPull(merge.url)}</strong>
     <div class="color-fg-muted">${by.login} enabled it ${relTime(merge.at)}. GitHub merges it (${merge.method}) once its requirements are met, such as required checks, with whatever the branch has then: a push by someone with write access, such as an update published from here, keeps auto-merge on, and one by someone without turns it off.</div></div></div>`;
+}
+
+const CHECK_ICON: Record<GithubCheck['result'], [string, string]> = {
+  passed: ['check', 'color-fg-success'],
+  failed: ['x', 'color-fg-danger'],
+  pending: ['dot-fill', 'color-fg-attention'],
+  skipped: ['skip', 'color-fg-muted'],
+};
+
+/** How the published pull request stands on GitHub, as merge box rows: review, checks, threads, conflicts. */
+function githubRows(p: PullPage): Safe[] {
+  const g = githubStatus(p.pull);
+  if (!g) return [];
+  const base = p.pull.base_ref;
+  const row = (iconName: string, cls: string, title: Safe | string, text: Safe | string = '', more: Safe | string = '') =>
+    html`<div class="merge-row">${icon(iconName, { cls })}<div class="flex-auto"><strong>${title}</strong>${text ? html`<div class="color-fg-muted">${text}</div>` : ''}${more}</div></div>`;
+  const rows: Safe[] = [];
+  if (g.reviewDecision === 'CHANGES_REQUESTED') rows.push(row('x-circle-fill', 'color-fg-danger', 'Changes requested on GitHub'));
+  else if (g.reviewDecision === 'APPROVED') rows.push(row('check-circle-fill', 'color-fg-success', 'Approved on GitHub'));
+  const s = checksSummary(g);
+  const running = [g.runs.length ? `${plural(g.runs.length, 'workflow run')} still running` : null, g.copilotPending ? 'Copilot is reviewing' : null].filter(Boolean);
+  if (s.result || running.length) {
+    const counts = [s.failed ? `${s.failed} failing` : null, s.pending ? `${s.pending} in progress` : null, s.passed ? `${s.passed} successful` : null, s.skipped ? `${s.skipped} skipped` : null];
+    const [iconName, cls, title] =
+      s.result === 'failed'
+        ? ['x-circle-fill', 'color-fg-danger', 'Some checks were not successful']
+        : s.result === 'pending'
+          ? ['dot-fill', 'color-fg-attention', "Some checks haven't completed yet"]
+          : running.length
+            ? ['dot-fill', 'color-fg-attention', 'Still running on GitHub']
+            : ['check-circle-fill', 'color-fg-success', 'All checks have passed'];
+    const list = g.checks.length
+      ? html`<details class="github-checks"><summary class="btn-link">Show checks</summary><ul class="merge-checks">${g.checks.map((c) => {
+          const [name, color] = CHECK_ICON[c.result];
+          return html`<li>${icon(name, { cls: color })} <span class="flex-auto">${checkName(c)}</span>${c.url ? html` <a href="${c.url}" target="_blank" rel="noopener">Details</a>` : ''}</li>`;
+        })}</ul></details>`
+      : '';
+    // More checks than one page: the counts are of those shown, the result is GitHub's for all.
+    const partial = s.total > s.shown ? `of the first ${s.shown} of ${s.total} checks` : null;
+    const text = [[counts.filter(Boolean).join(', '), partial].filter(Boolean).join(' '), running.join(', ')].filter(Boolean).join('; ');
+    rows.push(row(iconName, cls, title, html`${text}. Checked on GitHub ${relTime(g.checkedAt)}.`, list));
+  }
+  if (g.threads.length) {
+    const items = g.threads.map((t) => {
+      const last = t.comments.at(-1);
+      const line = t.line ?? t.originalLine;
+      const said = last ? `${last.author}: ${last.body.replace(/\s+/g, ' ').slice(0, 120)}` : '';
+      return html`<li>${icon('comment', { cls: 'color-fg-muted' })} <span><a href="${t.url}" target="_blank" rel="noopener"><code>${t.path}${line ? `:${line}` : ''}</code></a> ${said}</span></li>`;
+    });
+    rows.push(row('comment-discussion', 'color-fg-attention', `${plural(g.threads.length, 'unresolved conversation')} on GitHub`, '', html`<ul class="merge-checks">${items}</ul>`));
+  }
+  if (g.conflicting) rows.push(row('alert', 'color-fg-danger', html`This branch has conflicts with <span class="branch-name branch-name-sm">${base}</span> on GitHub`, `The agent rebases it; publishing that update force-pushes.`));
+  else if (g.mergeStateStatus === 'BEHIND') rows.push(row('alert', 'color-fg-attention', html`This branch is behind <span class="branch-name branch-name-sm">${base}</span> on GitHub`));
+  return rows;
 }
 
 /** Auto-publish while it is on: what it is waiting for, and a way to turn it off. */

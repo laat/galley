@@ -3,7 +3,7 @@
 import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
-import type { AutoMerge, Ctx, Placement, Service, Thread, Turn, TurnReason } from './service.ts';
+import { githubStatus, type AutoMerge, type Ctx, type Placement, type Service, type Thread, type Turn, type TurnReason } from './service.ts';
 import { duration } from './web/html.ts';
 
 /**
@@ -67,6 +67,7 @@ export function repoJson(s: Service, repo: RepoRow) {
 export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { files?: FileDiff[]; commits?: Commit[] } = {}) {
   const author = s.db.actorById(pull.author_id);
   const merged = pull.github_state === 'merged';
+  const github = githubStatus(pull);
   const json: Record<string, unknown> = {
     url: `${apiBase(s, repo)}/pulls/${pull.number}`,
     id: pull.id,
@@ -87,6 +88,9 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     merge_commit_sha: pull.github_merge_sha,
     // GitHub's auto_merge, for the published pull request: on when laatsux last turned it on there.
     auto_merge: autoMergeJson(s, pull),
+    // GitHub's mergeability, while it is open there.
+    mergeable: github && github.mergeable !== 'UNKNOWN' ? github.mergeable === 'MERGEABLE' : null,
+    mergeable_state: github ? github.mergeStateStatus.toLowerCase() : 'unknown',
     head: { label: `${repo.owner}:${pull.head_ref}`, ref: pull.head_ref, sha: pull.head_sha },
     base: { label: `${repo.owner}:${pull.base_ref}`, ref: pull.base_ref, sha: pull.base_sha },
     // laatsux extensions:
@@ -292,8 +296,11 @@ export const GH_FIELDS = [
   'headRefOid',
   'id',
   'isDraft',
+  'githubStatus',
   'latestReviews',
   'mergeCommit',
+  'mergeStateStatus',
+  'mergeable',
   'mergedAt',
   'mergedBy',
   'number',
@@ -303,6 +310,7 @@ export const GH_FIELDS = [
   'reviewThreads',
   'reviews',
   'state',
+  'statusCheckRollup',
   'title',
   'turn',
   'unpublishedChanges',
@@ -340,6 +348,19 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('mergedAt', () => (merged ? pull.github_closed_at : null));
   set('mergedBy', () => (merged && pull.github_closed_by ? { login: pull.github_closed_by, is_bot: false } : null));
   set('mergeCommit', () => (merged && pull.github_merge_sha ? { oid: pull.github_merge_sha } : null));
+  // As gh has them for the pull request on GitHub, while it is open there.
+  const github = githubStatus(pull);
+  set('mergeable', () => github?.mergeable ?? 'UNKNOWN');
+  set('mergeStateStatus', () => github?.mergeStateStatus ?? 'UNKNOWN');
+  set('statusCheckRollup', () =>
+    (github?.checks ?? []).map((c) =>
+      c.kind === 'CheckRun'
+        ? { __typename: c.kind, name: c.name, workflowName: c.workflow ?? '', status: c.status, conclusion: c.conclusion ?? '', detailsUrl: c.url ?? '' }
+        : { __typename: c.kind, context: c.name, state: c.status, targetUrl: c.url ?? '' },
+    ),
+  );
+  // laatsux extension: all it saw on GitHub, when it last asked (null before publishing, and once merged or closed there).
+  set('githubStatus', () => github);
   set('author', () => ghAuthor(s, pull.author_id));
   set('headRefName', () => pull.head_ref);
   set('baseRefName', () => pull.base_ref);

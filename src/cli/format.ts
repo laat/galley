@@ -114,6 +114,7 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
   if (pr.unpublishedChanges?.length) lines.push(`unpublished:\t${unpublished(pr)}`);
   if (pr.turn) lines.push(`turn:\t${pr.turn.whose.toLowerCase()}\t${pr.turn.reasons.join('; ')}`);
   if (pr.mergedAt) lines.push(`merged:\t${mergedText(pr)}`);
+  if (pr.githubStatus) lines.push(`github:\t${githubSummary(pr)}`);
   return `${lines.join('\n')}\n--\n${withImages(pr.body, images)}\n`;
 }
 
@@ -147,6 +148,7 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');
   if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}${pr.unpublishedChanges?.length ? c.yellow(` (update not published: ${unpublished(pr)})`) : ''}`);
   if (pr.mergedAt) out.push(`Merged on GitHub ${mergedText(pr)}`);
+  if (pr.githubStatus) out.push(`On GitHub: ${githubSummary(pr)}`);
   out.push(c.gray(`View this pull request in laatsux: ${pr.url}`));
   return out.join('\n') + '\n';
 }
@@ -235,4 +237,30 @@ export function formatConversation(pr: GhPull, images?: ImageRef): string {
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved);
   if (unresolved.length) out.push(c.yellow(`Unresolved threads: ${unresolved.map((t: any) => t.databaseId).join(', ')}`));
   return out.join('\n\n') + '\n';
+}
+
+// ------------------------------------------------------------------- GitHub
+
+/** How the published pull request stands on GitHub, in one line: "checks: 1 failed, 3 passed · 2 unresolved threads". */
+export function githubSummary(pr: GhPull): string {
+  const g = pr.githubStatus;
+  const count = (result: string) => g.checks.filter((ch: any) => ch.result === result).length;
+  const counts = ['failed', 'pending', 'passed', 'skipped'].map((r) => (count(r) ? `${count(r)} ${r}` : null)).filter(Boolean);
+  // `checks` is the first page; checksResult is GitHub's sum of all of them (absent from a status stored before).
+  const total = Math.max(g.checksTotal ?? 0, g.checks.length);
+  const checks =
+    total > g.checks.length
+      ? `checks: ${g.checksResult ?? 'unknown'} (first ${g.checks.length} of ${total}: ${counts.join(', ') || 'none listed'})`
+      : counts.length
+        ? `checks: ${counts.join(', ')}`
+        : null;
+  const parts = [
+    checks,
+    g.runs.length ? `${g.runs.length} workflow run${g.runs.length === 1 ? '' : 's'} running` : null,
+    g.copilotPending ? 'Copilot is reviewing' : null,
+    g.reviewDecision ? `review: ${g.reviewDecision.toLowerCase().replace('_', ' ')}` : null,
+    g.threads.length ? `${g.threads.length} unresolved thread${g.threads.length === 1 ? '' : 's'}` : null,
+    g.conflicting ? `conflicts with ${pr.baseRefName}` : g.mergeStateStatus === 'BEHIND' ? `behind ${pr.baseRefName}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : 'no checks, reviews or threads';
 }

@@ -1,5 +1,6 @@
 import type { Actor, CommentRow, Priority, PullRow, RepoRow } from '../db.ts';
-import type { Service, Thread } from '../service.ts';
+import { githubStatus, type Service, type Thread } from '../service.ts';
+import { checksSummary } from '../github-follow.ts';
 import { avatarUrl } from '../github.ts';
 import { avatar, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
@@ -79,6 +80,18 @@ export function pullIcon(pull: PullRow, unpublished = false): Safe {
   if (pull.state === 'published') return icon('mark-github', { cls: 'color-fg-done' });
   if (pull.draft) return icon('git-pull-request-draft', { cls: 'color-fg-muted' });
   return icon('git-pull-request', { cls: 'color-fg-open' });
+}
+
+/** A published pull request's checks on GitHub as one icon, as GitHub's lists show them. */
+export function checksIndicator(pull: PullRow): Safe {
+  const g = githubStatus(pull);
+  const s = g ? checksSummary(g) : null;
+  if (!s?.result) return raw('');
+  // Counts are of the first page of checks; the result is GitHub's for all of them.
+  const some = (n: number, what: string) => (n ? `${n} of ${s.total} checks ${what} on GitHub` : `Checks ${what} on GitHub`);
+  const title = s.result === 'failed' ? some(s.failed, 'failed') : s.result === 'pending' ? some(s.pending, 'in progress') : `All ${s.total} checks passed on GitHub`;
+  const [name, cls] = s.result === 'failed' ? ['x', 'color-fg-danger'] : s.result === 'pending' ? ['dot-fill', 'color-fg-attention'] : ['check', 'color-fg-success'];
+  return html`<span class="checks-indicator" title="${title}">${icon(name, { cls, label: title })}</span>`;
 }
 
 /** An author's name. A reviewer agent's links to its settings, found by its actor since its name is a setting. */

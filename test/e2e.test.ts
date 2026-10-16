@@ -104,12 +104,13 @@ before(async () => {
     gh,
     // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error, FAKE_GH_API_FAIL `gh api ...`. A file gh-merge-fail makes
     // the next `gh pr merge` fail with its contents. `gh pr view` answers FAKE_GH_VIEW, or an open pull request.
-    // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. The states of
-    // published pull requests come from gh-pulls.json (see githubSays).
+    // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. What GitHub
+    // says about published pull requests comes from gh-pulls.json (see githubSays), an earlier page of their review threads
+    // from gh-pulls-earlier.json.
     `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
       `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
-      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *"pullRequest("*) cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2},"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
+      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2},"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -2762,8 +2763,8 @@ test('published pull requests are followed until they are merged or closed on Gi
   const comment = (number: number, body: string) => human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body });
   const mergeCommit = 'e468a4e' + '1'.repeat(33);
   const open = { state: 'OPEN', mergedAt: null, closedAt: null, mergedBy: null, mergeCommit: null, timelineItems: { nodes: [] } };
-  const merged = { state: 'MERGED', mergedAt: '2026-10-16T09:00:00Z', closedAt: '2026-10-16T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: mergeCommit }, timelineItems: { nodes: [{ actor: { login: 'laat' } }] } };
-  const closed = { state: 'CLOSED', mergedAt: null, closedAt: '2026-10-16T10:00:00Z', mergedBy: null, mergeCommit: null, timelineItems: { nodes: [{ actor: { login: 'octocat' } }] } };
+  const merged = { state: 'MERGED', mergedAt: '2026-10-16T09:00:00Z', closedAt: '2026-10-16T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: mergeCommit }, timelineItems: { nodes: [{ __typename: 'ClosedEvent', actor: { login: 'laat' } }] } };
+  const closed = { state: 'CLOSED', mergedAt: null, closedAt: '2026-10-16T10:00:00Z', mergedBy: null, mergeCommit: null, timelineItems: { nodes: [{ __typename: 'ClosedEvent', actor: { login: 'octocat' } }] } };
 
   try {
     await t.test('pr wait after a publish waits for the merge, and says who merged it as what', async () => {
@@ -2894,6 +2895,109 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal(pr.asked(), asked + 1);
       assert.equal((await human('GET', pr.base)).github_state, 'closed');
       assert.equal((await pr.timeline()).filter((e) => e.event === 'closed_on_github').length, 1);
+    });
+
+    await t.test('how it stands on GitHub is shown to the reviewer, and makes it their turn; the agent waits on', async () => {
+      const pr = await published('feature/follow-checks', 'checks.js');
+      const n = String(pr.number);
+      const head = 'c0ffee' + '0'.repeat(34);
+      const run = (name: string, job: number, status: string, conclusion: string | null = null) => ({
+        __typename: 'CheckRun',
+        databaseId: job,
+        name,
+        status,
+        conclusion,
+        detailsUrl: `https://github.com/acme/widgets/actions/runs/1/job/${job}`,
+        checkSuite: { workflowRun: { workflow: { name: 'CI' } } },
+      });
+      const github = (checks: object[], more: object = {}) => ({
+        ...open,
+        headRefOid: head,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: checks } }, checkSuites: { nodes: [] } } }] },
+        ...more,
+      });
+      const turn = async () => JSON.parse((await cli(['pr', 'view', n, '--json', 'turn'])).stdout).turn;
+
+      // The agent waits for the reviewer; nothing from GitHub below wakes it.
+      const waiting = cli(['pr', 'wait', n, '--timeout', '20s']);
+      await untilWaiting(pr.base);
+
+      // Checks run, then pass: shown, and nobody's turn.
+      await githubSays({ [pr.id]: github([run('test', 11, 'IN_PROGRESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')]) });
+      assert.match((await cli(['pr', 'view', n])).stdout, /^github:\tchecks: 1 pending, 1 passed$/m);
+      await githubSays({ [pr.id]: github([run('test', 11, 'COMPLETED', 'SUCCESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')]) });
+      const view = JSON.parse((await cli(['pr', 'view', n, '--json', 'statusCheckRollup,mergeable,mergeStateStatus'])).stdout);
+      assert.deepEqual(view.statusCheckRollup[0], { __typename: 'CheckRun', name: 'test', workflowName: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://github.com/acme/widgets/actions/runs/1/job/11' });
+      assert.deepEqual([view.mergeable, view.mergeStateStatus], ['MERGEABLE', 'CLEAN']);
+      assert.match(await pr.page(), /<strong>All checks have passed<\/strong>/);
+      assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), /Add checks\.js<\/a> <span class="checks-indicator" title="All 2 checks passed on GitHub">/);
+      assert.equal((await turn()).whose, 'NONE');
+
+      // More checks than one page reads, and one past it failed: GitHub's sum says so.
+      const many = github([]);
+      many.commits.nodes[0].commit.statusCheckRollup = { state: 'FAILURE', contexts: { totalCount: 130, nodes: [run('test', 11, 'COMPLETED', 'SUCCESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')] } } as any;
+      await githubSays({ [pr.id]: many });
+      assert.match(await pr.page(), /<strong>Some checks were not successful<\/strong><div class="color-fg-muted">2 successful of the first 2 of 130 checks\./);
+      assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), /<span class="checks-indicator" title="Checks failed on GitHub">/);
+      assert.deepEqual((await turn()).reasons.filter((r: string) => /GitHub/.test(r)), ['checks failed on GitHub']);
+      assert.match((await cli(['pr', 'view', n])).stdout, /^github:\tchecks: failed \(first 2 of 130: 2 passed\)$/m);
+
+      // A failed check, changes requested with a thread (on an earlier page than the first query
+      // reads), and a conflict: shown, and the reviewer's turn, saying why.
+      const thread = {
+        id: 'PRRT_1',
+        isResolved: false,
+        isOutdated: false,
+        path: 'checks.js',
+        line: 1,
+        originalLine: 1,
+        startLine: null,
+        diffSide: 'RIGHT',
+        comments: { nodes: [{ databaseId: 501, author: { login: 'octocat' }, body: 'Export a function.', createdAt: '2026-10-16T12:00:00Z', url: 'https://github.com/acme/widgets/pull/7#discussion_r501', diffHunk: '@@ -0,0 +1 @@\n+export {};' }] },
+      };
+      writeFileSync(join(dir, 'gh-pulls-earlier.json'), JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [thread] } } } } }));
+      try {
+        await githubSays({
+          [pr.id]: github([run('test', 21, 'COMPLETED', 'FAILURE'), run('lint', 12, 'COMPLETED', 'SUCCESS')], {
+            reviewDecision: 'CHANGES_REQUESTED',
+            reviewThreads: { pageInfo: { hasPreviousPage: true, startCursor: 'T50' }, nodes: [] },
+            mergeable: 'CONFLICTING',
+            mergeStateStatus: 'DIRTY',
+          }),
+        });
+      } finally {
+        rmSync(join(dir, 'gh-pulls-earlier.json'), { force: true });
+      }
+      assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /reviewThreads\(last:100,before:\$cursor\).* -f cursor=T50$/m);
+      const page = await pr.page();
+      assert.match(page, /<strong>Some checks were not successful<\/strong>/);
+      assert.match(page, /<strong>Changes requested on GitHub<\/strong>/);
+      assert.match(page, /<strong>1 unresolved conversation on GitHub<\/strong>/);
+      assert.match(page, /This branch has conflicts with <span class="branch-name branch-name-sm">main<\/span> on GitHub/);
+      const yours = await turn();
+      assert.equal(yours.whose, 'REVIEWER');
+      assert.match(yours.reasons.join(' · '), /1 check failed on GitHub · changes requested on GitHub · 1 unresolved thread on GitHub · conflicts with main on GitHub/);
+      assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), /<span class="turn-reason turn-reason--github"><svg [^>]*octicon-mark-github[^]*?<\/svg>1 check failed on GitHub<\/span>/);
+      assert.doesNotMatch((await cli(['pr', 'view', n, '--comments'])).stdout, /Export a function/);
+      // The earlier page cannot be read this time (gh-pulls-earlier.json is gone): its thread stays.
+      await githubSays({
+        [pr.id]: github([run('test', 21, 'COMPLETED', 'FAILURE'), run('lint', 12, 'COMPLETED', 'SUCCESS')], {
+          reviewDecision: 'CHANGES_REQUESTED',
+          reviewThreads: { pageInfo: { hasPreviousPage: true, startCursor: 'T50' }, nodes: [] },
+          mergeable: 'CONFLICTING',
+          mergeStateStatus: 'DIRTY',
+        }),
+      });
+      assert.match(await pr.page(), /<strong>1 unresolved conversation on GitHub<\/strong>/);
+      assert.match((await turn()).reasons.join(' · '), /1 unresolved thread on GitHub/);
+
+      // The agent hears only from the reviewer, who decides what to hand over.
+      await comment(pr.number, 'The test fails on GitHub; please fix it.');
+      const heard = (await waiting).stdout;
+      assert.match(heard, /The test fails on GitHub; please fix it\./);
+      assert.doesNotMatch(heard, /Export a function|Checks failed|Conflicts/);
     });
 
     await t.test('pr wait on several pull requests returns the first with news, and says which', async () => {
