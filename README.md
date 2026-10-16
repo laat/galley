@@ -12,6 +12,7 @@ laatsux pr create   ───────▶  stages the branch, tracks pushes
 laatsux pr wait     ◀───────  blocks until feedback          ◀──────  review in the browser
 (amend, reply, edit)───────▶  new revision, comments follow
 laatsux pr wait     ◀───────  "Published to GitHub: …"       ◀──────  Publish: git push + gh pr create
+laatsux pr wait     ◀───────  "Merged on GitHub as e468a4e"  ◀──────  merge on GitHub
 ```
 
 ## Requirements
@@ -71,14 +72,14 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | Command | |
 |---|---|
 | `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` turns automatic Codex reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns them off. Without either, the settings decide |
-| `laatsux pr list` | `--state open\|published\|closed\|all`, `--json`, `--jq` |
+| `laatsux pr list` | `--state open\|published\|merged\|closed\|all`, `--json`, `--jq` |
 | `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web`. `--download-images <dir>` saves the images in them as files |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
 | `laatsux pr edit [<n>]` | `--title`, `--body`, `--body-file`, `--base` |
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
+| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
@@ -95,7 +96,8 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 `QUEUED`), `commit` and `startedAt`. `turn` says whose move it is (`AUTHOR`, `REVIEWER_AGENTS`,
 `REVIEWER` or `NONE`) and why, as on the [front page](#the-front-page). `unpublishedChanges` lists
 what a published pull request has that GitHub does not yet (`COMMITS`, `TITLE`, `BODY`); `state`
-stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both.
+stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both. `state` becomes
+`MERGED` or `CLOSED` once that happened on GitHub, with `mergedAt`, `mergedBy` and `mergeCommit` as in gh.
 
 ## The web UI
 
@@ -119,6 +121,7 @@ stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both.
 - Comments follow their lines across pushes, or are marked outdated when the code under them changed
 - Live updates while the agent works, and a "waiting for your review" indicator while it runs `pr wait`
 - Publish, with options to open as a draft and to [enable auto-merge on GitHub](#auto-merge). Publishing again after changes force-pushes if needed and updates the GitHub pull request with `gh pr edit`
+- A purple Merged badge and a "merged commit e468a4e into main on GitHub" timeline entry once the published pull request is merged on GitHub, and Closed on GitHub when it is closed there
 - Publish when reviews are done: [auto-publish](#auto-publish)
 
 ### The front page
@@ -174,7 +177,9 @@ request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's 
 `GET /api/settings`, `PUT /api/settings/codex` and `PUT /api/settings/publish` (`mergeMethod`), `POST /api/uploads` (an image's bytes; answers
 with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, and `GET /events`
 (server-sent events). A pull request also has `turn` (`whose`: `author`, `reviewer_agents`,
-`reviewer` or `none`, and `reasons`) and `unpublished_changes`.
+`reviewer` or `none`, and `reasons`) and `unpublished_changes`, and once published `github_state`
+(`open`, `merged` or `closed` on GitHub; null until laatsux has asked), `github_closed_at` and
+`github_closed_by`, and GitHub's own `merged`, `merged_at`, `merged_by` and `merge_commit_sha`.
 
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
@@ -213,6 +218,15 @@ staged pull requests.
   commits that signing replaces with copies) and force was chosen, with `--force-with-lease`
   against the last published commit (before the first publish, the branch as last fetched or
   pushed), so commits added on GitHub are never overwritten.
+- **Following GitHub**: once published, a pull request is followed until it is merged or
+  closed on GitHub. Every minute the server asks GitHub about all of them, with one
+  `gh api graphql` query per repository, and records a merge (the merge commit, who merged it,
+  when) or a close on the pull request and in its timeline. It stops asking about one once it is
+  merged or closed there, or closed in laatsux. `pr wait` reports the merge or close, and keeps
+  saying so on later waits. Nothing is published over a merge; publishing one closed on GitHub
+  again updates it there and follows it again. Commits or reviews added on GitHub after
+  publishing are not followed. The pinned `refs/laatsux/pull/<n>/*` stay after a merge, since
+  comments are anchored to those commits.
 - **Signing**: agents commit unsigned; the commits are yours once you publish. Publishing
   can sign them: laatsux makes a signed copy of each commit with `git commit-tree -S`, with
   the same tree, message and author and you as committer (GitHub only verifies a signature
@@ -364,10 +378,10 @@ the repository's CI as the last gate.
   in the merge box and the timeline, and `pr publish --auto-merge` exits with 1.
 - Under auto-publish, the `gh` calls get two minutes like the others.
 - The merge box, `pr view` (`auto-merge:` and `autoMergeRequest`, as in gh) and the API's
-  `auto_merge` show that auto-merge is on. They say what GitHub answered then: laatsux does
-  not follow the pull request on GitHub afterwards. When gh accepted the request but laatsux
-  could not check whether GitHub merged at once, the merge box says auto-merge was requested,
-  and the others do not claim it is on.
+  `auto_merge` show that auto-merge is on. They say what GitHub answered then; the merge itself
+  shows once following the pull request finds it (see Following GitHub). When gh accepted the
+  request but laatsux could not check whether GitHub merged at once, the merge box says
+  auto-merge was requested, and the others do not claim it is on.
 - What came of it stays in the merge box even when the option itself is hidden.
 
 ## Other review agents

@@ -86,6 +86,8 @@ export interface StartOptions {
   codexBin?: string;
   viewerLogin?: string;
   pollMs?: number;
+  /** How often to ask GitHub whether published pull requests were merged or closed there. */
+  followMs?: number;
 }
 
 export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; close: () => Promise<void> }> {
@@ -138,12 +140,21 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   }, opts.pollMs ?? 2000);
   timer.unref();
 
+  // Published pull requests are followed on GitHub until they are merged or closed there.
+  let following = service.followGithub();
+  const follow = setInterval(() => {
+    following = service.followGithub();
+  }, opts.followMs ?? 60_000);
+  follow.unref();
+
   return {
     url,
     port,
     service,
     close: async () => {
       clearInterval(timer);
+      clearInterval(follow);
+      await following;
       // Running reviews and publishes write to the database when they end, so they go first.
       await autoPublisher.stop();
       await service.codex?.stop();

@@ -40,6 +40,11 @@ export function userJson(s: Service, a: Actor) {
   return { login: a.login, id: a.id, type: a.type, avatar_url: avatarUrl(s, a) };
 }
 
+/** A GitHub user laatsux knows only by login, such as whoever merged a pull request there. */
+function githubUserJson(login: string) {
+  return { login, avatar_url: `https://github.com/${login}.png`, html_url: `https://github.com/${login}` };
+}
+
 function apiBase(s: Service, repo: RepoRow) {
   return `${s.baseUrl}/api/repos/${repo.owner}/${repo.name}`;
 }
@@ -61,6 +66,7 @@ export function repoJson(s: Service, repo: RepoRow) {
 
 export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { files?: FileDiff[]; commits?: Commit[] } = {}) {
   const author = s.db.actorById(pull.author_id);
+  const merged = pull.github_state === 'merged';
   const json: Record<string, unknown> = {
     url: `${apiBase(s, repo)}/pulls/${pull.number}`,
     id: pull.id,
@@ -74,7 +80,11 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     created_at: pull.created_at,
     updated_at: pull.updated_at,
     closed_at: pull.closed_at,
-    merged_at: null,
+    // Merged on GitHub, once it was published there.
+    merged,
+    merged_at: merged ? pull.github_closed_at : null,
+    merged_by: merged && pull.github_closed_by ? githubUserJson(pull.github_closed_by) : null,
+    merge_commit_sha: pull.github_merge_sha,
     // GitHub's auto_merge, for the published pull request: on when laatsux last turned it on there.
     auto_merge: autoMergeJson(s, pull),
     head: { label: `${repo.owner}:${pull.head_ref}`, ref: pull.head_ref, sha: pull.head_sha },
@@ -83,6 +93,11 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     staging_state: pull.state,
     published_url: pull.published_url,
     published_at: pull.published_at,
+    // The published pull request on GitHub: open, merged or closed there (null until laatsux has asked),
+    // and when and by whom it was merged or closed.
+    github_state: pull.github_state,
+    github_closed_at: pull.github_closed_at,
+    github_closed_by: pull.github_closed_by,
     author_waiting: (s.waiters.get(pull.id) ?? 0) > 0,
     auto_publish: autoPublishJson(s, pull),
     // Whose move it is (author, reviewer_agents, reviewer or none), and why.
@@ -239,7 +254,10 @@ function ghAuthor(s: Service, id: number) {
   return { login: a.login, is_bot: a.type === 'Bot' };
 }
 
+/** As gh says it, with PUBLISHED (a laatsux state) until the pull request is merged or closed on GitHub. */
 function ghState(pull: PullRow) {
+  if (pull.github_state === 'merged') return 'MERGED';
+  if (pull.github_state === 'closed') return 'CLOSED';
   return pull.state.toUpperCase();
 }
 
@@ -275,6 +293,9 @@ export const GH_FIELDS = [
   'id',
   'isDraft',
   'latestReviews',
+  'mergeCommit',
+  'mergedAt',
+  'mergedBy',
   'number',
   'publishedUrl',
   'reviewDecision',
@@ -309,12 +330,16 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('title', () => pull.title);
   set('body', () => pull.body);
   set('state', () => ghState(pull));
-  set('closed', () => pull.state === 'closed');
+  set('closed', () => pull.state === 'closed' || pull.github_state === 'merged' || pull.github_state === 'closed');
   set('url', () => s.pullUrl(repo, pull));
   set('isDraft', () => !!pull.draft);
   set('createdAt', () => pull.created_at);
   set('updatedAt', () => pull.updated_at);
-  set('closedAt', () => pull.closed_at);
+  set('closedAt', () => pull.closed_at ?? pull.github_closed_at);
+  const merged = pull.github_state === 'merged';
+  set('mergedAt', () => (merged ? pull.github_closed_at : null));
+  set('mergedBy', () => (merged && pull.github_closed_by ? { login: pull.github_closed_by, is_bot: false } : null));
+  set('mergeCommit', () => (merged && pull.github_merge_sha ? { oid: pull.github_merge_sha } : null));
   set('author', () => ghAuthor(s, pull.author_id));
   set('headRefName', () => pull.head_ref);
   set('baseRefName', () => pull.base_ref);

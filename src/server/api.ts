@@ -414,6 +414,8 @@ export function api(s: Service): Hono {
     return c.json({
       status: r.status,
       published_url: pull?.published_url ?? null,
+      // Who merged or closed it on GitHub (gh's JSON has no field for who closed it).
+      github_closed_by: pull?.github_closed_by ?? null,
       reviews: r.reviews.map((rv) => rv.id),
       comments: r.comments.map((cm) => ({ id: cm.id, kind: cm.kind, in_reply_to_id: cm.in_reply_to_id })),
       // Everything needed to show the feedback, so no second request can fail in between.

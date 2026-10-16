@@ -46,7 +46,8 @@ feedback, and the loop repeats until the user publishes it.
    and says so; mention that to the user along with the URL.
 
 2. Wait for the review. This blocks until the user submits a review or comment, publishes,
-   or closes the pull request, then prints only the new feedback:
+   or closes the pull request (and once published, until it is merged or closed on GitHub),
+   then prints only the new feedback:
 
    ```sh
    laatsux pr wait
@@ -111,13 +112,46 @@ feedback, and the loop repeats until the user publishes it.
      propose the structural fix to the user before you rewrite, instead of patching case after
      case.
 
-5. Run `laatsux pr wait` again. Repeat until it prints `Published to GitHub: <url>` (you are
-   done; tell the user the GitHub URL) or reports that the pull request was closed. If it says
-   a reviewer such as codex is still reviewing, its review is coming: wait for it before you
-   tell the user the pull request is ready. If it says auto-publish is on, the user has approved
-   publishing in advance: address the feedback and wait again, and laatsux publishes while you
-   wait once the reviewer agents are done. If it says it also turns on auto-merge, GitHub merges the
-   pull request once its required checks pass; you do not merge it.
+5. Run `laatsux pr wait` again. Repeat until it prints `Published to GitHub: <url>` or reports
+   that the pull request was closed. If it says a reviewer such as codex is still reviewing, its
+   review is coming: wait for it before you tell the user the pull request is ready. If it says
+   auto-publish is on, the user has approved publishing in advance: address the feedback and
+   wait again, and laatsux publishes while you wait once the reviewer agents are done. If it
+   says it also turns on auto-merge, GitHub merges the pull request once its required checks
+   pass; you do not merge it.
+
+6. After `Published to GitHub: <url>`, tell the user the GitHub URL, and run `laatsux pr wait`
+   once more, the same way. laatsux follows the pull request on GitHub, so this blocks until it
+   is merged or closed there, or new feedback arrives:
+
+   - `Merged on GitHub as e468a4e by laat: <url>`: clean up, as in [After the merge](#after-the-merge).
+   - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
+     user says otherwise.
+   - New feedback: address it as in step 4 and wait again. The user publishes the update.
+
+## After the merge
+
+The branch is on the base branch now. Clean up, unless the user wants to keep something:
+
+1. Bring the local base branch up to the merge: `git fetch origin`, then
+   `git merge --ff-only origin/<base>` where the base branch is checked out, or
+   `git fetch origin <base>:<base>` when it is checked out nowhere.
+2. Remove the pull request's worktree (`git worktree remove <path>`, if you made one) and its
+   branch. GitHub has signed copies of your commits (a squash merge makes new ones), so git does
+   not see the branch as merged: delete it with `git branch -D <branch>`.
+3. Rebase your other open pull requests that touch the same files onto the new base, so their
+   diffs and the user's review stay current: compare `laatsux pr diff <n> --name-only` with the
+   merged files, then `git rebase origin/<base>` on each such branch. laatsux records the rebase
+   as a new revision and carries the review comments along.
+
+Leave the `refs/laatsux/...` refs alone; the review comments are anchored to those commits.
+
+## Several pull requests
+
+An agent that looks after several pull requests can wait on all of them:
+`laatsux pr wait 5 6` returns as soon as one of them has news, says which, and leaves the news
+of the others for the next wait. A merged or closed pull request is reported on every wait, so
+leave it out of the next one, as the output says.
 
 ## Codex reviews
 
@@ -143,7 +177,7 @@ setting, unless they say otherwise when they ask you to stage:
 | `gh pr list`, `diff`, `edit`, `comment`, `checkout`, `status`, `ready`, `close`, `reopen` | same | |
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |
 | `gh api repos/{owner}/{repo}/pulls/N/comments` | same path | REST subset; see `laatsux api --help` |
-| | `laatsux pr wait` | block until feedback |
+| | `laatsux pr wait [<n>...]` | block until feedback, or after publishing until merged or closed on GitHub; several numbers return the first with news |
 | | `laatsux pr comment --reply-to ID [--resolve]` | reply to a review thread, and resolve it |
 | `gh browse path:line --commit sha` | `laatsux browse path:line[-line] [--commit sha]` | prints a link to those lines in the web UI (default: HEAD); give it to the user when you point at code |
 

@@ -104,11 +104,12 @@ before(async () => {
     gh,
     // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error, FAKE_GH_API_FAIL `gh api ...`. A file gh-merge-fail makes
     // the next `gh pr merge` fail with its contents. `gh pr view` answers FAKE_GH_VIEW, or an open pull request.
-    // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false.
+    // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. The states of
+    // published pull requests come from gh-pulls.json (see githubSays).
     `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
       `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
-      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *) printf '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2},"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
+      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *"pullRequest("*) cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2},"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -1471,7 +1472,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       [
         'pr create --repo acme/widgets --base main --head feature/merge-manual --title Add manual-merge.js --body-file -',
         `pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`,
-        `pr view ${url} --json state`,
+        `pr view ${url} --json state,mergedAt,mergedBy,mergeCommit`,
       ],
     );
     const enabled = (await pr.timeline()).findLast((e) => e.event === 'auto_merge_enabled');
@@ -1654,7 +1655,8 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     // Right after creating the pull request, gh asks for auto-merge before GitHub knows it is
     // clean, and GitHub refuses. Asked again, gh merges it.
     writeFileSync(join(dir, 'gh-merge-fail'), 'GraphQL: Pull request Pull request is in clean status (enablePullRequestAutoMerge)');
-    process.env.FAKE_GH_VIEW = '{"state":"MERGED"}';
+    const mergeCommit = 'f00d' + '0'.repeat(36);
+    process.env.FAKE_GH_VIEW = JSON.stringify({ state: 'MERGED', mergedAt: '2026-10-17T10:00:00Z', mergedBy: { login: 'reviewer' }, mergeCommit: { oid: mergeCommit } });
     const calls = ghCalls();
     try {
       const pull = await human('POST', `${pr.base}/publish`, { auto_merge: true });
@@ -1667,6 +1669,16 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     const page = await pr.page();
     assert.match(page, /<strong>Merged on GitHub<\/strong>/);
     assert.match(page, /merged <a [^>]*>acme\/widgets#7<\/a> on GitHub \(squash\) [^]*?: auto-merge had nothing to wait for/);
+    // Recorded as merged, as following would: the agent hears of it, and nothing is published over it.
+    const recorded = await human('GET', pr.base);
+    assert.deepEqual([recorded.github_state, recorded.merged_by?.login, recorded.merge_commit_sha], ['merged', 'reviewer', mergeCommit]);
+    assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Merged on GitHub as f00d000 by reviewer/m);
+    const pushed = pr.pushed();
+    writeFileSync(join(repo, 'clean-merge.js'), 'export const after = 1;\n');
+    git('commit', '-qam', 'After the merge');
+    const again = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(again.status, 422);
+    assert.equal(pr.pushed(), pushed);
   });
 
   await t.test('only where GitHub allows auto-merge, and with a merge method it allows', async () => {
@@ -2708,5 +2720,215 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
     delete process.env.FAKE_CODEX_FAIL;
     rmSync(gate, { force: true });
     await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
+  }
+});
+
+test('published pull requests are followed until they are merged or closed on GitHub', async (t) => {
+  /** Stage a branch with one commit as the agent, publish it as the reviewer, and let the agent hear of the publish. */
+  const published = async (branch: string, file: string) => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', branch);
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+    const created = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', '--no-review']);
+    assert.equal(created.code, 0, created.stderr);
+    const number = Number(created.stdout.trim().split('/').pop());
+    const base = `/api/repos/acme/widgets/pulls/${number}`;
+    const { id } = await human('POST', `${base}/publish`, { sign: false });
+    // The first wait after a publish reports it; the next one waits for GitHub.
+    const heard = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    assert.match(heard.stdout, /^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
+    assert.match(heard.stdout, new RegExp(`Run \`laatsux pr wait ${number}\` again to hear when it is merged or closed on GitHub`));
+    return {
+      number,
+      id,
+      base,
+      page: async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(),
+      timeline: (): Promise<any[]> => human('GET', `/api/repos/acme/widgets/issues/${number}/timeline`),
+      /** How many times laatsux has asked GitHub about it. */
+      asked: () => readFileSync(join(dir, 'gh.log'), 'utf8').split(`p${id}:pullRequest(number:7)`).length - 1,
+    };
+  };
+  /** What GitHub says about these pull requests (by staged pull id), and laatsux asking it, as it does every minute. */
+  const githubSays = async (nodes: Record<number, object>) => {
+    const repository = Object.fromEntries(Object.entries(nodes).map(([id, node]) => [`p${id}`, node]));
+    writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository } }));
+    await server.service.followGithub();
+  };
+  const untilWaiting = async (...bases: string[]) => {
+    for (const base of bases) for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  const comment = (number: number, body: string) => human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body });
+  const mergeCommit = 'e468a4e' + '1'.repeat(33);
+  const open = { state: 'OPEN', mergedAt: null, closedAt: null, mergedBy: null, mergeCommit: null, timelineItems: { nodes: [] } };
+  const merged = { state: 'MERGED', mergedAt: '2026-10-16T09:00:00Z', closedAt: '2026-10-16T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: mergeCommit }, timelineItems: { nodes: [{ actor: { login: 'laat' } }] } };
+  const closed = { state: 'CLOSED', mergedAt: null, closedAt: '2026-10-16T10:00:00Z', mergedBy: null, mergeCommit: null, timelineItems: { nodes: [{ actor: { login: 'octocat' } }] } };
+
+  try {
+    await t.test('pr wait after a publish waits for the merge, and says who merged it as what', async () => {
+      const pr = await published('feature/follow-merge', 'merge.js');
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await untilWaiting(pr.base);
+      // Still open on GitHub: nothing to tell.
+      await githubSays({ [pr.id]: open });
+      assert.equal((await human('GET', pr.base)).github_state, 'open');
+      const returned = await Promise.race([waiting.then(() => true), new Promise((r) => setTimeout(() => r(false), 300))]);
+      assert.equal(returned, false, 'a pull request still open on GitHub does not end the wait');
+      await githubSays({ [pr.id]: merged });
+      const r = await waiting;
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /^Merged on GitHub as e468a4e by laat: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
+      assert.match(r.stdout, /Next: fast-forward your main to the merge, remove the worktree and the branch feature\/follow-merge/);
+      // Every later wait says so at once.
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Merged on GitHub as e468a4e by laat/m);
+
+      const rest = await human('GET', pr.base);
+      assert.deepEqual(
+        [rest.github_state, rest.merged, rest.merged_at, rest.merged_by.login, rest.merge_commit_sha, rest.github_closed_by],
+        ['merged', true, '2026-10-16T09:00:00Z', 'laat', mergeCommit, 'laat'],
+      );
+      const view = await cli(['pr', 'view', String(pr.number), '--json', 'state,closed,mergedAt,mergedBy,mergeCommit,turn']);
+      assert.deepEqual(JSON.parse(view.stdout), {
+        state: 'MERGED',
+        closed: true,
+        mergedAt: '2026-10-16T09:00:00Z',
+        mergedBy: { login: 'laat', is_bot: false },
+        mergeCommit: { oid: mergeCommit },
+        // A merged pull request is nobody's turn.
+        turn: { whose: 'NONE', reasons: [] },
+      });
+      assert.match((await cli(['pr', 'view', String(pr.number)])).stdout, /^state:\tMERGED$[^]*^merged:\tas e468a4e by laat at 2026-10-16T09:00:00Z$/m);
+      assert.match((await cli(['pr', 'list', '--state', 'merged'])).stdout, new RegExp(`^${pr.number}\\tAdd merge\\.js\\tfeature/follow-merge\\tMERGED\\t`, 'm'));
+      const event = (await pr.timeline()).find((e) => e.event === 'merged');
+      assert.deepEqual([event.by, event.commit, event.at, event.url], ['laat', mergeCommit, '2026-10-16T09:00:00Z', 'https://github.com/acme/widgets/pull/7']);
+
+      const page = await pr.page();
+      assert.match(page, /<span class="State State--merged" title="Merged on GitHub"><svg class="octicon octicon-git-merge"[^>]*>.*?<\/svg> Merged<\/span>/);
+      assert.match(
+        page,
+        new RegExp(
+          `<a class="author" href="https://github\\.com/laat" target="_blank" rel="noopener">laat</a> merged commit <a class="commit-link" href="https://github\\.com/acme/widgets/commit/${mergeCommit}" target="_blank" rel="noopener"><code>e468a4e</code></a> into <span class="branch-name branch-name-sm">main</span> on GitHub`,
+        ),
+      );
+      assert.match(page, /<strong>Merged on GitHub<\/strong>/);
+      assert.doesNotMatch(page, /js-publish-form/);
+      const list = await (await fetch(`${server.url}/acme/widgets?state=all`)).text();
+      assert.match(list, new RegExp(`octicon-git-merge color-fg-done[^]*?href="/acme/widgets/pull/${pr.number}">Add merge\\.js</a>\\s*<span class="Label Label--merged">Merged</span>`));
+      // Nothing is published over a merge.
+      const res = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST' });
+      assert.equal(res.status, 422);
+      assert.match((await res.json()).message, /merged on GitHub/);
+
+      // Merged is final: laatsux stops asking GitHub about it.
+      const asked = pr.asked();
+      await githubSays({ [pr.id]: merged });
+      assert.equal(pr.asked(), asked);
+      assert.ok(!server.service.followed().some((p) => p.id === pr.id));
+
+      // Its branch can be staged again, and the merged pull request keeps the commits it was merged with.
+      const mergedHead = (await human('GET', pr.base)).head.sha;
+      git('checkout', '-q', 'feature/follow-merge');
+      writeFileSync(join(repo, 'merge.js'), 'export const more = 1;\n');
+      git('commit', '-qam', 'More work on the branch');
+      const again = await cli(['pr', 'create', '--title', 'More on the merged branch', '--body', 'x', '--no-review']);
+      assert.equal(again.code, 0, again.stderr);
+      await new Promise((r) => setTimeout(r, 300)); // the server polls branches every 50 ms here
+      assert.equal((await human('GET', pr.base)).head.sha, mergedHead);
+      assert.equal((await human('GET', `${pr.base}/commits`)).length, 1);
+      assert.equal(JSON.parse((await cli(['pr', 'view', '--json', 'number'])).stdout).number, Number(again.stdout.trim().split('/').pop()));
+    });
+
+    await t.test('a merge found while a publish signs stops the push', async () => {
+      const pr = await published('feature/follow-race', 'race.js');
+      writeFileSync(join(repo, 'race.js'), 'export const raced = 1;\n');
+      git('commit', '-qam', 'Race the merge');
+      const remoteHead = () => execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/follow-race'], { encoding: 'utf8' }).trim();
+      const before = remoteHead();
+      // Signing waits, as for a passphrase, while following finds the merge.
+      const signing = join(dir, 'race-signing');
+      const gate = join(dir, 'race-gate');
+      const program = join(dir, 'race-ssh-keygen');
+      writeFileSync(program, `#!/bin/sh\ntouch "${signing}"\nwhile [ ! -f "${gate}" ]; do sleep 0.02; done\nexec ssh-keygen "$@"\n`);
+      chmodSync(program, 0o755);
+      git('config', 'gpg.ssh.program', program);
+      try {
+        const publishing = fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: true, force: true }) });
+        for (let i = 0; i < 400 && !existsSync(signing); i++) await new Promise((r) => setTimeout(r, 25));
+        assert.ok(existsSync(signing), 'signing started');
+        await githubSays({ [pr.id]: merged });
+        writeFileSync(gate, '');
+        const res = await publishing;
+        assert.equal(res.status, 422);
+        assert.match((await res.json()).message, /merged on GitHub/);
+        assert.equal(remoteHead(), before);
+      } finally {
+        git('config', '--unset', 'gpg.ssh.program');
+        for (const f of [signing, gate, program]) rmSync(f, { force: true });
+      }
+    });
+
+    await t.test('closed on GitHub without merging, and followed again when published again', async () => {
+      const pr = await published('feature/follow-close', 'close.js');
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await untilWaiting(pr.base);
+      await githubSays({ [pr.id]: closed });
+      const r = await waiting;
+      assert.match(r.stdout, /^Closed on GitHub without merging by octocat: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Closed on GitHub without merging/m);
+      const view = await cli(['pr', 'view', String(pr.number), '--json', 'state,closed,closedAt,mergedAt,turn']);
+      assert.deepEqual(JSON.parse(view.stdout), { state: 'CLOSED', closed: true, closedAt: '2026-10-16T10:00:00Z', mergedAt: null, turn: { whose: 'NONE', reasons: [] } });
+      const page = await pr.page();
+      assert.match(page, /<span class="State State--closed" title="Closed on GitHub">/);
+      assert.match(page, /<a class="author" href="https:\/\/github\.com\/octocat" target="_blank" rel="noopener">octocat<\/a> closed this pull request on GitHub/);
+      assert.match(page, /<strong>Closed on GitHub<\/strong>/);
+
+      // Published again (it was reopened on GitHub, say): followed again, and a close GitHub still reports is no news.
+      writeFileSync(join(repo, 'close.js'), 'export const again = 1;\n');
+      git('commit', '-qam', 'Again');
+      await human('POST', `${pr.base}/publish`, { sign: false });
+      assert.equal((await human('GET', pr.base)).github_state, null);
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Published to GitHub/m);
+      const asked = pr.asked();
+      await githubSays({ [pr.id]: closed });
+      assert.equal(pr.asked(), asked + 1);
+      assert.equal((await human('GET', pr.base)).github_state, 'closed');
+      assert.equal((await pr.timeline()).filter((e) => e.event === 'closed_on_github').length, 1);
+    });
+
+    await t.test('pr wait on several pull requests returns the first with news, and says which', async () => {
+      const a = await published('feature/multi-a', 'a.js');
+      const b = await published('feature/multi-b', 'b.js');
+      const both = [String(a.number), String(b.number)];
+      const waiting = cli(['pr', 'wait', ...both, '--timeout', '20s']);
+      await untilWaiting(a.base, b.base);
+      await comment(b.number, 'One more thing on b.');
+      const r = await waiting;
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`^acme/widgets#${b.number} \\(feature/multi-b\\): ${server.url}/acme/widgets/pull/${b.number}$`, 'm'));
+      assert.match(r.stdout, /One more thing on b\./);
+      assert.match(r.stdout, new RegExp(`then run \`laatsux pr wait ${both.join(' ')}\` again`));
+
+      // News on both: a wait brings one, and the next the other. The poll it dropped lost nothing.
+      await comment(a.number, 'Note on a.');
+      await comment(b.number, 'Note on b.');
+      const first = (await cli(['pr', 'wait', ...both, '--timeout', '5s'])).stdout;
+      const second = (await cli(['pr', 'wait', ...both, '--timeout', '5s'])).stdout;
+      assert.notEqual(/Note on a\./.test(first), /Note on b\./.test(first), first);
+      assert.match(first + second, /Note on a\.[^]*Note on b\.|Note on b\.[^]*Note on a\./);
+
+      // One query asks GitHub about both.
+      const waitingAgain = cli(['pr', 'wait', ...both, '--timeout', '20s']);
+      await untilWaiting(a.base, b.base);
+      await githubSays({ [a.id]: merged, [b.id]: open });
+      const query = readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').findLast((l) => l.includes(`p${a.id}:pullRequest`));
+      assert.match(query!, new RegExp(`p${b.id}:pullRequest\\(number:7\\)`));
+      const merge = await waitingAgain;
+      assert.match(merge.stdout, new RegExp(`^acme/widgets#${a.number} \\(feature/multi-a\\)`, 'm'));
+      assert.match(merge.stdout, /^Merged on GitHub as e468a4e by laat/m);
+      assert.match(merge.stdout, new RegExp(`Wait on the others with \`laatsux pr wait ${b.number}\`\\.`));
+    });
+  } finally {
+    rmSync(join(dir, 'gh-pulls.json'), { force: true });
   }
 });

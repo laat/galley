@@ -63,6 +63,9 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
+  /** Merged or closed on GitHub, once published. */
+  const onGithub = (p: PullRow) =>
+    p.github_state === 'merged' ? html`<span class="Label Label--merged">Merged</span>` : p.github_state === 'closed' && p.state !== 'closed' ? html`<span class="Label">Closed on GitHub</span>` : '';
 
   /** A pull request with what it waits for: whose turn it is and why, the decision, and what GitHub does not have yet. */
   const row = (p: PullRow) => {
@@ -78,6 +81,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${t.reasons.some((r) => r.kind === 'approved') ? html`<span class="Label Label--success">${icon('check')} Approved</span>` : ''}
     ${t.reasons.some((r) => r.kind === 'changes_requested') ? html`<span class="Label Label--danger">${icon('file-diff')} Changes requested</span>` : ''}
     ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
+    ${onGithub(p)}
     ${turnReasons(t, apiBase(p))}
     <div class="pr-row-meta">#${p.number} opened ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
@@ -93,7 +97,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
     <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
-    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
+    ${t.whose === 'none' ? html`<span class="pr-row-turn">${onGithub(p)} ${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
   </div>
 </div>`;
   };
@@ -240,7 +244,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
     <div class="gh-header-meta">
       ${stateBadge(pull, 'md', unpublished)}
       <div class="gh-header-meta-text">
-        ${authorLink(s, author)} ${pull.state === 'published' && !unpublished ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
+        ${pull.github_state === 'merged' ? html`${githubUser(pull.github_closed_by)} merged` : html`${authorLink(s, author)} ${pull.state === 'published' && !unpublished ? 'published' : 'wants to merge'}`} ${plural(commits.length, 'commit')} into
         <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
       </div>
     </div>
@@ -289,6 +293,13 @@ function commitList(p: PullPage, commits: Commit[]): Safe {
 /** A pull request on GitHub, as owner/repo#7. */
 function githubPull(url: string): Safe {
   return html`<a href="${url}" target="_blank" rel="noopener">${url.replace('https://github.com/', '').replace('/pull/', '#')}</a>`;
+}
+
+/** Someone on GitHub, known by login only: whoever merged or closed a published pull request there. */
+function githubUser(login: string | null, withAvatar = false): Safe {
+  if (!login) return html`Someone`;
+  const link = html`<a class="author" href="https://github.com/${login}" target="_blank" rel="noopener">${login}</a>`;
+  return withAvatar ? html`${avatar(`https://github.com/${login}.png?size=40`, login, 20, 'avatar-circle avatar-small')} ${link}` : link;
 }
 
 const AUTO_PUBLISH_OFF: Record<string, string> = {
@@ -354,6 +365,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         { cls: 'timeline-badge--danger' },
       );
     case 'auto_publish_disabled':
+      if (data.reason === 'merged') return timelineBadge('clock', html`Auto-publish turned itself off when the pull request was merged on GitHub ${when}`);
       return timelineBadge('clock', html`${who} disabled auto-publish${AUTO_PUBLISH_OFF[data.reason] ?? ''} ${when}`);
     case 'auto_publish_failed':
       return timelineBadge(
@@ -362,6 +374,15 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
+    case 'merged': {
+      // `at` is when GitHub merged it; the event is from when laatsux learned of it.
+      const commit = data.commit
+        ? html`commit <a class="commit-link" href="${String(data.url).replace(/\/pull\/\d+$/, '')}/commit/${data.commit}" target="_blank" rel="noopener"><code>${shortSha(data.commit)}</code></a>`
+        : 'this pull request';
+      return timelineBadge('git-merge', html`${githubUser(data.by, true)} merged ${commit} into <span class="branch-name branch-name-sm">${p.pull.base_ref}</span> on GitHub ${relTime(data.at)}`, { cls: 'timeline-badge--done' });
+    }
+    case 'closed_on_github':
+      return timelineBadge('git-pull-request-closed', html`${githubUser(data.by, true)} closed this pull request on GitHub ${relTime(data.at)}`, { cls: 'timeline-badge--closed' });
     case 'convert_to_draft':
       return timelineBadge('git-pull-request-draft', html`${who} marked this pull request as draft ${when}`);
     case 'ready_for_review':
@@ -398,6 +419,15 @@ function lineDiff(a: string, b: string): Safe {
 
 async function mergeBox(p: PullPage): Promise<Safe> {
   const { s, pull, repo, viewer } = p;
+  if (pull.github_state === 'merged') {
+    const sha = pull.github_merge_sha ? html` as <code>${shortSha(pull.github_merge_sha)}</code>` : '';
+    return html`<div class="merge-box merge-box--merged">
+      <span class="merge-box-icon">${icon('git-merge', { size: 24 })}</span>
+      <div class="Box"><div class="merge-row merge-actions">${icon('git-merge', { cls: 'color-fg-done' })}<div class="flex-auto"><strong>Merged on GitHub</strong>
+        <div class="color-fg-muted">${githubUser(pull.github_closed_by)} merged it${sha} ${relTime(pull.github_closed_at)}. Conversations stay in laatsux.</div></div>
+        <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div></div>
+    </div>`;
+  }
   const submitted = p.reviews.filter((r) => r.state !== 'PENDING');
   const decision = submitted.length ? reviewDecision(submitted) : null;
   const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
@@ -425,6 +455,10 @@ async function mergeBox(p: PullPage): Promise<Safe> {
       <div class="Box">${rows}<div class="merge-row merge-actions"><div><strong>This staged pull request is closed.</strong></div>
         <button type="button" class="btn js-set-state" data-state="open">Reopen pull request</button></div></div>
     </div>`;
+  }
+
+  if (pull.github_state === 'closed') {
+    rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and laatsux follows it again in case it was reopened.</div></div></div>`);
   }
 
   const changed = s.unpublishedChanges(pull);
@@ -512,8 +546,9 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     }
   }
   if (merge) rows.push(autoMergeRow(p, merge));
-  return html`<div class="merge-box${pull.state === 'published' ? ' merge-box--published' : ''}">
-    <span class="merge-box-icon">${pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
+  const closedOnGithub = pull.github_state === 'closed';
+  return html`<div class="merge-box${closedOnGithub ? ' merge-box--closed' : pull.state === 'published' ? ' merge-box--published' : ''}">
+    <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
 }

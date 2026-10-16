@@ -113,6 +113,7 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
   // A server older than the CLI has neither field.
   if (pr.unpublishedChanges?.length) lines.push(`unpublished:\t${unpublished(pr)}`);
   if (pr.turn) lines.push(`turn:\t${pr.turn.whose.toLowerCase()}\t${pr.turn.reasons.join('; ')}`);
+  if (pr.mergedAt) lines.push(`merged:\t${mergedText(pr)}`);
   return `${lines.join('\n')}\n--\n${withImages(pr.body, images)}\n`;
 }
 
@@ -126,7 +127,9 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
         ? pr.unpublishedChanges?.length
           ? c.green('Update not published')
           : c.magenta('Published')
-        : c.red('Closed');
+        : pr.state === 'MERGED'
+          ? c.magenta('Merged')
+          : c.red('Closed');
   const out = [
     `${c.bold(pr.title)} ${c.gray('#' + pr.number)}`,
     `${state} • ${pr.author.login} wants to merge ${pr.commits.length} commit${pr.commits.length === 1 ? '' : 's'} into ${pr.baseRefName} from ${pr.headRefName} • ${c.green('+' + pr.additions)} ${c.red('-' + pr.deletions)}`,
@@ -143,6 +146,7 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   if (pr.turn && pr.turn.whose !== 'NONE') out.push(`${c.bold('Turn:')} ${turnLine(pr.turn)}`);
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');
   if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}${pr.unpublishedChanges?.length ? c.yellow(` (update not published: ${unpublished(pr)})`) : ''}`);
+  if (pr.mergedAt) out.push(`Merged on GitHub ${mergedText(pr)}`);
   out.push(c.gray(`View this pull request in laatsux: ${pr.url}`));
   return out.join('\n') + '\n';
 }
@@ -150,6 +154,11 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
 /** "commits, title": what GitHub does not have yet. */
 function unpublished(pr: GhPull): string {
   return pr.unpublishedChanges.map((x: string) => (x === 'BODY' ? 'description' : x.toLowerCase())).join(', ');
+}
+
+/** "as e468a4e by laat at 2026-10-16T09:12:00Z" */
+function mergedText(pr: GhPull): string {
+  return [pr.mergeCommit ? `as ${String(pr.mergeCommit.oid).slice(0, 7)}` : null, pr.mergedBy ? `by ${pr.mergedBy.login}` : null, `at ${pr.mergedAt}`].filter(Boolean).join(' ');
 }
 
 function location(t: any, pr?: GhPull): string {
