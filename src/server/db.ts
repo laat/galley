@@ -47,6 +47,8 @@ export interface PullRow {
   codex_max_iterations: number | null;
   /** Whether Codex reviews this pull request automatically (1 or 0); null uses the setting. */
   codex_enabled: number | null;
+  /** Auto-publish, when it is on: an AutoPublish as JSON (see Service.autoPublish). */
+  auto_publish: string | null;
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
@@ -254,6 +256,8 @@ export interface ReviewRunRow {
   effort: string | null;
   error: string | null;
   review_id: number | null;
+  /** How many findings the review had, inline and in its body; null for runs without a review (and older ones). */
+  findings: number | null;
   started_at: string;
   finished_at: string | null;
 }
@@ -264,6 +268,8 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'codex_max_iterations', 'INTEGER'],
   ['pulls', 'codex_enabled', 'INTEGER'],
   ['comments', 'priority', 'TEXT'],
+  ['pulls', 'auto_publish', 'TEXT'],
+  ['review_runs', 'findings', 'INTEGER'],
 ];
 
 export class Db {

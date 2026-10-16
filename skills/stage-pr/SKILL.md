@@ -99,7 +99,9 @@ feedback, and the loop repeats until the user publishes it.
 5. Run `laatsux pr wait` again. Repeat until it prints `Published to GitHub: <url>` (you are
    done; tell the user the GitHub URL) or reports that the pull request was closed. If it says
    a reviewer such as codex is still reviewing, its review is coming: wait for it before you
-   tell the user the pull request is ready.
+   tell the user the pull request is ready. If it says auto-publish is on, the user has approved
+   publishing in advance: address the feedback and wait again, and laatsux publishes while you
+   wait once the reviewer agents are done.
 
 ## Codex reviews
 

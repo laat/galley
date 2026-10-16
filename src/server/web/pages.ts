@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
-import { publishFingerprint, type Ctx, type Service, type Thread } from '../service.ts';
+import { publishFingerprint, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread } from '../service.ts';
 import { avatarUrl, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
@@ -200,6 +200,12 @@ function commitList(p: PullPage, commits: Commit[]): Safe {
   )}</div>`;
 }
 
+const AUTO_PUBLISH_OFF: Record<string, string> = {
+  closed: ' by closing the pull request',
+  changes_requested: ' by requesting changes',
+  base_changed: ' by changing the base branch',
+};
+
 async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
   const actor = p.s.db.actorById(e.actor_id);
   const who = html`${avatar(avatarUrl(p.s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(actor)}`;
@@ -235,8 +241,21 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     case 'published':
       return timelineBadge(
         'mark-github',
-        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''} ${when}`,
+        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${data.auto ? ' with auto-publish' : ''} ${when}`,
         { cls: 'timeline-badge--done' },
+      );
+    case 'auto_publish_enabled': {
+      const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null].filter(Boolean);
+      return timelineBadge('clock', html`${who} enabled auto-publish${options.length ? ` (${options.join(', ')})` : ''} ${when}`);
+    }
+    case 'auto_publish_disabled':
+      return timelineBadge('clock', html`${who} disabled auto-publish${AUTO_PUBLISH_OFF[data.reason] ?? ''} ${when}`);
+    case 'auto_publish_failed':
+      return timelineBadge(
+        'x',
+        html`Auto-publish failed and turned itself off ${when}
+        <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        { cls: 'timeline-badge--danger' },
       );
     case 'convert_to_draft':
       return timelineBadge('git-pull-request-draft', html`${who} marked this pull request as draft ${when}`);
@@ -311,11 +330,13 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     if (pull.published_title !== pull.title) changed.push('title');
     if (pull.published_body !== pull.body) changed.push('description');
   }
-  const forceNeeded = !!publishedSource && publishedSource !== pull.head_sha && !(await p.ctx.git.isAncestor(publishedSource, pull.head_sha));
   const unsigned = await s.unsignedCommits(p.ctx, p.commits);
   const signer = unsigned.length ? await s.signer(p.ctx) : null;
   const signByDefault = unsigned.length ? await s.signsByDefault(p.ctx) : false;
+  // For the signing checked by default; the server decides again on what it pushes.
+  const forceNeeded = await s.forceNeeded(p.ctx, signByDefault);
   const target = repo.github_slug;
+  const auto = s.autoPublish(pull);
   let publishRow: Safe;
   let publishable = false;
   if (!target) {
@@ -345,12 +366,15 @@ async function mergeBox(p: PullPage): Promise<Safe> {
               ? html`<label><input type="checkbox" name="sign"${signByDefault ? raw(' checked') : ''}${signer ? '' : raw(' disabled')}> Sign ${unsigned.length < p.commits.length ? `the ${plural(unsigned.length, 'unsigned commit')}` : unsigned.length === 1 ? 'the commit' : `all ${unsigned.length} commits`} as ${signer ? html`<strong>${signer.name}</strong> &lt;${signer.email}&gt;` : html`you (set <code>user.name</code> and <code>user.email</code> in git first)`}</label>`
               : ''
           }
-          <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (the branch history was rewritten)</label>
+          <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (this push replaces commits on GitHub)</label>
         </div>
         ${images ? html`<div class="flash flash-warn">${icon('alert')}<span>The description has ${plural(images, 'image')} stored in laatsux, which GitHub cannot show. Remove ${them}, or replace ${them} with ${images === 1 ? 'an image' : 'images'} uploaded to GitHub.</span></div>` : ''}
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
-      <button type="submit" class="btn btn-primary btn-publish"${work ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>
+      <div class="merge-buttons">
+        ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above">${icon('clock')} Publish when reviews are done</button>`}
+        <button type="submit" class="btn btn-primary btn-publish"${work ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>
+      </div>
     </form>`;
   }
   if (work) {
@@ -363,10 +387,66 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const note = html`${work.started_at ? html`Started ${relTime(work.started_at)}. ` : ''}Its review will show up here.${publishable ? ' Publishing before it arrives takes a second click.' : ''}`;
     rows.push(html`<div class="merge-row">${icon('dot-fill', { cls: 'color-fg-attention' })}<div><strong>${what}</strong><div class="color-fg-muted">${note}</div></div></div>`);
   }
+  if (auto) rows.push(autoPublishRow(p, auto));
+  else if (publishable) {
+    // Auto-publish turns itself off when publishing fails; say so until it is on again or the pull request is published.
+    const last = s.events(pull).findLast((e) => e.type.startsWith('auto_publish_') || e.type === 'published');
+    if (last?.type === 'auto_publish_failed') {
+      rows.push(html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Auto-publish failed ${relTime(last.created_at)}</strong>
+        <div class="color-fg-muted">It turned itself off. Publish by hand, or turn it on again.</div>
+        <pre class="merge-error">${JSON.parse(last.data).error}</pre></div></div>`);
+    }
+  }
   return html`<div class="merge-box${pull.state === 'published' ? ' merge-box--published' : ''}">
     <span class="merge-box-icon">${pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
+}
+
+/** Auto-publish while it is on: what it is waiting for, and a way to turn it off. */
+function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
+  const { s, pull, author } = p;
+  const r = s.readiness(pull);
+  const by = s.db.actorById(auto.by);
+  const options = [auto.sign ? 'signed' : null, auto.draft && !pull.published_url ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
+  const item = (state: 'done' | 'waiting' | 'failed', text: Safe | string) =>
+    html`<li>${state === 'done' ? icon('check', { cls: 'color-fg-success' }) : state === 'failed' ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' })} <span>${text}</span></li>`;
+  const items = r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
+  items.push(
+    r.authorWaiting && !r.unseen
+      ? item('done', `${author.login} is waiting for review, with all feedback seen`)
+      : item('waiting', r.authorWaiting ? `${author.login} has feedback it has not seen yet` : `${author.login} is working (not waiting for review)`),
+  );
+  if (r.openThreads) items.push(item('waiting', `${plural(r.openThreads, 'conversation')} you started ${r.openThreads === 1 ? 'is' : 'are'} unresolved`));
+  return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-done' })}<div class="flex-auto">
+    <strong>Auto-publish is on</strong>
+    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the latest commit${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them.</div>
+    <ul class="merge-checks">${items}</ul>
+  </div>
+  <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;
+}
+
+/** A reviewer agent's progress with the head, for the auto-publish checklist. */
+function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: Actor): Safe {
+  const sha = html`<code>${shortSha(status.commit)}</code>`;
+  switch (status.state) {
+    case 'reviewing':
+      return status.commit === pull.head_sha ? html`${login} is reviewing ${sha}` : html`${login} is reviewing an earlier commit, ${sha}`;
+    case 'queued':
+      return html`${login} is about to review ${sha}`;
+    case 'unreviewed':
+      return html`${login} reviews ${sha} when ${author.login} waits for review`;
+    case 'findings':
+      return html`${login} found problems in ${sha}, and reviews the commit that addresses them`;
+    case 'failed':
+      return html`${login}'s review of ${sha} failed. Ask it to review again, or publish by hand.`;
+    case 'clean':
+      return html`${login} found nothing in ${sha}`;
+    case 'capped':
+      return html`${login} has used up its automatic reviews`;
+    case 'off':
+      return html`${login} does not review this pull request automatically`;
+  }
 }
 
 function sidebar(p: PullPage): Safe {

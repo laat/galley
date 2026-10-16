@@ -355,6 +355,19 @@ export function api(s: Service): Hono {
     return c.json(pullJson(s, x.repo, pull));
   });
 
+  // laatsux extension: auto-publish, like GitHub's auto-merge: publish once the agents are done.
+  app.put('/repos/:owner/:repo/pulls/:n/auto-publish', async (c) => {
+    const x = await ctx(c);
+    const b = await body(c);
+    const flag = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+    await s.enableAutoPublish(x, { sign: flag(b.sign), draft: flag(b.draft), force: !!b.force }, actor(c));
+    return c.json(pullJson(s, x.repo, s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id)!));
+  });
+  app.delete('/repos/:owner/:repo/pulls/:n/auto-publish', async (c) => {
+    s.disableAutoPublish(await ctx(c, { sync: false }), actor(c));
+    return c.body(null, 204);
+  });
+
   // laatsux extension: long-poll until someone other than the author gives feedback.
   app.get('/repos/:owner/:repo/pulls/:n/wait', async (c) => {
     const x = await ctx(c);
@@ -363,7 +376,7 @@ export function api(s: Service): Hono {
     }
     const seconds = Number(c.req.query('timeout') ?? 240);
     const timeout = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 240, 3600) * 1000;
-    const r = await s.wait(x, timeout, c.req.raw.signal);
+    const r = await s.wait(x, actor(c), timeout, c.req.raw.signal);
     const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
     return c.json({
       status: r.status,

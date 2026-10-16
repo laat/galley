@@ -4,15 +4,16 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer, type AddressInfo } from 'node:net';
 import { startServer } from '../src/server/server.ts';
-import { Db } from '../src/server/db.ts';
+import { Db, now } from '../src/server/db.ts';
 import { Service } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
+import { Repo } from '../src/server/git.ts';
 
 const BIN = join(import.meta.dirname, '..', 'bin', 'laatsux.ts');
 const exec = promisify(execFile);
@@ -89,7 +90,8 @@ before(async () => {
   const gh = join(dir, 'gh');
   writeFileSync(
     gh,
-    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n  "api graphql") echo '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2}}}}' ;;\nesac\n`,
+    // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error.
+    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n  "api graphql") echo '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2}}}}' ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -752,6 +754,450 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
   });
 });
 
+test('auto-publish publishes once the agents are done', async (t) => {
+  /** Stage a branch with one commit, as the agent. */
+  const stage = async (branch: string, file: string, ...args: string[]) => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', branch);
+    writeFileSync(join(repo, file), `export const value = 1;\n`);
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+    const created = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', ...args]);
+    assert.equal(created.code, 0, created.stderr);
+    const number = Number(created.stdout.trim().split('/').pop());
+    const base = `/api/repos/acme/widgets/pulls/${number}`;
+    return {
+      number,
+      base,
+      page: async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(),
+      timeline: (): Promise<any[]> => human('GET', `/api/repos/acme/widgets/issues/${number}/timeline`),
+      created: () => new RegExp(`^pr create .* --head ${branch} `, 'm').test(readFileSync(join(dir, 'gh.log'), 'utf8')),
+    };
+  };
+  const untilWaiting = async (base: string) => {
+    for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  const defaults = { enabled: false, model: '', effort: '', maxIterations: 3 };
+  const until = async (done: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400 && !(await done()); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(await done(), what);
+  };
+  const comment = (number: number, body: string) => human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body });
+  /** Make signing wait for a gate, as it would for a passphrase or a 1Password prompt. */
+  const gateSigning = () => {
+    const signing = join(dir, 'signing');
+    const gate = join(dir, 'sign-gate');
+    const program = join(dir, 'gated-ssh-keygen');
+    const reset = () => {
+      rmSync(signing, { force: true });
+      rmSync(gate, { force: true });
+    };
+    reset();
+    writeFileSync(program, `#!/bin/sh\ntouch "${signing}"\nwhile [ ! -f "${gate}" ]; do sleep 0.02; done\nexec ssh-keygen "$@"\n`);
+    chmodSync(program, 0o755);
+    git('config', 'gpg.ssh.program', program);
+    return {
+      started: () => existsSync(signing),
+      open: () => writeFileSync(gate, ''),
+      reset,
+      restore: () => {
+        git('config', '--unset', 'gpg.ssh.program');
+        reset();
+      },
+    };
+  };
+
+  await t.test('after the last automatic review is answered', async () => {
+    const pr = await stage('feature/auto', 'auto.js');
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({
+      summary: 'Two things.',
+      comments: [
+        { path: 'auto.js', line: 1, start_line: null, side: 'RIGHT', priority: 'medium', body: 'Name it after what it is.' },
+        { path: 'math.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Not in this diff.' },
+      ],
+    });
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1 });
+    try {
+      assert.match(await pr.page(), /<button type="submit" class="btn" data-api="[^"]*\/auto-publish" data-method="PUT"[^>]*>.*Publish when reviews are done<\/button>/);
+      // Only the reviewer can turn it on, as only the reviewer can publish.
+      const agent = await cli(['pr', 'publish', String(pr.number), '--auto']);
+      assert.equal(agent.code, 1);
+      assert.match(agent.stderr, /auto-publish is for the reviewer/);
+      const on = await cli(['pr', 'publish', String(pr.number), '--auto'], { actor: 'reviewer' });
+      assert.equal(on.code, 0, on.stderr);
+      assert.match(on.stderr, new RegExp(`Pull request acme/widgets#${pr.number} will be published when the reviewer agents are done`));
+      assert.match((await cli(['pr', 'view', String(pr.number)])).stdout, /^auto-publish:\tenabled\treviewer$/m);
+      const { autoPublishRequest } = JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'autoPublishRequest'])).stdout);
+      assert.deepEqual({ ...autoPublishRequest, enabledAt: undefined }, { enabledAt: undefined, enabledBy: { login: 'reviewer', is_bot: false }, sign: true, draft: false, force: false });
+
+      // Codex's review wakes the agent, and nothing is published until the agent has answered it.
+      const first = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.equal(first.code, 0, first.stderr);
+      assert.match(first.stdout, /codex reviewed: commented/);
+      // Findings on lines outside the diff, which only the review's body carries, count too.
+      assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs.map((r: any) => r.findings), [2]);
+      assert.match(first.stdout, /Auto-publish is on \(reviewer turned it on\): laatsux publishes this pull request once the reviewer agents are done/);
+      assert.equal(pr.created(), false);
+      const box = await pr.page();
+      assert.match(box, /<strong>Auto-publish is on<\/strong>/);
+      assert.match(box, /codex has used up its automatic reviews/);
+      assert.match(box, /agent is working \(not waiting for review\)/);
+      assert.match(box, /js-auto-publish-cancel/);
+      assert.doesNotMatch(box, /Publish when reviews are done/);
+
+      // The agent fixes it and waits again. Codex has used its one review, so laatsux publishes the new commit.
+      writeFileSync(join(repo, 'auto.js'), 'export const answer = 1;\n');
+      git('commit', '-qam', 'Name the value');
+      const second = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.equal(second.code, 0, second.stderr);
+      assert.match(second.stdout, /Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7/);
+      assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr create --repo acme\/widgets --base main --head feature\/auto --title Add auto\.js --body-file -$/m);
+      const published = (await pr.timeline()).findLast((e) => e.event === 'published');
+      assert.equal(published.auto, true);
+      assert.equal(published.source, git('rev-parse', 'HEAD'));
+      assert.equal(published.signed, 2);
+      // It publishes once, and then it is off.
+      assert.equal((await human('GET', pr.base)).auto_publish, null);
+      assert.match(await pr.page(), /published this pull request to <a [^>]*>acme\/widgets#7<\/a> at <code>[0-9a-f]{7}<\/code> \(signed 2 commits\) with auto-publish/);
+    } finally {
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+  });
+
+  await t.test('not while Codex reviews, and after a review that finds nothing', async () => {
+    const pr = await stage('feature/auto-clean', 'clean.js');
+    const gate = join(dir, 'auto-gate');
+    process.env.FAKE_CODEX_GATE = gate;
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Looks right.', comments: [] });
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const codex = server.service.codex!;
+      const pull = await human('GET', pr.base);
+      const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', pull.id);
+      const reviewed = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      for (let i = 0; i < 200 && codex.atWork(row())?.status !== 'IN_PROGRESS'; i++) await new Promise((r) => setTimeout(r, 25));
+      await untilWaiting(pr.base);
+      // The agent waits and nothing else is open, but Codex is at work.
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(pr.created(), false);
+      assert.match(await pr.page(), new RegExp(`codex is reviewing <code>${git('rev-parse', '--short=7', 'HEAD')}</code>`));
+      writeFileSync(gate, '');
+      assert.match((await reviewed).stdout, /Looks right\./);
+      // Codex found nothing in the head; once the agent has seen that and waits, it is published.
+      const done = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.equal(done.code, 0, done.stderr);
+      assert.match(done.stdout, /Published to GitHub/);
+      assert.equal(pr.created(), true);
+    } finally {
+      delete process.env.FAKE_CODEX_GATE;
+      rmSync(gate, { force: true });
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+  });
+
+  await t.test('without waiting for Codex when the pull request was staged with --no-review', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      const pr = await stage('feature/auto-no-review', 'no-review.js', '--no-review');
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      assert.match(await pr.page(), /codex does not review this pull request automatically/);
+      // Codex reviews automatically in settings, but not this pull request: the author waiting is enough.
+      const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /Published to GitHub/);
+      assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs, []);
+      assert.equal((await pr.timeline()).findLast((e) => e.event === 'published').auto, true);
+    } finally {
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+  });
+
+  await t.test('held up by a failed review until it is cancelled, and turned off by a close, a change request or a new base', async () => {
+    const pr = await stage('feature/auto-failed', 'failed.js');
+    process.env.FAKE_CODEX_FAIL = '1';
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '3s']);
+      for (let i = 0; i < 100 && !(await human('GET', `${pr.base}/reviewers/codex`)).runs.some((r: any) => r.status === 'failed'); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // A failed review is no feedback for the agent, and it stops auto-publish from going ahead.
+      assert.equal((await waiting).code, 124);
+      assert.equal(pr.created(), false);
+      assert.match(await pr.page(), new RegExp(`codex's review of <code>${git('rev-parse', '--short=7', 'HEAD')}</code> failed\\. Ask it to review again, or publish by hand\\.`));
+      const agent = await cli(['pr', 'publish', String(pr.number), '--disable-auto']);
+      assert.equal(agent.code, 1);
+      const off = await cli(['pr', 'publish', String(pr.number), '--disable-auto'], { actor: 'reviewer' });
+      assert.equal(off.code, 0, off.stderr);
+      assert.match(off.stderr, new RegExp(`Auto-publish disabled for pull request acme/widgets#${pr.number}`));
+      assert.equal((await human('GET', pr.base)).auto_publish, null);
+      assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_disabled').reason, 'cancelled');
+    } finally {
+      delete process.env.FAKE_CODEX_FAIL;
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+
+    // The agent editing the title leaves it on; the reviewer's own change request, a new base and a close turn it off.
+    await human('PUT', `${pr.base}/auto-publish`, {});
+    assert.equal((await cli(['pr', 'edit', String(pr.number), '--title', 'Add failed.js, renamed'])).code, 0);
+    assert.ok((await human('GET', pr.base)).auto_publish);
+    const turnOffs: [string, () => Promise<unknown>][] = [
+      ['changes_requested', () => human('POST', `${pr.base}/reviews`, { event: 'REQUEST_CHANGES', body: 'Not like this.' })],
+      ['base_changed', () => human('PATCH', pr.base, { base: 'feature/mul' })],
+      ['closed', () => human('PATCH', pr.base, { state: 'closed' })],
+    ];
+    for (const [reason, change] of turnOffs) {
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      await change();
+      assert.equal((await human('GET', pr.base)).auto_publish, null, reason);
+      assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_disabled').reason, reason);
+    }
+    assert.match(await pr.page(), /disabled auto-publish by closing the pull request/);
+  });
+
+  await t.test('checks again after signing, which can wait for a prompt', async () => {
+    const pr = await stage('feature/auto-sign', 'sign.js');
+    const signing = gateSigning();
+    const signedCopy = () => git('for-each-ref', '--format=%(objectname)', `refs/laatsux/pull/${pr.number}/published`);
+    try {
+      // Cancelled while signing waits: nothing is pushed.
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const cancelled = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await until(signing.started, 'signing started');
+      await human('DELETE', `${pr.base}/auto-publish`);
+      signing.open();
+      await until(() => signedCopy() !== '', 'signing finished');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(pr.created(), false);
+      assert.throws(() => execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', 'refs/heads/feature/auto-sign'], { stdio: 'ignore' }));
+      await comment(pr.number, 'Hold on.');
+      assert.match((await cancelled).stdout, /Hold on\./);
+
+      // Feedback while signing waits: it reaches the agent first, and the next wait publishes.
+      signing.reset();
+      writeFileSync(join(repo, 'sign.js'), 'export const value = 2;\n');
+      git('commit', '-qam', 'Change the value');
+      const before = signedCopy();
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const fed = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await until(signing.started, 'signing started again');
+      await comment(pr.number, 'One more thing.');
+      signing.open();
+      assert.match((await fed).stdout, /One more thing\./);
+      await until(() => signedCopy() !== before, 'signing finished again');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(pr.created(), false);
+      const done = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.match(done.stdout, /Published to GitHub/);
+    } finally {
+      signing.restore();
+    }
+  });
+
+  await t.test('an attempt stops when its approval is replaced, and the new approval publishes', async () => {
+    const pr = await stage('feature/auto-replace', 'replace.js');
+    const signing = gateSigning();
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, { draft: false });
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await until(signing.started, 'signing started');
+      // Turned off and on again, now as a draft, while the first attempt signs.
+      await human('DELETE', `${pr.base}/auto-publish`);
+      await human('PUT', `${pr.base}/auto-publish`, { draft: true });
+      signing.open();
+      assert.match((await waiting).stdout, /Published to GitHub/);
+      // Published once, with the options of the approval in force: as a draft.
+      const creates = readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.startsWith('pr create ') && l.includes(' --head feature/auto-replace '));
+      assert.equal(creates.length, 1);
+      assert.match(creates[0], / --draft$/);
+    } finally {
+      signing.restore();
+    }
+  });
+
+  await t.test("a stale attempt's failure leaves a newer approval on", async () => {
+    const pr = await stage('feature/auto-stale', 'stale.js');
+    const { id } = await human('GET', pr.base);
+    const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+    await human('PUT', `${pr.base}/auto-publish`, { draft: false });
+    const first = row().auto_publish;
+    await human('PUT', `${pr.base}/auto-publish`, { draft: true });
+    const second = row().auto_publish;
+    assert.notEqual(first, second);
+    server.service.autoPublishFailed(row(), server.service.viewer(), 'from the first approval', first);
+    assert.equal(row().auto_publish, second);
+    assert.equal((await pr.timeline()).some((e) => e.event === 'auto_publish_failed'), false);
+    server.service.autoPublishFailed(row(), server.service.viewer(), 'from the second approval', second);
+    assert.equal(row().auto_publish, null);
+    assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_failed').error, 'from the second approval');
+  });
+
+  await t.test('a cancel while the force-push lease is looked up stops the push', async () => {
+    const pr = await stage('feature/auto-lease', 'lease.js');
+    // On GitHub before its first publish, then rewritten: publishing force-pushes with a lease.
+    git('push', '-q', 'origin', 'feature/auto-lease');
+    const theirs = git('rev-parse', 'HEAD');
+    git('commit', '-q', '--amend', '-m', 'Add lease.js, reworded');
+    await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the rewrite is recorded');
+    // Hold publish's look-up of the branch on GitHub, which decides force and the lease (not the page's).
+    const resolve = Repo.prototype.resolve;
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let holding = false;
+    Repo.prototype.resolve = async function (this: Repo, ref: string) {
+      if (ref === 'refs/remotes/origin/feature/auto-lease' && /at (async )?Service\.publish \(/.test(new Error().stack ?? '')) {
+        holding = true;
+        await held;
+      }
+      return resolve.call(this, ref);
+    };
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, { force: true });
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await until(() => holding, 'the lease is being looked up');
+      await human('DELETE', `${pr.base}/auto-publish`);
+      release();
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/auto-lease'], { encoding: 'utf8' }).trim(), theirs);
+      assert.equal(pr.created(), false);
+      await comment(pr.number, 'Not yet.');
+      assert.match((await waiting).stdout, /Not yet\./);
+    } finally {
+      Repo.prototype.resolve = resolve;
+      release();
+    }
+  });
+
+  await t.test('only the author waiting counts', async () => {
+    // Should a review start, it waits for this gate and never finishes.
+    const gate = join(dir, 'observer-gate');
+    process.env.FAKE_CODEX_GATE = gate;
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      const pr = await stage('feature/auto-observer', 'observer.js');
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const observe = async () => {
+        const res = await fetch(`${server.url}${pr.base}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'observer' } });
+        return { status: res.status, message: (await res.json()).message };
+      };
+      // Another agent waiting is not the author waiting: Codex does not start ...
+      const refused = await observe();
+      assert.equal(refused.status, 403);
+      assert.match(refused.message, /^only the author of this pull request \(agent\) can wait for its feedback, not observer\./);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs, []);
+      // ... and with Codex off for the pull request, auto-publish does not go ahead.
+      await human('PATCH', `${pr.base}/reviewers/codex`, { enabled: false });
+      assert.equal((await observe()).status, 403);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(pr.created(), false);
+      assert.ok((await human('GET', pr.base)).auto_publish);
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Published to GitHub/);
+    } finally {
+      delete process.env.FAKE_CODEX_GATE;
+      rmSync(gate, { force: true });
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+  });
+
+  await t.test('force-pushes over a branch already on GitHub when that was approved', async () => {
+    const pr = await stage('feature/auto-force', 'force.js');
+    // The branch reached GitHub before its first publish, and the agent then rewrote it.
+    git('push', '-q', 'origin', 'feature/auto-force');
+    const theirs = git('rev-parse', 'HEAD');
+    git('commit', '-q', '--amend', '-m', 'Add force.js, reworded');
+    await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the rewrite is recorded');
+    // As for publishing by hand, the box offers to force-push.
+    assert.match(await pr.page(), /<label class="js-force-option"><input type="checkbox" name="force" checked> Force-push/);
+    const on = await cli(['pr', 'publish', String(pr.number), '--auto', '--force'], { actor: 'reviewer' });
+    assert.equal(on.code, 0, on.stderr);
+    const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '10s']);
+    assert.match(r.stdout, /Published to GitHub/);
+    const published = (await pr.timeline()).findLast((e) => e.event === 'published');
+    assert.deepEqual([published.auto, published.force], [true, true]);
+    const tip = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/auto-force'], { encoding: 'utf8' }).trim();
+    assert.notEqual(tip, theirs);
+    assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${tip}^{tree}`], { encoding: 'utf8' }).trim(), git('rev-parse', 'HEAD^{tree}'));
+  });
+
+  /** The branch's tip in the bare remote, and whether it carries a signature. */
+  const remoteTip = (branch: string) => {
+    const sha = execFileSync('git', ['--git-dir', remote, 'rev-parse', branch], { encoding: 'utf8' }).trim();
+    const signed = /^gpgsig /m.test(execFileSync('git', ['--git-dir', remote, 'cat-file', 'commit', sha], { encoding: 'utf8' }));
+    return { sha, signed, tree: execFileSync('git', ['--git-dir', remote, 'rev-parse', `${sha}^{tree}`], { encoding: 'utf8' }).trim() };
+  };
+
+  await t.test('force-pushes signed copies over the unsigned commits already on GitHub when that was approved', async () => {
+    const pr = await stage('feature/auto-unsigned', 'unsigned.js');
+    // The agent's unsigned commit reached GitHub before the first publish; signing replaces it with a copy.
+    git('push', '-q', 'origin', 'feature/auto-unsigned');
+    const theirs = git('rev-parse', 'HEAD');
+    const on = await cli(['pr', 'publish', String(pr.number), '--auto', '--sign', '--force'], { actor: 'reviewer' });
+    assert.equal(on.code, 0, on.stderr);
+    const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '10s']);
+    assert.match(r.stdout, /Published to GitHub/);
+    const published = (await pr.timeline()).findLast((e) => e.event === 'published');
+    assert.deepEqual([published.auto, published.force, published.signed], [true, true, 1]);
+    const tip = remoteTip('feature/auto-unsigned');
+    assert.notEqual(tip.sha, theirs);
+    assert.deepEqual([tip.signed, tip.tree], [true, git('rev-parse', 'HEAD^{tree}')]);
+  });
+
+  await t.test('publishing by hand offers force when signing replaces unsigned commits on GitHub', async () => {
+    const pr = await stage('feature/manual-unsigned', 'manual.js');
+    git('push', '-q', 'origin', 'feature/manual-unsigned');
+    const theirs = git('rev-parse', 'HEAD');
+    await until(async () => (await human('GET', pr.base)).head.sha === theirs, 'the pull request is synced');
+    // The history did not change, but the signed copy does not contain the commit on GitHub.
+    assert.match(await pr.page(), /<label class="js-force-option"><input type="checkbox" name="force" checked> Force-push/);
+    // Without force it is refused before anything is pushed.
+    const refused = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ force: false }) });
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json()).message, /force-pushing was not chosen\.$/);
+    assert.equal(remoteTip('feature/manual-unsigned').sha, theirs);
+    const pull = await human('POST', `${pr.base}/publish`, { force: true });
+    assert.equal(pull.staging_state, 'published');
+    assert.equal((await pr.timeline()).findLast((e) => e.event === 'published').force, true);
+    assert.equal(remoteTip('feature/manual-unsigned').signed, true);
+  });
+
+  await t.test('waits for your own threads, and a failure to publish turns it off', async () => {
+    const pr = await stage('feature/auto-gh', 'gh.js');
+    const thread = await human('POST', `${pr.base}/comments`, { path: 'gh.js', line: 1, side: 'RIGHT', body: 'Is this needed?' });
+    await human('PUT', `${pr.base}/auto-publish`, {});
+    // Codex is off. The agent answers the thread but leaves it for the reviewer to resolve.
+    assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Is this needed\?/);
+    assert.equal((await cli(['pr', 'comment', String(pr.number), '--reply-to', String(thread.id), '-b', 'Yes.'])).code, 0);
+    const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+    await untilWaiting(pr.base);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(pr.created(), false);
+    assert.match(await pr.page(), /1 conversation you started is unresolved/);
+
+    process.env.FAKE_GH_FAIL = 'HTTP 502: gh is down';
+    try {
+      await human('PUT', `${pr.base}/threads/${thread.id}/resolved`);
+      for (let i = 0; i < 100 && (await human('GET', pr.base)).auto_publish; i++) await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      delete process.env.FAKE_GH_FAIL;
+    }
+    assert.equal((await human('GET', pr.base)).auto_publish, null);
+    const failed = (await pr.timeline()).findLast((e) => e.event === 'auto_publish_failed');
+    assert.equal(failed.error, 'gh pr create failed:\nHTTP 502: gh is down');
+    const page = await pr.page();
+    assert.match(page, /<strong>Auto-publish failed [^]*?<\/strong>[^]*?<pre class="merge-error">gh pr create failed:\nHTTP 502: gh is down<\/pre>/);
+    assert.match(page, /Auto-publish failed and turned itself off/);
+    assert.match(page, /Publish when reviews are done/);
+    // The reviewer tells the agent; it was never told it was published.
+    await human('POST', `/api/repos/acme/widgets/issues/${pr.number}/comments`, { body: 'I will publish this by hand.' });
+    const told = await waiting;
+    assert.match(told.stdout, /I will publish this by hand\./);
+    assert.doesNotMatch(told.stdout, /Published to GitHub/);
+  });
+});
+
 test('closing the server stops a running review and records why', async () => {
   const data = mkdtempSync(join(tmpdir(), 'laatsux-stop-'));
   const second = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 });
@@ -815,6 +1261,59 @@ test('the reviewer does not take over an author an older CLI called "codex"', as
     rmSync(data2, { recursive: true, force: true });
   }
 });
+test('Codex reviews from before findings were counted are counted from their review', async () => {
+  const data = mkdtempSync(join(tmpdir(), 'laatsux-findings-'));
+  const db = new Db(join(data, 'laatsux.db'));
+  const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
+  const reviewer = new CodexReviewer(s, join(dir, 'codex'));
+  s.codex = reviewer;
+  try {
+    for (const branch of ['feature/legacy-counted', 'feature/legacy-uncounted']) {
+      git('checkout', '-q', 'main');
+      git('checkout', '-qb', branch);
+      writeFileSync(join(repo, 'legacy.js'), 'export {};\n');
+      git('add', 'legacy.js');
+      git('commit', '-qm', 'Add legacy.js');
+    }
+    const registered = await s.registerRepo(repo);
+    const author = db.actor('agent', 'Bot');
+    const counted = await s.createPull(registered, { title: 'Counted', head: 'feature/legacy-counted', base: 'main' }, author);
+    const uncounted = await s.createPull(registered, { title: 'Uncounted', head: 'feature/legacy-uncounted', base: 'main' }, author);
+    // Codex is on for both, so a clean head is not mistaken for Codex being off.
+    db.run('UPDATE pulls SET codex_enabled = 1');
+    const row = (id: number) => db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+    // Runs as an older version left them: done, linked to their review, and no count.
+    const run = (pullId: number, head: string, reviewId: number | null) =>
+      db.insert('review_runs', { pull_id: pullId, reviewer: 'codex', head_sha: head, trigger: 'auto', status: 'done', review_id: reviewId, started_at: now(), finished_at: now() });
+    const ctx = await s.ctx(registered.owner, registered.name, counted.number);
+    const nothing = await s.createReview(ctx, { event: 'COMMENT', body: 'Codex found nothing to comment on.\n\n<sub>Codex reviewed it.</sub>' }, reviewer.actor());
+    const nothingRun = run(counted.id, counted.head_sha, nothing.id);
+    const found = await s.createReview(
+      ctx,
+      {
+        event: 'COMMENT',
+        body: 'Three things.\n\n**Comments on lines outside the diff**\n\n- `math.js:1`: First.\n- `math.js:2-3` (low priority): Second,\n  over two lines.\n\n<sub>Codex reviewed it.</sub>',
+        comments: [{ path: 'legacy.js', line: 1, body: 'Third.' }],
+      },
+      reviewer.actor(),
+    );
+    const foundRun = run(counted.id, '0'.repeat(40), found.id);
+    const lostRun = run(uncounted.id, uncounted.head_sha, null);
+    reviewer.start();
+    const findings = (id: number) => db.get<{ findings: number | null }>('SELECT findings FROM review_runs WHERE id = ?', id)!.findings;
+    assert.deepEqual([findings(nothingRun), findings(foundRun), findings(lostRun)], [0, 3, null]);
+    // A review that found nothing lets the head through; one that cannot be counted is reviewed again.
+    assert.equal(reviewer.headStatus(row(counted.id)).state, 'clean');
+    assert.equal(reviewer.headStatus(row(uncounted.id)).state, 'unreviewed');
+    reviewer.consider(uncounted.id);
+    assert.equal(reviewer.atWork(row(uncounted.id))?.status, 'QUEUED');
+  } finally {
+    await reviewer.stop();
+    db.sql.close();
+    rmSync(data, { recursive: true, force: true });
+  }
+});
+
 test('a reviewer never takes the human reviewer\'s own name', async () => {
   // Known at startup: the human is set up first, and the reviewer takes another name.
   const data = mkdtempSync(join(tmpdir(), 'laatsux-viewer-'));
@@ -887,6 +1386,41 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
     const confirm = await fetch(`${api}/seen`, { method: 'PUT', headers: { ...asAgent, ...json }, body: JSON.stringify({ at: once.seen_at }) });
     assert.equal(confirm.status, 204);
     assert.equal((await (await fetch(`${api}/wait?timeout=1`, { headers: asAgent })).json()).status, 'timeout');
+  } finally {
+    await second.close();
+    rmSync(data, { recursive: true, force: true });
+  }
+});
+
+test('auto-publish stays on when the server restarts', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/auto-restart');
+  writeFileSync(join(repo, 'restart.js'), 'export {};\n');
+  git('add', 'restart.js');
+  git('commit', '-qm', 'Add restart');
+  const data = mkdtempSync(join(tmpdir(), 'laatsux-auto-restart-'));
+  const options = { port: 0, dataDir: data, ghBin: join(dir, 'gh'), codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 };
+  const json = { 'content-type': 'application/json' };
+  const first = await startServer(options);
+  const registered = await (await fetch(`${first.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const pr = await (
+    await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
+      method: 'POST',
+      headers: { ...json, 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: 'Published after a restart', head: 'feature/auto-restart', base: 'main' }),
+    })
+  ).json();
+  assert.equal((await fetch(`${first.url}/api/repos/${registered.full_name}/pulls/${pr.number}/auto-publish`, { method: 'PUT', headers: json, body: '{}' })).status, 200);
+  await first.close();
+  const second = await startServer(options);
+  try {
+    const api = `${second.url}/api/repos/${registered.full_name}/pulls/${pr.number}`;
+    assert.equal((await (await fetch(api)).json()).auto_publish.enabled_by.login, 'reviewer');
+    // The agent waits on the new server, which publishes.
+    const r = await (await fetch(`${api}/wait?timeout=10`, { headers: { 'x-laatsux-actor': 'agent' } })).json();
+    assert.equal(r.status, 'published');
+    const timeline = await (await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/timeline`)).json();
+    assert.equal(timeline.findLast((e: any) => e.event === 'published').auto, true);
   } finally {
     await second.close();
     rmSync(data, { recursive: true, force: true });

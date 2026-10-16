@@ -9,7 +9,7 @@ import { conversationItems, formatConversation, reviewersAtWork, stillReviewing,
 type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
-  'additions', 'author', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
+  'additions', 'author', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
   'createdAt', 'deletions', 'files', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'number', 'publishedUrl',
   'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'updatedAt', 'url', 'waiting',
 ];
@@ -470,10 +470,26 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     sign: { type: 'boolean' },
     'no-sign': { type: 'boolean' },
     'during-review': { type: 'boolean' },
+    auto: { type: 'boolean' },
+    'disable-auto': { type: 'boolean' },
   });
+  if (v.auto && v['disable-auto']) throw new CliError('specify only one of --auto or --disable-auto');
+  if (v.auto && v['during-review']) throw new CliError('--during-review publishes now; --auto waits for the reviews instead');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
-  err(`Publishing ${t.repo.owner}/${t.repo.name}#${t.number} to GitHub…`);
+  const name = `${t.repo.owner}/${t.repo.name}#${t.number}`;
   const sign = v.sign ? true : v['no-sign'] ? false : undefined;
+  // Like `gh pr merge --auto`: publish once the reviewer agents are done and the author has answered them.
+  if (v['disable-auto']) {
+    await client.json('DELETE', `${pullPath(t)}/auto-publish`);
+    err(`✓ Auto-publish disabled for pull request ${name}`);
+    return 0;
+  }
+  if (v.auto) {
+    await client.json('PUT', `${pullPath(t)}/auto-publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign });
+    err(`✓ Pull request ${name} will be published when the reviewer agents are done and the author has answered them`);
+    return 0;
+  }
+  err(`Publishing ${name} to GitHub…`);
   const pr = await client
     .json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'] })
     .catch((e) => {
@@ -588,6 +604,16 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         ),
       );
     }
+    // The reviewer approved in advance; publishing happens while the author waits.
+    const auto = pr.autoPublishRequest;
+    if (auto) {
+      out(
+        c.gray(
+          `Auto-publish is on (${auto.enabledBy.login} turned it on): laatsux publishes this pull request once the reviewer agents are done with ` +
+            `your latest commit and you are waiting in \`laatsux pr wait ${t.number}\` with the feedback addressed.`,
+        ),
+      );
+    }
     return 0;
   }
 }
@@ -616,7 +642,7 @@ COMMANDS (same flags as gh)
 
 LAATSUX COMMANDS
   wait:        Block until the reviewer responds, then print the feedback
-  publish:     Push the branch and open the pull request on GitHub
+  publish:     Push the branch and open the pull request on GitHub (--auto: once the reviews are done)
 
 FLAGS
   -R, --repo [HOST/]OWNER/REPO   Select another repository

@@ -188,15 +188,20 @@
     codex_started: 'started reviewing',
     codex_failed: 'could not finish its review',
   };
+  // What laatsux did on its own on the viewer's behalf: their page has not heard of it.
+  const AUTOMATIC = {
+    auto_published: 'Published to GitHub with auto-publish',
+    auto_publish_failed: 'Auto-publish failed',
+  };
 
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);
 
   let pending = null;
   function onChange(ev) {
     const own = ev.actor === viewer();
-    if (own && ev.type !== 'waiting') return; // our own actions refresh after the request
+    if (own && ev.type !== 'waiting' && !AUTOMATIC[ev.type]) return; // our own actions refresh after the request
     if (ev.type === 'waiting' && dirty()) return;
-    const msg = DESCRIBE[ev.type] ? `${ev.actor} ${DESCRIBE[ev.type]}` : null;
+    const msg = AUTOMATIC[ev.type] || (DESCRIBE[ev.type] ? `${ev.actor} ${DESCRIBE[ev.type]}` : null);
     clearTimeout(pending);
     pending = setTimeout(() => {
       const active = document.activeElement;
@@ -307,14 +312,16 @@
 
   async function submitApiForm(form, submitter) {
     formError(form, null);
-    const publishing = form.matches('.js-publish-form');
+    // A submit button may send the form elsewhere, as "Publish when reviews are done" does.
+    const target = submitter && submitter.dataset.api ? submitter : form;
+    const publishing = form.matches('.js-publish-form') && target === form;
     busy(form, true, publishing ? 'Publishing…' : null);
     let leaving = false;
     try {
       const body = formJson(form);
       // The second click on a Publish button that asked first: publish while a reviewer is at work.
       if (publishing && submitter && submitter.dataset.confirm) body.during_review = true;
-      const res = await api(form.dataset.method || 'POST', form.dataset.api, body);
+      const res = await api(target.dataset.method || 'POST', target.dataset.api, body);
       for (const t of $$('textarea[data-draft-key]', form)) clearDraft(t.dataset.draftKey);
       if (form.dataset.reset) form.reset();
       // A publish clicked in this tab goes on to the pull request on GitHub; the button stays
@@ -326,7 +333,7 @@
       }
       await refresh();
       if (publishing) toast('Published to GitHub');
-      else if (form.dataset.toast) toast(form.dataset.toast);
+      else if (target.dataset.toast) toast(target.dataset.toast);
     } catch (err) {
       busy(form, false);
       formError(form, err);
@@ -1041,6 +1048,10 @@
     } else if ((el = on('.js-codex-reset'))) {
       el.disabled = true;
       await api('PATCH', el.dataset.api, { [el.dataset.field]: null }).catch((err) => toast(err.message));
+      refresh();
+    } else if ((el = on('.js-auto-publish-cancel'))) {
+      el.disabled = true;
+      await api('DELETE', el.dataset.api).catch((err) => toast(err.message));
       refresh();
     } else if ((el = on('.js-run-codex'))) {
       el.disabled = true;

@@ -11,6 +11,7 @@ import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
 import { uploads } from './uploads.ts';
+import { AutoPublisher } from './auto-publish.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
 const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -115,6 +116,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
   service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
   service.codex.start();
+  const autoPublisher = new AutoPublisher(service);
+  autoPublisher.start();
   app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
   if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
   // Warm the GitHub counts for the repo tabs, so the first page already has them.
@@ -126,6 +129,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     polling = true;
     try {
       await service.pollAll();
+      autoPublisher.considerAll();
     } catch (e) {
       console.error('poll failed:', e);
     } finally {
@@ -140,7 +144,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     service,
     close: async () => {
       clearInterval(timer);
-      // Running reviews write to the database when they end, so they go first.
+      // Running reviews and publishes write to the database when they end, so they go first.
+      await autoPublisher.stop();
       await service.codex?.stop();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());

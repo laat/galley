@@ -56,6 +56,7 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     published_url: pull.published_url,
     published_at: pull.published_at,
     author_waiting: (s.waiters.get(pull.id) ?? 0) > 0,
+    auto_publish: autoPublishJson(s, pull),
   };
   if (extra.files) {
     json.additions = extra.files.reduce((n, f) => n + f.additions, 0);
@@ -64,6 +65,12 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
   }
   if (extra.commits) json.commits = extra.commits.length;
   return json;
+}
+
+/** Auto-publish while it is on (a laatsux extension, after GitHub's auto_merge), or null. */
+function autoPublishJson(s: Service, pull: PullRow) {
+  const auto = s.autoPublish(pull);
+  return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force };
 }
 
 /** A commit of a pull request, or with no pull request one of the repository (linking to its tree). */
@@ -197,6 +204,7 @@ export function reviewDecision(reviews: ReviewRow[]): string {
 export const GH_FIELDS = [
   'additions',
   'author',
+  'autoPublishRequest',
   'baseRefName',
   'baseRefOid',
   'body',
@@ -261,6 +269,11 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('changedFiles', () => files.length);
   set('publishedUrl', () => pull.published_url);
   set('waiting', () => (s.waiters.get(pull.id) ?? 0) > 0);
+  // laatsux extension, after gh's autoMergeRequest: auto-publish while it is on.
+  set('autoPublishRequest', () => {
+    const auto = s.autoPublish(pull);
+    return auto && { enabledAt: auto.at, enabledBy: ghAuthor(s, auto.by), sign: auto.sign, draft: auto.draft, force: auto.force };
+  });
   set('commits', () =>
     commits.map((c) => {
       const [headline, ...rest] = c.message.split('\n');

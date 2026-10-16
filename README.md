@@ -78,8 +78,8 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
-| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`. Refused for agents |
+| `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
+| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish). Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant |
 | `laatsux serve` | Run the server and web UI |
@@ -87,7 +87,8 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 A pull request is found the way gh finds it: by number, URL, branch name, or the current branch.
 
 `pr view --json` supports gh's fields plus `reviewThreads` (with `isResolved`, `isOutdated`,
-`path`, `line`, `diffHunk` and the comments), `publishedUrl` and `waiting`. `reviewRequests`
+`path`, `line`, `diffHunk` and the comments), `publishedUrl`, `waiting`, and `autoPublishRequest`
+(who turned [auto-publish](#auto-publish) on and when, and its options; null when it is off). `reviewRequests`
 lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRESS` or
 `QUEUED`), `commit` and `startedAt`.
 
@@ -111,6 +112,7 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 - Comments follow their lines across pushes, or are marked outdated when the code under them changed
 - Live updates while the agent works, and a "waiting for your review" indicator while it runs `pr wait`
 - Publish, with an option to open as a draft. Publishing again after changes force-pushes if needed and updates the GitHub pull request with `gh pr edit`
+- Publish when reviews are done: [auto-publish](#auto-publish)
 
 Conversations stay in laatsux. Publishing sends the branch, title and description, not the review.
 Images in the description stay too: GitHub has no API for uploading them, so they would be broken
@@ -137,6 +139,7 @@ GET             /api/repos/{owner}/{repo}/contents/{path}?ref=       (ref defaul
 ```
 
 Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n}/publish`,
+`PUT|DELETE …/pulls/{n}/auto-publish` (body `{sign, draft, force}`),
 `GET …/pulls/{n}/wait?timeout=s`, `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
 `POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review; list its runs and this pull
 request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's own `enabled` and
@@ -177,9 +180,11 @@ staged pull requests.
 - **Publishing** pushes the reviewed commit (`git push origin <sha>:refs/heads/<branch>`)
   and runs `gh pr create`, or `gh pr edit` when the pull request already exists. The Publish
   button sends a fingerprint of the commits, title and description on screen; if the agent
-  changed any of them since the page loaded, publishing is refused. Force-pushes use
-  `--force-with-lease` against the last published commit, so commits added on GitHub are
-  never overwritten.
+  changed any of them since the page loaded, publishing is refused. It force-pushes only
+  when the push would drop the commit GitHub has (a rewritten history, or the agent's unsigned
+  commits that signing replaces with copies) and force was chosen, with `--force-with-lease`
+  against the last published commit (before the first publish, the branch as last fetched or
+  pushed), so commits added on GitHub are never overwritten.
 - **Signing**: agents commit unsigned; the commits are yours once you publish. Publishing
   can sign them: laatsux makes a signed copy of each commit with `git commit-tree -S`, with
   the same tree, message and author and you as committer (GitHub only verifies a signature
@@ -253,6 +258,35 @@ How it runs:
   started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
   `"during_review": true`.
 - Codex must be installed and logged in where the server runs.
+
+## Auto-publish
+
+**Publish when reviews are done**, next to Publish, approves publishing in advance, like
+GitHub's "Enable auto-merge". laatsux then publishes on its own once:
+
+- every reviewer agent is done with the head commit: Codex's latest review of it found
+  nothing, Codex has used up its automatic reviews, or it is off for the pull request
+  (in Settings, or with `pr create --no-review`);
+- the author agent is waiting in `laatsux pr wait`, with all feedback seen;
+- none of the conversations you started is unresolved.
+
+The box shows what it is waiting for.
+
+- It publishes what the agent pushed after you pressed the button (its answers to Codex),
+  but only the commit it checked: a push in between waits for the next check. Its last
+  check comes right before the push, after signing (which can wait for a prompt), so a
+  Cancel, new feedback, or turning it on again with other options stops that attempt.
+- The options are those in the publish box when you press the button: signing and draft as
+  checked, and force-pushing if it was checked and turns out to be needed.
+- Nothing is published while Codex reviews. A failed Codex review holds it up until you ask
+  Codex again, or publish by hand.
+- Signing, the push and each `gh` call get two minutes, since nobody is there to answer a
+  prompt. A failure is shown on the pull request and turns auto-publish off.
+- It publishes once, then turns off. Cancel, closing the pull request, your own "Request
+  changes" and a new base turn it off too; the agent editing the title or description does not.
+- Agents see it in `pr view` and in `pr wait`'s output, but only you can turn it on:
+  `laatsux pr publish --auto` (with `--sign`, `--no-sign`, `--draft`, `--force`) and
+  `laatsux pr publish --disable-auto`, after `gh pr merge --auto`.
 
 ## Other review agents
 
