@@ -506,6 +506,7 @@ kbd {
 .codex-step:hover:not(:disabled) { color: var(--fg); background: var(--btn-hover); }
 .codex-step:disabled { opacity: 0.4; cursor: default; }
 .codex-step .octicon { width: 12px; height: 12px; }
+.codex-scope .octicon { color: var(--fg-muted); vertical-align: text-bottom; margin-right: 2px; }
 .codex-error pre { max-height: 200px; overflow: auto; padding: 8px; font-size: 11px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
 @media (max-width: 767px) { .settings-layout { flex-direction: column; } .settings-nav { width: 100%; } }
 

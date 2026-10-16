@@ -73,6 +73,9 @@ export interface Thread {
 
 export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
 
+/** A pull request's own reviewer agent settings, as stored; left out, a column follows the setting. */
+export type ReviewColumns = Partial<Pick<PullRow, 'codex_enabled' | 'codex_max_iterations'>>;
+
 const EVENT_STATE: Record<ReviewEvent, ReviewState> = {
   COMMENT: 'COMMENTED',
   APPROVE: 'APPROVED',
@@ -289,9 +292,38 @@ export class Service {
     return this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', id)!;
   }
 
+  /**
+   * What staging asks of the reviewer agents (a laatsux extension to POST /pulls), as the
+   * pull request's own settings. `reviewers` turns the named ones on, with their own limit
+   * when one is given; `automatic_reviews` turns all of them on or off. Logins that no reviewer
+   * agent answers to are ignored, like gh's other reviewers, and returned so the caller can say so.
+   */
+  reviewRequest(reviewers: unknown, automatic: unknown): { columns: ReviewColumns; ignored: string[] } {
+    if (automatic !== undefined && typeof automatic !== 'boolean') throw new HttpError(422, 'automatic_reviews must be true or false');
+    if (reviewers !== undefined && !Array.isArray(reviewers)) throw new HttpError(422, 'reviewers must be an array');
+    const agents = this.codex ? [this.codex] : [];
+    const columns: ReviewColumns = {};
+    if (automatic !== undefined) for (const agent of agents) Object.assign(columns, agent.columns({ enabled: automatic }));
+    const ignored: string[] = [];
+    for (const r of reviewers ?? []) {
+      // A login, as in GitHub's requested reviewers, or { login, max_iterations }.
+      const { login, max_iterations = null } = typeof r === 'string' ? { login: r } : (r ?? {});
+      const name = String(login ?? '').trim();
+      if (!name) throw new HttpError(422, 'each reviewer needs a login');
+      const agent = agents.find((a) => a.answersTo(name));
+      if (!agent) {
+        ignored.push(name);
+        continue;
+      }
+      if (automatic === false) throw new HttpError(422, `${name} was asked to review, but automatic reviews are turned off`);
+      Object.assign(columns, agent.columns({ enabled: true, max_iterations }));
+    }
+    return { columns, ignored };
+  }
+
   async createPull(
     repo: RepoRow,
-    input: { title?: string; body?: string; head?: string; base?: string; draft?: boolean; fill?: 'default' | 'first' | 'verbose' },
+    input: { title?: string; body?: string; head?: string; base?: string; draft?: boolean; fill?: 'default' | 'first' | 'verbose'; reviews?: ReviewColumns },
     actor: Actor,
   ): Promise<PullRow> {
     const git = this.git(repo);
@@ -338,6 +370,7 @@ export class Service {
         created_at: ts,
         updated_at: ts,
         author_seen_at: ts,
+        ...input.reviews,
       });
       this.db.insert('revisions', { pull_id: id, seq: 1, head_sha: headSha, base_sha: mergeBase, before_sha: null, forced: 0, actor_id: actor.id, created_at: ts });
       return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!;

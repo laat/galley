@@ -92,8 +92,9 @@ export function api(s: Service): Hono {
     // The reviewer's actual name is the truth (it may have had to take another one).
     if (s.codex) settings.codex.name = s.codex.actor().login;
     saveSettings(s.db, settings);
-    // Turning reviews on should not wait for the author's next `pr wait` cycle.
-    if (settings.codex.enabled) for (const id of s.waiters.keys()) s.codex?.consider(id);
+    // Turning reviews on or raising the limit should not wait for the author's next `pr wait`
+    // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
+    for (const id of s.waiters.keys()) s.codex?.consider(id);
     return c.json(settings);
   });
 
@@ -147,8 +148,10 @@ export function api(s: Service): Hono {
   app.post('/repos/:owner/:repo/pulls', async (c) => {
     const repo = s.repo(c.req.param('owner'), c.req.param('repo'));
     const b = await body(c);
-    const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill }, actor(c));
-    return c.json(pullJson(s, repo, pull), 201);
+    // laatsux extension: `reviewers` and `automatic_reviews` decide the reviewer agents for this pull request.
+    const review = s.reviewRequest(b.reviewers, b.automatic_reviews);
+    const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns }, actor(c));
+    return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}) }, 201);
   });
 
   // Registered before /pulls/:n/... so "comments" is not taken for a number.
@@ -298,19 +301,17 @@ export function api(s: Service): Hono {
     const x = await ctx(c);
     return c.json({ run_id: s.codex.request(x) }, 202);
   });
-  // laatsux extension: this pull request's cap on automatic Codex reviews (null for the setting).
+  // laatsux extension: this pull request's own Codex settings, `enabled` and `max_iterations` (null for the setting).
   app.patch('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
     human(c);
     if (!s.codex) throw new HttpError(501, 'this server has no Codex reviewer');
     const x = await ctx(c);
     const b = await body(c);
-    const raw = b.max_iterations;
-    const limit = raw === null || raw === '' || raw === undefined ? null : Number(raw);
-    return c.json({ max_iterations: s.codex.setLimit(x, limit), overridden: limit !== null });
+    return c.json(s.codex.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
   });
   app.get('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
     const x = await ctx(c, { sync: false });
-    return c.json({ running: s.codex?.isRunning(x.pull.id) ?? false, runs: s.codex?.runs(x.pull) ?? [] });
+    return c.json({ running: s.codex?.isRunning(x.pull.id) ?? false, runs: s.codex?.runs(x.pull) ?? [], ...s.codex?.config(x.pull) });
   });
 
   // laatsux extension: push the branch and open (or update) the pull request on GitHub.

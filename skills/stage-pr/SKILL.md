@@ -38,8 +38,9 @@ feedback, and the loop repeats until the user publishes it.
    ```
 
    It prints the review URL. Give that URL to the user. `--fill`, `--base`, `--head` and
-   `--draft` work as in gh. If the server is not running, the CLI starts it and says so;
-   mention that to the user along with the URL.
+   `--draft` work as in gh. If the user said how the pull request should be reviewed, add the
+   flag from [Codex reviews](#codex-reviews). If the server is not running, the CLI starts it
+   and says so; mention that to the user along with the URL.
 
 2. Wait for the review. This blocks until the user submits a review or comment, publishes,
    or closes the pull request, then prints only the new feedback:
@@ -88,11 +89,26 @@ feedback, and the loop repeats until the user publishes it.
    a reviewer such as codex is still reviewing, its review is coming: wait for it before you
    tell the user the pull request is ready.
 
+## Codex reviews
+
+Codex can review the pull request before the user does. It reviews when you run
+`laatsux pr wait`, and its review wakes you like the user's: address it the same way and wait
+again. One loop is one Codex review and your answer to it. Whether Codex reviews is the user's
+setting, unless they say otherwise when they ask you to stage:
+
+| The user says | Add to `laatsux pr create` |
+|---|---|
+| "stage PR with codex 3 loops" | `--reviewer codex:3` |
+| "stage PR with codex 1 loop" | `--reviewer codex:1` |
+| "stage PR with codex" | `--reviewer codex` (as many loops as the settings allow) |
+| "stage PR no review" | `--no-review` |
+| nothing about review | nothing; the settings decide |
+
 ## Reference
 
 | gh | laatsux | notes |
 |---|---|---|
-| `gh pr create` | `laatsux pr create` | stages; never pushes |
+| `gh pr create` | `laatsux pr create` | stages; never pushes. `--reviewer codex[:N]`, `--no-review` |
 | `gh pr view [--comments] [--json f] [--jq q]` | same | `--comments` includes review threads; `--json reviewThreads` exists |
 | `gh pr list`, `diff`, `edit`, `comment`, `checkout`, `status`, `ready`, `close`, `reopen` | same | |
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |

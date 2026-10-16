@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { run } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
-import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type Service } from '../service.ts';
+import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type ReviewColumns, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, type CodexSettings } from '../settings.ts';
 
 export interface ModelInfo {
@@ -31,6 +31,19 @@ interface Finding {
 interface Result {
   summary: string;
   comments: Finding[];
+}
+
+/** A change to a pull request's own reviewer settings, as the API takes it. Left out: unchanged; null: the setting. */
+export interface ReviewerChange {
+  enabled?: boolean | string | null;
+  max_iterations?: number | string | null;
+}
+
+/** A reviewer's settings for one pull request: what is in effect, and its own values (null: the setting). */
+export interface ReviewerConfig {
+  enabled: boolean;
+  max_iterations: number;
+  overrides: { enabled: boolean | null; max_iterations: number | null };
 }
 
 /** The shape Codex must answer in (OpenAI strict mode: every property required, nullable when optional). */
@@ -242,18 +255,55 @@ export class CodexReviewer {
     return pull.codex_max_iterations ?? this.settings().maxIterations;
   }
 
-  /**
-   * Raise (or lower, or with null reset) this pull request's limit. If the author is waiting
-   * and the new limit allows it, Codex starts at once instead of at the author's next wait.
-   */
-  setLimit(ctx: Ctx, limit: number | null): number {
-    if (limit !== null && (!Number.isInteger(limit) || limit < 0 || limit > MAX_ITERATIONS_LIMIT)) {
-      throw new HttpError(422, `the limit must be a whole number from 0 to ${MAX_ITERATIONS_LIMIT}`);
+  /** Whether Codex reviews this pull request automatically: its own choice, or the setting. */
+  enabled(pull: PullRow): boolean {
+    return pull.codex_enabled === null ? this.settings().enabled : pull.codex_enabled === 1;
+  }
+
+  /** Whether a reviewer asked for by login (`pr create --reviewer`) is this one: "codex", or its name. */
+  answersTo(login: string): boolean {
+    const l = login.toLowerCase();
+    return l === this.engine || l === this.actor().login.toLowerCase();
+  }
+
+  /** What is in effect for a pull request, and its own values (null where it follows the setting). */
+  config(pull: PullRow): ReviewerConfig {
+    return {
+      enabled: this.enabled(pull),
+      max_iterations: this.limit(pull),
+      overrides: { enabled: pull.codex_enabled === null ? null : pull.codex_enabled === 1, max_iterations: pull.codex_max_iterations },
+    };
+  }
+
+  /** Check a change to a pull request's own settings and give the columns that store it. Null goes back to the setting. */
+  columns(change: ReviewerChange): ReviewColumns {
+    const cols: ReviewColumns = {};
+    if (change.enabled !== undefined) {
+      const on = change.enabled;
+      if (on !== null && on !== true && on !== false && on !== 'true' && on !== 'false') throw new HttpError(422, 'enabled must be true, false or null');
+      cols.codex_enabled = on === null ? null : on === true || on === 'true' ? 1 : 0;
     }
-    this.s.db.update('pulls', ctx.pull.id, { codex_max_iterations: limit });
+    if (change.max_iterations !== undefined) {
+      const raw = change.max_iterations;
+      const limit = raw === null || raw === '' ? null : Number(raw);
+      if (limit !== null && (!Number.isInteger(limit) || limit < 0 || limit > MAX_ITERATIONS_LIMIT)) {
+        throw new HttpError(422, `the limit must be a whole number from 0 to ${MAX_ITERATIONS_LIMIT}`);
+      }
+      cols.codex_max_iterations = limit;
+    }
+    return cols;
+  }
+
+  /**
+   * Change this pull request's own settings: turn automatic reviews on or off, raise or lower
+   * the limit, or with null go back to the setting. If the author is waiting and Codex may now
+   * review, it starts at once instead of at the author's next wait.
+   */
+  configure(ctx: Ctx, change: ReviewerChange): ReviewerConfig {
+    this.s.db.update('pulls', ctx.pull.id, this.columns(change));
     this.s.emit(ctx.pull.id, 'updated', this.s.viewer());
     if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.consider(ctx.pull.id);
-    return limit ?? this.settings().maxIterations;
+    return this.config(this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!);
   }
 
   automaticReviews(pull: PullRow): number {
@@ -268,11 +318,11 @@ export class CodexReviewer {
     this.deciding.set(p, pullId);
   }
 
-  /** Review automatically if Codex is on, this head has not been tried, and the cap is not reached. */
+  /** Review automatically if Codex is on for this pull request, this head has not been tried, and the cap is not reached. */
   async maybeReview(pullId: number): Promise<void> {
-    if (this.stopped || !this.settings().enabled || this.jobs.has(pullId)) return;
+    if (this.stopped || this.jobs.has(pullId)) return;
     const stale = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
-    if (!stale || stale.state === 'closed') return;
+    if (!stale || stale.state === 'closed' || !this.enabled(stale)) return;
     if (stale.author_id === this.actor().id) return;
     const repo = this.s.repoById(stale.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, stale.number);
@@ -282,7 +332,7 @@ export class CodexReviewer {
 
   /** Whether an automatic review of the pull request's head would start now. */
   private wouldReview(pull: PullRow): boolean {
-    if (this.stopped || !this.settings().enabled || pull.state === 'closed' || pull.author_id === this.actor().id) return false;
+    if (this.stopped || !this.enabled(pull) || pull.state === 'closed' || pull.author_id === this.actor().id) return false;
     // One attempt per head, failed or not: a failure is retried by asking from the page.
     if (this.s.db.get('SELECT 1 FROM review_runs WHERE pull_id = ? AND reviewer = ? AND head_sha = ?', pull.id, this.engine, pull.head_sha)) return false;
     return this.automaticReviews(pull) < this.limit(pull);

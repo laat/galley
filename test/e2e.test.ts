@@ -454,7 +454,7 @@ test('codex reviews when the author waits, within the limits in settings', async
   for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
   const selfRaise = await cli(['api', '-X', 'PATCH', `repos/{owner}/{repo}/pulls/${number}/reviewers/codex`, '-F', 'max_iterations=9']);
   assert.equal(selfRaise.code, 1, 'agents cannot raise their own limit');
-  assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: '2' }), { max_iterations: 2, overridden: true });
+  assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: '2' }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: 2 } });
   const second = await resumed;
   assert.equal(second.code, 0, second.stderr);
   assert.match(second.stdout, /automatic review 2 of 2/);
@@ -471,8 +471,9 @@ test('codex reviews when the author waits, within the limits in settings', async
   const page = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
   assert.match(page, /failed/);
   assert.match(page, /Automatic reviews: 2 of <span class="codex-limit"[^>]*data-limit="2"/);
-  assert.match(page, /js-codex-limit-reset/);
-  assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: null }), { max_iterations: 1, overridden: false });
+  assert.match(page, /js-codex-reset" data-api="[^"]*" data-field="max_iterations"/);
+  assert.doesNotMatch(page, /for this pull request/, 'following the setting, as without --reviewer');
+  assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: null }), { enabled: true, max_iterations: 1, overrides: { enabled: null, max_iterations: null } });
 
   // The reviewer is one identity: renaming it carries its earlier reviews along.
   await human('PUT', '/api/settings/codex', { name: 'codex-bot' });
@@ -589,6 +590,165 @@ test('a review still running shows in pr view and pr wait, and publishing before
     rmSync(gate, { force: true });
     await human('PUT', '/api/settings/codex', { enabled: false });
   }
+});
+
+test('pr create --reviewer and --no-review decide Codex reviews for that pull request', async (t) => {
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
+  const branch = (name: string, file: string) => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', name);
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+  };
+  const create = (args: string[]) => cli(['pr', 'create', '--title', 'Review options', '--body', 'x', ...args]);
+  const numberOf = (r: { stdout: string }) => Number(r.stdout.trim().split('/').pop());
+  const api = (n: number) => `/api/repos/acme/widgets/pulls/${n}`;
+  const page = async (n: number) => (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text();
+  const authorWaiting = async (n: number) => {
+    for (let i = 0; i < 100 && !(await human('GET', api(n))).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  /** What Codex reports the moment it starts deciding about the pull request, as when its author waits. */
+  const considered = async (n: number) => {
+    const { id } = await human('GET', api(n));
+    const codex = server.service.codex!;
+    codex.consider(id);
+    return codex.atWork(server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id));
+  };
+
+  await t.test('--reviewer codex:2 gets two reviews when automatic reviews are off in settings', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    branch('feature/two-loops', 'two.js');
+    // Repeated and comma-separated, as in gh; logins without a reviewer agent are ignored.
+    const r = await create(['-r', 'octocat,codex:2', '--reviewer', 'alice']);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /Ignored reviewer octocat: laatsux has no reviewer agent by that name/);
+    assert.match(r.stderr, /Ignored reviewer alice/);
+    const n = numberOf(r);
+    const { enabled, max_iterations, overrides } = await human('GET', `${api(n)}/reviewers/codex`);
+    assert.deepEqual({ enabled, max_iterations, overrides }, { enabled: true, max_iterations: 2, overrides: { enabled: true, max_iterations: 2 } });
+    const html = await page(n);
+    assert.match(html, /Turned on for this pull request \(off in Settings\)/);
+    assert.match(html, /Automatic reviews: 0 of <span class="codex-limit"[^>]*data-limit="2"/);
+    // Queued as soon as Codex considers it, although automatic reviews are off in settings.
+    assert.equal((await considered(n))?.status, 'QUEUED');
+    for (const i of [1, 2]) {
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s']);
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, new RegExp(`automatic review ${i} of 2`));
+      writeFileSync(join(repo, 'two.js'), `export const n = ${i};\n`);
+      git('commit', '-qam', `Change two.js (${i})`);
+    }
+    const capped = await cli(['pr', 'wait', String(n), '--timeout', '2s']);
+    assert.equal(capped.code, 124);
+    assert.equal((await human('GET', `${api(n)}/reviewers/codex`)).runs.length, 2);
+  });
+
+  await t.test('--reviewer codex follows the limit in settings, raised while the author waits', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 1 });
+    branch('feature/settings-limit', 'limit.js');
+    const r = await create(['--reviewer', 'codex']);
+    assert.equal(r.code, 0, r.stderr);
+    const n = numberOf(r);
+    const first = await cli(['pr', 'wait', String(n), '--timeout', '20s']);
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(first.stdout, /automatic review 1 of 1/);
+    writeFileSync(join(repo, 'limit.js'), 'export const n = 1;\n');
+    git('commit', '-qam', 'Change limit.js');
+    const waiting = cli(['pr', 'wait', String(n), '--timeout', '20s']);
+    await authorWaiting(n);
+    // Let Codex see the new commit and find the cap reached before the limit goes up.
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).runs.length, 1);
+    await human('PUT', '/api/settings/codex', { maxIterations: 2 });
+    const second = await waiting;
+    assert.equal(second.code, 0, second.stderr);
+    assert.match(second.stdout, /automatic review 2 of 2/);
+    await human('PUT', '/api/settings/codex', { maxIterations: 3 });
+  });
+
+  await t.test('--no-review gets no reviews when automatic reviews are on in settings', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    branch('feature/no-review', 'none.js');
+    const r = await create(['--no-review']);
+    assert.equal(r.code, 0, r.stderr);
+    const n = numberOf(r);
+    const w = await cli(['pr', 'wait', String(n), '--timeout', '2s']);
+    assert.equal(w.code, 124);
+    assert.equal(await considered(n), null, 'nothing queued, although automatic reviews are on in settings');
+    const config = await human('GET', `${api(n)}/reviewers/codex`);
+    assert.deepEqual(config.runs, []);
+    assert.equal(config.enabled, false);
+    assert.equal(config.overrides.enabled, false);
+    const html = await page(n);
+    assert.match(html, /Automatic reviews are off/);
+    assert.match(html, /Turned off for this pull request \(on in Settings\)/);
+    assert.match(html, /js-codex-reset" data-api="[^"]*" data-field="enabled"/);
+    // Back to the setting (the page's reset) while the author waits: Codex starts at once.
+    const resumed = cli(['pr', 'wait', String(n), '--timeout', '20s']);
+    await authorWaiting(n);
+    const reset = await human('PATCH', `${api(n)}/reviewers/codex`, { enabled: null });
+    assert.deepEqual(reset, { enabled: true, max_iterations: 3, overrides: { enabled: null, max_iterations: null } });
+    const second = await resumed;
+    assert.equal(second.code, 0, second.stderr);
+    assert.match(second.stdout, /codex reviewed: commented/);
+  });
+
+  await t.test('without either flag, the setting decides', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: false });
+    branch('feature/default-review', 'default.js');
+    const r = await create([]);
+    assert.equal(r.code, 0, r.stderr);
+    const n = numberOf(r);
+    assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).overrides, { enabled: null, max_iterations: null });
+    assert.equal((await cli(['pr', 'wait', String(n), '--timeout', '2s'])).code, 124);
+    assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).runs, []);
+    assert.doesNotMatch(await page(n), /for this pull request/);
+    // Turned on in Settings while the author waits, Codex reviews this one too.
+    const waiting = cli(['pr', 'wait', String(n), '--timeout', '20s']);
+    await authorWaiting(n);
+    await human('PUT', '/api/settings/codex', { enabled: true });
+    const w = await waiting;
+    assert.equal(w.code, 0, w.stderr);
+    assert.match(w.stdout, /codex reviewed: commented/);
+    await human('PUT', '/api/settings/codex', { enabled: false });
+  });
+
+  await t.test('flags that cannot work stage nothing', async () => {
+    branch('feature/refused', 'refused.js');
+    const bad = await create(['-r', 'codex:two']);
+    assert.equal(bad.code, 1);
+    assert.match(bad.stderr, /invalid reviewer "codex:two"/);
+    const both = await create(['--no-review', '-r', 'codex:2']);
+    assert.equal(both.code, 1);
+    assert.match(both.stderr, /codex was asked to review, but automatic reviews are turned off/);
+    const tooMany = await create(['-r', 'codex:99']);
+    assert.equal(tooMany.code, 1);
+    assert.match(tooMany.stderr, /from 0 to 20/);
+    assert.deepEqual(await human('GET', '/api/repos/acme/widgets/pulls?state=all&head=feature/refused'), []);
+  });
+
+  await t.test('the API takes logins as GitHub does, and turns every reviewer agent on or off', async () => {
+    const post = async (body: object) => {
+      const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+        body: JSON.stringify({ title: 'Through the API', head: 'feature/refused', base: 'main', ...body }),
+      });
+      assert.equal(res.status, 201);
+      const pr = await res.json();
+      const config = await human('GET', `${api(pr.number)}/reviewers/codex`);
+      await human('DELETE', api(pr.number));
+      return { pr, config };
+    };
+    const byLogin = await post({ reviewers: ['Codex', 'octocat'] });
+    assert.deepEqual(byLogin.pr.ignored_reviewers, ['octocat']);
+    assert.deepEqual(byLogin.config.overrides, { enabled: true, max_iterations: null });
+    assert.deepEqual((await post({ automatic_reviews: true })).config.overrides, { enabled: true, max_iterations: null });
+    const plain = await post({});
+    assert.equal(plain.pr.ignored_reviewers, undefined);
+    assert.deepEqual(plain.config.overrides, { enabled: null, max_iterations: null });
+  });
 });
 
 test('closing the server stops a running review and records why', async () => {
