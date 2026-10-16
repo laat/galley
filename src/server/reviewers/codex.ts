@@ -7,8 +7,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
-import { now, type Actor, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
-import { HttpError, type Ctx, type Service } from '../service.ts';
+import { now, type Actor, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
+import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, type CodexSettings } from '../settings.ts';
 
 export interface ModelInfo {
@@ -25,6 +25,7 @@ interface Finding {
   start_line: number | null;
   side: Side;
   body: string;
+  priority: Priority | null;
 }
 
 interface Result {
@@ -44,12 +45,17 @@ const SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['path', 'line', 'start_line', 'side', 'body'],
+        required: ['path', 'line', 'start_line', 'side', 'priority', 'body'],
         properties: {
           path: { type: 'string', description: 'File path relative to the repository root.' },
           line: { type: 'integer', description: 'Last line the comment is about.' },
           start_line: { type: ['integer', 'null'], description: 'First line of a multi-line comment, or null.' },
           side: { type: 'string', enum: ['RIGHT', 'LEFT'], description: 'RIGHT for new line numbers, LEFT for removed lines (old numbers).' },
+          priority: {
+            type: ['string', 'null'],
+            enum: ['high', 'medium', 'low', null],
+            description: 'high: must be fixed before merging (bugs, security). medium: should be fixed. low: minor improvement.',
+          },
           body: { type: 'string', description: 'The comment in Markdown.' },
         },
       },
@@ -184,6 +190,12 @@ export class CodexReviewer {
         if (old && old.id !== me.id && this.onlyReviewedForUs(old)) this.absorb(old, me);
         this.s.db.run('UPDATE review_runs SET reviewer = ? WHERE reviewer = ?', this.engine, reviewer);
       });
+    }
+    // Earlier reviews carried the priority in the text ("[P1] ..."); move it into the field.
+    const me = this.actor();
+    for (const c of this.s.db.all<Pick<CommentRow, 'id' | 'body'>>('SELECT id, body FROM comments WHERE author_id = ? AND priority IS NULL', me.id)) {
+      const split = splitPriorityPrefix(c.body);
+      if (split.priority) this.s.db.update('comments', c.id, { priority: split.priority, body: split.body });
     }
     this.s.bus.on('author-waiting', this.onWaiting);
   }
@@ -339,7 +351,13 @@ export class CodexReviewer {
       let [start, line] = [raw.start_line ?? null, raw.line];
       if (start !== null && start > line) [start, line] = [line, start];
       if (start === line) start = null;
-      const c: Finding = { ...raw, line, start_line: start, side: raw.side === 'LEFT' ? 'LEFT' : 'RIGHT' };
+      // The priority belongs in its field, even when the model writes "[P1] ..." in the text.
+      const split = splitPriorityPrefix(String(raw.body ?? ''));
+      let priority: Priority | null = split.priority;
+      try {
+        priority = checkPriority(raw.priority) ?? priority;
+      } catch {}
+      const c: Finding = { ...raw, body: split.body, priority, line, start_line: start, side: raw.side === 'LEFT' ? 'LEFT' : 'RIGHT' };
       const file = files.find((f) => f.path === c.path);
       const ok = file && Number.isInteger(c.line) && lineInDiff(file, c.side, c.line) && (c.start_line === null || lineInDiff(file, c.side, c.start_line));
       (ok ? inline : loose).push(c);
@@ -347,7 +365,7 @@ export class CodexReviewer {
     const n = trigger === 'auto' ? this.automaticReviews(pull) + 1 : null;
     const parts = [String(result.summary ?? '').trim() || (inline.length || loose.length ? 'Codex left comments.' : 'Codex found nothing to comment on.')];
     if (loose.length) {
-      parts.push('**Comments on lines outside the diff**', loose.map((c) => `- \`${c.path}:${c.start_line ? `${c.start_line}-` : ''}${c.line}\`: ${c.body.trim().replace(/\n/g, '\n  ')}`).join('\n'));
+      parts.push('**Comments on lines outside the diff**', loose.map((c) => `- \`${c.path}:${c.start_line ? `${c.start_line}-` : ''}${c.line}\`${c.priority ? ` (${c.priority} priority)` : ''}: ${c.body.trim().replace(/\n/g, '\n  ')}`).join('\n'));
     }
     const model = [settings.model || 'default model', settings.effort ? `${settings.effort} effort` : null].filter(Boolean).join(', ');
     parts.push(`<sub>Codex (${model}) reviewed \`${pull.head_sha.slice(0, 7)}\`${n ? `, automatic review ${n} of ${this.limit(pull)}` : ', on request'}.</sub>`);
@@ -357,7 +375,7 @@ export class CodexReviewer {
         event: 'COMMENT',
         body: parts.join('\n\n'),
         commit_id: pull.head_sha,
-        comments: inline.map((c) => ({ path: c.path, line: c.line, side: c.side, start_line: c.start_line, start_side: c.start_line ? c.side : null, body: c.body })),
+        comments: inline.map((c) => ({ path: c.path, line: c.line, side: c.side, start_line: c.start_line, start_side: c.start_line ? c.side : null, body: c.body, priority: c.priority })),
       },
       this.actor(),
     );
@@ -383,6 +401,8 @@ export class CodexReviewer {
       `Run \`git diff ${pull.base_sha} HEAD\` to see the changes and read the surrounding code as needed. Do not modify any files.`,
       '',
       'Look for bugs, regressions, security problems, missing error handling, and changes that do not do what the description says. Mention missing tests only where they matter. Skip style preferences and anything a formatter or linter would catch. If the pull request is fine, say so in the summary and leave no comments.',
+      '',
+      'Give each comment a priority: high for bugs, security problems and anything that must be fixed before merging; medium for what should be fixed; low for minor improvements. Do not write the priority into the comment text.',
       '',
       'Each comment is about lines of the diff: changed lines or the three lines of context around them. Use side RIGHT and new line numbers, or side LEFT and old line numbers for removed lines. `line` is the last line; `start_line` is the first line of a range, or null. To propose a replacement, put a ```suggestion block in the body; it replaces lines start_line..line exactly.',
     ];

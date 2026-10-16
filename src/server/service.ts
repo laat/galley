@@ -8,7 +8,9 @@ import type { CodexReviewer } from './reviewers/codex.ts';
 import {
   Db,
   now,
+  PRIORITIES,
   type Actor,
+  type Priority,
   type CommentRow,
   type EventRow,
   type PullRow,
@@ -48,6 +50,8 @@ export interface CommentInput {
   start_line?: number | null;
   start_side?: Side | null;
   subject_type?: SubjectType | null;
+  /** laatsux extension: high, medium or low. */
+  priority?: string | null;
   commit_id?: string | null;
   /** laatsux extension: the left side of the diff the comment was made on (for commit and interdiff views). */
   base_commit_id?: string | null;
@@ -509,8 +513,13 @@ export class Service {
     this.db.update('pulls', pull.id, { updated_at: ts });
   }
 
-  /** Validate where a new review comment points and build the columns that anchor it. */
+  /** The columns of a new review comment: where it points, and its priority. */
   private async anchor(ctx: Ctx, input: CommentInput): Promise<Record<string, string | number | null>> {
+    return { ...(await this.anchorAt(ctx, input)), priority: checkPriority(input.priority) };
+  }
+
+  /** Validate where a new review comment points and build the columns that anchor it. */
+  private async anchorAt(ctx: Ctx, input: CommentInput): Promise<Record<string, string | number | null>> {
     const { pull, git } = ctx;
     const subject: SubjectType = input.subject_type ?? (input.path ? (input.line ? 'line' : 'file') : 'commit');
     if (subject === 'commit') {
@@ -565,8 +574,17 @@ export class Service {
 
   private insertReviewComment(pull: PullRow, actor: Actor, reviewId: number | null, body: string, anchor: Record<string, string | number | null>, inReplyTo: number | null = null): number {
     if (!body.trim()) throw new HttpError(422, 'body cannot be blank');
+    const columns = { ...anchor };
+    if (inReplyTo === null) {
+      // From any reviewer: a "[P1] ..." prefix becomes the priority, unless one was given.
+      const split = splitPriorityPrefix(body);
+      if (split.priority) {
+        body = split.body;
+        columns.priority ??= split.priority;
+      }
+    }
     const ts = now();
-    return this.db.insert('comments', { pull_id: pull.id, kind: 'review', review_id: reviewId, author_id: actor.id, body, created_at: ts, updated_at: ts, in_reply_to_id: inReplyTo, ...anchor });
+    return this.db.insert('comments', { pull_id: pull.id, kind: 'review', review_id: reviewId, author_id: actor.id, body, created_at: ts, updated_at: ts, in_reply_to_id: inReplyTo, ...columns });
   }
 
   /** POST /pulls/:n/comments: a standalone comment wrapped in its own submitted review, as GitHub does. */
@@ -1052,4 +1070,22 @@ export function fillFromCommits(commits: Commit[], branch: string, mode: 'defaul
 export function publishFingerprint(pull: PullRow): string {
   const text = createHash('sha256').update(`${pull.base_ref}\0${pull.title}\0${pull.body}`).digest('hex').slice(0, 16);
   return `${pull.head_sha}:${text}`;
+}
+
+export function checkPriority(value: unknown): Priority | null {
+  if (value === null || value === undefined || value === '') return null;
+  const p = String(value).toLowerCase();
+  if (!(PRIORITIES as readonly string[]).includes(p)) throw new HttpError(422, `priority must be one of ${PRIORITIES.join(', ')}`);
+  return p as Priority;
+}
+
+/**
+ * Reviewers that put the priority in the text ("[P1] Title", Codex's habit) get it moved into
+ * the field: P0 and P1 are high, P2 medium, P3 low.
+ */
+export function splitPriorityPrefix(body: string): { priority: Priority | null; body: string } {
+  const m = body.match(/^\s*\[P([0-3])\]\s*/);
+  if (!m) return { priority: null, body };
+  const priority: Priority = m[1] === '2' ? 'medium' : m[1] === '3' ? 'low' : 'high';
+  return { priority, body: body.slice(m[0].length) };
 }

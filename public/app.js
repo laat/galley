@@ -36,9 +36,9 @@
 
   const draftPrefix = () => `laatsux:draft:${ds().pullId || 'global'}:`;
 
-  function saveDraft(key, value, meta) {
+  function saveDraft(key, value, meta, priority) {
     try {
-      if (value.trim()) sessionStorage.setItem(draftPrefix() + key, JSON.stringify({ value, meta }));
+      if (value.trim()) sessionStorage.setItem(draftPrefix() + key, JSON.stringify({ value, meta, priority }));
       else sessionStorage.removeItem(draftPrefix() + key);
     } catch {}
   }
@@ -67,6 +67,8 @@
       if (!ta && d.meta) ta = reopenForm(d.meta);
       if (!ta) continue;
       if (!ta.value || ta.value === ta.defaultValue) ta.value = d.value;
+      const priority = ta.closest('.inline-comment-form') && $('select[name=priority]', ta.closest('.inline-comment-form'));
+      if (priority && d.priority && !priority.value) priority.value = d.priority;
       reveal(ta);
     }
   }
@@ -79,12 +81,22 @@
     if (reply && reply.hidden) openReply(reply.closest('.review-thread-reply'), false);
   }
 
+  /** A draft is its text, where it goes, and for a new review comment its priority. */
+  function saveDraftOf(textarea) {
+    const holder = textarea.closest('[data-draft-meta]');
+    const priority = holder && $('select[name=priority]', holder);
+    saveDraft(textarea.dataset.draftKey, textarea.value, holder ? JSON.parse(holder.dataset.draftMeta) : undefined, priority ? priority.value : undefined);
+  }
+
   document.addEventListener('input', (e) => {
     const t = e.target;
-    if (t.matches && t.matches('textarea[data-draft-key]')) {
-      const holder = t.closest('[data-draft-meta]');
-      saveDraft(t.dataset.draftKey, t.value, holder ? JSON.parse(holder.dataset.draftMeta) : undefined);
-    }
+    if (t.matches && t.matches('textarea[data-draft-key]')) saveDraftOf(t);
+  });
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t.matches || !t.matches('.inline-comment-form select[name=priority]')) return;
+    const textarea = $('textarea[data-draft-key]', t.closest('.inline-comment-form'));
+    if (textarea) saveDraftOf(textarea);
   });
 
   // ------------------------------------------------------------- refresh
@@ -383,6 +395,9 @@
 <form class="js-new-comment-form">
   ${editorHtml({ draftKey: key, suggestion: !!suggestion })}
   <div class="form-actions">
+    <select class="form-select priority-select" name="priority" aria-label="Priority">
+      <option value="">No priority</option><option value="high">High priority</option><option value="medium">Medium priority</option><option value="low">Low priority</option>
+    </select>
     <button type="button" class="btn js-inline-cancel">Cancel</button>
     ${pendingReview ? '' : '<button type="submit" class="btn" value="single">Add single comment</button>'}
     <button type="submit" class="btn btn-primary" value="review">${pendingReview ? 'Add review comment' : 'Start a review'}</button>
@@ -396,7 +411,7 @@
     const meta = JSON.parse(wrap.dataset.draftMeta);
     const body = $('textarea', form).value;
     const mode = submitter ? submitter.value : ds().pendingReview ? 'review' : 'single';
-    const payload = { body };
+    const payload = { body, priority: $('select[name=priority]', form).value || null };
     if (meta.kind === 'commit') Object.assign(payload, { subject_type: 'commit', commit_id: meta.sha });
     else {
       Object.assign(payload, { path: meta.path, commit_id: ds().commitId, base_commit_id: ds().baseCommitId });

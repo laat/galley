@@ -158,12 +158,13 @@ test('the agent loop, from staging to publishing', async (t) => {
     await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', {
       event: 'REQUEST_CHANGES',
       body: 'Almost.',
-      comments: [{ path: 'math.js', line: 6, side: 'RIGHT', body: 'Add a doc comment.' }],
+      comments: [{ path: 'math.js', line: 6, side: 'RIGHT', body: 'Add a doc comment.', priority: 'high' }],
     });
     const r = await waiting;
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /reviewer reviewed: changes requested/);
-    assert.match(r.stdout, /thread \d+ on math\.js:6 \[unresolved\]/);
+    assert.match(r.stdout, /thread \d+ on math\.js:6 \[unresolved\] \(high priority\)/);
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/1/files`)).text(), /<span class="Label Label--priority Label--priority-high" title="Priority">High<\/span>/);
     assert.match(r.stdout, /Add a doc comment\./);
     // Seen feedback is not returned twice.
     const again = await cli(['pr', 'wait', '--timeout', '1s']);
@@ -239,6 +240,13 @@ test('the agent loop, from staging to publishing', async (t) => {
     writeFileSync(join(dir, 'body.md'), "app.get('/repos/:owner/:repo') {owner}");
     const file = await cli(['api', 'repos/{owner}/{repo}/issues/1/comments', '-F', `body=@${join(dir, 'body.md')}`]);
     assert.equal(JSON.parse(file.stdout).body, "app.get('/repos/:owner/:repo') {owner}");
+    const urgent = await cli(['api', 'repos/{owner}/{repo}/pulls/1/comments', '-f', 'body=x', '-f', 'path=math.js', '-F', 'line=9', '-f', 'priority=urgent']);
+    assert.equal(urgent.code, 1);
+    assert.match(urgent.stderr, /priority must be one of high, medium, low/);
+    // Any reviewer that writes the priority into the text gets it moved into the field.
+    const prefixed = await cli(['api', 'repos/{owner}/{repo}/pulls/1/comments', '-f', 'body=[P1] Fix this', '-f', 'path=math.js', '-F', 'line=9']);
+    assert.equal(prefixed.code, 0, prefixed.stderr);
+    assert.deepEqual((({ priority, body }) => ({ priority, body }))(JSON.parse(prefixed.stdout)), { priority: 'high', body: 'Fix this' });
     const missing = await cli(['api', 'repos/{owner}/{repo}/pulls/99']);
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /HTTP 404/);
@@ -379,8 +387,9 @@ test('codex reviews when the author waits, within the limits in settings', async
     summary: 'Off by one.',
     comments: [
       // Models often write a one-line comment as start_line == line.
-      { path: 'codex.js', line: 1, start_line: 1, side: 'RIGHT', body: '```suggestion\nexport const answer = 42;\n```' },
-      { path: 'math.js', line: 1, start_line: null, side: 'RIGHT', body: 'Not in this diff.' },
+      { path: 'codex.js', line: 1, start_line: 1, side: 'RIGHT', priority: 'high', body: '```suggestion\nexport const answer = 42;\n```' },
+      // The priority written into the text the way Codex likes to: it becomes the field.
+      { path: 'math.js', line: 1, start_line: null, side: 'RIGHT', priority: null, body: '[P2] Not in this diff.' },
     ],
   });
 
@@ -398,8 +407,8 @@ test('codex reviews when the author waits, within the limits in settings', async
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /codex reviewed: commented/);
   assert.match(r.stdout, /Off by one\./);
-  assert.match(r.stdout, /thread \d+ on codex\.js:1 \[unresolved\]/);
-  assert.match(r.stdout, /`math\.js:1`: Not in this diff\./);
+  assert.match(r.stdout, /thread \d+ on codex\.js:1 \[unresolved\] \(high priority\)/);
+  assert.match(r.stdout, /`math\.js:1` \(medium priority\): Not in this diff\./);
   const call = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
   assert.equal(call.args[call.args.indexOf('-m') + 1], 'gpt-test');
   assert.ok(call.args.includes('model_reasoning_effort="high"'));

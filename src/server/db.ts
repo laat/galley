@@ -76,6 +76,8 @@ export interface ReviewRow {
 }
 
 export type Side = 'LEFT' | 'RIGHT';
+export type Priority = 'high' | 'medium' | 'low';
+export const PRIORITIES: readonly Priority[] = ['high', 'medium', 'low'];
 export type SubjectType = 'line' | 'file' | 'commit';
 
 export interface CommentRow {
@@ -100,6 +102,8 @@ export interface CommentRow {
   in_reply_to_id: number | null;
   resolved_at: string | null;
   resolved_by_id: number | null;
+  /** How much a review comment matters, when its author said so. */
+  priority: Priority | null;
 }
 
 export interface EventRow {
@@ -256,6 +260,7 @@ export interface ReviewRunRow {
 const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'published_source_sha', 'TEXT'],
   ['pulls', 'codex_max_iterations', 'INTEGER'],
+  ['comments', 'priority', 'TEXT'],
 ];
 
 export class Db {

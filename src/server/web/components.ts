@@ -88,6 +88,13 @@ export interface CommentView {
   anchor: string;
   markdownCtx?: Parameters<typeof renderMarkdown>[1];
   deletable?: boolean;
+  priority?: 'high' | 'medium' | 'low' | null;
+}
+
+const PRIORITY_TEXT = { high: 'High', medium: 'Medium', low: 'Low' } as const;
+
+export function priorityPill(priority: CommentView['priority']): Safe {
+  return priority ? html`<span class="Label Label--priority Label--priority-${priority}" title="Priority">${PRIORITY_TEXT[priority]}</span>` : raw('');
 }
 
 /** A full-width comment with avatar, as used in the conversation timeline. */
@@ -144,6 +151,7 @@ export function threadComment(s: Service, c: CommentView): Safe {
     ${c.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}
     ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
     <span class="flex-auto"></span>
+    ${priorityPill(c.priority)}
     ${c.editPath ? commentMenu(c) : ''}
   </div>
   <div class="review-comment-body">${commentBodyAndEditor(c)}</div>
@@ -221,6 +229,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     isAuthor: c.author_id === o.pull.author_id,
     anchor: `discussion_r${c.id}`,
     markdownCtx: { suggestionLines, suggestionLang: lang },
+    priority: c.priority,
   });
   const range = root.start_line && root.start_line !== root.line ? `lines ${root.start_line} to ${root.line}` : root.line ? `line ${root.line}` : '';
   let title: Safe;
