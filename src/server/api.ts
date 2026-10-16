@@ -331,13 +331,26 @@ export function api(s: Service): Hono {
     const seconds = Number(c.req.query('timeout') ?? 240);
     const timeout = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 240, 3600) * 1000;
     const r = await s.wait(x, timeout, c.req.raw.signal);
-    const pull = s.db.get<any>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
+    const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
     return c.json({
       status: r.status,
       published_url: pull?.published_url ?? null,
       reviews: r.reviews.map((rv) => rv.id),
       comments: r.comments.map((cm) => ({ id: cm.id, kind: cm.kind, in_reply_to_id: cm.in_reply_to_id })),
+      // Everything needed to show the feedback, so no second request can fail in between.
+      pr: r.status !== 'timeout' && pull ? await ghPullJson(s, await s.ctx(x.repo.owner, x.repo.name, pull.number), actor(c), []) : undefined,
+      seen_at: r.seenAt,
     });
+  });
+
+  // laatsux extension: the author confirms it has shown the feedback a wait returned.
+  app.put('/repos/:owner/:repo/pulls/:n/seen', async (c) => {
+    const x = await ctx(c, { sync: false });
+    if (actor(c).id !== x.pull.author_id) throw new HttpError(403, 'only the author marks feedback as seen');
+    const at = String((await body(c)).at ?? '');
+    if (!/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(at)) throw new HttpError(422, 'at must be the seen_at of a wait response');
+    s.markSeen(x.pull, at);
+    return c.body(null, 204);
   });
 
   // ----------------------------------------------------------------- issues

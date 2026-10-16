@@ -415,6 +415,11 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
   return 0;
 }
 
+/** The server is down or restarting: worth asking again shortly. */
+function transient(e: unknown): boolean {
+  return (e instanceof TypeError && e.message === 'fetch failed') || (e instanceof CliError && /not running/.test(e.message));
+}
+
 async function wait(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v, positionals } = parse(args, { timeout: { type: 'string' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
@@ -430,8 +435,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     try {
       r = await client.get(`${pullPath(t)}/wait?timeout=${Math.min(left, 240)}`);
     } catch (e) {
-      if (e instanceof CliError && /not running/.test(e.message)) {
-        // The server restarted; give it a moment and keep waiting.
+      // The server went away (refused) or restarted under us (the open request was dropped):
+      // give it a moment and keep waiting.
+      if (transient(e)) {
         await new Promise((res) => setTimeout(res, 3000));
         continue;
       }
@@ -439,7 +445,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if (r.status === 'timeout') continue;
     const url = `${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`;
-    const pr = await client.get(ghPath(t, []));
+    const pr = r.pr;
     const items = conversationItems(pr, {
       reviews: new Set(r.reviews),
       comments: new Set(r.comments.filter((cm: any) => cm.kind === 'issue').map((cm: any) => cm.id)),
@@ -450,6 +456,19 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(items.map((i) => i.text).join('\n\n') + '\n');
     }
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
+    // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at });
+        break;
+      } catch (e) {
+        if (!transient(e) || attempt === 10) {
+          err('Could not confirm the feedback as seen; the next `laatsux pr wait` will show it again.');
+          break;
+        }
+        await new Promise((res) => setTimeout(res, 3000));
+      }
+    }
     if (r.status === 'published') {
       out(`Published to GitHub: ${r.published_url}`);
       out(items.length ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');

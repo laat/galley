@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hono } from 'hono';
@@ -90,8 +91,19 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
 
   let server: ServerType;
   let app: Hono | null = null;
+  let inflight = 0;
+  const drained = new EventEmitter();
   const port = await new Promise<number>((resolve, reject) => {
-    const fetch = (req: Request) => (app ? app.fetch(req) : new Response('starting', { status: 503 }));
+    const fetch = async (req: Request) => {
+      if (!app) return new Response('starting', { status: 503 });
+      // Count handlers that are still running, so closing can let them finish with the database.
+      inflight++;
+      try {
+        return await app.fetch(req);
+      } finally {
+        if (--inflight === 0) drained.emit('idle');
+      }
+    };
     server = serve({ fetch, port: opts.port, hostname: host }, (info) => resolve(info.port));
     server.once('error', reject);
   });
@@ -129,6 +141,16 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
         server.close(() => resolve());
         (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
       });
+      // Dropped requests (an open `pr wait`) still finish their handlers; give them a moment.
+      if (inflight > 0) {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 5000);
+          drained.once('idle', () => {
+            clearTimeout(t);
+            resolve();
+          });
+        });
+      }
       db.sql.close();
     },
   };

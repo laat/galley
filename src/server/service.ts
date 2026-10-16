@@ -79,6 +79,8 @@ export interface WaitResult {
   status: 'feedback' | 'published' | 'closed' | 'timeout';
   reviews: ReviewRow[];
   comments: CommentRow[];
+  /** What the author confirms with markSeen once it has shown this feedback. */
+  seenAt?: string;
 }
 
 export interface ServiceOptions {
@@ -801,7 +803,8 @@ export class Service {
 
   /** Record that the author has been shown everything up to `at` (taken before reading the feedback). */
   markSeen(pull: PullRow, at: string): void {
-    this.db.update('pulls', pull.id, { author_seen_at: at });
+    // Only forward: a late confirmation must not bring back feedback seen since.
+    this.db.run('UPDATE pulls SET author_seen_at = ? WHERE id = ? AND author_seen_at < ?', at, pull.id, at);
   }
 
   /**
@@ -846,9 +849,10 @@ export class Service {
         const fb = this.unseenFeedback(pull);
         const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
         if (pull.state === 'closed' || fb.reviews.length || fb.comments.length || published) {
-          this.markSeen(pull, checkedAt);
+          // Not marked as seen here: the author confirms once it has shown the feedback, so a
+          // response lost on the way (a restart) delivers it again instead of losing it.
           const status = pull.state === 'closed' ? 'closed' : published ? 'published' : 'feedback';
-          return { status, ...fb };
+          return { status, ...fb, seenAt: checkedAt };
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0 || signal?.aborted) return { status: 'timeout', reviews: [], comments: [] };

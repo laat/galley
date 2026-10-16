@@ -561,3 +561,51 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
     rmSync(data2, { recursive: true, force: true });
   }
 });
+
+test('pr wait keeps waiting when the server restarts under it', async () => {
+  const data = mkdtempSync(join(tmpdir(), 'laatsux-restart-'));
+  const first = await startServer({ port: 0, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 60_000 });
+  const port = first.port;
+  const json = { 'content-type': 'application/json' };
+  const registered = await (await fetch(`${first.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const pr = await (
+    await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
+      method: 'POST',
+      headers: { ...json, 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: 'Survives restarts', head: 'feature/by-codex', base: 'main' }),
+    })
+  ).json();
+  const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], {
+    cwd: repo,
+    env: { ...process.env, LAATSUX_URL: first.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1' },
+  });
+  // Close the server while the wait's request is open, then bring it back on the same port.
+  for (let i = 0; i < 100; i++) {
+    if ((await (await fetch(`${first.url}/api/repos/${registered.full_name}/pulls/${pr.number}`)).json()).author_waiting) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  await first.close();
+  const second = await startServer({ port, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 60_000 });
+  try {
+    await new Promise((r) => setTimeout(r, 4000)); // the wait retries every 3 seconds
+    await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/comments`, { method: 'POST', headers: json, body: JSON.stringify({ body: 'Still there?' }) });
+    const r = await waiting;
+    assert.match(r.stdout, /Still there\?/);
+
+    // Delivered but never confirmed (the CLI died, say): the next wait brings it again.
+    const api = `${second.url}/api/repos/${registered.full_name}/pulls/${pr.number}`;
+    const asAgent = { 'x-laatsux-actor': 'agent' };
+    await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/comments`, { method: 'POST', headers: json, body: JSON.stringify({ body: 'Second?' }) });
+    const once = await (await fetch(`${api}/wait?timeout=5`, { headers: asAgent })).json();
+    const twice = await (await fetch(`${api}/wait?timeout=5`, { headers: asAgent })).json();
+    assert.equal(once.status, 'feedback');
+    assert.deepEqual(twice.comments, once.comments);
+    assert.ok(once.pr.comments.some((cm: any) => cm.body === 'Second?'), 'the wait carries what is needed to show the feedback');
+    const confirm = await fetch(`${api}/seen`, { method: 'PUT', headers: { ...asAgent, ...json }, body: JSON.stringify({ at: once.seen_at }) });
+    assert.equal(confirm.status, 204);
+    assert.equal((await (await fetch(`${api}/wait?timeout=1`, { headers: asAgent })).json()).status, 'timeout');
+  } finally {
+    await second.close();
+    rmSync(data, { recursive: true, force: true });
+  }
+});
