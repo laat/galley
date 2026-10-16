@@ -208,13 +208,24 @@
 
     if (window.SharedWorker) {
       try {
-        const worker = new SharedWorker('/static/live-worker.js', { name: 'laatsux-live' });
-        worker.port.onmessage = (m) => {
-          if (m.data.type === 'reconnected') refresh();
-          else if (m.data.type === 'change' && mine(m.data.event)) onChange(m.data.event);
+        const join = () => {
+          const worker = new SharedWorker('/static/live-worker.js', { name: 'laatsux-live' });
+          worker.port.onmessage = (m) => {
+            if (m.data.type === 'reconnected') refresh();
+            else if (m.data.type === 'change' && mine(m.data.event)) onChange(m.data.event);
+          };
+          worker.port.start();
+          return worker.port;
         };
-        worker.port.start();
-        window.addEventListener('pagehide', () => worker.port.postMessage('bye'));
+        let port = join();
+        window.addEventListener('pagehide', () => port.postMessage('bye'));
+        // Back to a page kept in the back/forward cache (as after publishing): it said bye
+        // when it left, and missed what happened since.
+        window.addEventListener('pageshow', (e) => {
+          if (!e.persisted) return;
+          port = join();
+          refresh();
+        });
         return;
       } catch {
         // Fall through to a connection of our own.
@@ -291,13 +302,21 @@
     formError(form, null);
     const publishing = form.matches('.js-publish-form');
     busy(form, true, publishing ? 'Publishing…' : null);
+    let leaving = false;
     try {
       const body = formJson(form);
       // The second click on a Publish button that asked first: publish while a reviewer is at work.
       if (publishing && submitter && submitter.dataset.confirm) body.during_review = true;
-      await api(form.dataset.method || 'POST', form.dataset.api, body);
+      const res = await api(form.dataset.method || 'POST', form.dataset.api, body);
       for (const t of $$('textarea[data-draft-key]', form)) clearDraft(t.dataset.draftKey);
       if (form.dataset.reset) form.reset();
+      // A publish clicked in this tab goes on to the pull request on GitHub; the button stays
+      // busy until the page is gone. Publishes from anywhere else never navigate.
+      if (publishing && res && res.published_url) {
+        leaving = true;
+        location.href = res.published_url;
+        return;
+      }
       await refresh();
       if (publishing) toast('Published to GitHub');
       else if (form.dataset.toast) toast(form.dataset.toast);
@@ -315,7 +334,7 @@
         confirmed(submitter, submitter.dataset.confirm);
       }
     } finally {
-      busy(form, false);
+      if (!leaving) busy(form, false);
     }
   }
 
