@@ -1203,11 +1203,25 @@
     for (const el of $$('relative-time')) el.textContent = ago(new Date(el.getAttribute('datetime')));
   }
 
+  // ------------------------------------------------------------- avatars
+
+  // An avatar from elsewhere (an agent's logo, your GitHub avatar) that can't load, such as
+  // offline, shows the generated one instead. Load errors don't bubble: listen in the capture phase.
+  function avatarFallback(img) {
+    img.src = img.dataset.fallback;
+    delete img.dataset.fallback;
+  }
+  document.addEventListener('error', (e) => {
+    if (e.target instanceof HTMLImageElement && e.target.dataset.fallback) avatarFallback(e.target);
+  }, { capture: true });
+
   // ---------------------------------------------------------------- boot
 
   try {
     if (localStorage.getItem('laatsux:tree-hidden')) document.body.classList.add('tree-hidden');
   } catch {}
+  // Avatars that failed before this script ran.
+  for (const img of $$('img[data-fallback]')) if (img.complete && !img.naturalWidth) avatarFallback(img);
   afterRender();
   markLines(true);
   connectLive();
