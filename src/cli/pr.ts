@@ -396,10 +396,16 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
 // -------------------------------------------------------------- the loop
 
 async function publish(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, { draft: { type: 'boolean', short: 'd' }, force: { type: 'boolean', short: 'f' } });
+  const { values: v, positionals } = parse(args, {
+    draft: { type: 'boolean', short: 'd' },
+    force: { type: 'boolean', short: 'f' },
+    sign: { type: 'boolean' },
+    'no-sign': { type: 'boolean' },
+  });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   err(`Publishing ${t.repo.owner}/${t.repo.name}#${t.number} to GitHub…`);
-  const pr = await client.json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force });
+  const sign = v.sign ? true : v['no-sign'] ? false : undefined;
+  const pr = await client.json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign });
   out(pr.published_url);
   return 0;
 }

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { parseRawCommit } from '../src/server/git.ts';
 import { diffHunkFor, lineInDiff, mapLine, parseDiff, parseHunkRanges, rangeTouched, unquote } from '../src/server/diff.ts';
 
 const DIFF = `diff --git a/math.js b/math.js
@@ -116,6 +117,30 @@ test('diffHunkFor rewrites the header to match the slice', () => {
   assert.equal(header, '@@ -0,0 +4,7 @@');
   assert.equal(body[0], '+line 4');
   assert.equal(body.at(-1), '+line 10');
+});
+
+test('parseRawCommit keeps what is needed to recreate a commit', () => {
+  const raw = [
+    'tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904',
+    'parent 1111111111111111111111111111111111111111',
+    'parent 2222222222222222222222222222222222222222',
+    'author Agent Smith <agent@example.com> 1760630400 +0200',
+    'committer Agent Smith <agent@example.com> 1760630400 +0200',
+    'gpgsig -----BEGIN SSH SIGNATURE-----',
+    ' U1NIU0lH',
+    ' -----END SSH SIGNATURE-----',
+    '',
+    'Subject',
+    '',
+    'Body with a blank line above.',
+    '',
+  ].join('\n');
+  const c = parseRawCommit(raw);
+  assert.equal(c.tree, '4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+  assert.equal(c.parents.length, 2);
+  assert.deepEqual(c.author, { name: 'Agent Smith', email: 'agent@example.com', date: '1760630400 +0200' });
+  assert.equal(c.signed, true);
+  assert.equal(c.message, 'Subject\n\nBody with a blank line above.\n');
 });
 
 test('unquote decodes git C-style quoting', () => {

@@ -39,7 +39,10 @@ export interface PullRow {
   closed_at: string | null;
   published_url: string | null;
   published_at: string | null;
+  /** The commit on GitHub; a signed copy of published_source_sha when publishing signed. */
   published_head_sha: string | null;
+  /** The staged head that was published. */
+  published_source_sha: string | null;
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
@@ -208,7 +211,17 @@ CREATE TABLE IF NOT EXISTS viewed (
   blob TEXT NOT NULL,
   PRIMARY KEY (pull_id, path)
 );
+-- The signed copy made of each agent commit when publishing, so publishing again reuses it.
+CREATE TABLE IF NOT EXISTS signed_commits (
+  repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  source_sha TEXT NOT NULL,
+  signed_sha TEXT NOT NULL,
+  PRIMARY KEY (repo_id, source_sha)
+);
 `;
+
+/** Columns added after a table was first created: [table, column, definition]. */
+const ADDED_COLUMNS: [string, string, string][] = [['pulls', 'published_source_sha', 'TEXT']];
 
 export class Db {
   sql: DatabaseSync;
@@ -217,6 +230,10 @@ export class Db {
     this.sql = new DatabaseSync(file);
     this.sql.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.sql.exec(SCHEMA);
+    for (const [table, column, def] of ADDED_COLUMNS) {
+      const cols = this.sql.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+    }
   }
 
   get<T>(query: string, ...params: SQLInputValue[]): T | undefined {

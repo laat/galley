@@ -261,7 +261,8 @@ export function api(s: Service): Hono {
   app.post('/repos/:owner/:repo/pulls/:n/publish', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
-    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected }, actor(c));
+    const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
+    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign }, actor(c));
     return c.json(pullJson(s, x.repo, pull));
   });
 
