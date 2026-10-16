@@ -135,6 +135,11 @@ export class CodexReviewer {
     return actor;
   }
 
+  /** Its section of the Settings page. */
+  settingsUrl(): string {
+    return '/settings#codex';
+  }
+
   /**
    * Give the reviewer a new name. Its earlier reviews keep belonging to it. A name that was
    * only ever used for this reviewer's reviews is folded in; one used by you or an author is refused.

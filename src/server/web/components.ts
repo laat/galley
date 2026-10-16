@@ -75,8 +75,11 @@ export function pullIcon(pull: PullRow): Safe {
   return icon('git-pull-request', { cls: 'color-fg-open' });
 }
 
-export function authorLink(a: Actor): Safe {
-  return html`<a class="author" href="#" title="${a.type === 'Bot' ? 'agent' : 'reviewer'}">${a.login}</a>${a.type === 'Bot' ? html`<span class="Label Label--bot">bot</span>` : ''}`;
+/** An author's name. A reviewer agent's links to its settings, found by its actor since its name is a setting. */
+export function authorLink(s: Service, a: Actor): Safe {
+  const reviewer = s.reviewerAgents().find((r) => r.actor().id === a.id);
+  const title = reviewer ? `Settings for ${a.login}` : a.type === 'Bot' ? 'agent' : 'reviewer';
+  return html`<a class="author" href="${reviewer?.settingsUrl() ?? '#'}" title="${title}">${a.login}</a>${a.type === 'Bot' ? html`<span class="Label Label--bot">bot</span>` : ''}`;
 }
 
 export function markdownEditor(opts: { name?: string; value?: string; placeholder?: string; draftKey?: string; suggestion?: boolean; autofocus?: boolean; rows?: number }): Safe {
@@ -127,7 +130,7 @@ export function timelineComment(s: Service, c: CommentView, header?: Safe): Safe
   <span class="timeline-avatar">${avatar(avatarUrl(s, c.author), c.author.login, 40, c.author.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')}</span>
   <div class="timeline-comment${c.author.type === 'User' ? ' timeline-comment--viewer' : ''}">
     <div class="timeline-comment-header">
-      <h3 class="timeline-comment-header-text">${header ?? html`${authorLink(c.author)} commented <a href="#${c.anchor}" class="link-muted">${relTime(c.createdAt)}</a>`}${edited ? html` <span class="edited">· edited</span>` : ''}</h3>
+      <h3 class="timeline-comment-header-text">${header ?? html`${authorLink(s, c.author)} commented <a href="#${c.anchor}" class="link-muted">${relTime(c.createdAt)}</a>`}${edited ? html` <span class="edited">· edited</span>` : ''}</h3>
       <div class="timeline-comment-actions">
         ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
         ${c.editPath ? commentMenu(c) : ''}
@@ -170,7 +173,7 @@ export function threadComment(s: Service, c: CommentView): Safe {
   return html`<div class="review-comment" id="${c.anchor}">
   <div class="review-comment-header">
     ${avatar(avatarUrl(s, c.author), c.author.login, 24, c.author.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')}
-    <span class="review-comment-meta">${authorLink(c.author)} <a href="#${c.anchor}" class="link-muted">${relTime(c.createdAt)}</a>${edited ? html` <span class="edited">· edited</span>` : ''}</span>
+    <span class="review-comment-meta">${authorLink(s, c.author)} <a href="#${c.anchor}" class="link-muted">${relTime(c.createdAt)}</a>${edited ? html` <span class="edited">· edited</span>` : ''}</span>
     ${c.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}
     ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
     <span class="flex-auto"></span>

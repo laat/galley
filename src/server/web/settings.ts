@@ -32,7 +32,7 @@ export async function settingsPage(s: Service): Promise<string> {
     <a class="settings-nav-item selected" href="/settings">${icon('code-review')} Code review</a>
   </nav>
   <div class="settings-main">
-    <div class="Subhead">
+    <div class="Subhead" id="codex">
       <h2 class="Subhead-heading">Codex</h2>
       <p class="Subhead-description">Let Codex review staged pull requests before you do. It reviews a read-only checkout of the pull request and posts its findings as a review from <strong>${s.codex?.actor().login ?? settings.name}</strong>.</p>
     </div>
