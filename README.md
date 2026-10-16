@@ -68,7 +68,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers) are 
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
 | `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` |
-| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. Refused for agents |
+| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux serve` | Run the server and web UI |
 
@@ -138,6 +138,13 @@ UI, you act as yourself. Agents cannot publish or delete staged pull requests.
   changed any of them since the page loaded, publishing is refused. Force-pushes use
   `--force-with-lease` against the last published commit, so commits added on GitHub are
   never overwritten.
+- **Signing**: agents commit unsigned; the commits are yours once you publish. Publishing
+  can sign them: laatsux makes a signed copy of each commit with `git commit-tree -S`, with
+  the same tree, message and author and you as committer (GitHub only verifies a signature
+  whose key belongs to the committer), and pushes the copies. The agent's branch is left as
+  it is. Copies are remembered per commit, so publishing again after the agent added commits
+  is a fast-forward on GitHub. Signing is on by default when your git has
+  `commit.gpgsign = true`, and the Publish button has a checkbox for it.
 - **Git settings** that change diff output (`diff.noprefix`, `diff.mnemonicPrefix`,
   `diff.relative`, `diff.interHunkContext`, `log.showSignature`) are overridden for the
   server's git calls.

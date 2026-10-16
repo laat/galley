@@ -223,7 +223,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     case 'published':
       return timelineBadge(
         'mark-github',
-        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.force ? ' (force-pushed)' : ''} ${when}`,
+        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''} ${when}`,
         { cls: 'timeline-badge--done' },
       );
     case 'convert_to_draft':
@@ -289,13 +289,18 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     </div>`;
   }
 
+  // What was published, in terms of the staged commits (GitHub may have signed copies of them).
+  const publishedSource = pull.published_source_sha ?? pull.published_head_sha;
   const changed: string[] = [];
   if (pull.published_url) {
-    if (pull.published_head_sha !== pull.head_sha) changed.push('commits');
+    if (publishedSource !== pull.head_sha) changed.push('commits');
     if (pull.published_title !== pull.title) changed.push('title');
     if (pull.published_body !== pull.body) changed.push('description');
   }
-  const forceNeeded = !!pull.published_head_sha && pull.published_head_sha !== pull.head_sha && !(await p.ctx.git.isAncestor(pull.published_head_sha, pull.head_sha));
+  const forceNeeded = !!publishedSource && publishedSource !== pull.head_sha && !(await p.ctx.git.isAncestor(publishedSource, pull.head_sha));
+  const unsigned = await s.unsignedCommits(p.ctx, p.commits);
+  const signer = unsigned.length ? await s.signer(p.ctx) : null;
+  const signByDefault = unsigned.length ? await s.signsByDefault(p.ctx) : false;
   const target = repo.github_slug;
   let publishRow: Safe;
   if (!target) {
@@ -316,6 +321,11 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         <div class="color-fg-muted">${what}</div>
         <div class="merge-options">
           ${pull.published_url ? '' : html`<label><input type="checkbox" name="draft"${pull.draft ? raw(' checked') : ''}> Open as a draft on GitHub</label>`}
+          ${
+            unsigned.length
+              ? html`<label><input type="checkbox" name="sign"${signByDefault ? raw(' checked') : ''}${signer ? '' : raw(' disabled')}> Sign ${unsigned.length < p.commits.length ? `the ${plural(unsigned.length, 'unsigned commit')}` : unsigned.length === 1 ? 'the commit' : `all ${unsigned.length} commits`} as ${signer ? html`<strong>${signer.name}</strong> &lt;${signer.email}&gt;` : html`you (set <code>user.name</code> and <code>user.email</code> in git first)`}</label>`
+              : ''
+          }
           <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (the branch history was rewritten)</label>
         </div>
         <div class="flash flash-error js-form-error" hidden></div>

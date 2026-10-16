@@ -18,6 +18,9 @@ feedback, and the loop repeats until the user publishes it.
   server pushes the exact commit the user reviewed.
 - Do not run `laatsux pr publish`, `laatsux pr close` or `laatsux pr review` unless the user asks.
 - Commit on a branch. Staging needs at least one commit between the base and your branch.
+- Commit unsigned. laatsux signs the commits as the user when they publish. If `git commit`
+  tries to sign (it asks for a key, or fails on signing), commit with
+  `git -c commit.gpgsign=false commit …`.
 - You may rewrite history freely (amend, fixup, rebase, reword). The server records each
   push as a revision and carries review comments to the new lines.
 - Leave resolving threads to the user. Reply to them instead.

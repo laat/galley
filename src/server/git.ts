@@ -82,6 +82,37 @@ export interface Commit {
   message: string;
 }
 
+/** A commit object as stored, for recreating it exactly (apart from its signature). */
+export interface RawCommit {
+  tree: string;
+  parents: string[];
+  /** "Name <email> <unix time> <tz>", the format GIT_AUTHOR_* accept back. */
+  author: { name: string; email: string; date: string };
+  signed: boolean;
+  /** The message bytes as stored, including the trailing newline. */
+  message: string;
+}
+
+export function parseRawCommit(text: string): RawCommit {
+  const sep = text.indexOf('\n\n');
+  const headers = (sep === -1 ? text : text.slice(0, sep)).split('\n');
+  const message = sep === -1 ? '' : text.slice(sep + 2);
+  let tree = '';
+  const parents: string[] = [];
+  let author = { name: '', email: '', date: '' };
+  let signed = false;
+  for (const h of headers) {
+    if (h.startsWith('tree ')) tree = h.slice(5);
+    else if (h.startsWith('parent ')) parents.push(h.slice(7));
+    else if (h.startsWith('gpgsig ') || h.startsWith('gpgsig-sha256 ')) signed = true;
+    else if (h.startsWith('author ')) {
+      const m = h.slice(7).match(/^(.*) <(.*)> (\d+ [+-]\d{4})$/);
+      if (m) author = { name: m[1], email: m[2], date: m[3] };
+    }
+  }
+  return { tree, parents, author, signed, message };
+}
+
 /** Git operations on one repository, addressed by its (common) git dir so worktrees share it. */
 export class Repo {
   gitDir: string;
@@ -186,6 +217,20 @@ export class Repo {
     const text = await this.cached(['diff', '--no-color', '--no-ext-diff', '-U0', from, to, '--', path]);
     if (/^deleted file mode/m.test(text) || /^\+\+\+ \/dev\/null/m.test(text)) return 'deleted';
     return parseHunkRanges(text);
+  }
+
+  async rawCommit(sha: string): Promise<RawCommit> {
+    return parseRawCommit(await this.cached(['cat-file', 'commit', sha]));
+  }
+
+  async exists(sha: string): Promise<boolean> {
+    return (await this.run(['cat-file', '-e', `${sha}^{commit}`], { allowFail: true })).code === 0;
+  }
+
+  /** A config value as git resolves it for this repository (repository, global and system files). */
+  async config(key: string, type?: 'bool'): Promise<string | null> {
+    const r = await this.run(['config', ...(type ? [`--type=${type}`] : []), '--get', key], { allowFail: true });
+    return r.code === 0 ? r.stdout.trim() : null;
   }
 
   async show(sha: string, path: string): Promise<string | null> {

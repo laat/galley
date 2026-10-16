@@ -860,9 +860,82 @@ export class Service {
     }
   }
 
-  // ------------------------------------------------------------- publishing
+  // ---------------------------------------------------- publishing and signing
 
-  async publish(ctx: Ctx, opts: { draft?: boolean; force?: boolean; expected?: string }, actor: Actor): Promise<PullRow> {
+  /**
+   * Whether publishing signs by default: when the user's git signs their own commits,
+   * or when this pull request was published signed before.
+   */
+  async signsByDefault(ctx: Ctx): Promise<boolean> {
+    const { pull, git } = ctx;
+    if (pull.published_head_sha && pull.published_source_sha && pull.published_head_sha !== pull.published_source_sha) return true;
+    return (await git.config('commit.gpgsign', 'bool')) === 'true';
+  }
+
+  /** Who signed commits are committed by: the user's git identity. */
+  async signer(ctx: Ctx): Promise<{ name: string; email: string } | null> {
+    const name = await ctx.git.config('user.name');
+    const email = await ctx.git.config('user.email');
+    return name && email ? { name, email } : null;
+  }
+
+  /** The commits of the pull request that carry no signature. */
+  async unsignedCommits(ctx: Ctx, commits?: Commit[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const c of commits ?? (await this.commits(ctx))) if (!(await ctx.git.rawCommit(c.sha)).signed) out.push(c.sha);
+    return out;
+  }
+
+  /**
+   * Make a signed copy of every commit in the pull request, with the user as committer
+   * (GitHub only verifies a signature whose key belongs to the committer). Trees, messages
+   * and authors stay as the agent made them. Copies are remembered per source commit, so
+   * publishing again after the agent added commits reuses them and GitHub sees a fast-forward.
+   */
+  async signCommits(ctx: Ctx, pull: PullRow): Promise<{ head: string; signed: number }> {
+    const { repo, git } = ctx;
+    const signer = await this.signer(ctx);
+    if (!signer) throw new HttpError(422, 'set user.name and user.email in git to sign commits');
+    const memo = new Map(
+      this.db.all<{ source_sha: string; signed_sha: string }>('SELECT source_sha, signed_sha FROM signed_commits WHERE repo_id = ?', repo.id).map((r) => [r.source_sha, r.signed_sha]),
+    );
+    const shas = (await git.out(['rev-list', '--reverse', '--topo-order', `${pull.base_sha}..${pull.head_sha}`])).split('\n').filter(Boolean);
+    let signed = 0;
+    for (const sha of shas) {
+      const known = memo.get(sha);
+      if (known && (await git.exists(known))) continue;
+      const c = await git.rawCommit(sha);
+      const parents = c.parents.map((p) => memo.get(p) ?? p);
+      if (c.signed && parents.every((p, i) => p === c.parents[i])) {
+        memo.set(sha, sha);
+        continue;
+      }
+      const r = await git.run(['commit-tree', '-S', c.tree, ...parents.flatMap((p) => ['-p', p]), '-F', '-'], {
+        input: c.message,
+        env: {
+          GIT_AUTHOR_NAME: c.author.name,
+          GIT_AUTHOR_EMAIL: c.author.email,
+          GIT_AUTHOR_DATE: c.author.date,
+          GIT_COMMITTER_NAME: signer.name,
+          GIT_COMMITTER_EMAIL: signer.email,
+        },
+        allowFail: true,
+      });
+      if (r.code !== 0) throw new HttpError(502, `signing commit ${sha.slice(0, 7)} failed:\n${r.stderr.trim()}`);
+      const copy = r.stdout.trim();
+      memo.set(sha, copy);
+      this.db.run(
+        'INSERT INTO signed_commits (repo_id, source_sha, signed_sha) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET signed_sha = excluded.signed_sha',
+        repo.id,
+        sha,
+        copy,
+      );
+      signed++;
+    }
+    return { head: memo.get(pull.head_sha) ?? pull.head_sha, signed };
+  }
+
+  async publish(ctx: Ctx, opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean }, actor: Actor): Promise<PullRow> {
     const { repo, git } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from laatsux');
     const pull = await this.sync(ctx.pull);
@@ -874,6 +947,14 @@ export class Service {
     const cwd = repo.work_dir ?? tmpdir();
     const env = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
 
+    let pushed = pull.head_sha;
+    let signed = 0;
+    if (opts.sign ?? (await this.signsByDefault(ctx))) {
+      ({ head: pushed, signed } = await this.signCommits(ctx, pull));
+      // The signed copies exist only here and on GitHub; keep them from being garbage collected.
+      if (pushed !== pull.head_sha) await git.updateRef(`refs/laatsux/pull/${pull.number}/published`, pushed);
+    }
+
     const branch = `refs/heads/${pull.head_ref}`;
     const args = ['push'];
     if (opts.force) {
@@ -881,7 +962,7 @@ export class Service {
       const expect = pull.published_head_sha ?? (await git.resolve(`refs/remotes/${repo.remote}/${pull.head_ref}`)) ?? '';
       args.push(`--force-with-lease=${branch}:${expect}`);
     }
-    args.push(repo.remote, `${pull.head_sha}:${branch}`);
+    args.push(repo.remote, `${pushed}:${branch}`);
     const push = await git.run(args, { cwd, env, allowFail: true });
     if (push.code !== 0) {
       const stale = /stale info/.test(push.stderr);
@@ -920,12 +1001,13 @@ export class Service {
         state: 'published',
         published_url: url,
         published_at: ts,
-        published_head_sha: pull.head_sha,
+        published_head_sha: pushed,
+        published_source_sha: pull.head_sha,
         published_title: pull.title,
         published_body: pull.body,
         updated_at: ts,
       });
-      this.addEvent(pull, actor, 'published', { url, head: pull.head_sha, first, force: !!opts.force }, ts);
+      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force: !!opts.force }, ts);
     });
     this.emit(pull.id, 'published', actor);
     return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;

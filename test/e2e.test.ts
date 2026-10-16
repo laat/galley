@@ -19,13 +19,21 @@ let server: Awaited<ReturnType<typeof startServer>>;
 
 // Keep the user's git config out of the test, and use settings that change diff output,
 // which the server must override.
-const gitconfig = join(mkdtempSync(join(tmpdir(), 'laatsux-gitconfig-')), 'config');
-writeFileSync(gitconfig, '[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n\tinterHunkContext = 10\n[log]\n\tshowSignature = true\n');
+// The reviewer signs with an SSH key, like a user with commit.gpgsign = true; agents commit unsigned.
+const configDir = mkdtempSync(join(tmpdir(), 'laatsux-gitconfig-'));
+const gitconfig = join(configDir, 'config');
+const signingKey = join(configDir, 'id_ed25519');
+execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'reviewer', '-f', signingKey]);
+writeFileSync(
+  gitconfig,
+  '[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n\tinterHunkContext = 10\n[log]\n\tshowSignature = true\n' +
+    `[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n\tsigningkey = ${signingKey}\n[gpg]\n\tformat = ssh\n[commit]\n\tgpgsign = true\n`,
+);
 process.env.GIT_CONFIG_GLOBAL = gitconfig;
 process.env.GIT_CONFIG_NOSYSTEM = '1';
 
 function git(...args: string[]): string {
-  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
+  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
 }
 
 async function cli(args: string[], opts: { input?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -209,6 +217,11 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(missing.stderr, /HTTP 404/);
   });
 
+  await t.test('the publish button offers to sign, checked when git signs by default', async () => {
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page, /<input type="checkbox" name="sign" checked> Sign the commit as <strong>Reviewer<\/strong> &lt;reviewer@example\.com&gt;/);
+  });
+
   await t.test('agents cannot publish, and stale pages cannot publish', async () => {
     const r = await cli(['pr', 'publish']);
     assert.equal(r.code, 1);
@@ -227,12 +240,37 @@ test('the agent loop, from staging to publishing', async (t) => {
     const pr = await human('POST', '/api/repos/acme/widgets/pulls/1/publish', {});
     assert.equal(pr.published_url, 'https://github.com/acme/widgets/pull/7');
     assert.equal(pr.staging_state, 'published');
-    assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim(), git('rev-parse', 'HEAD'));
+    // GitHub gets signed copies: same tree, message and author, the reviewer as committer.
+    const remoteHead = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
+    assert.notEqual(remoteHead, git('rev-parse', 'HEAD'));
+    const copy = execFileSync('git', ['--git-dir', remote, 'cat-file', 'commit', remoteHead], { encoding: 'utf8' });
+    assert.match(copy, /^gpgsig -----BEGIN SSH SIGNATURE-----/m);
+    assert.match(copy, /^author Dev <dev@example\.com> /m);
+    assert.match(copy, /^committer Reviewer <reviewer@example\.com> /m);
+    assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${remoteHead}^{tree}`], { encoding: 'utf8' }).trim(), git('rev-parse', 'HEAD^{tree}'));
+    assert.equal(copy.slice(copy.indexOf('\n\n') + 2), git('cat-file', 'commit', 'HEAD').split('\n\n').slice(1).join('\n\n') + '\n');
+    // The agent's branch is left alone.
+    assert.doesNotMatch(git('cat-file', 'commit', 'HEAD'), /^gpgsig/m);
     const log = readFileSync(join(dir, 'gh.log'), 'utf8');
     assert.match(log, /^pr create --repo acme\/widgets --base main --head feature\/mul --title Add multiplication helper --body-file -$/m);
     assert.equal(readFileSync(join(dir, 'gh-stdin.log'), 'utf8'), 'Adds `mul`.');
     const r = await waiting;
     assert.match(r.stdout, /Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7/);
+  });
+
+  await t.test('publishing new commits signs only those and fast-forwards GitHub', async () => {
+    const before = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
+    writeFileSync(join(repo, 'README.md'), '# widgets\n');
+    git('add', 'README.md');
+    git('commit', '-qm', 'Add a readme');
+    await human('POST', '/api/repos/acme/widgets/pulls/1/publish', {});
+    const after = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
+    assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${after}^`], { encoding: 'utf8' }).trim(), before);
+    const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
+    assert.equal(timeline.filter((e: any) => e.event === 'published').at(-1).signed, 1);
+    // The signed copies count as the staged commits: nothing is left to publish.
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page, /GitHub has the same commits, title and description/);
   });
 
   await t.test('a rewritten branch needs force to publish again', async () => {
