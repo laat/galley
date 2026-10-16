@@ -704,6 +704,10 @@ code.wrap { word-break: break-all; }
 .review-thread-participants .avatar { margin-right: -4px; box-shadow: 0 0 0 2px var(--bg-subtle); }
 .review-thread[open] .when-closed, .review-thread:not([open]) .when-open { display: none; }
 .review-thread-resolved-note { font-size: 12px; }
+/* The conversation the file tree went to; a tall one starts under the sticky headers. */
+.files .review-thread { scroll-margin-top: 104px; }
+.review-thread.is-flash { animation: thread-flash 2s ease-out; }
+@keyframes thread-flash { from { box-shadow: 0 0 0 2px var(--accent-emphasis); } to { box-shadow: 0 0 0 2px transparent; } }
 .review-thread .diff-snippet { border-bottom: 1px solid var(--border); }
 .review-comment { padding: 12px 16px 0; }
 .review-comment + .review-comment { border-top: 1px solid var(--border-muted); }
@@ -769,11 +773,11 @@ code.wrap { word-break: break-all; }
 body.tree-hidden .file-tree { display: none; }
 .file-tree ul { list-style: none; margin: 0; padding: 0 0 0 12px; }
 .file-tree > ul { padding-left: 0; }
-.file-tree summary, .file-tree a { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; color: var(--fg); white-space: nowrap; }
+.file-tree summary, .tree-file { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; color: var(--fg); white-space: nowrap; }
 .file-tree summary { list-style: none; color: var(--fg); }
 .file-tree summary::-webkit-details-marker { display: none; }
-.file-tree a:hover, .file-tree summary:hover { background: var(--neutral-muted); text-decoration: none; }
-.file-tree a.active { background: var(--accent-subtle); }
+.tree-file:hover, .file-tree summary:hover { background: var(--neutral-muted); }
+.tree-file:has(> a.active) { background: var(--accent-subtle); }
 .file-tree .octicon { color: var(--fg-muted); }
 .file-tree .tree-dir-icon { color: #54aeff; }
 .file-tree details[open] > summary .when-closed, .file-tree details:not([open]) > summary .when-open { display: none; }
@@ -783,6 +787,14 @@ body.tree-hidden .file-tree { display: none; }
 .tree-status-removed { color: var(--danger) !important; }
 .tree-status-modified, .tree-status-changed { color: var(--attention) !important; }
 .tree-status-renamed, .tree-status-copied { color: var(--fg-muted) !important; }
+/* A file's link covers its row; the conversations button sits above the link. */
+.tree-file { position: relative; }
+.tree-file > a { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; color: var(--fg); }
+.tree-file > a:hover { text-decoration: none; }
+.tree-file > a::after { content: ''; position: absolute; inset: 0; border-radius: 6px; }
+.tree-threads { position: relative; display: inline-flex; align-items: center; gap: 4px; margin: -2px 0; padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: var(--fg-muted); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
+.tree-threads:hover { color: var(--accent); background: var(--neutral-muted); }
+.file-tree .tree-threads:hover .octicon { color: var(--accent); }
 @media (max-width: 1011px) { .file-tree { display: none; } }
 
 .file { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; scroll-margin-top: 64px; }

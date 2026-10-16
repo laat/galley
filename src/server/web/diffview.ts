@@ -1,7 +1,7 @@
 import { gaps, type DiffLine, type FileDiff, type Gap, type Hunk } from '../diff.ts';
 import type { Side } from '../db.ts';
 import type { Thread } from '../service.ts';
-import { fileAnchor, html, icon, raw, shortSha, type Safe } from './html.ts';
+import { fileAnchor, html, icon, plural, raw, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor } from './markdown.ts';
 import { copyButton } from './components.ts';
 
@@ -232,7 +232,11 @@ interface TreeNode {
   file?: FileDiff;
 }
 
-export function fileTree(files: FileDiff[], viewed: Map<string, string>): Safe {
+/**
+ * The Files changed tree. `threads` holds the ids of each file's unresolved conversations on the
+ * page, in page order; a file with any gets a bubble that public/app.js steps through them with.
+ */
+export function fileTree(files: FileDiff[], viewed: Map<string, string>, threads: Map<string, number[]>): Safe {
   const root: TreeNode = { name: '', children: new Map() };
   for (const f of files) {
     const parts = f.path.split('/');
@@ -253,7 +257,12 @@ export function fileTree(files: FileDiff[], viewed: Map<string, string>): Safe {
     return html`<ul>${entries.map((e) => {
       if (e.file) {
         const isViewed = viewed.get(e.file.path) === fileBlob(e.file);
-        return html`<li class="tree-file${isViewed ? ' is-viewed' : ''}"><a href="#${fileAnchor(e.file.path)}" data-path="${e.file.path}">${icon('file')}<span class="tree-name">${e.name}</span>${icon(statusIcon[e.file.status], { cls: `tree-status tree-status-${e.file.status}` })}</a></li>`;
+        const ids = threads.get(e.file.path) ?? [];
+        const label = plural(ids.length, 'unresolved conversation');
+        const bubble = ids.length
+          ? html`<button type="button" class="tree-threads js-tree-threads" data-threads="${ids.join(' ')}" aria-label="${label}" title="${label}">${icon('comment')}${ids.length}</button>`
+          : '';
+        return html`<li class="tree-file${isViewed ? ' is-viewed' : ''}"><a href="#${fileAnchor(e.file.path)}" data-path="${e.file.path}">${icon('file')}<span class="tree-name">${e.name}</span></a>${bubble}${icon(statusIcon[e.file.status], { cls: `tree-status tree-status-${e.file.status}` })}</li>`;
       }
       // Collapse chains of single directories ("src/server").
       let name = e.name;

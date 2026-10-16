@@ -1856,3 +1856,60 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.match(await api('repos/{owner}/{repo}/commits/nope'), /No commit found for SHA: nope \(HTTP 422\)/);
   });
 });
+
+test('the file tree counts the unresolved conversations on each file in the diff shown', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/tree');
+  const five = (name: string, change: (i: number) => string | null = () => null) =>
+    Array.from({ length: 5 }, (_, k) => change(k + 1) ?? `export const ${name}${k + 1} = ${k + 1};`).join('\n') + '\n';
+  writeFileSync(join(repo, 'one.js'), five('one'));
+  writeFileSync(join(repo, 'two.js'), five('two'));
+  git('add', '-A');
+  git('commit', '-qm', 'Add one and two');
+  const first = git('rev-parse', 'HEAD');
+  writeFileSync(join(repo, 'two.js'), five('two', (i) => (i === 1 ? 'export const two1 = -1;' : null)));
+  git('commit', '-qam', 'Negate two1');
+  const created = await cli(['pr', 'create', '--title', 'Tree', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const n = Number(created.stdout.trim().split('/').pop());
+  const api = `/api/repos/acme/widgets/pulls/${n}`;
+  const comment = (body: object) => human('POST', `${api}/comments`, body);
+
+  /** Each file in the tree with the conversations its bubble goes to, after checking the count it shows. */
+  const tree = async (query = '') => {
+    const text = await (await fetch(`${server.url}/acme/widgets/pull/${n}/files${query}`)).text();
+    const out: Record<string, number[]> = {};
+    for (const [, path, row] of text.matchAll(/<li class="tree-file[^"]*"><a [^>]*data-path="([^"]+)">([^]*?)<\/li>/g)) {
+      const bubble = row.match(/<button type="button" class="tree-threads js-tree-threads" data-threads="([\d ]+)" aria-label="(\d+) unresolved conversations?"[^>]*><svg[^]*?<\/svg>(\d+)<\/button>/);
+      const ids = bubble ? bubble[1].split(' ').map(Number) : [];
+      if (bubble) assert.deepEqual([Number(bubble[2]), Number(bubble[3])], [ids.length, ids.length], path);
+      else assert.doesNotMatch(row, /tree-threads/, path);
+      out[path] = ids;
+    }
+    return out;
+  };
+
+  const lower = await comment({ path: 'one.js', line: 4, side: 'RIGHT', body: 'Open, lower.' });
+  const higher = await comment({ path: 'one.js', line: 2, side: 'RIGHT', body: 'Open, higher.' });
+  const about = await comment({ path: 'one.js', subject_type: 'file', body: 'About the file.' });
+  const resolved = await comment({ path: 'one.js', line: 3, side: 'RIGHT', body: 'Resolved.' });
+  await human('PUT', `${api}/threads/${resolved.id}/resolved`);
+  // The reviewer's own pending comments are not conversations yet.
+  await human('POST', `${api}/pending-comments`, { path: 'one.js', line: 5, body: 'Pending.' });
+  const soonOutdated = await comment({ path: 'two.js', line: 5, side: 'RIGHT', body: 'Soon outdated.' });
+  // On the first commit's diff; the second commit changed the line, so it is outdated in the pull request's.
+  const onFirst = await comment({ path: 'two.js', line: 1, side: 'RIGHT', commit_id: first, body: 'On the first commit.' });
+
+  // In page order: the lines from the top, then the conversations about the whole file.
+  assert.deepEqual(await tree(), { 'one.js': [higher.id, lower.id, about.id], 'two.js': [soonOutdated.id] });
+  assert.deepEqual(await tree(`?commit=${first}`), { 'one.js': [], 'two.js': [onFirst.id] });
+  assert.deepEqual(await tree(`?range=${first}..${git('rev-parse', 'HEAD')}`), { 'two.js': [] });
+
+  // Resolving, reopening and pushing change the counts.
+  await human('PUT', `${api}/threads/${higher.id}/resolved`);
+  await human('DELETE', `${api}/threads/${resolved.id}/resolved`);
+  writeFileSync(join(repo, 'two.js'), five('two', (i) => (i === 1 ? 'export const two1 = -1;' : i === 5 ? 'export const two5 = -5;' : null)));
+  git('commit', '-qam', 'Negate two5');
+  assert.deepEqual(await tree(), { 'one.js': [resolved.id, lower.id, about.id], 'two.js': [] });
+  assert.deepEqual(await tree('?diff=split'), { 'one.js': [resolved.id, lower.id, about.id], 'two.js': [] });
+});
