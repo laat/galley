@@ -61,11 +61,11 @@ blocks any of them, start the server yourself outside it.
 ## The CLI
 
 `laatsux` takes the same subcommands and flags as `gh`, so an agent that knows gh needs no
-new vocabulary. Flags that mean nothing here (labels, assignees, reviewers) are accepted and ignored.
+new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other than Codex) are accepted and ignored.
 
 | Command | |
 |---|---|
-| `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose` |
+| `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` turns automatic Codex reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns them off. Without either, the settings decide |
 | `laatsux pr list` | `--state open\|published\|closed\|all`, `--json`, `--jq` |
 | `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web` |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
@@ -120,8 +120,18 @@ GET             /api/repos/{owner}/{repo}/issues/{n}/timeline
 
 Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n}/publish`,
 `GET …/pulls/{n}/wait?timeout=s`, `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
-`POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review, list its runs),
+`POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review; list its runs and this pull
+request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's own `enabled` and
+`max_iterations`; null follows the settings, and fields left out stay as they are),
 `GET /api/settings` and `PUT /api/settings/codex`, and `GET /events` (server-sent events).
+
+`POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
+named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
+`{"login": "codex", "max_iterations": 3}` for a limit of its own. A login matches a reviewer
+agent by its kind (`codex`) or its name in settings; others are ignored and listed in the
+response's `ignored_reviewers`. `"automatic_reviews": false` turns all of them off (`true`
+turns all of them on), and is refused together with a reviewer agent in `reviewers`. Left
+out, the settings decide.
 
 Requests carry the caller's identity in `X-Laatsux-Actor`. The CLI sets it to
 `LAATSUX_ACTOR`, or to the detected agent (`claude` in Claude Code, `codex` in Codex), or to
@@ -201,6 +211,11 @@ How it runs:
 - A pull request's own limit is set with the − and + after the number in its sidebar
   ("Automatic reviews: 3 of 3 − +"); "reset" goes back to the setting. If the author is
   waiting when the limit goes up, Codex starts right away.
+- Staging can decide for one pull request, whatever the setting says:
+  `laatsux pr create --reviewer codex:3` turns automatic reviews on with a limit of 3,
+  `--reviewer codex` turns them on with the limit from settings, and `--no-review` turns them
+  off. The sidebar then says "Turned on for this pull request (off in Settings)", or off, and
+  its "reset" goes back to the setting.
 - "Ask Codex to review" in a pull request's sidebar runs a review at any time, regardless of
   the cap. The sidebar also shows a running review and the error of a failed one.
 - While Codex reviews, `pr view` and `pr wait` say so, an approval no longer tells the agent

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
+import { parseReviewers } from '../src/cli/pr.ts';
 import { checkPriority, fillFromCommits, splitPriorityPrefix } from '../src/server/service.ts';
 import { cliActor } from '../src/config.ts';
 import type { Commit } from '../src/server/git.ts';
@@ -66,6 +67,17 @@ test('an author agent running in Codex is not named like the Codex reviewer', ()
   } finally {
     process.env = saved;
   }
+});
+
+test('pr create --reviewer takes repeats and commas like gh, and a number of reviews', () => {
+  assert.deepEqual(parseReviewers(['octocat,codex:2', ' alice ', 'codex']), [
+    { login: 'octocat' },
+    { login: 'codex', max_iterations: 2 },
+    { login: 'alice' },
+    { login: 'codex' },
+  ]);
+  assert.deepEqual(parseReviewers(['a,,b,']), [{ login: 'a' }, { login: 'b' }]);
+  for (const bad of ['codex:two', 'codex:', ':3', 'codex:-1']) assert.throws(() => parseReviewers([bad]), /invalid reviewer/, bad);
 });
 
 test('priorities: validated, and moved out of "[P1]"-style prefixes', () => {

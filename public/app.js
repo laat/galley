@@ -719,9 +719,9 @@
       refresh();
     } else if ((el = on('.js-codex-step'))) {
       stepCodexLimit(el);
-    } else if ((el = on('.js-codex-limit-reset'))) {
+    } else if ((el = on('.js-codex-reset'))) {
       el.disabled = true;
-      await api('PATCH', el.dataset.api, { max_iterations: null }).catch((err) => toast(err.message));
+      await api('PATCH', el.dataset.api, { [el.dataset.field]: null }).catch((err) => toast(err.message));
       refresh();
     } else if ((el = on('.js-run-codex'))) {
       el.disabled = true;

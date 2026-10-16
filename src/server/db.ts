@@ -45,6 +45,8 @@ export interface PullRow {
   published_source_sha: string | null;
   /** This pull request's cap on automatic Codex reviews; null uses the setting. */
   codex_max_iterations: number | null;
+  /** Whether Codex reviews this pull request automatically (1 or 0); null uses the setting. */
+  codex_enabled: number | null;
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
@@ -260,6 +262,7 @@ export interface ReviewRunRow {
 const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'published_source_sha', 'TEXT'],
   ['pulls', 'codex_max_iterations', 'INTEGER'],
+  ['pulls', 'codex_enabled', 'INTEGER'],
   ['comments', 'priority', 'TEXT'],
 ];
 

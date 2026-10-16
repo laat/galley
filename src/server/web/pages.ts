@@ -427,18 +427,26 @@ function codexSidebar(p: PullPage): Safe {
   }
   const used = codex.automaticReviews(p.pull);
   const limit = codex.limit(p.pull);
+  const enabled = codex.enabled(p.pull);
   const own = p.pull.codex_max_iterations !== null;
   const limitApi = `${p.apiBase}/reviewers/codex`;
   // The limit is changed in place: −/+ after the number, saved shortly after the last click.
-  const auto = settings.enabled
+  const auto = enabled
     ? html`Automatic reviews: ${used} of <span class="codex-limit" data-api="${limitApi}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><strong class="js-codex-limit">${limit}</strong><button type="button" class="codex-step js-codex-step" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><button type="button" class="codex-step js-codex-step" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>${
-        own ? html` <button type="button" class="btn-link js-codex-limit-reset" data-api="${limitApi}" title="Use the default from Settings (${settings.maxIterations})">reset</button>` : ''
+        own ? html` <button type="button" class="btn-link js-codex-reset" data-api="${limitApi}" data-field="max_iterations" title="Use the default from Settings (${settings.maxIterations})">reset</button>` : ''
       }`
     : html`Automatic reviews are off`;
+  // Staging can turn automatic reviews on or off for one pull request, whatever Settings say.
+  const onOff = (on: boolean) => (on ? 'on' : 'off');
+  const scope =
+    p.pull.codex_enabled === null
+      ? ''
+      : html`<p class="sidebar-text codex-scope">${icon('pin')} Turned ${onOff(enabled)} for this pull request${settings.enabled !== enabled ? ` (${onOff(settings.enabled)} in Settings)` : ''} <button type="button" class="btn-link js-codex-reset" data-api="${limitApi}" data-field="enabled" title="Follow Settings (automatic reviews ${onOff(settings.enabled)})">reset</button></p>`;
   return html`<div class="sidebar-item"><h3 class="sidebar-heading">Codex</h3>
     <div class="sidebar-person">${avatar(avatarUrl(p.s, actor), actor.login, 20, 'avatar-bot')} <span class="flex-auto">${actor.login}</span></div>
     ${status}
     <p class="sidebar-text color-fg-muted">${auto} · <a href="/settings">Settings</a></p>
+    ${scope}
     <button type="button" class="btn btn-sm js-run-codex" data-api="${p.apiBase}/reviewers/codex"${running || p.pull.state === 'closed' ? raw(' disabled') : ''}>${icon('sync')} Ask Codex to review</button>
   </div>`;
 }

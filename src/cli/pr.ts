@@ -18,7 +18,6 @@ const multi = { type: 'string', multiple: true } as const;
 const IGNORED: Options = {
   assignee: { ...multi, short: 'a' },
   label: { ...multi, short: 'l' },
-  reviewer: { ...multi, short: 'r' },
   milestone: { type: 'string', short: 'm' },
   project: { ...multi, short: 'p' },
   'no-maintainer-edit': { type: 'boolean' },
@@ -97,6 +96,21 @@ const ghPath = (t: Target, fields: string[]) => `${repoPath(t.repo)}/gh/pulls/${
 
 // ------------------------------------------------------------------- create
 
+/**
+ * `--reviewer` values, repeated or comma-separated as in gh. `codex:3` asks for that many
+ * automatic reviews. Which logins are reviewer agents is up to the server, so a new one needs
+ * no change here; it ignores the rest.
+ */
+export function parseReviewers(values: string[]): { login: string; max_iterations?: number }[] {
+  return values.flatMap((v) =>
+    v.split(',').map((s) => s.trim()).filter(Boolean).map((s) => {
+      const m = s.match(/^([^:\s]+)(?::(\d+))?$/);
+      if (!m) throw new CliError(`invalid reviewer "${s}": use a login, or a reviewer agent and its number of reviews, as in codex:3`);
+      return m[2] === undefined ? { login: m[1] } : { login: m[1], max_iterations: Number(m[2]) };
+    }),
+  );
+}
+
 async function create(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v } = parse(args, {
     ...IGNORED,
@@ -114,8 +128,11 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
     template: { type: 'string', short: 'T' },
     'dry-run': { type: 'boolean' },
     recover: { type: 'string' },
+    reviewer: { ...multi, short: 'r' },
+    'no-review': { type: 'boolean' },
   });
   if (v.editor) throw new CliError('--editor is not supported; pass --title and --body or --body-file');
+  const reviewers = v.reviewer ? parseReviewers(v.reviewer as string[]) : undefined;
   const fill = v['fill-verbose'] ? 'verbose' : v['fill-first'] ? 'first' : v.fill ? 'default' : undefined;
   const body = readBody(v as any);
   if (v.title === undefined && !fill) {
@@ -130,7 +147,17 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   } catch {}
   err(`Staging pull request for ${head} into ${(v.base as string) ?? 'the default branch'} in ${repo.owner}/${repo.name}\n`);
   if (v['dry-run']) return 0;
-  const pr = await client.json('POST', `${repoPath(repo)}/pulls`, { title: v.title, body, head, base: v.base, draft: !!v.draft, fill });
+  const pr = await client.json('POST', `${repoPath(repo)}/pulls`, {
+    title: v.title,
+    body,
+    head,
+    base: v.base,
+    draft: !!v.draft,
+    fill,
+    reviewers,
+    automatic_reviews: v['no-review'] ? false : undefined,
+  });
+  for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: laatsux has no reviewer agent by that name.`);
   out(pr.html_url);
   if (v.web) openBrowser(pr.html_url);
   err(c.gray(`Review happens in the browser. Run \`laatsux pr wait ${pr.number}\` to block until the reviewer responds.`));
