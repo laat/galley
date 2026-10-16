@@ -249,6 +249,20 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(page, /<input type="checkbox" name="sign" checked> Sign the commit as <strong>Reviewer<\/strong> &lt;reviewer@example\.com&gt;/);
   });
 
+  await t.test('the agent resolves a thread it fixed in the same command as its reply', async () => {
+    const r = await cli(['pr', 'comment', '--resolve', '-b', 'x']);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /--resolve needs --reply-to/);
+    const open = JSON.parse((await cli(['pr', 'view', '--json', 'reviewThreads'])).stdout).reviewThreads.filter((th: any) => !th.isResolved);
+    const target = open[0].databaseId;
+    const fixed = await cli(['pr', 'comment', '--reply-to', String(target), '--resolve', '-b', 'Fixed in the last commit.']);
+    assert.equal(fixed.code, 0, fixed.stderr);
+    const after = JSON.parse((await cli(['pr', 'view', '--json', 'reviewThreads'])).stdout).reviewThreads.find((th: any) => th.databaseId === target);
+    assert.equal(after.isResolved, true);
+    assert.equal(after.comments.at(-1).body, 'Fixed in the last commit.');
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/1`)).text(), /agent marked this conversation as resolved/);
+  });
+
   await t.test('agents cannot publish, and stale pages cannot publish', async () => {
     const r = await cli(['pr', 'publish']);
     assert.equal(r.code, 1);

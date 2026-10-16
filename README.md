@@ -65,7 +65,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers) are 
 | `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web` |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
 | `laatsux pr edit [<n>]` | `--title`, `--body`, `--body-file`, `--base` |
-| `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread |
+| `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
 | `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` |

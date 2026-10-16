@@ -279,6 +279,7 @@ async function comment(client: Client, cwd: string, args: string[]): Promise<num
     body: { type: 'string', short: 'b' },
     'body-file': { type: 'string', short: 'F' },
     'reply-to': { type: 'string' },
+    resolve: { type: 'boolean' },
     'edit-last': { type: 'boolean' },
     'create-if-none': { type: 'boolean' },
     'delete-last': { type: 'boolean' },
@@ -306,10 +307,14 @@ async function comment(client: Client, cwd: string, args: string[]): Promise<num
     }
     if (!v['create-if-none']) throw new CliError('no comments found for current user');
   }
+  if (v.resolve && !v['reply-to']) throw new CliError('--resolve needs --reply-to <thread>');
   if (body === undefined) throw new CliError('--body or --body-file required when not running interactively');
   if (v['reply-to']) {
     const id = String(v['reply-to']).replace(/^\D+/, '');
-    out((await client.json('POST', `${pullPath(t)}/comments/${id}/replies`, { body })).html_url);
+    const reply = await client.json('POST', `${pullPath(t)}/comments/${id}/replies`, { body });
+    // Say what was done, then close the thread: the reviewer can reopen it.
+    if (v.resolve) await client.json('PUT', `${pullPath(t)}/threads/${id}/resolved`);
+    out(reply.html_url);
     return 0;
   }
   out((await client.json('POST', `${repoPath(t.repo)}/issues/${t.number}/comments`, { body })).html_url);
@@ -460,8 +465,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     } else {
       out(
         c.gray(
-          `Address the feedback, reply to threads with \`laatsux pr comment ${t.number} --reply-to <thread> -b "…"\`, ` +
-            `then run \`laatsux pr wait ${t.number}\` again.`,
+          `Address the feedback. Reply to each thread and resolve the ones you fixed with ` +
+            `\`laatsux pr comment ${t.number} --reply-to <thread> --resolve -b "…"\` ` +
+            `(leave out --resolve to keep a thread open for the reviewer), then run \`laatsux pr wait ${t.number}\` again.`,
         ),
       );
     }
@@ -482,7 +488,7 @@ COMMANDS (same flags as gh)
   view:        Show a pull request (--comments for reviews and review threads)
   diff:        Show the diff
   edit:        Change title, body or base
-  comment:     Comment, or reply to a review thread with --reply-to <id>
+  comment:     Comment, or reply to a review thread with --reply-to <id> [--resolve]
   review:      Approve, comment or request changes
   close:       Close a pull request
   reopen:      Reopen a pull request

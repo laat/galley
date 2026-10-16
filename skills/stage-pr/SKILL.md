@@ -23,7 +23,9 @@ feedback, and the loop repeats until the user publishes it.
   `git -c commit.gpgsign=false commit …`.
 - You may rewrite history freely (amend, fixup, rebase, reword). The server records each
   push as a revision and carries review comments to the new lines.
-- Leave resolving threads to the user. Reply to them instead.
+- Resolve the threads you addressed, in the same command as your reply (`--resolve`). Keep a
+  thread open when you disagree, only partly addressed it, or need the user's answer. The
+  user can reopen any thread.
 
 ## The loop
 
@@ -71,10 +73,12 @@ feedback, and the loop repeats until the user publishes it.
    - Change the code and commit. Amend or fix up the commit the feedback is about, so the
      history stays the way the user wants it published.
    - Change the title or description with `laatsux pr edit --title "..." --body-file -`.
-   - Reply to every thread you handled, saying what you did or why you did not:
+   - Reply to every thread you handled, saying what you did or why you did not, and resolve
+     the ones you fixed:
 
      ```sh
-     laatsux pr comment --reply-to 12 -b "Switched to backoff() in 3f2a1c9."
+     laatsux pr comment --reply-to 12 --resolve -b "Switched to backoff() in 3f2a1c9."
+     laatsux pr comment --reply-to 14 -b "Kept the loop: backoff() can't retry here because …"
      ```
 
    - For anything that needs the user's input, ask in a reply or with `laatsux pr comment -b "..."`.
@@ -92,7 +96,7 @@ feedback, and the loop repeats until the user publishes it.
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |
 | `gh api repos/{owner}/{repo}/pulls/N/comments` | same path | REST subset; see `laatsux api --help` |
 | | `laatsux pr wait` | block until feedback |
-| | `laatsux pr comment --reply-to ID` | reply to a review thread |
+| | `laatsux pr comment --reply-to ID [--resolve]` | reply to a review thread, and resolve it |
 
 `laatsux api` speaks the GitHub REST shapes for pulls, review comments, reviews and issue
 comments, with `-f`, `-F`, `-X`, `--input` and `--jq`. GraphQL is not supported.
