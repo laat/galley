@@ -12,6 +12,8 @@ export interface CodexSettings {
   effort: string;
   /** Automatic reviews per pull request. Asking from the pull request page is not capped. */
   maxIterations: number;
+  /** Install the dependencies before Codex reviews, and let it run the tests in its checkout without network; off keeps it read-only. */
+  runTests: boolean;
 }
 
 export const MERGE_METHODS = ['squash', 'merge', 'rebase'] as const;
@@ -28,7 +30,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  codex: { enabled: false, name: 'codex', model: '', effort: '', maxIterations: 3 },
+  codex: { enabled: false, name: 'codex', model: '', effort: '', maxIterations: 3, runTests: true },
   publish: { mergeMethod: 'squash' },
 };
 
@@ -73,6 +75,7 @@ export function nextSettings(db: Db, patch: { codex?: Record<string, unknown>; p
     if (!Number.isInteger(n) || n < 0 || n > MAX_ITERATIONS_LIMIT) throw new HttpError(422, `max iterations must be a whole number from 0 to ${MAX_ITERATIONS_LIMIT}`);
     next.codex.maxIterations = n;
   }
+  if (c.runTests !== undefined) next.codex.runTests = c.runTests === true || c.runTests === 'true';
   const p = patch.publish ?? {};
   if (p.mergeMethod !== undefined) {
     const method = String(p.mergeMethod) as MergeMethod;

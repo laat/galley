@@ -234,14 +234,31 @@ in the header):
 | Model | Any model from `codex debug models`, or Codex's own default |
 | Reasoning effort | The levels the chosen model supports, or Codex's default |
 | Max iterations | Automatic reviews per pull request, so Codex and the author agent do not go back and forth forever |
+| Let Codex install dependencies and run tests | On by default. laatsux installs the pull request's dependencies, and Codex may run its typecheck, tests or build; off, it only reads the code |
 
 How it runs:
 
-- Each head commit gets one automatic review. Codex runs `codex exec --sandbox read-only
-  --ephemeral` in a temporary checkout of that commit, answers in a JSON schema, and laatsux
-  posts the result as a review from the reviewer bot, named `codex` unless you rename it in
-  settings. Renaming keeps its earlier reviews. Findings on lines outside the diff go
-  in the review's body.
+- Each head commit gets one automatic review. Codex runs `codex exec --ephemeral` in a
+  temporary checkout of that commit, answers in a JSON schema, and laatsux posts the result
+  as a review from the reviewer bot, named `codex` unless you rename it in settings. Renaming
+  keeps its earlier reviews. Findings on lines outside the diff go in the review's body.
+- When Codex may run the tests, laatsux first installs the dependencies from the lockfile
+  (pnpm, npm, Yarn or Bun) in Codex's sandbox, with network but without the repository's
+  install scripts, pnpmfile or yarnPath. Codex then runs in its `workspace-write` sandbox
+  without network, so the code under review can not reach laatsux's API on localhost. Both
+  write only to the checkout and a temporary directory of their own, removed after the
+  review, whatever `[sandbox_workspace_write]` in your Codex config says. Your repository
+  stays read-only: Codex protects the checkout's `.git` and the worktree's git directory, and
+  the rest is outside what it can write. With the setting off Codex runs with
+  `--sandbox read-only`.
+- The risk that remains is in the install step only: code from the repository that gets past
+  those switches has network access there, and could reach laatsux's API on localhost, which
+  takes any local caller for you. Once
+  [#52](https://github.com/laat/stage-pr/issues/52) lands, a call without the token can not
+  publish. Turn the setting off for repositories whose install you do not trust.
+- Either way the checkout counts as an untrusted project, so a `.codex/config.toml` in the
+  pull request (which could start MCP servers outside the sandbox) is ignored, and Codex does
+  not mark your repository as trusted.
 - The review wakes the author's `pr wait`, so the agent addresses Codex's comments and waits
   again; Codex then reviews the new commit, until the cap is reached.
 - Codex reviews only comment. They never approve or request changes, so the review decision
