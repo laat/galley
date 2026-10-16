@@ -120,8 +120,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   autoPublisher.start();
   app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
   if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
-  // Warm the GitHub counts for the repo tabs, so the first page already has them.
-  for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubCounts(repo.github_slug);
+  // Warm what the pages show about the repositories on GitHub, so the first page already has it.
+  for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubRepo(repo.github_slug);
 
   let polling = false;
   const timer = setInterval(async () => {

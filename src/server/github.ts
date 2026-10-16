@@ -3,7 +3,7 @@
 import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
-import type { Ctx, Placement, Service, Thread } from './service.ts';
+import type { AutoMerge, Ctx, Placement, Service, Thread } from './service.ts';
 
 /**
  * The official logos of the agents we know: the avatar of each vendor's own GitHub App, as
@@ -74,6 +74,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     updated_at: pull.updated_at,
     closed_at: pull.closed_at,
     merged_at: null,
+    // GitHub's auto_merge, for the published pull request: on when laatsux last turned it on there.
+    auto_merge: autoMergeJson(s, pull),
     head: { label: `${repo.owner}:${pull.head_ref}`, ref: pull.head_ref, sha: pull.head_sha },
     base: { label: `${repo.owner}:${pull.base_ref}`, ref: pull.base_ref, sha: pull.base_sha },
     // laatsux extensions:
@@ -95,7 +97,18 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
 /** Auto-publish while it is on (a laatsux extension, after GitHub's auto_merge), or null. */
 function autoPublishJson(s: Service, pull: PullRow) {
   const auto = s.autoPublish(pull);
-  return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force };
+  return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge };
+}
+
+function autoMergeJson(s: Service, pull: PullRow) {
+  const merge = s.autoMerge(pull);
+  if (merge?.state !== 'enabled') return null;
+  return { enabled_by: userJson(s, s.db.actorById(merge.by)), merge_method: merge.method, commit_title: null, commit_message: null };
+}
+
+/** What came of turning on auto-merge when publishing (a laatsux extension): `enabled`, `merged` at once, `requested` (which of the two could not be checked), or `failed` with gh's message. */
+export function autoMergeResult(merge: AutoMerge | null) {
+  return merge && { state: merge.state, merge_method: merge.method, error: merge.error ?? null };
 }
 
 /** A commit of a pull request, or with no pull request one of the repository (linking to its tree). */
@@ -229,6 +242,7 @@ export function reviewDecision(reviews: ReviewRow[]): string {
 export const GH_FIELDS = [
   'additions',
   'author',
+  'autoMergeRequest',
   'autoPublishRequest',
   'baseRefName',
   'baseRefOid',
@@ -294,10 +308,16 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('changedFiles', () => files.length);
   set('publishedUrl', () => pull.published_url);
   set('waiting', () => (s.waiters.get(pull.id) ?? 0) > 0);
+  // Auto-merge on the published pull request, as laatsux last turned it on there.
+  set('autoMergeRequest', () => {
+    const merge = s.autoMerge(pull);
+    if (merge?.state !== 'enabled') return null;
+    return { authorEmail: null, commitBody: null, commitHeadline: null, enabledAt: merge.at, enabledBy: ghAuthor(s, merge.by), mergeMethod: merge.method.toUpperCase() };
+  });
   // laatsux extension, after gh's autoMergeRequest: auto-publish while it is on.
   set('autoPublishRequest', () => {
     const auto = s.autoPublish(pull);
-    return auto && { enabledAt: auto.at, enabledBy: ghAuthor(s, auto.by), sign: auto.sign, draft: auto.draft, force: auto.force };
+    return auto && { enabledAt: auto.at, enabledBy: ghAuthor(s, auto.by), sign: auto.sign, draft: auto.draft, force: auto.force, autoMerge: auto.autoMerge };
   });
   set('commits', () =>
     commits.map((c) => {

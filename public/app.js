@@ -192,6 +192,8 @@
   const AUTOMATIC = {
     auto_published: 'Published to GitHub with auto-publish',
     auto_publish_failed: 'Auto-publish failed',
+    auto_merge_enabled: 'Auto-merge enabled on GitHub',
+    auto_merge_failed: 'Enabling auto-merge on GitHub failed',
   };
 
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);

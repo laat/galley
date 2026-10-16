@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
-import { publishFingerprint, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread } from '../service.ts';
+import { publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread } from '../service.ts';
 import { avatarUrl, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
@@ -208,6 +208,11 @@ function commitList(p: PullPage, commits: Commit[]): Safe {
   )}</div>`;
 }
 
+/** A pull request on GitHub, as owner/repo#7. */
+function githubPull(url: string): Safe {
+  return html`<a href="${url}" target="_blank" rel="noopener">${url.replace('https://github.com/', '').replace('/pull/', '#')}</a>`;
+}
+
 const AUTO_PUBLISH_OFF: Record<string, string> = {
   closed: ' by closing the pull request',
   changes_requested: ' by requesting changes',
@@ -253,9 +258,23 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         { cls: 'timeline-badge--done' },
       );
     case 'auto_publish_enabled': {
-      const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null].filter(Boolean);
+      const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null, data.auto_merge ? `with auto-merge (${data.auto_merge}) on GitHub` : null].filter(Boolean);
       return timelineBadge('clock', html`${who} enabled auto-publish${options.length ? ` (${options.join(', ')})` : ''} ${when}`);
     }
+    case 'auto_merge_enabled':
+      if (data.merged === true) {
+        return timelineBadge('git-merge', html`${who} merged ${githubPull(data.url)} on GitHub (${data.method}) ${when}: auto-merge had nothing to wait for`, { cls: 'timeline-badge--done' });
+      }
+      return data.merged === false
+        ? timelineBadge('git-merge', html`${who} enabled auto-merge (${data.method}) on ${githubPull(data.url)} ${when}`)
+        : timelineBadge('git-merge', html`${who} requested auto-merge (${data.method}) on ${githubPull(data.url)} ${when}; whether GitHub merged it at once could not be checked`);
+    case 'auto_merge_failed':
+      return timelineBadge(
+        'x',
+        html`Enabling auto-merge on ${githubPull(data.url)} failed ${when}
+        <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        { cls: 'timeline-badge--danger' },
+      );
     case 'auto_publish_disabled':
       return timelineBadge('clock', html`${who} disabled auto-publish${AUTO_PUBLISH_OFF[data.reason] ?? ''} ${when}`);
     case 'auto_publish_failed':
@@ -351,6 +370,9 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const them = closes.length === 1 ? 'it' : 'them';
     rows.push(html`<div class="merge-row">${icon('issue-closed', { cls: 'color-fg-done' })}<div><strong>Merging on GitHub closes ${links}</strong><div class="color-fg-muted">The description names ${them} after a closing keyword. GitHub closes ${them} when it merges the pull request into the default branch.</div></div></div>`);
   }
+  // The option shows only where GitHub allows auto-merge; what came of using it shows regardless.
+  const mergeOption = s.autoMergeOption(repo);
+  const merge = pull.published_url ? s.autoMerge(pull) : null;
   let publishRow: Safe;
   let publishable = false;
   if (!target) {
@@ -381,6 +403,13 @@ async function mergeBox(p: PullPage): Promise<Safe> {
               : ''
           }
           <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (this push replaces commits on GitHub)</label>
+          ${
+            !mergeOption
+              ? ''
+              : mergeOption.methodAllowed
+                ? html`<label><input type="checkbox" name="auto_merge"> Enable auto-merge on GitHub (${mergeOption.method})</label><input type="hidden" name="merge_method" value="${mergeOption.method}">`
+                : html`<label class="color-fg-muted"><input type="checkbox" name="auto_merge" disabled> Enable auto-merge on GitHub: ${target} does not allow ${mergeOption.method} merges. <a href="/settings/publishing">Change the merge method</a></label>`
+          }
         </div>
         ${images ? html`<div class="flash flash-warn">${icon('alert')}<span>The description has ${plural(images, 'image')} stored in laatsux, which GitHub cannot show. Remove ${them}, or replace ${them} with ${images === 1 ? 'an image' : 'images'} uploaded to GitHub.</span></div>` : ''}
         <div class="flash flash-error js-form-error" hidden></div>
@@ -411,10 +440,31 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         <pre class="merge-error">${JSON.parse(last.data).error}</pre></div></div>`);
     }
   }
+  if (merge) rows.push(autoMergeRow(p, merge));
   return html`<div class="merge-box${pull.state === 'published' ? ' merge-box--published' : ''}">
     <span class="merge-box-icon">${pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
+}
+
+/** What came of the last time laatsux turned on auto-merge on GitHub. */
+function autoMergeRow(p: PullPage, merge: AutoMerge): Safe {
+  const by = p.s.db.actorById(merge.by);
+  if (merge.state === 'failed') {
+    return html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Auto-merge failed ${relTime(merge.at)}</strong>
+      <div class="color-fg-muted">${githubPull(merge.url)} is published, but auto-merge is not on. Enable it on GitHub, or publish again with auto-merge.</div>
+      <pre class="merge-error">${merge.error}</pre></div></div>`;
+  }
+  if (merge.state === 'requested') {
+    return html`<div class="merge-row">${icon('git-merge', { cls: 'color-fg-attention' })}<div><strong>Auto-merge requested for ${githubPull(merge.url)}</strong>
+      <div class="color-fg-muted">${by.login} requested it ${relTime(merge.at)}, and gh accepted it. Whether GitHub merged it at once (${merge.method}) or waits for its requirements could not be checked.</div></div></div>`;
+  }
+  if (merge.state === 'merged') {
+    return html`<div class="merge-row">${icon('git-merge', { cls: 'color-fg-done' })}<div><strong>Merged on GitHub</strong>
+      <div class="color-fg-muted">${by.login} enabled auto-merge ${relTime(merge.at)}, and GitHub had nothing left to wait for, so ${githubPull(merge.url)} was merged right away (${merge.method}).</div></div></div>`;
+  }
+  return html`<div class="merge-row">${icon('git-merge', { cls: 'color-fg-done' })}<div><strong>Auto-merge is on for ${githubPull(merge.url)}</strong>
+    <div class="color-fg-muted">${by.login} enabled it ${relTime(merge.at)}. GitHub merges it (${merge.method}) once its requirements are met, such as required checks, with whatever the branch has then: a push by someone with write access, such as an update published from here, keeps auto-merge on, and one by someone without turns it off.</div></div></div>`;
 }
 
 /** Auto-publish while it is on: what it is waiting for, and a way to turn it off. */
@@ -432,9 +482,14 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
       : item('waiting', r.authorWaiting ? `${author.login} has feedback it has not seen yet` : `${author.login} is working (not waiting for review)`),
   );
   if (r.openThreads) items.push(item('waiting', `${plural(r.openThreads, 'conversation')} you started ${r.openThreads === 1 ? 'is' : 'are'} unresolved`));
+  // GitHub's settings may have changed since it was turned on; publishing refuses then.
+  const method = auto.autoMerge;
+  const merging = method && p.repo.github_slug ? s.githubRepo(p.repo.github_slug)?.merging : null;
+  if (merging && !merging.autoMerge) items.push(item('failed', `${p.repo.github_slug} does not allow auto-merge, so publishing will fail`));
+  else if (merging && method && !merging.methods.includes(method)) items.push(item('failed', `${p.repo.github_slug} does not allow ${method} merges, so publishing will fail`));
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-done' })}<div class="flex-auto">
     <strong>Auto-publish is on</strong>
-    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the latest commit${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them.</div>
+    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the latest commit${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them.${auto.autoMerge ? ` Then it enables auto-merge on GitHub (${method}).` : ''}</div>
     <ul class="merge-checks">${items}</ul>
   </div>
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;
