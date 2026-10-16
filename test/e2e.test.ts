@@ -7,6 +7,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { createServer, type AddressInfo } from 'node:net';
 import { startServer } from '../src/server/server.ts';
 import { Db } from '../src/server/db.ts';
 import { Service } from '../src/server/service.ts';
@@ -617,4 +618,28 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
     await second.close();
     rmSync(data, { recursive: true, force: true });
   }
+});
+
+test('the CLI starts a server when none is running', async () => {
+  const port = await new Promise<number>((resolve) => {
+    const probe = createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+  const url = `http://localhost:${port}`;
+  const home = mkdtempSync(join(tmpdir(), 'laatsux-autostart-'));
+  try {
+    const r = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, LAATSUX_URL: url, LAATSUX_HOME: home, LAATSUX_ACTOR: 'agent' } });
+    assert.match(r.stderr, new RegExp(`Started the laatsux server at ${url}`));
+    // It keeps running after the command that started it.
+    const health = await (await fetch(`${url}/api/health`)).json();
+    assert.equal(health.ok, true);
+    process.kill(health.pid);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+  const off = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, LAATSUX_URL: url, LAATSUX_NO_AUTOSTART: '1' } }).catch((e) => e);
+  assert.equal(off.code, 1);
+  assert.match(off.stderr, /not running/);
 });

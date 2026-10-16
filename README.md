@@ -49,9 +49,14 @@ ln -s "$PWD/skills/stage-pr" ~/.claude/skills/stage-pr
 laatsux serve            # http://localhost:7171
 ```
 
-Run the server outside any agent sandbox: it runs `git push` and `gh pr create` with your
-credentials when you publish. The CLI only talks HTTP to the server, so agents in a sandbox
-can use it.
+You rarely need to: when nothing answers at a local `LAATSUX_URL`, the CLI starts
+`laatsux serve` in the background (log in `~/.local/share/laatsux/server.log`) and carries on.
+The server is detached, so it keeps running after the agent that started it is done.
+`LAATSUX_NO_AUTOSTART=1` turns this off.
+
+The server runs with the permissions of whoever started it, and publishing needs `git push`
+and `gh pr create` (and your signing key, when signing) to work there. If an agent sandbox
+blocks any of them, start the server yourself outside it.
 
 ## The CLI
 
@@ -166,6 +171,7 @@ UI, you act as yourself. Agents cannot publish or delete staged pull requests.
 | `LAATSUX_USER` | your `gh` login | The reviewer's name in the UI |
 | `LAATSUX_GH` | `gh` | gh binary used for publishing |
 | `LAATSUX_CODEX` | `codex` | Codex binary used for reviews |
+| `LAATSUX_NO_AUTOSTART` | unset | Do not start a server when none is running |
 
 ## Codex reviews
 

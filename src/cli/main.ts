@@ -40,7 +40,8 @@ async function serve(args: string[]): Promise<number> {
   out(`laatsux is serving ${server.url} (data in ${dataDir()})`);
   if (v.open) (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore' });
   await new Promise<void>((resolve) => {
-    const stop = () => server.close().then(resolve);
+    // Exit once closed; open live-update streams would otherwise keep timers alive for a while.
+    const stop = () => server.close().then(() => process.exit(0), resolve);
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   });

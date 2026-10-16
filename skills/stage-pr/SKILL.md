@@ -38,8 +38,8 @@ feedback, and the loop repeats until the user publishes it.
    ```
 
    It prints the review URL. Give that URL to the user. `--fill`, `--base`, `--head` and
-   `--draft` work as in gh. If the server is not running, ask the user to start
-   `laatsux serve`.
+   `--draft` work as in gh. If the server is not running, the CLI starts it and says so;
+   mention that to the user along with the URL.
 
 2. Wait for the review. This blocks until the user submits a review or comment, publishes,
    or closes the pull request, then prints only the new feedback:
