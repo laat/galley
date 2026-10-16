@@ -6,6 +6,7 @@ import { Repo, run, githubSlug, type Commit, type RawCommit, type RunResult } fr
 import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
+import { reviewDecision } from './github.ts';
 import {
   Db,
   now,
@@ -98,10 +99,18 @@ export interface HeadStatus {
   done: boolean;
   /** The commit this is about: the head, or the earlier commit a running review started on. */
   commit: string;
+  /** When the running review started. */
+  startedAt?: string | null;
+  /** When the failed review ended. */
+  failedAt?: string | null;
+  /** Automatic reviews of the pull request so far, and how many it gets. */
+  automatic?: { used: number; limit: number };
 }
 
 /** A reviewer agent such as Codex: one actor that reviews on its own. */
 export interface ReviewerAgent {
+  /** Its kind, as in `…/pulls/{n}/reviewers/{engine}`, where a review is asked for. */
+  readonly engine: string;
   actor(): Actor;
   /** Its section of the Settings page. */
   settingsUrl(): string;
@@ -110,7 +119,7 @@ export interface ReviewerAgent {
 
 /** Whether the agents are done with a pull request, so the reviewer can take it from here. */
 export interface Readiness {
-  reviewers: { login: string; status: HeadStatus }[];
+  reviewers: { login: string; engine: string; status: HeadStatus }[];
   /** The author is running `pr wait`. */
   authorWaiting: boolean;
   /** Reviews and comments the author has not been shown. */
@@ -119,6 +128,41 @@ export interface Readiness {
   openThreads: number;
   /** Every reviewer agent is done with the head, and the author is waiting with all feedback seen. */
   agentsDone: boolean;
+}
+
+/** Whose move a pull request waits for: the author agent's, the reviewer agents', the reviewer's, or nobody's. */
+export type Whose = 'author' | 'reviewer_agents' | 'reviewer' | 'none';
+
+/**
+ * Where the author agent is: working on feedback it was handed (until its next action), not yet
+ * handed feedback that asks something of it, waiting in `pr wait`, or stopped.
+ */
+export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped';
+
+/** One reason for whose turn it is, as the list row and `pr view` say it. */
+export interface TurnReason {
+  /** The author agent, a reviewer agent, what changed since the reviewer's last review, the decision, unresolved threads, or an update not on GitHub yet. */
+  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished';
+  /** A few words. The reviewer is named by login, so it reads the same to the reviewer and to agents. */
+  text: string;
+  /** Since when it has been so: waiting, reviewing, working on feedback, or stopped. */
+  since?: string | null;
+  /** The author's AuthorState, or a reviewer agent's HeadStatus state. */
+  state?: AuthorState | HeadStatus['state'];
+  /** A reviewer agent's engine, for asking it to review again. */
+  engine?: string;
+}
+
+/**
+ * Whose move a pull request waits for (#6). The author agent's from being handed feedback that
+ * asks something of it until its next action (a push, an edit, a reply, a wait); a reviewer
+ * agent's while one reviews the pull request or is about to; then the reviewer's: the author has
+ * answered and waits or has stopped, and the reviewer agents are done with the head. Nobody's once
+ * it is closed, or published with nothing new and no feedback the author has yet to be handed.
+ */
+export interface Turn {
+  whose: Whose;
+  reasons: TurnReason[];
 }
 
 /** Auto-publish, while it is on: who turned it on, when, and the publish options fixed then. */
@@ -1052,9 +1096,20 @@ export class Service {
 
   /** Record that the author has been shown everything up to `at` (taken before reading the feedback). */
   markSeen(pull: PullRow, at: string): void {
-    // Only forward: a late confirmation must not bring back feedback seen since.
-    this.db.run('UPDATE pulls SET author_seen_at = ? WHERE id = ? AND author_seen_at < ?', at, pull.id, at);
+    const moved = this.db.transaction(() => {
+      const before = this.db.get<{ seen: string }>('SELECT author_seen_at AS seen FROM pulls WHERE id = ?', pull.id)!.seen;
+      // Only forward: a late confirmation must not bring back feedback seen since.
+      if (before >= at) return false;
+      // Among it, feedback that asks something of the author: from now, its turn (see turn).
+      const asked = this.askedAt(pull, at);
+      this.db.update('pulls', pull.id, asked !== null && asked > before ? { author_seen_at: at, author_handed_at: at } : { author_seen_at: at });
+      return true;
+    });
+    if (moved) this.emit(pull.id, 'seen', this.db.actorById(pull.author_id));
   }
+
+  /** When each author's `pr wait` began, kept across its re-polls; for "waiting 12 min". */
+  private waitingSince = new Map<number, string>();
 
   /**
    * `pr wait` re-polls every few minutes. Announce that the author started waiting at once,
@@ -1073,10 +1128,14 @@ export class Service {
       if (stopping) {
         clearTimeout(stopping);
         this.waitingStopped.delete(id);
-      } else this.emit(id, 'waiting', author);
+      } else {
+        this.waitingSince.set(id, now());
+        this.emit(id, 'waiting', author);
+      }
     } else if (before > 0 && n === 0) {
       const t = setTimeout(() => {
         this.waitingStopped.delete(id);
+        this.waitingSince.delete(id);
         this.emit(id, 'waiting', author);
       }, 3000);
       t.unref();
@@ -1109,6 +1168,12 @@ export class Service {
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0 || signal?.aborted) return { status: 'timeout', reviews: [], comments: [] };
+        // Waiting with nothing new to read says the author is done with the feedback so far (see
+        // turn). When that ends the author's turn, pages hear of it: a wait started within seconds
+        // of the last one announces nothing (setWaiting). Renewals that change nothing stay quiet.
+        const working = pull.author_handed_at !== null && pull.author_handed_at > this.authorActedAt(pull);
+        this.db.update('pulls', id, { author_waited_at: checkedAt });
+        if (working) this.emit(id, 'waiting', author);
         await new Promise<void>((resolve) => {
           const done = () => {
             clearTimeout(timer);
@@ -1140,7 +1205,7 @@ export class Service {
    * the threads the reviewer started to be open.
    */
   readiness(pull: PullRow): Readiness {
-    const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
+    const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, engine: r.engine, status: r.headStatus(pull) }));
     const authorWaiting = (this.waiters.get(pull.id) ?? 0) > 0;
     const fb = this.unseenFeedback(pull);
     const unseen = fb.reviews.length + fb.comments.length;
@@ -1152,6 +1217,137 @@ export class Service {
     )!.n;
     const agentsDone = reviewers.every((r) => r.status.done) && authorWaiting && unseen === 0;
     return { reviewers, authorWaiting, unseen, openThreads, agentsDone };
+  }
+
+  /** Whose move the pull request waits for, and why (see Turn). */
+  turn(pull: PullRow): Turn {
+    if (pull.state === 'closed') return { whose: 'none', reasons: [] };
+    const r = this.readiness(pull);
+    const author = this.db.actorById(pull.author_id).login;
+    const acted = this.authorActedAt(pull);
+    // The author's turn: from `pr wait` or `pr view --comments` handing it feedback that asks
+    // something of it (markSeen) to its next action.
+    const working = pull.author_handed_at !== null && pull.author_handed_at > acted;
+    // Such feedback it has not been handed yet. Not waiting, it hears of it only when the reviewer says so.
+    const asked = this.askedAt(pull);
+    const unseen = asked !== null && asked > pull.author_seen_at;
+    // A wait that just ended counts for a few seconds more (see setWaiting), long enough for the
+    // author to confirm the feedback it was handed.
+    const waiting = r.authorWaiting || this.waitingStopped.has(pull.id);
+    const state: AuthorState = working ? 'working' : unseen ? 'unseen' : waiting ? 'waiting' : 'stopped';
+
+    const reasons: TurnReason[] = [];
+    if (working) reasons.push({ kind: 'author', state, text: `${author} is working on the feedback`, since: pull.author_handed_at });
+    if (unseen) reasons.push({ kind: 'author', state: 'unseen', text: `${author} has not seen the latest feedback` });
+    if (state === 'waiting') reasons.push({ kind: 'author', state, text: `${author} is waiting for review`, since: this.waitingSince.get(pull.id) ?? null });
+    // Not waiting, it does not hear of anything new: the reviewer has to tell it.
+    if (state === 'stopped' || (state === 'unseen' && !waiting)) reasons.push({ kind: 'author', state: 'stopped', text: `${author} is not waiting`, since: acted });
+
+    const atWork = r.reviewers.some((x) => x.status.state === 'reviewing' || x.status.state === 'queued');
+    // A waiting author starts the reviewer agents that have not reviewed its head.
+    const next = state === 'waiting' && r.reviewers.some((x) => x.status.state === 'unreviewed');
+    const unpublished = this.unpublishedChanges(pull);
+    // A review that failed after publishing (asked for by hand) needs the reviewer all the same.
+    const failed = r.reviewers.some((x) => x.status.state === 'failed' && !!x.status.failedAt && x.status.failedAt > (pull.published_at ?? ''));
+    // Feedback being handed over (the author waits) makes it the author's turn; feedback it is not
+    // waiting for is the reviewer's to pass on, published or not.
+    const whose: Whose = atWork
+      ? 'reviewer_agents'
+      : working || (unseen && waiting)
+        ? 'author'
+        : next
+          ? 'reviewer_agents'
+          : pull.state === 'published' && !unpublished.length && !failed && !unseen
+            ? 'none'
+            : 'reviewer';
+    if (whose === 'none') return { whose, reasons: [] };
+
+    if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
+    for (const { login, engine, status } of r.reviewers) {
+      const text = reviewerAgentText(login, status, pull, author, state === 'waiting');
+      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine });
+    }
+    // The agents at work come first, since that is whose turn it is.
+    if (whose === 'reviewer_agents') reasons.sort((a, b) => Number(b.kind === 'reviewer_agent') - Number(a.kind === 'reviewer_agent'));
+
+    const reviews = this.db.all<ReviewRow>("SELECT * FROM reviews WHERE pull_id = ? AND state != 'PENDING' ORDER BY id", pull.id);
+    const decision = reviewDecision(reviews);
+    if (decision === 'APPROVED') reasons.push({ kind: 'approved', text: 'approved' });
+    if (decision === 'CHANGES_REQUESTED') reasons.push({ kind: 'changes_requested', text: 'changes requested' });
+    const unresolved = this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM comments WHERE pull_id = ? AND kind = 'review' AND in_reply_to_id IS NULL AND resolved_at IS NULL
+         AND (review_id IS NULL OR review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`,
+      pull.id,
+    )!.n;
+    if (unresolved) reasons.push({ kind: 'threads', text: `${unresolved} unresolved thread${unresolved === 1 ? '' : 's'}` });
+    if (unpublished.length) reasons.push({ kind: 'unpublished', text: `update not published: ${unpublished.join(', ')}` });
+    return { whose, reasons };
+  }
+
+  /** What changed since the reviewer last reviewed: pushes, and threads the author answered. */
+  private sinceReview(pull: PullRow, author: string): TurnReason[] {
+    const viewer = this.viewer();
+    const last = this.db.get<ReviewRow>("SELECT * FROM reviews WHERE pull_id = ? AND author_id = ? AND state != 'PENDING' ORDER BY submitted_at DESC", pull.id, viewer.id);
+    const out: TurnReason[] = [];
+    if (last) {
+      const pushes = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM revisions WHERE pull_id = ? AND created_at > ?', pull.id, last.submitted_at)!.n;
+      if (pushes) out.push({ kind: 'changes', text: `${pushes} ${pushes === 1 ? 'push' : 'pushes'} since ${viewer.login}'s review` });
+    } else out.push({ kind: 'changes', text: `no review from ${viewer.login} yet` });
+    const answered = this.db.get<{ n: number }>(
+      'SELECT COUNT(DISTINCT in_reply_to_id) AS n FROM comments WHERE pull_id = ? AND author_id = ? AND in_reply_to_id IS NOT NULL AND created_at > ?',
+      pull.id,
+      pull.author_id,
+      last?.submitted_at ?? '',
+    )!.n;
+    if (answered) out.push({ kind: 'changes', text: `${author} answered ${answered} thread${answered === 1 ? '' : 's'}` });
+    return out;
+  }
+
+  /** When the author last did something: staged, pushed, edited, commented (or edited a comment), resolved a thread, or waited with nothing new to read. */
+  private authorActedAt(pull: PullRow): string {
+    const at = this.db.get<{ at: string }>(
+      `SELECT MAX(at) AS at FROM (
+         SELECT created_at AS at FROM pulls WHERE id = ?1
+         UNION ALL SELECT author_waited_at FROM pulls WHERE id = ?1
+         UNION ALL SELECT created_at FROM events WHERE pull_id = ?1 AND actor_id = ?2
+         UNION ALL SELECT updated_at FROM comments WHERE pull_id = ?1 AND author_id = ?2
+         UNION ALL SELECT resolved_at FROM comments WHERE pull_id = ?1 AND resolved_by_id = ?2)`,
+      pull.id,
+      pull.author_id,
+    )!.at;
+    return at;
+  }
+
+  /**
+   * When someone last asked something of the author (up to `until`): a review or comment from
+   * anyone else. An approval without comments asks nothing, nor does a reviewer agent's review
+   * that found nothing.
+   */
+  private askedAt(pull: PullRow, until = '9999'): string | null {
+    return this.db.get<{ at: string | null }>(
+      `SELECT MAX(at) AS at FROM (
+         SELECT r.submitted_at AS at FROM reviews r
+          WHERE r.pull_id = ?1 AND r.author_id != ?2 AND r.state != 'PENDING'
+            AND (r.state != 'APPROVED' OR EXISTS (SELECT 1 FROM comments c WHERE c.review_id = r.id))
+            AND NOT EXISTS (SELECT 1 FROM review_runs x WHERE x.review_id = r.id AND x.findings = 0)
+         UNION ALL SELECT created_at FROM comments WHERE pull_id = ?1 AND author_id != ?2 AND review_id IS NULL)
+       WHERE at <= ?3`,
+      pull.id,
+      pull.author_id,
+      until,
+    )!.at;
+  }
+
+  /** What a published pull request has that GitHub does not yet: commits, title, description. Empty before the first publish. */
+  unpublishedChanges(pull: PullRow): ('commits' | 'title' | 'description')[] {
+    if (!pull.published_url) return [];
+    // What was published, in terms of the staged commits (GitHub may have signed copies of them).
+    const source = pull.published_source_sha ?? pull.published_head_sha;
+    const changed: ('commits' | 'title' | 'description')[] = [];
+    if (source !== pull.head_sha) changed.push('commits');
+    if (pull.published_title !== pull.title) changed.push('title');
+    if (pull.published_body !== pull.body) changed.push('description');
+    return changed;
   }
 
   // ------------------------------------------------------------ auto-publish
@@ -1556,6 +1752,29 @@ export class Service {
 
 /** Environment for git and gh when nobody can answer a prompt. */
 const UNPROMPTED = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
+
+/** A reviewer agent's progress with the head, as a reason in Turn; null when it has nothing to do with the pull request. */
+function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean): string | null {
+  const sha = status.commit.slice(0, 7);
+  switch (status.state) {
+    case 'reviewing':
+      return status.commit === pull.head_sha ? `${login} is reviewing ${sha}` : `${login} is reviewing an earlier commit, ${sha}`;
+    case 'queued':
+      return `${login} is about to review ${sha}`;
+    case 'unreviewed':
+      return authorWaiting ? `${login} is about to review ${sha}` : `${login} reviews ${sha} when ${author} waits for review`;
+    case 'findings':
+      return `${login} commented on ${sha}`;
+    case 'failed':
+      return `${login}'s review of ${sha} failed`;
+    case 'clean':
+      return `${login} found nothing in ${sha}`;
+    case 'capped':
+      return status.automatic ? `${login} used ${status.automatic.used} of ${status.automatic.limit} automatic reviews` : `${login} has used up its automatic reviews`;
+    case 'off':
+      return null;
+  }
+}
 
 /** Why a command failed: its output, or that it ran out of time (and, given, what it may have waited for). */
 function failure(r: RunResult, waitedFor?: string): string {

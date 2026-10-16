@@ -3,7 +3,8 @@
 import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
-import type { AutoMerge, Ctx, Placement, Service, Thread } from './service.ts';
+import type { AutoMerge, Ctx, Placement, Service, Thread, Turn, TurnReason } from './service.ts';
+import { duration } from './web/html.ts';
 
 /**
  * The official logos of the agents we know: the avatar of each vendor's own GitHub App, as
@@ -84,6 +85,10 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     published_at: pull.published_at,
     author_waiting: (s.waiters.get(pull.id) ?? 0) > 0,
     auto_publish: autoPublishJson(s, pull),
+    // Whose move it is (author, reviewer_agents, reviewer or none), and why.
+    turn: s.turn(pull),
+    // What a published pull request has that GitHub does not yet: commits, title, description.
+    unpublished_changes: s.unpublishedChanges(pull),
   };
   if (extra.files) {
     json.additions = extra.files.reduce((n, f) => n + f.additions, 0);
@@ -219,6 +224,16 @@ export function reviewJson(s: Service, repo: RepoRow, pull: PullRow, r: ReviewRo
 
 // ------------------------------------------------------------------ gh --json
 
+/** Turn as gh JSON: whose move it is (AUTHOR, REVIEWER_AGENTS, REVIEWER or NONE), and the reasons as text. */
+function ghTurn(t: Turn) {
+  return { whose: t.whose.toUpperCase(), reasons: t.reasons.map(reasonText) };
+}
+
+/** A reason in words, with how long it has been so: "codex is reviewing 8c64534, 3 min". */
+export function reasonText(r: TurnReason): string {
+  return r.since ? `${r.text}, ${duration(r.since)}` : r.text;
+}
+
 function ghAuthor(s: Service, id: number) {
   const a = s.db.actorById(id);
   return { login: a.login, is_bot: a.type === 'Bot' };
@@ -268,6 +283,8 @@ export const GH_FIELDS = [
   'reviews',
   'state',
   'title',
+  'turn',
+  'unpublishedChanges',
   'updatedAt',
   'url',
   'waiting',
@@ -359,6 +376,10 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     return [...latest.values()].map(review);
   });
   set('reviewDecision', () => reviewDecision(reviews));
+  // laatsux extensions: whose move it is, and what GitHub does not have yet (#6, #29). `state`
+  // stays PUBLISHED when an update is not published, as gh would show it.
+  set('turn', () => ghTurn(s.turn(pull)));
+  set('unpublishedChanges', () => s.unpublishedChanges(pull).map((c) => (c === 'description' ? 'BODY' : c.toUpperCase())));
   // Reviewers still to be heard from: one that is reviewing now, or about to start.
   set('reviewRequests', () => {
     const work = s.codex?.atWork(pull);

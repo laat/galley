@@ -4,14 +4,14 @@ import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson } from './output.ts';
-import { conversationItems, formatConversation, reviewersAtWork, stillReviewing, viewPlain, viewTTY, type ImageRef } from './format.ts';
+import { conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
   'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
   'createdAt', 'deletions', 'files', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'number', 'publishedUrl',
-  'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'updatedAt', 'url', 'waiting',
+  'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
 ];
 
 // gh flags that have no meaning here. They are accepted so habitual invocations keep working.
@@ -217,7 +217,7 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
   }
   const state = v.state === 'merged' ? 'published' : String(v.state);
   const fields = v.json !== undefined ? checkFields(String(v.json), GH_FIELDS) : ['number', 'title', 'headRefName', 'state', 'createdAt', 'isDraft', 'author'];
-  const q = new URLSearchParams({ state, limit: String(v.limit), fields: [...new Set([...fields, 'isDraft', 'author'])].join(',') });
+  const q = new URLSearchParams({ state, limit: String(v.limit), fields: [...new Set([...fields, 'isDraft', 'author', 'unpublishedChanges'])].join(',') });
   if (v.head) q.set('head', String(v.head));
   if (v.base) q.set('base', String(v.base));
   let pulls = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?${q}`);
@@ -235,7 +235,9 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
     out(`\nShowing ${pulls.length} of ${pulls.length} ${state === 'all' ? '' : state + ' '}pull requests in ${repo.owner}/${repo.name}\n`);
     const w = Math.max(...pulls.map((p) => p.title.length));
     for (const p of pulls) {
-      const num = p.state === 'CLOSED' ? c.red(`#${p.number}`) : p.state === 'PUBLISHED' ? c.magenta(`#${p.number}`) : p.isDraft ? c.gray(`#${p.number}`) : c.green(`#${p.number}`);
+      // A published pull request with an update not on GitHub yet shows as open, as in the web UI.
+      const published = p.state === 'PUBLISHED' && !p.unpublishedChanges?.length;
+      const num = p.state === 'CLOSED' ? c.red(`#${p.number}`) : published ? c.magenta(`#${p.number}`) : p.isDraft ? c.gray(`#${p.number}`) : c.green(`#${p.number}`);
       out(`${num}\t${p.title.padEnd(w)}  ${c.cyan(p.headRefName)}  ${c.gray(p.createdAt.slice(0, 10))}`);
     }
   } else {
@@ -443,7 +445,7 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
   const { values: v } = parse(args, { ...JSON_OPTS });
   const repo = await client.repoFor(cwd, v.repo as string | undefined);
   const branch = currentBranch(cwd);
-  const pulls = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=open&fields=number,title,headRefName,state,isDraft,reviewDecision,url,waiting`);
+  const pulls = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=open&fields=number,title,headRefName,state,isDraft,reviewDecision,url,waiting,turn,unpublishedChanges`);
   if (v.json !== undefined) {
     const fields = checkFields(String(v.json), GH_FIELDS);
     const pick = (p: any) => Object.fromEntries(fields.map((f) => [f, p[f]]));
@@ -453,10 +455,10 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
   out(`\nRelevant pull requests in ${repo.owner}/${repo.name}\n`);
   out(c.bold('Current branch'));
   const mine = pulls.find((p) => p.headRefName === branch);
-  out(mine ? `  #${mine.number}  ${mine.title} [${mine.headRefName}]\n    - ${mine.reviewDecision.toLowerCase().replace('_', ' ')}` : `  There is no pull request associated with [${branch}]`);
+  out(mine ? `  #${mine.number}  ${mine.title} [${mine.headRefName}]\n    - ${mine.reviewDecision.toLowerCase().replace('_', ' ')}${mine.turn ? `\n    - ${turnLine(mine.turn)}` : ''}` : `  There is no pull request associated with [${branch}]`);
   out('\n' + c.bold('Open staged pull requests'));
   if (!pulls.length) out('  You have no open pull requests');
-  for (const p of pulls) out(`  #${p.number}  ${p.title} [${p.headRefName}]${p.state === 'PUBLISHED' ? ' (published)' : ''}`);
+  for (const p of pulls) out(`  #${p.number}  ${p.title} [${p.headRefName}]${p.state === 'PUBLISHED' ? (p.unpublishedChanges?.length ? ' (update not published)' : ' (published)') : ''}`);
   out('');
   return 0;
 }

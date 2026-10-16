@@ -72,6 +72,22 @@ export function ago(d: Date, nowMs = Date.now()): string {
   return `on ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
 }
 
+/** How long since `iso`, in a word or two: "3 min", "5 h", "4 days". */
+export function duration(iso: string, nowMs = Date.now()): string {
+  const m = Math.max(1, Math.round((nowMs - Date.parse(iso)) / 60_000));
+  if (m < 60) return `${m} min`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.round(h / 24)} days`;
+}
+
+/** A duration since `iso` that keeps counting in the page (see updateTimes in app.js). */
+export function since(iso: string | null | undefined): Safe {
+  if (!iso) return raw('');
+  const d = new Date(iso);
+  return html`<relative-time datetime="${iso}" data-format="duration" title="Since ${d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}">${duration(iso)}</relative-time>`;
+}
+
 export function avatar(src: string, login: string, size = 40, cls = ''): Safe {
   // An avatar from elsewhere (an agent's logo, the viewer's GitHub avatar) falls back to the
   // generated one when it can't load, such as offline (public/app.js).

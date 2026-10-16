@@ -52,6 +52,10 @@ export interface PullRow {
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
+  /** When the author last waited for review with all feedback seen: the latest `pr wait` that had nothing to return. */
+  author_waited_at: string | null;
+  /** When the author was last handed feedback that asks something of it (`pr wait`, `pr view --comments`); its turn until its next action. */
+  author_handed_at: string | null;
 }
 
 export interface RevisionRow {
@@ -270,6 +274,8 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['comments', 'priority', 'TEXT'],
   ['pulls', 'auto_publish', 'TEXT'],
   ['review_runs', 'findings', 'INTEGER'],
+  ['pulls', 'author_waited_at', 'TEXT'],
+  ['pulls', 'author_handed_at', 'TEXT'],
 ];
 
 export class Db {

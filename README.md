@@ -92,11 +92,15 @@ A pull request is found the way gh finds it: by number, URL, branch name, or the
 `autoMergeRequest` is gh's field for the [auto-merge](#auto-merge) laatsux enabled on the GitHub
 pull request. `reviewRequests`
 lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRESS` or
-`QUEUED`), `commit` and `startedAt`.
+`QUEUED`), `commit` and `startedAt`. `turn` says whose move it is (`AUTHOR`, `REVIEWER_AGENTS`,
+`REVIEWER` or `NONE`) and why, as on the [front page](#the-front-page). `unpublishedChanges` lists
+what a published pull request has that GitHub does not yet (`COMMITS`, `TITLE`, `BODY`); `state`
+stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both.
 
 ## The web UI
 
-- Pull request list, and per pull request the Conversation, Commits and Files changed tabs
+- The [front page](#the-front-page): the pull requests waiting for you, then those the agents are working on
+- Per pull request the Conversation, Commits and Files changed tabs
 - Unified and split diffs with syntax highlighting, a file tree, and per-file "Viewed"
 - Unfold arrows on hunk headers load more lines of the file above and below a hunk, as on GitHub
 - The repository at any commit, read from git's objects without a checkout: "View file" (and the old
@@ -116,6 +120,25 @@ lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRES
 - Live updates while the agent works, and a "waiting for your review" indicator while it runs `pr wait`
 - Publish, with options to open as a draft and to [enable auto-merge on GitHub](#auto-merge). Publishing again after changes force-pushes if needed and updates the GitHub pull request with `gh pr edit`
 - Publish when reviews are done: [auto-publish](#auto-publish)
+
+### The front page
+
+The Open tab lists the pull requests whose turn it is for you first, oldest first, then those
+with the agents, then those published with nothing new. The author agent's turn starts when
+`pr wait` (or `pr view --comments`) hands it feedback that asks something of it, and lasts until
+its next action: a push, an edit, a reply, or waiting again. A reviewer agent's turn lasts while
+it reviews the pull request or is about to. After that it is your turn: the author has answered
+and waits, or has stopped ("claude is not waiting"), and the reviewer agents are done with the
+latest commit. A failed review is your turn too, with a Retry button, and so is feedback the
+author has not been handed while it is not waiting ("claude has not seen the latest feedback"):
+it hears of it only when you tell it.
+
+Each row says why: whether the author waits and for how long, pushes and answered threads since
+your last review, what each reviewer agent made of the latest commit, your decision, unresolved
+threads, and an update not published yet (a published pull request that changed since shows as
+open, "Update not published: commits, title"). The tab's title counts your turn, "(2) Staged pull
+requests", and **Notify me** shows a desktop notification when a pull request in any repository
+becomes your turn, while a list page (any tab) is open.
 
 Conversations stay in laatsux. Publishing sends the branch, title and description, not the review.
 Images in the description stay too: GitHub has no API for uploading them, so they would be broken
@@ -150,7 +173,8 @@ request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's 
 `max_iterations`; null follows the settings, and fields left out stay as they are),
 `GET /api/settings`, `PUT /api/settings/codex` and `PUT /api/settings/publish` (`mergeMethod`), `POST /api/uploads` (an image's bytes; answers
 with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, and `GET /events`
-(server-sent events).
+(server-sent events). A pull request also has `turn` (`whose`: `author`, `reviewer_agents`,
+`reviewer` or `none`, and `reasons`) and `unpublished_changes`.
 
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or

@@ -60,16 +60,19 @@ export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {
   return html`<a href="/">laatsux</a><span class="crumb-sep">/</span><a href="/${repo.owner}/${repo.name}"><strong>${repo.owner}/${repo.name}</strong></a>${extra ?? ''}`;
 }
 
-export function stateBadge(pull: PullRow, size: 'md' | 'sm' = 'md'): Safe {
+/** `unpublished`: published, with changes GitHub does not have yet (Service.unpublishedChanges), which shows as open. */
+export function stateBadge(pull: PullRow, size: 'md' | 'sm' = 'md', unpublished = false): Safe {
   const cls = size === 'sm' ? ' State--small' : '';
   if (pull.state === 'closed') return html`<span class="State State--closed${cls}">${icon('git-pull-request-closed')} Closed</span>`;
+  if (pull.state === 'published' && unpublished) return html`<span class="State State--open${cls}">${icon('git-pull-request')} Update not published</span>`;
   if (pull.state === 'published') return html`<span class="State State--published${cls}">${icon('mark-github')} Published</span>`;
   if (pull.draft) return html`<span class="State State--draft${cls}">${icon('git-pull-request-draft')} Draft</span>`;
   return html`<span class="State State--open${cls}">${icon('git-pull-request')} Open</span>`;
 }
 
-export function pullIcon(pull: PullRow): Safe {
+export function pullIcon(pull: PullRow, unpublished = false): Safe {
   if (pull.state === 'closed') return icon('git-pull-request-closed', { cls: 'color-fg-closed' });
+  if (pull.state === 'published' && unpublished) return icon('git-pull-request', { cls: 'color-fg-open' });
   if (pull.state === 'published') return icon('mark-github', { cls: 'color-fg-done' });
   if (pull.draft) return icon('git-pull-request-draft', { cls: 'color-fg-muted' });
   return icon('git-pull-request', { cls: 'color-fg-open' });
