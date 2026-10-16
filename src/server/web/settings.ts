@@ -49,7 +49,7 @@ export async function settingsPage(s: Service): Promise<string> {
     '/settings',
     html`<div class="Subhead" id="codex">
       <h2 class="Subhead-heading">Codex</h2>
-      <p class="Subhead-description">Let Codex review staged pull requests before you do. It reviews a read-only checkout of the pull request and posts its findings as a review from <strong>${s.codex?.actor().login ?? settings.name}</strong>.</p>
+      <p class="Subhead-description">Let Codex review staged pull requests before you do. It reviews a throwaway checkout of the pull request and posts its findings as a review from <strong>${s.codex?.actor().login ?? settings.name}</strong>.</p>
     </div>
     ${
       s.codex && models.length === 0
@@ -82,6 +82,10 @@ export async function settingsPage(s: Service): Promise<string> {
         <label class="form-label" for="codex-iterations">Max iterations</label>
         <input class="form-control input-narrow" type="number" id="codex-iterations" name="maxIterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${settings.maxIterations}">
         <p class="note">Automatic reviews per pull request, so Codex and the author agent do not go back and forth forever. "Ask Codex to review" on a pull request is not limited.</p>
+      </div>
+      <div class="form-checkbox">
+        <label><input type="checkbox" name="runTests"${settings.runTests ? raw(' checked') : ''}> Let Codex install dependencies and run tests</label>
+        <p class="note">Before Codex starts, laatsux installs the pull request's dependencies from its lockfile, without running its install scripts. Codex may then run the typecheck, tests or build to check what it finds, without network access. It writes only to its checkout and a temporary directory, both removed after the review; your repository stays read-only. Off, Codex only reads the code.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>

@@ -4,9 +4,9 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer, type AddressInfo } from 'node:net';
 import { startServer } from '../src/server/server.ts';
@@ -112,10 +112,13 @@ before(async () => {
   );
   chmodSync(gh, 0o755);
 
-  // A stand-in for the Codex CLI: a model catalog, and `exec` answering with FAKE_CODEX_REVIEW,
-  // after FAKE_CODEX_SLEEP milliseconds or once the file FAKE_CODEX_GATE exists.
+  // A stand-in for the Codex CLI: a model catalog, `sandbox` standing in for the package manager
+  // it runs (failing with FAKE_INSTALL_FAIL), and `exec` answering with FAKE_CODEX_REVIEW, after
+  // FAKE_CODEX_SLEEP milliseconds or once the file FAKE_CODEX_GATE exists. Where it may run the
+  // tests, it leaves a read-only directory behind, as Go's module cache does.
   const codex = join(dir, 'codex');
   process.env.FAKE_CODEX_LOG = join(dir, 'codex.log');
+  process.env.FAKE_CODEX_SANDBOX_LOG = join(dir, 'codex-sandbox.log');
   writeFileSync(
     codex,
     `#!${process.execPath}
@@ -128,9 +131,20 @@ if (args[0] === 'debug' && args[1] === 'models') {
   ] }));
   process.exit(0);
 }
+if (args[0] === 'sandbox') {
+  fs.appendFileSync(process.env.FAKE_CODEX_SANDBOX_LOG, JSON.stringify({ args, cwd: process.cwd(), store: process.env.npm_config_store_dir }) + '\\n');
+  if (process.env.FAKE_INSTALL_FAIL) { console.error('ERR_PNPM_OUTDATED_LOCKFILE'); process.exit(1); }
+  console.log('Packages: +3\\nDone in 1s');
+  process.exit(0);
+}
 if (args[0] !== 'exec') process.exit(2);
 const prompt = fs.readFileSync(0, 'utf8');
-fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args, prompt, sawFile: fs.existsSync('codex.js') }) + '\\n');
+fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args, prompt, sawFile: fs.existsSync('codex.js'), tmpdir: process.env.TMPDIR, npmCache: process.env.npm_config_cache }) + '\\n');
+if (args.includes('workspace-write')) {
+  fs.mkdirSync('.cache/mod', { recursive: true });
+  fs.chmodSync('.cache/mod', 0o555);
+  fs.chmodSync('.cache', 0o555);
+}
 if (process.env.FAKE_CODEX_FAIL) { console.error('model overloaded'); process.exit(3); }
 const answer = () => fs.writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_CODEX_REVIEW);
 const gate = process.env.FAKE_CODEX_GATE;
@@ -480,7 +494,8 @@ test('codex reviews when the author waits, within the limits in settings', async
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/codex');
   writeFileSync(join(repo, 'codex.js'), 'export const answer = 41;\n');
-  git('add', 'codex.js');
+  writeFileSync(join(repo, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+  git('add', 'codex.js', 'pnpm-lock.yaml');
   git('commit', '-qm', 'Add the answer');
   const created = await cli(['pr', 'create', '--title', 'Add the answer', '--body', 'It is 42.']);
   assert.equal(created.code, 0, created.stderr);
@@ -505,6 +520,7 @@ test('codex reviews when the author waits, within the limits in settings', async
   assert.match(settingsPage, /<option value="gpt-test"[^>]* selected>GPT Test/);
   assert.doesNotMatch(settingsPage, /internal/);
   assert.match(settingsPage, /<div class="Subhead" id="codex">/);
+  assert.match(settingsPage, /<input type="checkbox" name="runTests" checked> Let Codex install dependencies and run tests/);
 
   // The agent waits; Codex reviews first and its review wakes the agent.
   const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
@@ -516,9 +532,57 @@ test('codex reviews when the author waits, within the limits in settings', async
   const call = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
   assert.equal(call.args[call.args.indexOf('-m') + 1], 'gpt-test');
   assert.ok(call.args.includes('model_reasoning_effort="high"'));
-  assert.equal(call.args[call.args.indexOf('-s') + 1], 'read-only');
   assert.match(call.prompt, /Title: Add the answer/);
   assert.equal(call.sawFile, true, 'codex runs in a checkout of the head commit');
+  // By default laatsux installs the dependencies from the lockfile first, in Codex's sandbox with
+  // network and without the repository's scripts. Then Codex may run the tests, without network,
+  // writing only to the checkout and a temporary directory beside it, whatever the user's
+  // config.toml says, and ignoring the checkout's own .codex/config.toml.
+  const checkout = call.args[call.args.indexOf('-C') + 1];
+  const workspaceWrite = (network: boolean) => [
+    '-c',
+    `sandbox_workspace_write.network_access=${network}`,
+    '-c',
+    'sandbox_workspace_write.writable_roots=[]',
+    '-c',
+    'sandbox_workspace_write.exclude_slash_tmp=true',
+    '-c',
+    'sandbox_workspace_write.exclude_tmpdir_env_var=false',
+  ];
+  const untrusted = ['-c', `projects={${JSON.stringify(checkout)}={trust_level="untrusted"}}`];
+  const installs = () => readFileSync(process.env.FAKE_CODEX_SANDBOX_LOG!, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(installs(), [
+    {
+      args: [
+        'sandbox',
+        '-c',
+        'sandbox_mode="workspace-write"',
+        ...workspaceWrite(true),
+        ...untrusted,
+        '--',
+        'pnpm',
+        'install',
+        '--frozen-lockfile',
+        '--ignore-scripts',
+        '--ignore-pnpmfile',
+        '--config.manage-package-manager-versions=false',
+      ],
+      cwd: checkout,
+      store: join(dirname(checkout), 'tmp', 'pnpm-store'),
+    },
+  ]);
+  assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-C')), ['-s', 'workspace-write', ...workspaceWrite(false), ...untrusted]);
+  assert.equal(call.tmpdir, join(dirname(checkout), 'tmp'));
+  assert.equal(call.npmCache, join(call.tmpdir, 'npm'));
+  assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile [^`]*`, which runs no install scripts/);
+  assert.match(call.prompt, /\n    Packages: \+3\n    Done in 1s\n/);
+  assert.match(call.prompt, /you may run the typecheck, tests or build/);
+  assert.match(call.prompt, /There is no network, so you can not install anything/);
+  assert.match(call.prompt, /changes you make to it are lost/);
+  assert.doesNotMatch(call.prompt, /Do not modify any files/);
+  // Removed afterwards, read-only directories and all. The review is posted before the cleanup finishes.
+  await server.service.codex!.settle((await human('GET', base)).id);
+  assert.equal(existsSync(dirname(checkout)), false);
   assert.doesNotMatch(git('worktree', 'list'), /laatsux-review-/);
 
   // The cap: after one automatic review, a new commit and another wait start nothing.
@@ -529,21 +593,41 @@ test('codex reviews when the author waits, within the limits in settings', async
 
   // Raising this pull request's limit lets Codex go on, at once when the author is waiting.
   assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /data-limit="1"[^]*js-codex-step[^]*js-codex-step/);
+  // This time the install fails; Codex reviews anyway and is told why.
+  process.env.FAKE_INSTALL_FAIL = '1';
   const resumed = cli(['pr', 'wait', String(number), '--timeout', '20s']);
   for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
   const selfRaise = await cli(['api', '-X', 'PATCH', `repos/{owner}/{repo}/pulls/${number}/reviewers/codex`, '-F', 'max_iterations=9']);
   assert.equal(selfRaise.code, 1, 'agents cannot raise their own limit');
   assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: '2' }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: 2 } });
   const second = await resumed;
+  delete process.env.FAKE_INSTALL_FAIL;
   assert.equal(second.code, 0, second.stderr);
   assert.match(second.stdout, /automatic review 2 of 2/);
+  const failedInstall = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  assert.match(failedInstall.prompt, /laatsux could not install the dependencies: `pnpm install [^`]*` exited with 1\. Its output ended with:\n\n    ERR_PNPM_OUTDATED_LOCKFILE\n/);
 
-  // Asking from the page ignores the cap, and a failed run keeps its error.
+  // Asking from the page ignores the cap, and a failed run keeps its error. With running the
+  // tests turned off, Codex gets today's read-only sandbox and is told not to modify files.
   process.env.FAKE_CODEX_FAIL = '1';
+  await human('PUT', '/api/settings/codex', { runTests: false });
+  assert.doesNotMatch(await (await fetch(`${server.url}/settings`)).text(), /name="runTests" checked/);
   const pull = await human('GET', base);
   await human('POST', `${base}/reviewers/codex`);
   await server.service.codex!.settle(pull.id);
   delete process.env.FAKE_CODEX_FAIL;
+  const readOnly = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  assert.deepEqual(readOnly.args.slice(readOnly.args.indexOf('-s'), readOnly.args.indexOf('-C')), [
+    '-s',
+    'read-only',
+    '-c',
+    `projects={${JSON.stringify(readOnly.args[readOnly.args.indexOf('-C') + 1])}={trust_level="untrusted"}}`,
+  ]);
+  assert.equal(installs().length, 2, 'nothing is installed for a read-only review');
+  assert.equal(readOnly.tmpdir, process.env.TMPDIR);
+  assert.match(readOnly.prompt, /Do not modify any files\./);
+  assert.doesNotMatch(readOnly.prompt, /install the dependencies/);
+  await human('PUT', '/api/settings/codex', { runTests: true });
   const { runs } = await human('GET', `${base}/reviewers/codex`);
   assert.deepEqual(runs.map((x: any) => [x.trigger, x.status]), [['auto', 'done'], ['auto', 'done'], ['manual', 'failed']]);
   assert.match(runs[2].error, /model overloaded/);
@@ -585,7 +669,47 @@ test('codex reviews when the author waits, within the limits in settings', async
   const waited = await cli(['pr', 'wait', byCodex.stdout.trim().split('/').pop()!, '--timeout', '20s'], { actor: 'codex-agent' });
   assert.equal(waited.code, 0, waited.stderr);
   assert.match(waited.stdout, /codex reviewed: commented/);
+  // Without a lockfile nothing is installed, and Codex is told so.
+  const noLockfile = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  assert.match(noLockfile.prompt, /No dependencies are installed: the repository root has no lockfile/);
+  assert.equal(installs().length, 2);
   await human('PUT', '/api/settings/codex', { enabled: false });
+});
+
+test('symlinks in a pull request lead the reviewer nowhere: not to /dev/zero, not outside the checkout', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'laatsux-outside-'));
+  writeFileSync(join(outside, 'secret'), 'keep\n');
+  chmodSync(join(outside, 'secret'), 0o444);
+  chmodSync(outside, 0o555);
+  try {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', 'feature/symlinks');
+    // Read from the checkout, package.json would never end and the symlinked lockfile would win.
+    symlinkSync('/dev/zero', join(repo, 'package.json'));
+    symlinkSync(join(outside, 'secret'), join(repo, 'pnpm-lock.yaml'));
+    symlinkSync(outside, join(repo, 'vendor'));
+    writeFileSync(join(repo, 'package-lock.json'), '{}\n');
+    git('add', 'package.json', 'pnpm-lock.yaml', 'vendor', 'package-lock.json');
+    git('commit', '-qm', 'Link things');
+    const created = await cli(['pr', 'create', '--title', 'Link things', '--body', 'x']);
+    assert.equal(created.code, 0, created.stderr);
+    const base = `/api/repos/acme/widgets/pulls/${created.stdout.trim().split('/').pop()}`;
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
+    const pull = await human('GET', base);
+    await human('POST', `${base}/reviewers/codex`);
+    await server.service.codex!.settle(pull.id);
+    const { runs } = await human('GET', `${base}/reviewers/codex`);
+    assert.deepEqual(runs.map((x: any) => x.status), ['done']);
+    const install = readFileSync(process.env.FAKE_CODEX_SANDBOX_LOG!, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).at(-1);
+    assert.deepEqual(install.args.slice(install.args.indexOf('--') + 1, install.args.indexOf('--') + 3), ['npm', 'ci']);
+    // Cleaning up the checkout made nothing outside it writable, and removed nothing there.
+    assert.equal(readFileSync(join(outside, 'secret'), 'utf8'), 'keep\n');
+    assert.equal(statSync(join(outside, 'secret')).mode & 0o777, 0o444);
+    assert.equal(statSync(outside).mode & 0o777, 0o555);
+  } finally {
+    chmodSync(outside, 0o755);
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test('a review still running shows in pr view and pr wait, and publishing before it needs a confirmation', async () => {

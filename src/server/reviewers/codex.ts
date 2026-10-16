@@ -1,15 +1,16 @@
 // Codex as a reviewer agent. When the author waits for review, Codex reviews the head
-// commit in a throwaway checkout (read-only sandbox) and laatsux posts what it found as a
-// GitHub-style review from the reviewer bot (named in settings, "codex" by default), which
-// wakes the author's `pr wait`.
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+// commit in a throwaway checkout (where it may run the tests, or read-only, as settings say)
+// and laatsux posts what it found as a GitHub-style review from the reviewer bot (named in
+// settings, "codex" by default), which wakes the author's `pr wait`.
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { run } from '../git.ts';
+import { run, type Repo } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
 import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, type CodexSettings } from '../settings.ts';
+import { cacheEnv, installCommand } from './install.ts';
 
 export interface ModelInfo {
   slug: string;
@@ -77,6 +78,51 @@ const SCHEMA = {
 };
 
 const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+/** Running the tests takes longer than reading. */
+const TEST_RUN_TIMEOUT_MS = 60 * 60 * 1000;
+const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Codex's workspace-write sandbox: it writes only to the checkout and the TMPDIR it is given
+ * beside it. Every setting is given here, or Codex takes it from the user's config.toml, where
+ * writable_roots or network_access may open more. /tmp and the server's own TMPDIR are left
+ * out, since repositories and other agents' worktrees can live there. The user's repository
+ * stays read-only: Codex protects the checkout's .git and the worktree's git directory it
+ * points to, and the rest of the repository is outside what it may write. Network is only for
+ * installing dependencies: with it, code from the pull request could reach laatsux's API on
+ * localhost and act as the user.
+ */
+function workspaceWrite(network: boolean): string[] {
+  return [
+    '-c',
+    `sandbox_workspace_write.network_access=${network}`,
+    '-c',
+    'sandbox_workspace_write.writable_roots=[]',
+    '-c',
+    'sandbox_workspace_write.exclude_slash_tmp=true',
+    '-c',
+    'sandbox_workspace_write.exclude_tmpdir_env_var=false',
+  ];
+}
+
+/**
+ * Codex loads a trusted project's .codex/config.toml, whose MCP servers it starts outside the
+ * sandbox, and on a writable checkout it marks the user's repository trusted in their
+ * config.toml. Marking the checkout untrusted turns both off; it outranks the repository's
+ * own trust.
+ */
+function untrusted(checkout: string): string[] {
+  return ['-c', `projects={${JSON.stringify(checkout)}={trust_level="untrusted"}}`];
+}
+
+/** How installing the dependencies went, for the prompt. */
+interface Installed {
+  command: string;
+  /** Why it failed; null when it worked. */
+  failure: string | null;
+  output: string;
+}
+
 /** Heads the list of findings on lines outside the diff in a review's body. */
 const OUTSIDE_THE_DIFF = '**Comments on lines outside the diff**';
 /** What the CLI calls an author agent running in Codex (see cliActor in src/config.ts). */
@@ -427,24 +473,37 @@ export class CodexReviewer {
   private async review(ctx: Ctx, runId: number, settings: CodexSettings, trigger: 'auto' | 'manual', signal: AbortSignal): Promise<void> {
     const { git } = ctx;
     const pull = ctx.pull;
-    const dir = mkdtempSync(join(tmpdir(), 'laatsux-review-'));
+    // The real path (/private/var, not /var), as Codex sees it, so the trust setting for the checkout applies.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'laatsux-review-')));
     const checkout = join(dir, 'checkout');
     const schemaFile = join(dir, 'schema.json');
     const outFile = join(dir, 'review.json');
+    // The one place besides the checkout that Codex may write to when it runs the tests.
+    const tmp = join(dir, 'tmp');
+    const timeoutMs = settings.runTests ? TEST_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS;
     try {
       await git.run(['worktree', 'add', '--detach', checkout, pull.head_sha]);
       writeFileSync(schemaFile, JSON.stringify(SCHEMA));
-      const args = ['exec', '--ephemeral', '--skip-git-repo-check', '-s', 'read-only', '-C', checkout, '--color', 'never', '--output-schema', schemaFile, '-o', outFile];
+      let env: NodeJS.ProcessEnv | undefined;
+      let installed: Installed | null = null;
+      if (settings.runTests) {
+        mkdirSync(tmp);
+        env = cacheEnv(tmp);
+        installed = await this.install(git, pull.head_sha, checkout, tmp, env, signal);
+        if (signal.aborted) throw new Error('The laatsux server stopped during the review.');
+      }
+      const sandbox = settings.runTests ? ['-s', 'workspace-write', ...workspaceWrite(false)] : ['-s', 'read-only'];
+      const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), '-C', checkout, '--color', 'never', '--output-schema', schemaFile, '-o', outFile];
       if (settings.model) args.push('-m', settings.model);
       if (settings.effort) args.push('-c', `model_reasoning_effort="${settings.effort}"`);
       args.push('-');
-      const input = await this.prompt(ctx, trigger, settings);
-      const r = await run(this.bin, args, { cwd: checkout, input, allowFail: true, timeoutMs: RUN_TIMEOUT_MS, signal }).catch((e: Error) => {
+      const input = await this.prompt(ctx, trigger, settings, installed);
+      const r = await run(this.bin, args, { cwd: checkout, env, input, allowFail: true, timeoutMs, signal }).catch((e: Error) => {
         throw new Error(`could not run ${this.bin}: ${e.message}`);
       });
       if (signal.aborted) throw new Error('The laatsux server stopped during the review.');
       if (r.code !== 0) {
-        const why = r.timedOut ? `timed out after ${RUN_TIMEOUT_MS / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
+        const why = r.timedOut ? `timed out after ${timeoutMs / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
         throw new Error(`codex ${why}:\n${lastLines(r.stderr || r.stdout, 15)}`);
       }
       let result: Result;
@@ -455,8 +514,28 @@ export class CodexReviewer {
       }
       await this.post(ctx, runId, result, settings, trigger);
     } finally {
+      // Some tools leave read-only directories (Go's module cache), which neither git nor rmSync can remove.
+      if (settings.runTests) await run('chmod', ['-R', 'u+w', dir], { allowFail: true });
       await git.run(['worktree', 'remove', '--force', checkout], { allowFail: true });
       rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Install the checkout's dependencies before Codex starts, in its sandbox with network, from
+   * the lockfile and without running the repository's scripts. Null when there is no lockfile.
+   */
+  private async install(git: Repo, sha: string, checkout: string, tmp: string, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Installed | null> {
+    const how = await installCommand(git, sha, tmp);
+    if (!how) return null;
+    const command = how.command.join(' ');
+    const args = ['sandbox', '-c', 'sandbox_mode="workspace-write"', ...workspaceWrite(true), ...untrusted(checkout), '--', ...how.command];
+    try {
+      const r = await run(this.bin, args, { cwd: checkout, env: { ...env, ...how.env }, allowFail: true, timeoutMs: INSTALL_TIMEOUT_MS, signal });
+      const failure = r.code === 0 ? null : r.timedOut ? `timed out after ${INSTALL_TIMEOUT_MS / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
+      return { command, failure, output: lastLines(`${r.stdout}\n${r.stderr}`, 20) };
+    } catch (e) {
+      return { command, failure: 'could not start', output: (e as Error).message };
     }
   }
 
@@ -504,7 +583,7 @@ export class CodexReviewer {
     this.s.db.update('review_runs', runId, { status: 'done', review_id: review.id, findings: inline.length + loose.length, finished_at: now() });
   }
 
-  private async prompt(ctx: Ctx, trigger: 'auto' | 'manual', settings: CodexSettings): Promise<string> {
+  private async prompt(ctx: Ctx, trigger: 'auto' | 'manual', settings: CodexSettings, installed: Installed | null): Promise<string> {
     const { pull } = ctx;
     const commits = await this.s.commits(ctx);
     const threads = (await this.s.threads(ctx, this.actor())).filter((t) => !t.pending && !t.resolved);
@@ -520,8 +599,9 @@ export class CodexReviewer {
       `The pull request is everything between ${pull.base_sha} (where it branched off ${pull.base_ref}) and HEAD (${pull.head_sha}). Commits:`,
       ...commits.map((c) => `- ${c.sha.slice(0, 7)} ${c.message.split('\n')[0]}`),
       '',
-      `Run \`git diff ${pull.base_sha} HEAD\` to see the changes and read the surrounding code as needed. Do not modify any files.`,
+      `Run \`git diff ${pull.base_sha} HEAD\` to see the changes and read the surrounding code as needed.${settings.runTests ? '' : ' Do not modify any files.'}`,
       '',
+      ...(settings.runTests ? [...testInstructions(installed), ''] : []),
       'Look for bugs, regressions, security problems, missing error handling, and changes that do not do what the description says. Mention missing tests only where they matter. Skip style preferences and anything a formatter or linter would catch. If the pull request is fine, say so in the summary and leave no comments.',
       '',
       'Focus on problems this change introduces or makes reachable. An issue that was there before it, or one outside what the pull request sets out to do, is not a defect of this change: say in the comment that it is pre-existing or out of scope, and give it low priority.',
@@ -597,6 +677,21 @@ function outsideTheDiff(body: string): number {
   // The list is the paragraph after the heading; a finding's own lines are indented.
   const list = body.slice(at).split('\n\n')[1] ?? '';
   return list.split('\n').filter((l) => l.startsWith('- `')).length;
+}
+
+/** What Codex is told about the installed dependencies and running the tests. */
+function testInstructions(installed: Installed | null): string[] {
+  const indent = (text: string) => text.replace(/^/gm, '    ');
+  const out = !installed
+    ? ['No dependencies are installed: the repository root has no lockfile laatsux installs from (pnpm-lock.yaml, package-lock.json, yarn.lock or bun.lock).']
+    : installed.failure
+      ? [`laatsux could not install the dependencies: \`${installed.command}\` ${installed.failure}. Its output ended with:`, '', indent(installed.output)]
+      : [`laatsux installed the dependencies with \`${installed.command}\`, which runs no install scripts, so a package that needs a build step may not work. Its output ended with:`, '', indent(installed.output)];
+  out.push(
+    '',
+    "To check your findings, you may run the typecheck, tests or build with the repository's own tooling (its package scripts). There is no network, so you can not install anything: a check that fails for lack of network, a missing dependency or tool, or the sandbox is not a finding. You can write only to this checkout and $TMPDIR (point caches there). The checkout is thrown away after the review, so changes you make to it are lost: report findings only in your answer.",
+  );
+  return out;
 }
 
 function lastLines(text: string, n: number): string {
