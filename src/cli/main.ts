@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { ApiError, CliError, Client } from './client.ts';
 import { pr } from './pr.ts';
 import { api } from './api.ts';
+import { browse } from './browse.ts';
 import { err, out } from './output.ts';
 import { DEFAULT_PORT, VERSION, dataDir } from '../config.ts';
 
@@ -17,7 +18,7 @@ COMMANDS
   pr:          Work with staged pull requests (like \`gh pr\`)
   api:         Make an API request (like \`gh api\`)
   serve:       Run the server and web UI
-  browse:      Open the web UI
+  browse:      Print and open the web UI's URL for a pull request, file or directory (like \`gh browse\`)
 
 ENVIRONMENT
   LAATSUX_URL     Server URL (default http://localhost:${DEFAULT_PORT})
@@ -60,12 +61,8 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       case 'serve':
       case 'server':
         return await serve(rest);
-      case 'browse': {
-        const url = client.base;
-        (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { stdio: 'ignore', detached: true }).unref();
-        out(url);
-        return 0;
-      }
+      case 'browse':
+        return await browse(client, cwd, rest);
       case '--version':
       case 'version':
         out(`laatsux version ${VERSION}`);

@@ -1,9 +1,10 @@
 import { Hono, type Context } from 'hono';
 import { GitError } from './git.ts';
 import { HttpError, type Ctx, type ReviewEvent, type Service } from './service.ts';
-import { now, type Actor, type ActorType, type PullRow } from './db.ts';
+import { now, type Actor, type ActorType, type PullRow, type RepoRow } from './db.ts';
 import {
   commitJson,
+  contentJson,
   fileJson,
   ghPullJson,
   issueCommentJson,
@@ -115,6 +116,37 @@ export function api(s: Service): Hono {
   });
   app.get('/repos', (c) => c.json(s.repos().map((r) => repoJson(s, r))));
   app.get('/repos/:owner/:repo', (c) => c.json(repoJson(s, s.repo(c.req.param('owner'), c.req.param('repo')))));
+
+  // GitHub's "get a commit" and "get repository content", used by `laatsux browse --repo`. A ref
+  // is anything git resolves (a SHA, a branch, HEAD); contents default to HEAD, where GitHub
+  // uses the default branch.
+  const commitFor = async (repo: RepoRow, ref: string): Promise<string> => {
+    const sha = ref.startsWith('-') ? null : await s.git(repo).resolve(ref);
+    if (!sha) throw new HttpError(422, `No commit found for SHA: ${ref}`);
+    return sha;
+  };
+  app.get('/repos/:owner/:repo/commits/:ref{.+}', async (c) => {
+    const repo = s.repo(c.req.param('owner'), c.req.param('repo'));
+    const sha = await commitFor(repo, c.req.param('ref'));
+    return c.json(commitJson(s, repo, null, (await s.git(repo).commit(sha))!));
+  });
+  const contents = async (c: Context) => {
+    const repo = s.repo(c.req.param('owner')!, c.req.param('repo')!);
+    const git = s.git(repo);
+    const sha = await commitFor(repo, c.req.query('ref') ?? 'HEAD');
+    const path = (c.req.param('path') ?? '').replace(/\/$/, '');
+    // Paths are looked up in git's objects only, never on disk.
+    const entry = path && path.split('/').some((p) => p === '' || p === '.' || p === '..') ? null : await git.entry(sha, path);
+    if (!entry) throw new HttpError(404, 'Not Found');
+    if (entry.type === 'tree') return c.json((await git.tree(sha, path))!.map((e) => contentJson(s, repo, sha, path ? `${path}/${e.name}` : e.name, e)));
+    const json = contentJson(s, repo, sha, path, entry);
+    if (entry.type !== 'blob') return c.json(json);
+    // As on GitHub, files over 1 MB come without their content.
+    const bytes = (entry.size ?? 0) <= 1024 * 1024 ? await git.blob(sha, path) : null;
+    return c.json({ ...json, encoding: bytes ? 'base64' : 'none', content: bytes ? bytes.toString('base64') : '' });
+  };
+  app.get('/repos/:owner/:repo/contents', contents);
+  app.get('/repos/:owner/:repo/contents/:path{.+}', contents);
 
   // ------------------------------------------------------- gh-shaped (CLI)
 

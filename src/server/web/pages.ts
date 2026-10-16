@@ -20,7 +20,9 @@ import {
   timelineBadge,
   timelineComment,
 } from './components.ts';
-import { diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
+import { browseUrl, diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
+import { withThreadContext } from './browse.ts';
+import type { Span } from '../diff.ts';
 
 // ------------------------------------------------------------------ lists
 
@@ -394,7 +396,7 @@ function sidebar(p: PullPage): Safe {
   <div class="sidebar-item"><h3 class="sidebar-heading">Revisions</h3>
     <ol class="sidebar-list revision-list">${revisions.map((r, i) => {
       const prev = revisions[i - 1];
-      return html`<li><a href="${p.htmlBase}/files${prev ? `?range=${prev.head_sha}..${r.head_sha}` : ''}" title="${prev ? 'Changes in this revision' : 'Files at the first revision'}"><code>${shortSha(r.head_sha)}</code></a> ${r.forced ? html`<span class="Label Label--small">force-push</span>` : ''} <span class="color-fg-muted">${relTime(r.created_at)}</span></li>`;
+      return html`<li><a href="${p.htmlBase}/files${prev ? `?range=${prev.head_sha}..${r.head_sha}` : ''}" title="${prev ? 'Changes in this revision' : 'Files at the first revision'}"><code>${shortSha(r.head_sha)}</code></a> ${r.forced ? html`<span class="Label Label--small">force-push</span>` : ''} <span class="color-fg-muted">${relTime(r.created_at)}</span> <a class="revision-browse link-muted" href="${browseUrl(`/${repo.owner}/${repo.name}`, 'tree', r.head_sha, '')}" title="Browse the repository at this revision" aria-label="Browse files at ${shortSha(r.head_sha)}">${icon('code')}</a></li>`;
     })}</ol>
   </div>
   <div class="sidebar-item"><h3 class="sidebar-heading">Repository</h3>
@@ -582,6 +584,7 @@ export function commitsPage(p: PullPage): string {
             <button type="button" class="btn btn-sm js-commit-comment" title="Comment on this commit's message">${icon('comment')}${threads.length ? html` ${threads.length}` : ''}</button>
             <a class="btn btn-sm commit-sha" href="${p.htmlBase}/files?commit=${c.sha}"><code>${shortSha(c.sha)}</code></a>
             ${copyButton(c.sha, 'Copy full SHA')}
+            <a class="btn btn-sm" href="${browseUrl(`/${p.repo.owner}/${p.repo.name}`, 'tree', c.sha, '')}" title="Browse the repository at this commit" aria-label="Browse files">${icon('code')}</a>
           </div>
         </div>
         <div class="commit-threads">${threads.map((t) => reviewThread(s, t, opts))}</div>
@@ -630,6 +633,7 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
   // Threads that belong in this view, keyed by where they sit.
   const threadsAt = new Map<string, Thread[]>();
   const fileThreads = new Map<string, Thread[]>();
+  const spans = new Map<string, Span[]>();
   for (const t of p.threads) {
     const r = t.root;
     if (r.subject_type === 'commit') continue;
@@ -646,11 +650,14 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
     }
     const key = threadKey(r.path!, r.side!, line!);
     threadsAt.set(key, [...(threadsAt.get(key) ?? []), t]);
+    spans.set(r.path!, [...(spans.get(r.path!) ?? []), { side: r.side!, line: line!, startSide: r.start_side, startLine: fullView ? t.placement.startLine : r.start_line }]);
   }
+  const shown = await withThreadContext(ctx.git, head, files, spans);
 
   const viewed = s.viewed(pull);
   const opts = threadOpts(p, false);
-  const rendered = files.map((f) => renderFile(f, { mode, threadsAt, viewed, fileThreads, renderThread: (t, lines) => reviewThread(s, t, { ...opts, suggestionLines: lines }) }));
+  const browse = { repo: `/${p.repo.owner}/${p.repo.name}`, base, head };
+  const rendered = shown.files.map((f) => renderFile(f, { mode, threadsAt, viewed, fileThreads, browse, totals: shown.totals, renderThread: (t, lines) => reviewThread(s, t, { ...opts, suggestionLines: lines }) }));
   const viewedCount = fullView ? files.filter((f) => viewed.get(f.path) === (f.newBlob ?? f.oldBlob ?? `${f.additions}-${f.deletions}`)).length : 0;
 
   const lastReview = [...p.reviews].reverse().find((r) => r.author_id === p.viewer.id && r.state !== 'PENDING');

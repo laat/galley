@@ -127,6 +127,7 @@ setting, unless they say otherwise when they ask you to stage:
 | `gh api repos/{owner}/{repo}/pulls/N/comments` | same path | REST subset; see `laatsux api --help` |
 | | `laatsux pr wait` | block until feedback |
 | | `laatsux pr comment --reply-to ID [--resolve]` | reply to a review thread, and resolve it |
+| `gh browse path:line --commit sha` | `laatsux browse path:line[-line] [--commit sha]` | prints a link to those lines in the web UI (default: HEAD); give it to the user when you point at code |
 
 `laatsux api` speaks the GitHub REST shapes for pulls, review comments, reviews and issue
 comments, with `-f`, `-F`, `-X`, `--input` and `--jq`. GraphQL is not supported.

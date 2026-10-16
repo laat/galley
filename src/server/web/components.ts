@@ -41,7 +41,7 @@ ${opts.subnav ?? ''}
  * The repository's tabs, as on GitHub: the staged pull requests here, and the pull requests
  * and issues of the repository on GitHub (opening there).
  */
-export function repoNav(s: Service, repo: RepoRow): Safe {
+export function repoNav(s: Service, repo: RepoRow, selected: 'staged' | null = 'staged'): Safe {
   const staged = s.pulls(repo, { state: 'open' }).length;
   const slug = repo.github_slug;
   const counts = slug ? s.githubCounts(slug) : null;
@@ -49,7 +49,7 @@ export function repoNav(s: Service, repo: RepoRow): Safe {
   const external = (path: string, iconName: string, label: string, n: number | undefined) =>
     html`<a class="UnderlineNav-item" href="https://github.com/${slug}/${path}" target="_blank" rel="noopener" title="${label} on GitHub">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
   return html`<nav class="UnderlineNav" aria-label="Repository">
-  <a class="UnderlineNav-item selected" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} Staged${counter(staged)}</a>
+  <a class="UnderlineNav-item${selected === 'staged' ? ' selected' : ''}" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} Staged${counter(staged)}</a>
   ${slug ? external('pulls', 'mark-github', 'Pull requests', counts?.pulls) : ''}
   ${slug ? external('issues', 'issue-opened', 'Issues', counts?.issues) : ''}
 </nav>`;

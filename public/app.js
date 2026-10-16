@@ -65,15 +65,20 @@
     for (const [key, d] of drafts()) {
       let ta = $(`textarea[data-draft-key="${CSS.escape(key)}"]`);
       if (!ta && d.meta) ta = reopenForm(d.meta);
-      if (!ta) continue;
-      if (!ta.value || ta.value === ta.defaultValue) {
-        ta.value = withoutStaleUploads(d.value);
-        if (ta.value !== d.value) saveDraftOf(ta);
-      }
-      const priority = ta.closest('.inline-comment-form') && $('select[name=priority]', ta.closest('.inline-comment-form'));
-      if (priority && d.priority && !priority.value) priority.value = d.priority;
-      reveal(ta);
+      if (ta) fillDraft(ta, d);
+      // A comment on lines that are folded away again: load them first.
+      else if (d.meta && d.meta.kind === 'line') unfoldFor(d.meta).then((t) => t && fillDraft(t, d), () => {});
     }
+  }
+
+  function fillDraft(ta, d) {
+    if (!ta.value || ta.value === ta.defaultValue) {
+      ta.value = withoutStaleUploads(d.value);
+      if (ta.value !== d.value) saveDraftOf(ta);
+    }
+    const priority = ta.closest('.inline-comment-form') && $('select[name=priority]', ta.closest('.inline-comment-form'));
+    if (priority && d.priority && !priority.value) priority.value = d.priority;
+    reveal(ta);
   }
 
   /** Show the (hidden) form a textarea lives in. */
@@ -104,7 +109,7 @@
 
   // ------------------------------------------------------------- refresh
 
-  const userState = { collapsed: new Map(), threads: new Map() };
+  const userState = { collapsed: new Map(), threads: new Map(), expanded: new Map() };
   let refreshing = null;
 
   async function refresh() {
@@ -142,6 +147,8 @@
     restoreDrafts();
     updateTimes();
     markActiveTreeItem();
+    markLines(false);
+    restoreExpanded().then(restoreDrafts);
   }
 
   // ---------------------------------------------------------------- toast
@@ -699,6 +706,8 @@
       const end = cellFor(meta.path, meta.side, meta.line);
       if (!end) return null;
       const start = meta.startLine ? cellFor(meta.path, meta.startSide, meta.startLine) : null;
+      // A range reopens whole or not at all, so it never turns into a comment on its last line.
+      if (meta.startLine && !start) return null;
       return openLineForm(end, start);
     }
     if (meta.kind === 'file') {
@@ -805,6 +814,154 @@
     if (toggle) toggle.setAttribute('aria-expanded', String(!collapsed));
   }
 
+  // ------------------------------------------------------ expand context
+  // The unfold arrows on a hunk header load the unchanged lines above it (GitHub's
+  // blob_excerpt). Lines a reviewer loaded come back after a live refresh, and can carry comments.
+
+  const EXPAND_STEP = 20;
+
+  const gapOf = (row) => ({ from: Number(row.dataset.gapFrom), to: Number(row.dataset.gapTo), delta: Number(row.dataset.delta) });
+
+  /** The arrows that fit what is left of a gap: one for a short gap, else down (under the hunk above) and up. */
+  function updateGapRow(row) {
+    const { from, to } = gapOf(row);
+    const size = to - from + 1;
+    const show = { all: size <= EXPAND_STEP, down: size > EXPAND_STEP && from > 1, up: size > EXPAND_STEP && !row.classList.contains('hunk-row-end') };
+    for (const b of $$('.js-expand', row)) {
+      b.hidden = !show[b.dataset.dir];
+      b.disabled = false;
+    }
+  }
+
+  /** Each hunk header says which lines follow it, as `git diff` would after loading the lines. */
+  function relabelHunks(table) {
+    for (const row of $$('tr.hunk-row:not(.hunk-row-end)', table)) {
+      const first = [null, null];
+      const count = [0, 0];
+      for (let r = row.nextElementSibling; r && !r.classList.contains('hunk-row'); r = r.nextElementSibling) {
+        if (!r.classList.contains('line')) continue;
+        $$('td.blob-num', r).forEach((td, i) => {
+          if (!td.dataset.num) return;
+          if (first[i] === null) first[i] = td.dataset.num;
+          count[i]++;
+        });
+      }
+      const section = row.dataset.section;
+      $('.blob-code-hunk', row).textContent = `@@ -${first[0] ?? 0},${count[0]} +${first[1] ?? 0},${count[1]} @@${section ? ' ' + section : ''}`;
+    }
+  }
+
+  /** Load lines from..to (new side) of the gap above `row`. */
+  async function loadGap(row, from, to) {
+    const file = row.closest('.file');
+    const gap = gapOf(row);
+    from = Math.max(from, gap.from);
+    to = Math.min(to, gap.to);
+    if (from > to) return;
+    const table = row.closest('table');
+    const mode = table.classList.contains('diff-split') ? 'split' : 'unified';
+    const res = await fetch(`${file.dataset.excerpt}&from=${from}&to=${to}&delta=${gap.delta}&diff=${mode}`);
+    if (!res.ok) throw new Error(`Could not load lines ${from} to ${to}`);
+    const rows = document.createElement('template');
+    rows.innerHTML = await res.text();
+    if (!row.isConnected) return;
+    // Lines above the loaded ones stay folded behind a row of their own; this row keeps those below.
+    if (from > gap.from) {
+      const upper = row.cloneNode(true);
+      upper.classList.remove('hunk-row-end');
+      upper.dataset.gapTo = String(from - 1);
+      upper.dataset.section = '';
+      row.before(upper);
+      updateGapRow(upper);
+    }
+    row.before(rows.content);
+    if (to < gap.to) {
+      row.dataset.gapFrom = String(to + 1);
+      updateGapRow(row);
+    } else row.remove();
+    relabelHunks(table);
+  }
+
+  const expandedKey = (file) => `${ds().commitId}:${ds().baseCommitId}:${file.dataset.path}`;
+  const expanding = new WeakMap();
+
+  /**
+   * Load lines from..to (new side) wherever they are still folded in a file. A file loads one
+   * range at a time, so each sees the gaps the one before it left.
+   */
+  function expandRange(file, from, to, remember) {
+    if (remember) {
+      const key = expandedKey(file);
+      userState.expanded.set(key, [...(userState.expanded.get(key) || []), [from, to]]);
+    }
+    const run = (expanding.get(file) || Promise.resolve()).then(async () => {
+      for (const row of $$('tr.hunk-row[data-gap-from]', file)) {
+        const g = gapOf(row);
+        if (row.isConnected && from <= g.to && to >= g.from) await loadGap(row, from, to);
+      }
+    });
+    expanding.set(file, run.catch(() => {}));
+    return run;
+  }
+
+  /** After a refresh, load again what the reviewer had loaded. */
+  function restoreExpanded() {
+    return Promise.all(
+      $$('.file[data-excerpt]').map(async (file) => {
+        for (const [from, to] of userState.expanded.get(expandedKey(file)) || []) await expandRange(file, from, to, false).catch(() => {});
+      }),
+    );
+  }
+
+  /** Load the lines a draft line comment is on, with a few around them, and reopen its form. */
+  async function unfoldFor(meta) {
+    const file = $(`.file[data-path="${CSS.escape(meta.path)}"][data-excerpt]`);
+    if (!file) return null;
+    for (const [side, line] of [[meta.startSide, meta.startLine], [meta.side, meta.line]]) {
+      if (!line || cellFor(meta.path, side, line)) continue;
+      for (const row of $$('tr.hunk-row[data-gap-from]', file)) {
+        const g = gapOf(row);
+        const n = side === 'LEFT' ? line + g.delta : line;
+        if (n >= g.from && n <= g.to) {
+          await expandRange(file, n - 3, n + 3, true);
+          break;
+        }
+      }
+    }
+    return cellFor(meta.path, meta.side, meta.line) ? reopenForm(meta) : null;
+  }
+
+  // ----------------------------------------------------------- file view
+  // Line numbers select lines, shift-click a range, kept in the URL as #L12 or #L12-L20.
+
+  function selectedLines() {
+    const m = location.hash.match(/^#L(\d+)(?:-L(\d+))?$/);
+    if (!m) return null;
+    const a = Number(m[1]);
+    const b = Number(m[2] || m[1]);
+    if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) return null;
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+
+  // Walks the file's rows, not the numbers in the URL, so #L1-L1000000000 costs no more than the file.
+  function markLines(scroll) {
+    // Rendered Markdown and SVG have no line numbers: lines in the URL open the source, as on GitHub.
+    const rendered = $('.blob-body[data-plain]');
+    if (rendered && selectedLines()) return location.replace(rendered.dataset.plain + location.hash);
+    const table = $('.blob-table');
+    if (!table) return;
+    const sel = selectedLines();
+    let first = null;
+    for (const td of $$('td.js-line-number', table)) {
+      const n = Number(td.dataset.num);
+      const on = !!sel && n >= sel[0] && n <= sel[1];
+      td.parentElement.classList.toggle('selected-line', on);
+      if (on && !first) first = td;
+    }
+    if (scroll && first) first.scrollIntoView({ block: 'center' });
+  }
+  window.addEventListener('hashchange', () => markLines(true));
+
   function markActiveTreeItem() {
     const id = location.hash.slice(1);
     for (const a of $$('.file-tree a')) a.classList.toggle('active', a.getAttribute('href') === `#${id}`);
@@ -822,7 +979,22 @@
     // Close dropdowns when clicking elsewhere.
     for (const d of $$('details.dropdown[open]')) if (!d.contains(t)) d.open = false;
 
-    if ((el = on('.md-tab'))) {
+    if ((el = on('.js-expand'))) {
+      const row = el.closest('tr.hunk-row');
+      const { from, to } = gapOf(row);
+      const [a, b] = el.dataset.dir === 'up' ? [to - EXPAND_STEP + 1, to] : el.dataset.dir === 'down' ? [from, from + EXPAND_STEP - 1] : [from, to];
+      el.disabled = true;
+      expandRange(row.closest('.file'), a, b, true).catch((err) => {
+        el.disabled = false;
+        toast(err.message);
+      });
+    } else if ((el = on('.js-line-number'))) {
+      const n = Number(el.dataset.num);
+      const sel = selectedLines();
+      const hash = e.shiftKey && sel && n !== sel[0] ? `#L${Math.min(sel[0], n)}-L${Math.max(sel[0], n)}` : `#L${n}`;
+      history.replaceState(null, '', hash);
+      markLines(false);
+    } else if ((el = on('.md-tab'))) {
       const editor = el.closest('.md-editor');
       for (const tab of $$('.md-tab', editor)) tab.classList.toggle('selected', tab === el);
       el.dataset.tab === 'preview' ? showPreview(editor) : showWrite(editor);
@@ -999,6 +1171,7 @@
     if (localStorage.getItem('laatsux:tree-hidden')) document.body.classList.add('tree-hidden');
   } catch {}
   afterRender();
+  markLines(true);
   connectLive();
   setInterval(updateTimes, 30_000);
 })();

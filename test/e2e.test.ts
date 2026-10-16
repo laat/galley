@@ -4,7 +4,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1044,5 +1044,226 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     assert.doesNotMatch(before, /stored in laatsux/);
     await human('PATCH', base, { body: `Before and after:\n\n![before](${path})\n![after](${path.replace('.png', '.gif')})` });
     assert.match(await page(), /The description has 2 images stored in laatsux, which GitHub cannot show\. Remove them, or replace them with images uploaded to GitHub\./);
+  });
+});
+
+test('browsing the repository at a commit of a pull request', async (t) => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/browse');
+  const numbered = (n: number, change: (i: number) => string | null = () => null) =>
+    Array.from({ length: n }, (_, k) => change(k + 1) ?? `export const v${k + 1} = ${k + 1};`).join('\n') + '\n';
+  mkdirSync(join(repo, 'dir with space'));
+  writeFileSync(
+    join(repo, 'dir with space', 'notes.md'),
+    '# Notes\n\nSee [math](../math.js) and ![logo](../logo.png).\n\nFrom the root: [long](/long.js) ![root logo](/logo.png), [elsewhere](//example.com/x).\n\n![icon](../icon.svg) ![big](../big.svg) ![web](https://example.com/w.png) ![other](//example.com/o.png)\n\n[up](../) and [root](/)\n',
+  );
+  writeFileSync(join(repo, 'big.svg'), `<svg xmlns="http://www.w3.org/2000/svg"><!-- ${'x'.repeat(300_000)} --></svg>\n`);
+  writeFileSync(join(repo, 'long.js'), numbered(60));
+  writeFileSync(join(repo, 'page.html'), '<!doctype html><script>alert(document.cookie)</script>\n');
+  writeFileSync(join(repo, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>\n');
+  writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
+  writeFileSync(join(repo, 'data.bin'), Buffer.from([0, 1, 2, 0, 3]));
+  writeFileSync(join(repo, 'doomed.txt'), 'gone soon\n');
+  git('add', '-A');
+  git('commit', '-qm', 'Add files to browse');
+  const base = git('rev-parse', 'HEAD');
+  git('branch', 'browse-base');
+  // The pull request changes lines 10 and 50 of long.js; lines 14 to 46 stay unchanged, outside the diff.
+  writeFileSync(join(repo, 'long.js'), numbered(60, (i) => (i === 10 || i === 50 ? `export const v${i} = -${i};` : null)));
+  git('rm', '-q', 'doomed.txt');
+  git('commit', '-qam', 'Negate two values');
+  const head = git('rev-parse', 'HEAD');
+  const created = await cli(['pr', 'create', '--title', 'Negate', '--body', 'x', '--base', 'browse-base']);
+  assert.equal(created.code, 0, created.stderr);
+  const n = Number(created.stdout.trim().split('/').pop());
+  const page = async (path: string) => {
+    const res = await fetch(server.url + path, { redirect: 'manual' });
+    return { status: res.status, type: res.headers.get('content-type'), location: res.headers.get('location'), text: await res.text(), headers: res.headers };
+  };
+
+  await t.test('tree and blob views, with a path that has a space', async () => {
+    const root = await page(`/acme/widgets/tree/${head.slice(0, 7)}`);
+    assert.equal(root.status, 200);
+    assert.match(root.text, new RegExp(`<a href="/acme/widgets/tree/${head}/dir%20with%20space">dir with space</a>`));
+    assert.match(root.text, new RegExp(`<a href="/acme/widgets/blob/${head}/long.js">long.js</a>`));
+    assert.doesNotMatch(root.text, /doomed\.txt/);
+    const dir = await page(`/acme/widgets/tree/${head}/dir%20with%20space`);
+    assert.equal(dir.status, 200);
+    assert.match(dir.text, /<a href="[^"]*\/dir%20with%20space\/notes\.md">notes\.md<\/a>/);
+    // The README-like rendering and Markdown links point into the same commit.
+    const md = await page(`/acme/widgets/blob/${head}/dir%20with%20space/notes.md`);
+    assert.equal(md.status, 200);
+    assert.match(md.text, new RegExp(`<a href="/acme/widgets/blob/${head}/math\\.js">math</a>`));
+    assert.match(md.text, new RegExp(`<img src="/acme/widgets/raw/${head}/logo\\.png"`));
+    // "/x" is from the repository's root; "//host/x" is another site.
+    assert.match(md.text, new RegExp(`<a href="/acme/widgets/blob/${head}/long\\.js">long</a>`));
+    assert.match(md.text, new RegExp(`<img src="/acme/widgets/raw/${head}/logo\\.png" alt="root logo"`));
+    assert.match(md.text, /<a href="\/\/example\.com\/x">elsewhere<\/a>/);
+    // /raw serves SVG as text, so SVG images go inline; one too big to inline becomes a link.
+    assert.match(md.text, /<img src="data:image\/svg\+xml;base64,[A-Za-z0-9+\/=]+" alt="icon"/);
+    assert.match(md.text, new RegExp(`<a href="/acme/widgets/blob/${head}/big\\.svg">big</a>`));
+    // Other images stay only when they come from the web, as in comments.
+    assert.match(md.text, /<img src="https:\/\/example\.com\/w\.png" alt="web"/);
+    assert.match(md.text, /<img alt="other"/);
+    // The root is a directory, at /tree; /blob without a path goes there too.
+    assert.match(md.text, new RegExp(`<a href="/acme/widgets/tree/${head}">up</a> and <a href="/acme/widgets/tree/${head}">root</a>`));
+    assert.equal((await page(`/acme/widgets/blob/${head}`)).location, `/acme/widgets/tree/${head}`);
+    // Rendered files carry their source's URL, where app.js sends #L12 links.
+    assert.match(md.text, new RegExp(`<div class="blob-body" data-plain="/acme/widgets/blob/${head}/dir%20with%20space/notes\\.md\\?plain=1">`));
+    assert.match((await page(`/acme/widgets/blob/${head}/icon.svg`)).text, /data-plain="[^"]*\/icon\.svg\?plain=1"/);
+    const plain = await page(`/acme/widgets/blob/${head}/dir%20with%20space/notes.md?plain=1`);
+    assert.match(plain.text, /<td id="L3" class="blob-num js-line-number" data-num="3"><\/td>/);
+    assert.doesNotMatch(plain.text, /data-plain=/);
+    const code = await page(`/acme/widgets/blob/${head}/long.js`);
+    assert.match(code.text, /<td id="L60" class="blob-num js-line-number" data-num="60"><\/td><td class="blob-code"><span class="hljs-keyword">export<\/span>/);
+    assert.match(code.text, /60 lines/);
+    // The base commit still has the deleted file.
+    assert.equal((await page(`/acme/widgets/blob/${base}/doomed.txt`)).status, 200);
+    // A directory at a /blob URL and a file at a /tree URL go where they belong.
+    assert.equal((await page(`/acme/widgets/blob/${head}/dir%20with%20space`)).location, `/acme/widgets/tree/${head}/dir%20with%20space`);
+    assert.equal((await page(`/acme/widgets/tree/${head}/long.js`)).location, `/acme/widgets/blob/${head}/long.js`);
+  });
+
+  await t.test('raw files never run as HTML on this origin', async () => {
+    const html = await page(`/acme/widgets/raw/${head}/page.html`);
+    assert.equal(html.status, 200);
+    assert.equal(html.type, 'text/plain; charset=utf-8');
+    assert.equal(html.text, '<!doctype html><script>alert(document.cookie)</script>\n');
+    assert.equal(html.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(html.headers.get('content-security-policy')!, /sandbox/);
+    assert.equal(html.headers.get('cross-origin-resource-policy'), 'same-origin');
+    assert.equal((await page(`/acme/widgets/raw/${head}/icon.svg`)).type, 'text/plain; charset=utf-8');
+    assert.equal((await page(`/acme/widgets/raw/${head}/logo.png`)).type, 'image/png');
+    const bin = await page(`/acme/widgets/raw/${head}/data.bin`);
+    assert.equal(bin.type, 'application/octet-stream');
+    assert.equal(bin.headers.get('content-disposition'), "attachment; filename*=UTF-8''data.bin");
+    const spaced = await page(`/acme/widgets/raw/${head}/dir%20with%20space/notes.md`);
+    assert.match(spaced.text, /^# Notes/);
+  });
+
+  await t.test('unknown commits and paths are not found', async () => {
+    for (const path of [
+      `/acme/widgets/tree/${'0'.repeat(40)}`,
+      `/acme/widgets/tree/not-a-sha`,
+      `/acme/widgets/blob/${head}/nope.js`,
+      `/acme/widgets/raw/${head}/nope.js`,
+      `/acme/widgets/raw/${head}/dir%20with%20space`,
+      `/acme/widgets/tree/${head}/dir%20with%20space/..%2F..%2Fetc`,
+      `/acme/widgets/blob_excerpt/${head}?path=nope.js&from=1&to=2&delta=0`,
+      `/acme/nothing/tree/${head}`,
+    ]) {
+      assert.equal((await page(path)).status, 404, path);
+    }
+    assert.equal((await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=a&to=2&delta=0`)).status, 400);
+  });
+
+  await t.test('the unfold arrows load lines of the file as diff rows', async () => {
+    const files = await page(`/acme/widgets/pull/${n}/files`);
+    assert.match(files.text, new RegExp(`data-excerpt="/acme/widgets/blob_excerpt/${head}\\?path=long\\.js"`));
+    // Lines 14 to 46 are folded between the hunks, and lines 54 to 60 after the last.
+    assert.match(files.text, /<tr class="hunk-row" data-gap-from="14" data-gap-to="46" data-delta="0"/);
+    assert.match(files.text, /<tr class="hunk-row hunk-row-end" data-gap-from="54" data-gap-to="60" data-delta="0"/);
+    assert.match(files.text, new RegExp(`href="/acme/widgets/blob/${head}/long\\.js">View file`));
+    assert.match(files.text, new RegExp(`href="/acme/widgets/blob/${base}/doomed\\.txt">View old version`));
+    const rows = await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=20&to=22&delta=2`);
+    assert.equal(rows.status, 200);
+    assert.deepEqual([...rows.text.matchAll(/<tr class="line context"><td class="blob-num blob-num-context" data-num="(\d+)"><\/td><td class="blob-num blob-num-context" data-num="(\d+)"><\/td><td class="blob-code blob-code-context " data-side="RIGHT" data-line="(\d+)"/g)].map((m) => m.slice(1).map(Number)), [[18, 20, 20], [19, 21, 21], [20, 22, 22]]);
+    assert.match(rows.text, /export<\/span> <span class="hljs-keyword">const<\/span> v20/);
+    const split = await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=20&to=20&delta=0&diff=split`);
+    assert.match(split.text, /data-side="LEFT" data-line="20"[^]*data-side="RIGHT" data-line="20"/);
+    // Past the end of the file there is nothing to load.
+    assert.equal((await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=61&to=80&delta=0`)).text, '');
+  });
+
+  await t.test('lines loaded by the arrows can carry comments, which follow them across pushes', async () => {
+    const comment = await human('POST', `/api/repos/acme/widgets/pulls/${n}/comments`, { path: 'long.js', line: 30, side: 'RIGHT', body: 'Negate this one too.' });
+    assert.equal(comment.line, 30);
+    assert.equal(comment.diff_hunk, '@@ -27,4 +27,4 @@\n export const v27 = 27;\n export const v28 = 28;\n export const v29 = 29;\n export const v30 = 30;');
+    const range = await human('POST', `/api/repos/acme/widgets/pulls/${n}/comments`, { path: 'long.js', start_line: 8, line: 20, side: 'RIGHT', body: 'From a changed line into folded ones.' });
+    assert.match(range.diff_hunk, /v8 = 8;[^]*v10 = -10;[^]*v20 = 20;$/);
+    for (const bad of [{ line: 61 }, { line: -1 }, { start_line: 70, line: 30 }]) {
+      const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls/${n}/comments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'long.js', side: 'RIGHT', body: 'x', ...bad }) });
+      assert.equal(res.status, 422, JSON.stringify(bad));
+    }
+    // The Files changed tab shows the thread with the lines around it, as if expanded.
+    const files = await page(`/acme/widgets/pull/${n}/files`);
+    assert.match(files.text, /data-side="RIGHT" data-line="33"/);
+    assert.match(files.text, /Negate this one too\./);
+    let threads = JSON.parse((await cli(['pr', 'view', String(n), '--json', 'reviewThreads'])).stdout).reviewThreads;
+    assert.deepEqual(threads.map((th: any) => [th.line, th.isOutdated]), [[30, false], [20, false]]);
+    // Two lines added at the top: the threads move down with their lines and are not outdated.
+    writeFileSync(join(repo, 'long.js'), '// one\n// two\n' + numbered(60, (i) => (i === 10 || i === 50 ? `export const v${i} = -${i};` : null)));
+    git('commit', '-qam', 'Add a header');
+    threads = JSON.parse((await cli(['pr', 'view', String(n), '--json', 'reviewThreads'])).stdout).reviewThreads;
+    assert.deepEqual(threads.map((th: any) => [th.line, th.isOutdated]), [[32, false], [22, false]]);
+    // Changing the line itself makes it outdated, as for any comment.
+    writeFileSync(join(repo, 'long.js'), '// one\n// two\n' + numbered(60, (i) => (i === 10 || i === 50 || i === 30 ? `export const v${i} = -${i};` : null)));
+    git('commit', '-qam', 'Negate v30');
+    threads = JSON.parse((await cli(['pr', 'view', String(n), '--json', 'reviewThreads'])).stdout).reviewThreads;
+    assert.deepEqual(threads.map((th: any) => th.isOutdated), [true, false]);
+  });
+
+  await t.test('commits and revisions link to their tree', async () => {
+    const commits = await page(`/acme/widgets/pull/${n}/commits`);
+    assert.match(commits.text, new RegExp(`href="/acme/widgets/tree/${head}" title="Browse the repository at this commit"`));
+    const conversation = await page(`/acme/widgets/pull/${n}`);
+    assert.match(conversation.text, new RegExp(`href="/acme/widgets/tree/${head}" title="Browse the repository at this revision"`));
+  });
+
+  await t.test('laatsux browse prints the URL of a pull request, file or directory', async () => {
+    const browse = async (...args: string[]) => {
+      const r = await cli(['browse', ...args]);
+      assert.equal(r.code, 0, r.stderr);
+      return r.stdout.trim();
+    };
+    assert.equal(await browse('long.js:12', '--commit', head), `${server.url}/acme/widgets/blob/${head}/long.js#L12`);
+    assert.equal(await browse(`--commit=${head.slice(0, 7)}`, 'long.js:12-14'), `${server.url}/acme/widgets/blob/${head}/long.js#L12-L14`);
+    const now = git('rev-parse', 'HEAD');
+    assert.equal(await browse('dir with space/notes.md:2'), `${server.url}/acme/widgets/blob/${now}/dir%20with%20space/notes.md?plain=1#L2`);
+    assert.equal(await browse('icon.svg:1'), `${server.url}/acme/widgets/blob/${now}/icon.svg?plain=1#L1`);
+    assert.equal(await browse('icon.svg'), `${server.url}/acme/widgets/blob/${now}/icon.svg`);
+    assert.equal(await browse('dir with space/', '-c'), `${server.url}/acme/widgets/tree/${now}/dir%20with%20space`);
+    assert.equal(await browse(String(n)), `${server.url}/acme/widgets/pull/${n}`);
+    assert.equal(await browse(), `${server.url}/acme/widgets`);
+    assert.equal(await browse(head.slice(0, 7)), `${server.url}/acme/widgets/tree/${head}`);
+    const missing = await cli(['browse', 'doomed.txt']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /doomed\.txt does not exist at [0-9a-f]{7}/);
+    // The URLs work.
+    assert.equal((await page(new URL(await browse('long.js:12', '--commit', head)).pathname)).status, 200);
+  });
+
+  await t.test('laatsux browse --repo looks up commits and paths in that repository, through the server', async () => {
+    const other = join(dir, 'other');
+    execFileSync('git', ['init', '-q', '-b', 'main', other]);
+    execFileSync('git', ['-C', other, '-c', 'commit.gpgsign=false', '-c', 'user.name=Other', '-c', 'user.email=other@example.com', 'commit', '-q', '--allow-empty', '-m', 'Other']);
+    const browseFrom = (cwd: string, ...args: string[]) =>
+      exec(process.execPath, [BIN, 'browse', ...args], { cwd, env: { ...process.env, LAATSUX_URL: server.url, LAATSUX_ACTOR: 'agent', NO_COLOR: '1' } }).then(
+        (r) => r.stdout.trim(),
+        (e) => `exit ${e.code}: ${e.stderr.trim()}`,
+      );
+    // Without --commit, HEAD of that repository's checkout.
+    const now = git('rev-parse', 'HEAD');
+    for (const cwd of [other, dir]) {
+      assert.equal(await browseFrom(cwd, '-R', 'acme/widgets', 'dir with space/notes.md:2'), `${server.url}/acme/widgets/blob/${now}/dir%20with%20space/notes.md?plain=1#L2`, cwd);
+    }
+    assert.equal(await browseFrom(other, '-R', 'acme/widgets', 'long.js:3', '--commit', head.slice(0, 7)), `${server.url}/acme/widgets/blob/${head}/long.js#L3`);
+    assert.equal(await browseFrom(other, '--repo=acme/widgets', '-b', 'browse-base', 'doomed.txt'), `${server.url}/acme/widgets/blob/${base}/doomed.txt`);
+    assert.equal(await browseFrom(other, '-R', 'acme/widgets', '/dir with space/'), `${server.url}/acme/widgets/tree/${now}/dir%20with%20space`);
+    assert.match(await browseFrom(other, '-R', 'acme/widgets', 'nope.js'), /^exit 1: nope\.js does not exist at [0-9a-f]{7}$/);
+    assert.match(await browseFrom(other, '-R', 'acme/widgets', '-c', 'nope', 'long.js'), /^exit 1: no commit "nope" in acme\/widgets$/);
+
+    // The GitHub endpoints it uses.
+    const api = async (endpoint: string) => {
+      const r = await cli(['api', endpoint]);
+      return r.code === 0 ? JSON.parse(r.stdout) : r.stderr;
+    };
+    assert.deepEqual((await api(`repos/{owner}/{repo}/contents/dir%20with%20space?ref=${head}`)).map((e: any) => [e.type, e.path]), [['file', 'dir with space/notes.md']]);
+    const file = await api(`repos/{owner}/{repo}/contents/long.js?ref=${base}`);
+    assert.equal(Buffer.from(file.content, 'base64').toString(), numbered(60));
+    assert.equal(file.html_url, `${server.url}/acme/widgets/blob/${base}/long.js`);
+    assert.equal((await api('repos/{owner}/{repo}/commits/browse-base')).sha, base);
+    assert.match(await api(`repos/{owner}/{repo}/contents/nope.js?ref=${head}`), /HTTP 404/);
+    assert.match(await api('repos/{owner}/{repo}/commits/nope'), /No commit found for SHA: nope \(HTTP 422\)/);
   });
 });
