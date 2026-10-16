@@ -975,6 +975,31 @@
   }
   window.addEventListener('hashchange', markActiveTreeItem);
 
+  // A file's bubble in the tree goes to its unresolved conversations in turn, wrapping around.
+  // Per file it remembers the last one, and its place in case it was resolved since.
+  const treeThread = new Map();
+
+  function nextTreeThread(button) {
+    const path = $('a', button.closest('li')).dataset.path;
+    const ids = button.dataset.threads.split(' ');
+    const last = treeThread.get(path);
+    const index = (!last ? 0 : ids.includes(last.id) ? ids.indexOf(last.id) + 1 : last.index) % ids.length;
+    treeThread.set(path, { id: ids[index], index });
+    const thread = document.getElementById(`thread-${ids[index]}`);
+    if (!thread) return;
+    const file = thread.closest('.file');
+    if (file.classList.contains('is-collapsed') && $('.file-body', file).contains(thread)) {
+      userState.collapsed.set(file.dataset.path, false);
+      setCollapsed(file, false);
+    }
+    thread.open = true;
+    userState.threads.set(thread.dataset.thread, true);
+    thread.scrollIntoView({ block: thread.offsetHeight > innerHeight / 2 ? 'start' : 'center' });
+    for (const t of $$('.review-thread.is-flash')) t.classList.remove('is-flash');
+    void thread.offsetWidth; // restart the animation
+    thread.classList.add('is-flash');
+  }
+
   // --------------------------------------------------------------- clicks
 
   document.addEventListener('click', async (e) => {
@@ -1083,6 +1108,8 @@
     } else if ((el = on('.js-commit-expand'))) {
       const desc = $('.commit-desc', el.closest('.commit'));
       if (desc) desc.hidden = !desc.hidden;
+    } else if ((el = on('.js-tree-threads'))) {
+      nextTreeThread(el);
     } else if ((el = on('.js-tree-toggle'))) {
       document.body.classList.toggle('tree-hidden');
       try {

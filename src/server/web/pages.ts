@@ -753,7 +753,13 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
   const viewed = s.viewed(pull);
   const opts = threadOpts(p, false);
   const browse = { repo: `/${p.repo.owner}/${p.repo.name}`, base, head };
-  const rendered = shown.files.map((f) => renderFile(f, { mode, threadsAt, viewed, fileThreads, browse, totals: shown.totals, renderThread: (t, lines) => reviewThread(s, t, { ...opts, suggestionLines: lines }) }));
+  // Each file's unresolved conversations, as they render: what the file tree counts and goes to.
+  const unresolved = new Map<string, number[]>();
+  const renderThread = (t: Thread, lines: string[]) => {
+    if (!t.resolved && !t.pending) unresolved.set(t.root.path!, [...(unresolved.get(t.root.path!) ?? []), t.root.id]);
+    return reviewThread(s, t, { ...opts, suggestionLines: lines });
+  };
+  const rendered = shown.files.map((f) => renderFile(f, { mode, threadsAt, viewed, fileThreads, browse, totals: shown.totals, renderThread }));
   const viewedCount = fullView ? files.filter((f) => viewed.get(f.path) === (f.newBlob ?? f.oldBlob ?? `${f.additions}-${f.deletions}`)).length : 0;
 
   const lastReview = [...p.reviews].reverse().find((r) => r.author_id === p.viewer.id && r.state !== 'PENDING');
@@ -818,7 +824,7 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
   </div>
 </div>
 <div class="container container-full files-layout">
-  ${files.length ? fileTree(files, fullView ? viewed : new Map()) : ''}
+  ${files.length ? fileTree(files, fullView ? viewed : new Map(), unresolved) : ''}
   <div class="files">
     ${rendered.length ? rendered : html`<div class="blankslate"><h3>No changes</h3></div>`}
   </div>
