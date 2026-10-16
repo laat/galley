@@ -1,9 +1,10 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson } from './output.ts';
-import { conversationItems, formatConversation, reviewersAtWork, stillReviewing, viewPlain, viewTTY } from './format.ts';
+import { conversationItems, formatConversation, reviewersAtWork, stillReviewing, viewPlain, viewTTY, type ImageRef } from './format.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
@@ -89,6 +90,34 @@ async function resolvePull(client: Client, cwd: string, repoFlag: string | undef
   const pick = list.find((p) => p.state !== 'CLOSED') ?? list[0];
   if (!pick) throw new CliError(`no pull requests found for branch "${branch}"`);
   return { repo, number: pick.number };
+}
+
+/**
+ * Text that shows comments, with the images uploaded to laatsux in them as absolute URLs, or
+ * with `dir` (--download-images), as the files they were saved to: agents read image files,
+ * not URLs. `found` is the number of images.
+ */
+async function withImageFiles(client: Client, dir: string | undefined, render: (images: ImageRef) => string): Promise<{ text: string; found: number }> {
+  const found = new Set<string>();
+  const text = render((path) => (found.add(path), client.base + path));
+  if (dir === undefined || !found.size) return { text, found: found.size };
+  mkdirSync(dir, { recursive: true });
+  const saved = new Map<string, string>();
+  for (const path of found) {
+    // Named by their content, so a file already there is this image.
+    const file = resolve(dir, basename(path));
+    try {
+      if (!existsSync(file)) {
+        const res = await client.raw('GET', path);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+      }
+      saved.set(path, file);
+    } catch (e) {
+      err(`Could not download ${client.base}${path}: ${(e as Error).message}`);
+    }
+  }
+  return { text: render((path) => saved.get(path) ?? client.base + path), found: found.size };
 }
 
 const pullPath = (t: Target) => `${repoPath(t.repo)}/pulls/${t.number}`;
@@ -218,7 +247,12 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
 // --------------------------------------------------------------------- view
 
 async function view(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, { ...JSON_OPTS, comments: { type: 'boolean', short: 'c' }, web: { type: 'boolean', short: 'w' } });
+  const { values: v, positionals } = parse(args, {
+    ...JSON_OPTS,
+    comments: { type: 'boolean', short: 'c' },
+    web: { type: 'boolean', short: 'w' },
+    'download-images': { type: 'string' },
+  });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.web) {
     openBrowser(`${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`);
@@ -230,8 +264,10 @@ async function view(client: Client, cwd: string, args: string[]): Promise<number
     return 0;
   }
   const pr = await client.get(ghPath(t, []) + (v.comments ? '?seen=1' : ''));
-  out(isTTY ? viewTTY(pr) : viewPlain(pr));
-  if (v.comments) out(formatConversation(pr));
+  const dir = v['download-images'] as string | undefined;
+  const { text, found } = await withImageFiles(client, dir, (images) => (isTTY ? viewTTY(pr, images) : viewPlain(pr, images)) + (v.comments ? formatConversation(pr, images) : ''));
+  process.stdout.write(text);
+  if (found && dir === undefined) out(c.gray('Run again with --download-images <dir> to save the images as files.'));
   return 0;
 }
 
@@ -472,7 +508,7 @@ function transient(e: unknown): boolean {
 }
 
 async function wait(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, { timeout: { type: 'string' } });
+  const { values: v, positionals } = parse(args, { timeout: { type: 'string' }, 'download-images': { type: 'string' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const deadline = v.timeout ? Date.now() + parseDuration(String(v.timeout)) : Infinity;
   if (isTTY) err(`Waiting for feedback on ${t.repo.owner}/${t.repo.name}#${t.number}…`);
@@ -497,15 +533,18 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'timeout') continue;
     const url = `${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`;
     const pr = r.pr;
-    const items = conversationItems(pr, {
-      reviews: new Set(r.reviews),
-      comments: new Set(r.comments.filter((cm: any) => cm.kind === 'issue').map((cm: any) => cm.id)),
-      replies: new Set(r.comments.filter((cm: any) => cm.kind === 'review').map((cm: any) => cm.id)),
-    });
-    if (items.length) {
+    const fresh = {
+      reviews: new Set<number>(r.reviews),
+      comments: new Set<number>(r.comments.filter((cm: any) => cm.kind === 'issue').map((cm: any) => cm.id)),
+      replies: new Set<number>(r.comments.filter((cm: any) => cm.kind === 'review').map((cm: any) => cm.id)),
+    };
+    const dir = v['download-images'] as string | undefined;
+    const { text, found } = await withImageFiles(client, dir, (images) => conversationItems(pr, { ...fresh, images }).map((i) => i.text).join('\n\n'));
+    if (text) {
       out(`New feedback on ${url} (review decision: ${pr.reviewDecision})\n`);
-      out(items.map((i) => i.text).join('\n\n') + '\n');
+      out(text + '\n');
     }
+    if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`laatsux pr view ${t.number} --comments --download-images <dir>\`.`));
     for (const line of approvedBefore(pr, new Set(r.reviews))) out(line);
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
@@ -527,7 +566,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'published') {
       out(`Published to GitHub: ${r.published_url}`);
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
-      else out(items.length ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
+      else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
       return 0;
     }
     if (r.status === 'closed') {
@@ -563,7 +602,8 @@ USAGE
 COMMANDS (same flags as gh)
   create:      Stage a pull request for the current branch
   list:        List staged pull requests
-  view:        Show a pull request (--comments for reviews and review threads)
+  view:        Show a pull request (--comments for reviews and review threads,
+               --download-images <dir> to save the images in them as files)
   diff:        Show the diff
   edit:        Change title, body or base
   comment:     Comment, or reply to a review thread with --reply-to <id> [--resolve]

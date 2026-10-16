@@ -3,6 +3,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -914,4 +915,134 @@ test('the CLI starts a server when none is running', async () => {
   const off = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, LAATSUX_URL: url, LAATSUX_NO_AUTOSTART: '1' } }).catch((e) => e);
   assert.equal(off.code, 1);
   assert.match(off.stderr, /not running/);
+});
+
+test('images pasted into comments are stored, shown to agents, and warned about before publishing', async (t) => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/images');
+  writeFileSync(join(repo, 'images.js'), 'export {};\n');
+  git('add', 'images.js');
+  git('commit', '-qm', 'Add images.js');
+  const created = await cli(['pr', 'create', '--title', 'Show images', '--body', 'Nothing to see.']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  // A 1x1 PNG.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  const hash = createHash('sha256').update(png).digest('hex');
+  const path = `/uploads/${hash}.png`;
+  const upload = (body: Buffer<ArrayBuffer> | string, headers: Record<string, string> = { 'content-type': 'image/png' }) => fetch(`${server.url}/api/uploads`, { method: 'POST', headers, body });
+
+  await t.test('an uploaded PNG is stored under its hash and served back as a PNG', async () => {
+    const res = await upload(png);
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { path, url: server.url + path, content_type: 'image/png', size: png.length });
+    assert.deepEqual(readFileSync(join(dir, 'data', 'uploads', `${hash}.png`)), png);
+    const served = await fetch(server.url + path);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get('content-type'), 'image/png');
+    assert.equal(served.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    assert.equal(served.headers.get('x-content-type-options'), 'nosniff');
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), png);
+    // The bytes decide the type, whatever the request said; the same bytes are the same file.
+    assert.equal((await (await upload(png, { 'content-type': 'image/jpeg' })).json()).path, path);
+    assert.equal((await fetch(`${server.url}/uploads/${'0'.repeat(64)}.png`)).status, 404);
+  });
+
+  await t.test('only PNG, JPEG, GIF and WebP images of at most 10 MB are accepted', async () => {
+    const kinds: [Buffer<ArrayBuffer>, string, string][] = [
+      [Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), 'jpg', 'image/jpeg'],
+      [Buffer.from('GIF89a\x01\x00\x01\x00', 'latin1'), 'gif', 'image/gif'],
+      [Buffer.from('RIFF\x10\x00\x00\x00WEBPVP8 ', 'latin1'), 'webp', 'image/webp'],
+    ];
+    for (const [bytes, ext, type] of kinds) {
+      // Without a declared type, as from a file the browser does not know.
+      const res = await upload(bytes, {});
+      assert.equal(res.status, 201, ext);
+      const { path: stored, content_type } = await res.json();
+      assert.match(stored, new RegExp(`^/uploads/[0-9a-f]{64}\\.${ext}$`));
+      assert.equal(content_type, type);
+      assert.equal((await fetch(server.url + stored)).headers.get('content-type'), type);
+    }
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const asSvg = await upload(svg, { 'content-type': 'image/svg+xml' });
+    assert.equal(asSvg.status, 415);
+    assert.match((await asSvg.json()).message, /SVG images are not accepted/);
+    // Declared as a PNG, but the bytes are not one.
+    const disguised = await upload(svg);
+    assert.equal(disguised.status, 415);
+    assert.match((await disguised.json()).message, /this file is none of them/);
+    assert.equal((await upload(Buffer.from('GIF8 and then some'))).status, 415);
+    assert.equal((await upload(png, { 'content-type': 'text/html' })).status, 415);
+    assert.equal((await upload(Buffer.alloc(0))).status, 422);
+    const big = Buffer.alloc(png.length + 10 * 1024 * 1024);
+    png.copy(big);
+    const tooBig = await upload(big);
+    assert.equal(tooBig.status, 413);
+    assert.match((await tooBig.json()).message, /at most 10 MB/);
+    // Also when the size is not declared up front.
+    const chunks = new ReadableStream<Uint8Array>({
+      start(ctl) {
+        ctl.enqueue(png);
+        for (let i = 0; i < 11; i++) ctl.enqueue(new Uint8Array(1024 * 1024));
+        ctl.close();
+      },
+    });
+    const streamed = await fetch(`${server.url}/api/uploads`, { method: 'POST', headers: { 'content-type': 'image/png' }, body: chunks, duplex: 'half' } as RequestInit);
+    assert.equal(streamed.status, 413);
+  });
+
+  await t.test('uploads from other sites are refused', async () => {
+    const res = await fetch(`${server.url}/api/uploads`, { method: 'POST', headers: { 'content-type': 'image/png', origin: 'https://evil.example' }, body: png });
+    assert.equal(res.status, 403);
+  });
+
+  await t.test('rendered Markdown keeps uploaded images, and no other local ones', async () => {
+    const render = async (text: string) => (await fetch(`${server.url}/api/markdown`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })).text();
+    assert.match(await render(`![screenshot](${path})`), new RegExp(`<img src="${path}" alt="screenshot" />`));
+    assert.match(await render(`<img src="${path}" width="200">`), new RegExp(`<img src="${path}" width="200" />`));
+    assert.match(await render('![remote](https://example.com/a.png)'), /<img src="https:\/\/example\.com\/a\.png" alt="remote" \/>/);
+    for (const src of [
+      '/api/repos/acme/widgets/pulls/1',
+      `/uploads/${hash}.svg`,
+      `/uploads/${hash}.png/../../laatsux.db`,
+      '//evil.example/a.png',
+      'javascript:alert(1)',
+      'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+    ]) {
+      for (const text of [`![x](${src})`, `<img src="${src}" alt="x">`]) assert.match(await render(text), /^(<p>)?<img alt="x" \/>(<\/p>)?$/m, text);
+    }
+  });
+
+  await t.test('pr wait and pr view --comments list the images, and --download-images saves them', async () => {
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
+    await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: `It is cut off:\n\n![screenshot](${path})` });
+    const woken = await waiting;
+    assert.equal(woken.code, 0, woken.stderr);
+    assert.match(woken.stdout, new RegExp(`^    !\\[screenshot\\]\\(${path}\\)\n    Image: ${server.url}${path}$`, 'm'));
+    assert.match(woken.stdout, new RegExp(`laatsux pr view ${number} --comments --download-images <dir>`));
+
+    await human('POST', `${base}/reviews`, { event: 'COMMENT', comments: [{ path: 'images.js', line: 1, side: 'RIGHT', body: `Like this:\n![after](${path})` }] });
+    const view = await cli(['pr', 'view', String(number), '--comments']);
+    assert.equal(view.code, 0, view.stderr);
+    assert.equal(view.stdout.match(new RegExp(`Image: ${server.url}${path}$`, 'gm'))?.length, 2, 'under the comment and under the thread comment');
+    assert.match(view.stdout, /Run again with --download-images <dir>/);
+
+    const saveTo = join(dir, 'images');
+    const saved = await cli(['pr', 'view', String(number), '--comments', '--download-images', saveTo]);
+    assert.equal(saved.code, 0, saved.stderr);
+    assert.equal(saved.stdout.match(new RegExp(`Image: ${join(saveTo, `${hash}.png`)}$`, 'gm'))?.length, 2);
+    assert.doesNotMatch(saved.stdout, /download-images|Image: http/);
+    assert.deepEqual(readFileSync(join(saveTo, `${hash}.png`)), png);
+  });
+
+  await t.test('the publish box warns about images in the description, not in comments', async () => {
+    const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+    const before = await page();
+    assert.match(before, /js-attach-image/);
+    assert.doesNotMatch(before, /stored in laatsux/);
+    await human('PATCH', base, { body: `Before and after:\n\n![before](${path})\n![after](${path.replace('.png', '.gif')})` });
+    assert.match(await page(), /The description has 2 images stored in laatsux, which GitHub cannot show\. Remove them, or replace them with images uploaded to GitHub\./);
+  });
 });

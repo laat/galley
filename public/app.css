@@ -680,6 +680,8 @@ code.wrap { word-break: break-all; }
 .md-toolbar-btn { display: inline-flex; padding: 4px 6px; color: var(--fg-muted); background: none; border: 0; border-radius: 6px; cursor: pointer; }
 .md-toolbar-btn:hover { color: var(--accent); background: var(--neutral-muted); }
 .md-input { display: block; border: 0 !important; box-shadow: none !important; border-radius: 0; padding: 8px 12px; min-height: 100px; }
+.md-editor.is-dragover { border-color: var(--accent-emphasis); box-shadow: 0 0 0 1px var(--accent-emphasis); }
+.md-editor.is-dragover .md-input { background: var(--accent-subtle); }
 .md-preview { padding: 12px 16px; min-height: 100px; border-bottom: 1px solid var(--border-muted); }
 .md-hint { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--fg-muted); border-top: 1px dashed var(--border-muted); display: flex; align-items: center; gap: 4px; }
 
@@ -909,6 +911,7 @@ body.selecting { user-select: none; cursor: ns-resize; }
 .markdown-body table tr:nth-child(2n) { background: var(--bg-subtle); }
 .markdown-body hr { height: 0.25em; padding: 0; margin: 24px 0; background: var(--border); border: 0; }
 .markdown-body img { max-width: 100%; }
+.markdown-body img[src^="/uploads/"] { cursor: zoom-in; }
 .markdown-body a { text-decoration: underline; text-underline-offset: 0.2rem; }
 .markdown-body details summary { cursor: pointer; }
 .markdown-body kbd { font-size: 11px; }

@@ -66,7 +66,10 @@
       let ta = $(`textarea[data-draft-key="${CSS.escape(key)}"]`);
       if (!ta && d.meta) ta = reopenForm(d.meta);
       if (!ta) continue;
-      if (!ta.value || ta.value === ta.defaultValue) ta.value = d.value;
+      if (!ta.value || ta.value === ta.defaultValue) {
+        ta.value = withoutStaleUploads(d.value);
+        if (ta.value !== d.value) saveDraftOf(ta);
+      }
       const priority = ta.closest('.inline-comment-form') && $('select[name=priority]', ta.closest('.inline-comment-form'));
       if (priority && d.priority && !priority.value) priority.value = d.priority;
       reveal(ta);
@@ -320,11 +323,13 @@
     const form = e.target;
     if (form.matches('.js-api-form')) {
       e.preventDefault();
+      if (stillUploading(form)) return;
       const prompt = e.submitter && e.submitter.dataset.confirm;
       if (prompt && !confirmed(e.submitter, prompt)) return;
       submitApiForm(form, e.submitter);
     } else if (form.matches('.js-new-comment-form')) {
       e.preventDefault();
+      if (stillUploading(form)) return;
       submitNewComment(form, e.submitter);
     }
   });
@@ -346,10 +351,15 @@
 
   // --------------------------------------------------- markdown editor
 
+  /** The latest preview asked for in each editor; an earlier one answering late is dropped. */
+  const previews = new WeakMap();
+
   async function showPreview(editor) {
     const ta = $('.md-input', editor);
     const preview = $('.md-preview', editor);
     const holder = editor.closest('[data-suggestion]');
+    const request = {};
+    previews.set(editor, request);
     preview.innerHTML = '<p class="color-fg-muted">Loading preview…</p>';
     ta.hidden = true;
     preview.hidden = false;
@@ -360,9 +370,9 @@
         body: JSON.stringify({ text: ta.value, suggestion_lines: holder ? JSON.parse(holder.dataset.suggestion) : undefined }),
       });
       const htmlText = await res.text();
-      preview.innerHTML = htmlText || '<p class="color-fg-muted">Nothing to preview</p>';
+      if (previews.get(editor) === request) preview.innerHTML = htmlText || '<p class="color-fg-muted">Nothing to preview</p>';
     } catch (err) {
-      preview.textContent = err.message;
+      if (previews.get(editor) === request) preview.textContent = err.message;
     }
   }
 
@@ -388,11 +398,125 @@
     return `<div class="md-editor">
   <div class="md-editor-header">
     <div class="md-tabs"><button type="button" class="md-tab selected" data-tab="write">Write</button><button type="button" class="md-tab" data-tab="preview">Preview</button></div>
-    <div class="md-toolbar">${suggestion ? '<button type="button" class="md-toolbar-btn js-insert-suggestion" title="Insert a suggestion">±</button>' : ''}</div>
+    <div class="md-toolbar">${suggestion ? '<button type="button" class="md-toolbar-btn js-insert-suggestion" title="Insert a suggestion">±</button>' : ''}<button type="button" class="md-toolbar-btn js-attach-image" title="Attach an image" aria-label="Attach an image">${IMAGE_ICON}</button></div>
   </div>
   <textarea class="form-control md-input" name="body" rows="4" placeholder="${esc(placeholder)}" data-draft-key="${esc(draftKey)}"></textarea>
   <div class="md-preview markdown-body" hidden></div>
 </div>`;
+  }
+
+  // ---------------------------------------------------------------- images
+  // Pasted, dropped and attached images are uploaded, and go into the text as on GitHub: a
+  // placeholder where the cursor was, replaced by the image's Markdown once it is stored.
+
+  const MAX_UPLOAD = 10 * 1024 * 1024; // as in src/server/uploads.ts
+  const IMAGE_ICON =
+    '<svg class="octicon octicon-image" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M16 13.25A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25V2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75ZM1.75 2.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h.94l.03-.03 6.077-6.078a1.75 1.75 0 0 1 2.412-.06L14.5 10.31V2.75a.25.25 0 0 0-.25-.25Zm12.5 11a.25.25 0 0 0 .25-.25v-.917l-4.298-3.889a.25.25 0 0 0-.344.009L4.81 13.5ZM7 6a2 2 0 1 1-3.999.001A2 2 0 0 1 7 6ZM5.5 6a.5.5 0 1 0-1 0 .5.5 0 0 0 1 0Z"></path></svg>';
+  /** The placeholders of uploads still running. A draft restored after a reload drops the others. */
+  const uploading = new Set();
+
+  const withoutStaleUploads = (text) => text.replace(/!\[Uploading [^\]\n]*…\]\(\)/g, (p) => (uploading.has(p) ? p : ''));
+
+  function stillUploading(form) {
+    const busy = $$('textarea', form).some((t) => [...uploading].some((p) => t.value.includes(p)));
+    if (busy) formError(form, new Error('Wait until the images have uploaded.'));
+    return busy;
+  }
+
+  function replaceText(ta, from, to) {
+    const at = ta.value.indexOf(from);
+    if (at < 0) return;
+    ta.setRangeText(to, at, at + from.length, 'preserve');
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  async function upload(file) {
+    if (file.size > MAX_UPLOAD) throw new Error(`${file.name || 'The image'} is larger than 10 MB.`);
+    const res = await fetch('/api/uploads', { method: 'POST', headers: file.type ? { 'content-type': file.type } : {}, body: file });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((json && json.message) || res.statusText);
+    return json.path;
+  }
+
+  function attachImages(ta, files) {
+    const editor = ta.closest('.md-editor');
+    if (ta.hidden) showWrite(editor);
+    for (const tab of $$('.md-tab', editor)) tab.classList.toggle('selected', tab.dataset.tab === 'write');
+    const key = ta.dataset.draftKey;
+    const form = ta.closest('form');
+    if (form) formError(form, null);
+    [...files].forEach(async (file, i) => {
+      const name = (file.name || 'image.png').replace(/[[\]\n]/g, '');
+      let placeholder = `![Uploading ${name}…]()`;
+      for (let n = 2; uploading.has(placeholder); n++) placeholder = `![Uploading ${name} (${n})…]()`;
+      uploading.add(placeholder);
+      ta.setRangeText((i > 0 ? '\n' : '') + placeholder, ta.selectionStart, ta.selectionEnd, 'end');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      let markdown = '';
+      let failure = null;
+      try {
+        markdown = `![${name.replace(/\.\w+$/, '')}](${await upload(file)})`;
+      } catch (err) {
+        failure = err;
+      }
+      uploading.delete(placeholder);
+      // A live refresh may have replaced the textarea meanwhile; its draft went to the new one.
+      const target = ta.isConnected ? ta : key ? $(`textarea[data-draft-key="${CSS.escape(key)}"]`) : null;
+      if (target) {
+        replaceText(target, placeholder, markdown);
+        // A preview opened during the upload shows the placeholder; show what took its place.
+        const editor = target.closest('.md-editor');
+        if (!$('.md-preview', editor).hidden) showPreview(editor);
+      }
+      if (failure) {
+        const box = target && target.closest('form');
+        box ? formError(box, failure) : toast(failure.message);
+      }
+    });
+  }
+
+  document.addEventListener('paste', (e) => {
+    const ta = e.target;
+    if (!ta.matches || !ta.matches('textarea.md-input')) return;
+    const files = [...((e.clipboardData && e.clipboardData.files) || [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    attachImages(ta, files);
+  });
+
+  /** The textarea of the editor a file is dragged over. */
+  function dropTarget(e) {
+    const editor = e.target.closest && e.target.closest('.md-editor');
+    const carriesFiles = e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+    return editor && carriesFiles ? $('.md-input', editor) : null;
+  }
+  document.addEventListener('dragover', (e) => {
+    const ta = dropTarget(e);
+    if (!ta) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    ta.closest('.md-editor').classList.add('is-dragover');
+  });
+  document.addEventListener('dragleave', (e) => {
+    const editor = e.target.closest && e.target.closest('.md-editor');
+    if (editor && !editor.contains(e.relatedTarget)) editor.classList.remove('is-dragover');
+  });
+  document.addEventListener('drop', (e) => {
+    const ta = dropTarget(e);
+    if (!ta) return;
+    e.preventDefault();
+    ta.closest('.md-editor').classList.remove('is-dragover');
+    attachImages(ta, e.dataTransfer.files);
+    ta.focus();
+  });
+
+  function chooseImages(editor) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/gif,image/webp';
+    input.multiple = true;
+    input.onchange = () => attachImages($('.md-input', editor), input.files);
+    input.click();
   }
 
   // ---------------------------------------------------------- inline forms
@@ -685,6 +809,10 @@
       el.dataset.tab === 'preview' ? showPreview(editor) : showWrite(editor);
     } else if ((el = on('.js-insert-suggestion'))) {
       insertSuggestion(el.closest('.md-editor'));
+    } else if ((el = on('.js-attach-image'))) {
+      chooseImages(el.closest('.md-editor'));
+    } else if ((el = on('.markdown-body img[src^="/uploads/"]')) && !el.closest('a')) {
+      window.open(el.src, '_blank', 'noopener');
     } else if ((el = on('.js-title-edit'))) {
       $('.js-title-view').hidden = true;
       const form = $('.js-title-form');

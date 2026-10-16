@@ -4,6 +4,7 @@ import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, Revision
 import { publishFingerprint, type Ctx, type Service, type Thread } from '../service.ts';
 import { avatarUrl, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
+import { uploadsIn } from '../uploads.ts';
 import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
 import {
@@ -326,6 +327,9 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const what = pull.published_url
       ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.`
       : html`Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>) to <code>${repo.remote}</code> and opens a pull request on <strong>${target}</strong> with this title and description.`;
+    // Images pasted into the description live on this machine; GitHub has no API to upload them to.
+    const images = uploadsIn(pull.body).length;
+    const them = images === 1 ? 'it' : 'them';
     publishRow = html`<form class="merge-row merge-actions js-api-form js-publish-form" data-api="${p.apiBase}/publish" data-method="POST">
       <input type="hidden" name="expected" value="${publishFingerprint(pull)}">
       ${icon('rocket', { cls: 'color-fg-done' })}
@@ -341,6 +345,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
           }
           <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (the branch history was rewritten)</label>
         </div>
+        ${images ? html`<div class="flash flash-warn">${icon('alert')}<span>The description has ${plural(images, 'image')} stored in laatsux, which GitHub cannot show. Remove ${them}, or replace ${them} with ${images === 1 ? 'an image' : 'images'} uploaded to GitHub.</span></div>` : ''}
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
       <button type="submit" class="btn btn-primary btn-publish"${work ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>

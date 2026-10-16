@@ -10,6 +10,20 @@ const REVIEW_STATE: Record<string, string> = {
   DISMISSED: 'dismissed',
 };
 
+/** Where an image uploaded to laatsux (`/uploads/<sha256>.<ext>`) can be had: its URL, or a file it was saved to. */
+export type ImageRef = (path: string) => string;
+
+/** The images uploaded to laatsux that a text refers to, each once (the server's `uploadsIn`). */
+export function uploadsIn(text: string): string[] {
+  return [...new Set(text.match(/\/uploads\/[0-9a-f]{64}\.(?:png|jpg|gif|webp)\b/g) ?? [])];
+}
+
+/** A comment's text, followed by a line for each image uploaded to laatsux in it. */
+function withImages(text: string, images?: ImageRef): string {
+  const found = images ? uploadsIn(text) : [];
+  return [text, ...found.map((path) => `Image: ${images!(path)}`)].join('\n');
+}
+
 function ago(iso: string): string {
   const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
   if (s < 45) return 'just now';
@@ -57,7 +71,7 @@ function reviewersLine(pr: GhPull): string {
 }
 
 /** `gh pr view` without a TTY: key/value header, "--", body. */
-export function viewPlain(pr: GhPull): string {
+export function viewPlain(pr: GhPull, images?: ImageRef): string {
   const lines = [
     `title:\t${pr.title}`,
     `state:\t${pr.state}`,
@@ -80,10 +94,10 @@ export function viewPlain(pr: GhPull): string {
     `unresolved threads:\t${pr.reviewThreads.filter((t: any) => !t.isResolved).length}`,
   ];
   if (pr.publishedUrl) lines.push(`published:\t${pr.publishedUrl}`);
-  return `${lines.join('\n')}\n--\n${pr.body}\n`;
+  return `${lines.join('\n')}\n--\n${withImages(pr.body, images)}\n`;
 }
 
-export function viewTTY(pr: GhPull): string {
+export function viewTTY(pr: GhPull, images?: ImageRef): string {
   const state =
     pr.state === 'OPEN' ? (pr.isDraft ? c.gray('Draft') : c.green('Open')) : pr.state === 'PUBLISHED' ? c.magenta('Published') : c.red('Closed');
   const out = [
@@ -94,7 +108,7 @@ export function viewTTY(pr: GhPull): string {
   if (reviewers) out.push(`Reviewers: ${reviewers}`);
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved).length;
   if (unresolved) out.push(c.yellow(`${unresolved} unresolved review thread${unresolved === 1 ? '' : 's'}`));
-  out.push('', pr.body.trim() ? indent(pr.body.trim(), '  ') : c.gray('  No description provided.'), '');
+  out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');
   if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}`);
   out.push(c.gray(`View this pull request in laatsux: ${pr.url}`));
   return out.join('\n') + '\n';
@@ -112,7 +126,7 @@ function location(t: any, pr?: GhPull): string {
   return `${t.path}:${range}${t.diffSide === 'LEFT' ? ' (old side)' : ''}`;
 }
 
-export function formatThread(t: any, newIds?: Set<number>, pr?: GhPull): string {
+export function formatThread(t: any, newIds?: Set<number>, pr?: GhPull, images?: ImageRef): string {
   const flags = [t.isResolved ? 'resolved' : 'unresolved', t.isOutdated ? 'outdated' : null].filter(Boolean).join(', ');
   const priority = t.priority ? ` (${t.priority === 'high' ? c.red('high priority') : `${t.priority} priority`})` : '';
   const out = [c.bold(`thread ${t.databaseId}`) + ` on ${location(t, pr)} [${flags}]${priority}`];
@@ -123,7 +137,7 @@ export function formatThread(t: any, newIds?: Set<number>, pr?: GhPull): string 
   }
   for (const cm of t.comments) {
     const mark = newIds?.has(cm.databaseId) ? c.yellow(' (new)') : '';
-    out.push(indent(`${c.bold(cm.author.login)}${mark}:`), indent(cm.body.trim(), '      '));
+    out.push(indent(`${c.bold(cm.author.login)}${mark}:`), indent(withImages(cm.body.trim(), images), '      '));
   }
   return out.join('\n');
 }
@@ -133,12 +147,12 @@ interface Item {
   text: string;
 }
 
-export function conversationItems(pr: GhPull, opts: { reviews?: Set<number>; comments?: Set<number>; replies?: Set<number> } = {}): Item[] {
+export function conversationItems(pr: GhPull, opts: { reviews?: Set<number>; comments?: Set<number>; replies?: Set<number>; images?: ImageRef } = {}): Item[] {
   const filter = opts.reviews || opts.comments || opts.replies;
   const items: Item[] = [];
   for (const cm of pr.comments) {
     if (filter && !opts.comments?.has(cm.databaseId)) continue;
-    items.push({ at: cm.createdAt, text: `${c.bold(cm.author.login)} commented (comment ${cm.databaseId}, ${cm.createdAt}):\n${indent(cm.body.trim())}` });
+    items.push({ at: cm.createdAt, text: `${c.bold(cm.author.login)} commented (comment ${cm.databaseId}, ${cm.createdAt}):\n${indent(withImages(cm.body.trim(), opts.images))}` });
   }
   const shownThreads = new Set<number>();
   for (const r of pr.reviews) {
@@ -147,10 +161,10 @@ export function conversationItems(pr: GhPull, opts: { reviews?: Set<number>; com
     // An approval or a change request is feedback even without text; an empty comment is not.
     if (!r.body.trim() && threads.length === 0 && r.state === 'COMMENTED') continue;
     const parts = [`${c.bold(r.author.login)} reviewed: ${REVIEW_STATE[r.state] ?? r.state} (review ${r.databaseId}, ${r.submittedAt})`];
-    if (r.body.trim()) parts.push(indent(r.body.trim()));
+    if (r.body.trim()) parts.push(indent(withImages(r.body.trim(), opts.images)));
     for (const t of threads) {
       shownThreads.add(t.databaseId);
-      parts.push(indent(formatThread(t, undefined, pr), '  '));
+      parts.push(indent(formatThread(t, undefined, pr, opts.images), '  '));
     }
     items.push({ at: r.submittedAt, text: parts.join('\n') });
   }
@@ -161,14 +175,14 @@ export function conversationItems(pr: GhPull, opts: { reviews?: Set<number>; com
       const fresh = [...opts.replies].filter((id) => ids.has(id));
       if (!fresh.length || shownThreads.has(t.databaseId)) continue;
       const last = t.comments.find((cm: any) => cm.databaseId === fresh[fresh.length - 1]);
-      items.push({ at: last.createdAt, text: `${c.bold(last.author.login)} replied:\n${indent(formatThread(t, new Set(fresh), pr), '  ')}` });
+      items.push({ at: last.createdAt, text: `${c.bold(last.author.login)} replied:\n${indent(formatThread(t, new Set(fresh), pr, opts.images), '  ')}` });
     }
   }
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function formatConversation(pr: GhPull): string {
-  const items = conversationItems(pr);
+export function formatConversation(pr: GhPull, images?: ImageRef): string {
+  const items = conversationItems(pr, { images });
   const out = [c.bold('-- conversation --')];
   out.push(...(items.length ? items.map((i) => i.text) : [c.gray('No comments or reviews yet.')]));
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved);
