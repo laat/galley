@@ -1,17 +1,19 @@
-/* laatsux: GitHub's look, using Primer's colour tokens. */
+/* laatsux: GitHub's look, using Primer's colour tokens, with the neutrals and the header
+   tinted purple so a laatsux tab is not mistaken for a GitHub one. */
 
 :root {
   color-scheme: light;
   --fg: #1f2328;
   --fg-muted: #59636e;
-  --fg-subtle: #6e7781;
+  --fg-subtle: #68717b;
   --fg-on-emphasis: #ffffff;
-  --bg: #ffffff;
-  --bg-subtle: #f6f8fa;
-  --bg-inset: #f6f8fa;
-  --bg-overlay: #ffffff;
-  --border: #d1d9e0;
-  --border-muted: #d1d9e0b3;
+  --bg: #fbfaff;
+  --bg-subtle: #f7f5ff;
+  --bg-inset: #f7f5ff;
+  --bg-overlay: #fbfaff;
+  --header-bg: #e7ddff;
+  --border: #d8d5e7;
+  --border-muted: #d8d5e7b3;
   --accent: #0969da;
   --accent-emphasis: #0969da;
   --accent-subtle: #ddf4ff;
@@ -31,9 +33,9 @@
   --neutral-emphasis: #59636e;
   --neutral-muted: #818b981f;
   --neutral-subtle: #818b9814;
-  --btn-bg: #f6f8fa;
-  --btn-hover: #eff2f5;
-  --btn-border: #d1d9e0;
+  --btn-bg: #f7f5ff;
+  --btn-hover: #f1eefb;
+  --btn-border: #d8d5e7;
   --btn-primary-bg: #1f883d;
   --btn-primary-hover: #1c8139;
   --diff-add-bg: #dafbe1;
@@ -43,7 +45,7 @@
   --diff-hunk-bg: #ddf4ff;
   --diff-hunk-num: #b6e3ff;
   --diff-selected: #fff8c5;
-  --diff-empty: #f6f8fa;
+  --diff-empty: #f7f5ff;
   --shadow: 0 1px 0 #1f23280a;
   --shadow-overlay: 0 1px 3px #1f232812, 0 8px 24px #42474e2e;
   --hl-keyword: #cf222e;
@@ -64,12 +66,13 @@
     --fg: #f0f6fc;
     --fg-muted: #9198a1;
     --fg-subtle: #848d97;
-    --bg: #0d1117;
-    --bg-subtle: #151b23;
-    --bg-inset: #010409;
-    --bg-overlay: #151b23;
-    --border: #3d444d;
-    --border-muted: #3d444db3;
+    --bg: #120f1c;
+    --bg-subtle: #1c1827;
+    --bg-inset: #05030a;
+    --bg-overlay: #1c1827;
+    --header-bg: #2c2047;
+    --border: #454152;
+    --border-muted: #454152b3;
     --accent: #4493f8;
     --accent-emphasis: #1f6feb;
     --accent-subtle: #388bfd1a;
@@ -89,9 +92,9 @@
     --neutral-emphasis: #656c76;
     --neutral-muted: #656c7633;
     --neutral-subtle: #656c761a;
-    --btn-bg: #212830;
-    --btn-hover: #262c36;
-    --btn-border: #3d444d;
+    --btn-bg: #282535;
+    --btn-hover: #2d293a;
+    --btn-border: #454152;
     --btn-primary-bg: #238636;
     --btn-primary-hover: #29903b;
     --diff-add-bg: #2ea04326;
@@ -101,9 +104,9 @@
     --diff-hunk-bg: #388bfd1a;
     --diff-hunk-num: #388bfd40;
     --diff-selected: #bb800926;
-    --diff-empty: #151b23;
+    --diff-empty: #1c1827;
     --shadow: none;
-    --shadow-overlay: 0 0 0 1px #3d444d, 0 8px 24px #010409;
+    --shadow-overlay: 0 0 0 1px #454152, 0 8px 24px #05030a;
     --hl-keyword: #ff7b72;
     --hl-title: #d2a8ff;
     --hl-constant: #79c0ff;
@@ -153,7 +156,7 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .container-xl { max-width: 1280px; }
 .container-full { max-width: none; }
 
-.app-header-wrap { background: var(--bg-subtle); border-bottom: 1px solid var(--border); }
+.app-header-wrap { background: var(--header-bg); border-bottom: 1px solid var(--border); }
 .app-header {
   display: flex;
   align-items: center;
