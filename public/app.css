@@ -120,6 +120,8 @@
 
 * { box-sizing: border-box; }
 html { font-size: 14px; }
+/* scrollbar-color is inherited, so this reaches every scrolling area. */
+:root { scrollbar-color: var(--done-emphasis) var(--bg-subtle); }
 body {
   margin: 0;
   font-family: var(--font);
