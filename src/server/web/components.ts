@@ -22,7 +22,10 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <header class="app-header">
   <a class="app-header-logo" href="/" title="All staged pull requests">${icon('git-pull-request', { size: 24 })}</a>
   <nav class="app-header-context">${opts.crumbs ?? html`<a href="/"><strong>laatsux</strong></a>`}</nav>
-  <div class="app-header-actions">${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}</div>
+  <div class="app-header-actions">
+    <a class="app-header-button" href="/settings" title="Settings" aria-label="Settings">${icon('gear')}</a>
+    ${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}
+  </div>
 </header>
 <div id="main"${data}>${opts.body}</div>
 <div id="toast" class="toast" hidden></div>

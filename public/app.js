@@ -159,6 +159,8 @@
     published: 'published the pull request',
     resolved: 'resolved a conversation',
     comment_edited: 'edited a comment',
+    codex_started: 'started reviewing',
+    codex_failed: 'could not finish its review',
   };
 
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);
@@ -276,6 +278,7 @@
       if (form.dataset.reset) form.reset();
       await refresh();
       if (publishing) toast('Published to GitHub');
+      else if (form.dataset.toast) toast(form.dataset.toast);
     } catch (err) {
       busy(form, false);
       formError(form, err);
@@ -675,6 +678,16 @@
       await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       userState.threads.delete(el.closest('.review-thread').dataset.thread);
       refresh();
+    } else if ((el = on('.js-codex-step'))) {
+      stepCodexLimit(el);
+    } else if ((el = on('.js-codex-limit-reset'))) {
+      el.disabled = true;
+      await api('PATCH', el.dataset.api, { max_iterations: null }).catch((err) => toast(err.message));
+      refresh();
+    } else if ((el = on('.js-run-codex'))) {
+      el.disabled = true;
+      await api('POST', el.dataset.api).catch((err) => toast(err.message));
+      refresh();
     } else if ((el = on('.js-set-state'))) {
       el.disabled = true;
       await api('PATCH', ds().apiBase, { state: el.dataset.state }).catch((err) => toast(err.message));
@@ -719,6 +732,37 @@
       // Let the toggle happen, then remember the choice across refreshes.
       setTimeout(() => userState.threads.set(thread.dataset.thread, thread.open));
     }
+  });
+
+  // The Codex review limit of a pull request: each click moves the number at once, and the
+  // last value is saved shortly after the clicks stop.
+  let limitSave = null;
+  function stepCodexLimit(button) {
+    const box = button.closest('.codex-limit');
+    const max = Number(box.dataset.max);
+    const value = Math.min(max, Math.max(0, Number(box.dataset.limit) + Number(button.dataset.step)));
+    box.dataset.limit = String(value);
+    $('.js-codex-limit', box).textContent = String(value);
+    for (const b of $$('.js-codex-step', box)) b.disabled = Number(b.dataset.step) < 0 ? value <= 0 : value >= max;
+    clearTimeout(limitSave);
+    limitSave = setTimeout(async () => {
+      await api('PATCH', box.dataset.api, { max_iterations: value }).catch((err) => toast(err.message));
+      refresh();
+    }, 500);
+  }
+
+  // Settings: the effort levels on offer depend on the model.
+  document.addEventListener('change', (e) => {
+    const model = e.target;
+    if (!model.matches || !model.matches('.js-codex-model')) return;
+    const option = model.selectedOptions[0];
+    const efforts = (option.dataset.efforts || '').split(',').filter(Boolean);
+    const effort = $('.js-codex-effort', model.form);
+    const current = effort.value;
+    const fallback = option.dataset.defaultEffort;
+    effort.innerHTML =
+      `<option value="">Codex default${fallback ? ` (${esc(fallback)})` : ''}</option>` + efforts.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+    effort.value = efforts.includes(current) ? current : '';
   });
 
   document.addEventListener('change', async (e) => {

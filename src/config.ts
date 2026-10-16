@@ -23,7 +23,8 @@ export function cliActor(): { login: string; type: 'User' | 'Bot' } | null {
   const env = process.env;
   if (env.LAATSUX_ACTOR) return { login: env.LAATSUX_ACTOR, type: env.LAATSUX_ACTOR_TYPE === 'User' ? 'User' : 'Bot' };
   if (env.CLAUDECODE) return { login: 'claude', type: 'Bot' };
-  if (env.CODEX_SANDBOX || env.CODEX_MANAGED_BY_NPM) return { login: 'codex', type: 'Bot' };
+  // Not "codex": that is the Codex reviewer's default name, and an author must not share it.
+  if (env.CODEX_SANDBOX || env.CODEX_MANAGED_BY_NPM) return { login: 'codex-agent', type: 'Bot' };
   if (env.AI_AGENT) return { login: env.AI_AGENT.split('_')[0].replace(/-code$/, ''), type: 'Bot' };
   // A person at a terminal acts as the reviewer; anything else driving the CLI is an agent.
   return process.stdin.isTTY ? null : { login: 'agent', type: 'Bot' };

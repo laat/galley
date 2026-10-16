@@ -113,7 +113,8 @@ GET             /api/repos/{owner}/{repo}/issues/{n}/timeline
 
 Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n}/publish`,
 `GET …/pulls/{n}/wait?timeout=s`, `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
-and `GET /events` (server-sent events).
+`POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review, list its runs),
+`GET /api/settings` and `PUT /api/settings/codex`, and `GET /events` (server-sent events).
 
 Requests carry the caller's identity in `X-Laatsux-Actor`. The CLI sets it to
 `LAATSUX_ACTOR`, or to the detected agent (`claude` in Claude Code, `codex` in Codex), or to
@@ -164,8 +165,39 @@ UI, you act as yourself. Agents cannot publish or delete staged pull requests.
 | `LAATSUX_ACTOR` | see below | Who CLI calls act as |
 | `LAATSUX_USER` | your `gh` login | The reviewer's name in the UI |
 | `LAATSUX_GH` | `gh` | gh binary used for publishing |
+| `LAATSUX_CODEX` | `codex` | Codex binary used for reviews |
 
-## Review agents
+## Codex reviews
+
+Codex can review staged pull requests before you do. Turn it on under **Settings** (the gear
+in the header):
+
+| Setting | |
+|---|---|
+| Review automatically | Codex reviews when the author agent runs `laatsux pr wait`, before you look |
+| Model | Any model from `codex debug models`, or Codex's own default |
+| Reasoning effort | The levels the chosen model supports, or Codex's default |
+| Max iterations | Automatic reviews per pull request, so Codex and the author agent do not go back and forth forever |
+
+How it runs:
+
+- Each head commit gets one automatic review. Codex runs `codex exec --sandbox read-only
+  --ephemeral` in a temporary checkout of that commit, answers in a JSON schema, and laatsux
+  posts the result as a review from the reviewer bot, named `codex` unless you rename it in
+  settings. Renaming keeps its earlier reviews. Findings on lines outside the diff go
+  in the review's body.
+- The review wakes the author's `pr wait`, so the agent addresses Codex's comments and waits
+  again; Codex then reviews the new commit, until the cap is reached.
+- Codex reviews only comment. They never approve or request changes, so the review decision
+  stays yours.
+- A pull request's own limit is set with the − and + after the number in its sidebar
+  ("Automatic reviews: 3 of 3 − +"); "reset" goes back to the setting. If the author is
+  waiting when the limit goes up, Codex starts right away.
+- "Ask Codex to review" in a pull request's sidebar runs a review at any time, regardless of
+  the cap. The sidebar also shows a running review and the error of a failed one.
+- Codex must be installed and logged in where the server runs.
+
+## Other review agents
 
 Reviews are not tied to the human. Another agent can review by setting its own identity and
 using the same calls a GitHub review bot would:

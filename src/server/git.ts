@@ -14,7 +14,10 @@ export class GitError extends Error {
 export interface RunResult {
   stdout: string;
   stderr: string;
+  /** Exit code; null when the process was killed (by a signal, a timeout or an abort). */
   code: number | null;
+  /** The process ran past `timeoutMs` and was killed. */
+  timedOut?: boolean;
 }
 
 export interface RunOptions {
@@ -23,28 +26,97 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   /** Resolve instead of throwing on a non-zero exit. */
   allowFail?: boolean;
+  /** Kill the process (and everything it started) after this long. */
+  timeoutMs?: number;
+  /** Kill the process (and everything it started) when this aborts. */
+  signal?: AbortSignal;
+  /** How long a killed process gets after SIGTERM before SIGKILL. */
+  graceMs?: number;
 }
 
 export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
+    // Commands we may have to kill get their own process group, so their children go too.
+    const killable = opts.timeoutMs !== undefined || opts.signal !== undefined;
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: killable,
     });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on('data', (d: Buffer) => out.push(d));
     child.stderr.on('data', (d: Buffer) => err.push(d));
-    child.on('error', reject);
-    child.on('close', (code) => {
-      const res = { stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), code };
-      if (code !== 0 && !opts.allowFail) {
-        reject(new GitError(`${cmd} ${args.join(' ')} failed: ${res.stderr.trim() || `exit ${code}`}`, res.stderr, code));
+
+    let timedOut = false;
+    let killed = false;
+    let settled = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const signalGroup = (sig: NodeJS.Signals) => {
+      try {
+        process.kill(-child.pid!, sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {}
+      }
+    };
+    const kill = () => {
+      if (killed) return;
+      killed = true;
+      // The whole group, even when the command itself is gone: its children may still be running.
+      signalGroup('SIGTERM');
+      // Not cleared when the command exits: descendants that ignored SIGTERM still get SIGKILL.
+      setTimeout(() => signalGroup('SIGKILL'), opts.graceMs ?? 3000).unref();
+      // If the command already exited, a child holding the pipes would keep 'close' from firing.
+      if (child.exitCode !== null || child.signalCode !== null) finish(child.exitCode);
+    };
+    const onAbort = () => kill();
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      opts.signal?.removeEventListener('abort', onAbort);
+      const res: RunResult = {
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+        // Whatever a killed process exits with, it did not finish its work.
+        code: killed ? null : code,
+        timedOut,
+      };
+      if (res.code !== 0 && !opts.allowFail) {
+        reject(new GitError(`${cmd} ${args.join(' ')} failed: ${res.stderr.trim() || `exit ${code}`}`, res.stderr, res.code));
       } else {
         resolve(res);
       }
+    };
+
+    if (opts.timeoutMs !== undefined) {
+      deadline = setTimeout(() => {
+        timedOut = true;
+        kill();
+      }, opts.timeoutMs);
+    }
+    if (opts.signal) {
+      if (opts.signal.aborted) kill();
+      else opts.signal.addEventListener('abort', onAbort);
+    }
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      opts.signal?.removeEventListener('abort', onAbort);
+      reject(e);
     });
+    child.on('close', (code) => finish(code));
+    // Once we killed it, do not wait for stray descendants to close the pipes.
+    child.on('exit', (code) => {
+      if (killed) finish(code);
+    });
+    // A command that exits without reading all its input closes the pipe (EPIPE). Its exit
+    // code tells the caller what happened; the write error must not escape and crash us.
+    child.stdin.on('error', () => {});
     child.stdin.end(opts.input ?? '');
   });
 }

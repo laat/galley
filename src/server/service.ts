@@ -4,6 +4,7 @@ import { basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Repo, run, githubSlug, type Commit } from './git.ts';
 import { diffHunkFor, lineInDiff, mapLine, rangeTouched, type FileDiff } from './diff.ts';
+import type { CodexReviewer } from './reviewers/codex.ts';
 import {
   Db,
   now,
@@ -92,6 +93,8 @@ export class Service {
   baseUrl: string;
   ghBin: string;
   bus = new EventEmitter();
+  /** Codex as a reviewer agent, when the server runs one. */
+  codex: CodexReviewer | null = null;
   /** Number of `pr wait` calls currently blocked, per pull id. */
   waiters = new Map<number, number>();
   private syncing = new Map<number, Promise<PullRow>>();
@@ -115,6 +118,13 @@ export class Service {
   setViewerLogin(login: string): void {
     this.viewerLogin = login;
     this.db.setMeta('viewer_login', login);
+    this.claimViewerLogin();
+  }
+
+  /** The human's login belongs to the human: a reviewer bot holding it moves to another name. */
+  claimViewerLogin(): void {
+    this.codex?.releaseName(this.viewerLogin);
+    this.viewer();
   }
 
   /** Look up the GitHub login of whoever `gh` is authenticated as, so the UI can show their avatar. */
@@ -800,6 +810,8 @@ export class Service {
    */
   private waitingStopped = new Map<number, ReturnType<typeof setTimeout>>();
   private setWaiting(id: number, delta: 1 | -1, author: Actor): void {
+    // Reviewer agents start when the author says it is ready, every time it does.
+    if (delta === 1) this.bus.emit('author-waiting', id);
     const before = this.waiters.get(id) ?? 0;
     const n = before + delta;
     if (n > 0) this.waiters.set(id, n);

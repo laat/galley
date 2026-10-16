@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { fillFromCommits } from '../src/server/service.ts';
+import { cliActor } from '../src/config.ts';
 import type { Commit } from '../src/server/git.ts';
 
 test('setField builds nested bodies like gh api -f/-F', () => {
@@ -54,4 +55,15 @@ test('fillFromCommits mirrors gh pr create --fill', () => {
   });
   assert.equal(fillFromCommits([commit('One'), commit('Two')], 'b', 'first').title, 'One');
   assert.equal(fillFromCommits([commit('One'), commit('Two\n\nMore')], 'b', 'verbose').body, '- One\n- Two\n  \n  More');
+});
+
+test('an author agent running in Codex is not named like the Codex reviewer', () => {
+  const saved = { ...process.env };
+  try {
+    for (const k of ['LAATSUX_ACTOR', 'CLAUDECODE', 'AI_AGENT', 'CODEX_MANAGED_BY_NPM']) delete process.env[k];
+    process.env.CODEX_SANDBOX = 'seatbelt';
+    assert.deepEqual(cliActor(), { login: 'codex-agent', type: 'Bot' });
+  } finally {
+    process.env = saved;
+  }
 });

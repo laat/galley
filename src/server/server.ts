@@ -8,6 +8,7 @@ import { Service, type ChangeEvent } from './service.ts';
 import { api } from './api.ts';
 import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
+import { CodexReviewer } from './reviewers/codex.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
 const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -77,6 +78,7 @@ export interface StartOptions {
   host?: string;
   dataDir: string;
   ghBin?: string;
+  codexBin?: string;
   viewerLogin?: string;
   pollMs?: number;
 }
@@ -96,6 +98,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const url = `http://localhost:${port}`;
   const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER });
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
+  service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
+  service.codex.start();
   app = createApp(service, { allowedHosts });
   if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
 
@@ -117,14 +121,15 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     url,
     port,
     service,
-    close: () =>
-      new Promise<void>((resolve) => {
-        clearInterval(timer);
-        server.close(() => {
-          db.sql.close();
-          resolve();
-        });
+    close: async () => {
+      clearInterval(timer);
+      // Running reviews write to the database when they end, so they go first.
+      await service.codex?.stop();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
         (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
-      }),
+      });
+      db.sql.close();
+    },
   };
 }
