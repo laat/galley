@@ -149,6 +149,43 @@ export class Service {
     this.bus.emit('change', { pullId, type, actor: actor.login } satisfies ChangeEvent);
   }
 
+  // --------------------------------------------------------- GitHub counts
+
+  private githubCountsCache = new Map<string, { at: number; value: { issues: number; pulls: number } | null; loading?: Promise<void> }>();
+
+  /**
+   * Open issues and pull requests on GitHub, for the repo tabs. Never waits on the network:
+   * it answers from the cache (or with nothing) and refreshes it in the background.
+   */
+  githubCounts(slug: string): { issues: number; pulls: number } | null {
+    const hit = this.githubCountsCache.get(slug);
+    if (!hit || (Date.now() - hit.at > 5 * 60_000 && !hit.loading)) this.refreshGithubCounts(slug);
+    return hit?.value ?? null;
+  }
+
+  refreshGithubCounts(slug: string): Promise<void> {
+    const current = this.githubCountsCache.get(slug);
+    if (current?.loading) return current.loading;
+    const [owner, name] = slug.split('/');
+    const query = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount}}}';
+    // -f, not -F: -F would turn a repository named "123" or "true" into a number or boolean.
+    const loading = run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
+      .then((r) => {
+        const repo = JSON.parse(r.stdout).data.repository;
+        return { issues: repo.issues.totalCount as number, pulls: repo.pullRequests.totalCount as number };
+      })
+      .catch(() => current?.value ?? null)
+      .then((value) => {
+        this.githubCountsCache.set(slug, { at: Date.now(), value });
+        // Pages rendered before this answer came show old or no counts; let them refresh.
+        if (JSON.stringify(value) !== JSON.stringify(current?.value ?? null)) {
+          this.bus.emit('change', { pullId: null, type: 'github_counts', actor: 'github' } satisfies ChangeEvent);
+        }
+      });
+    this.githubCountsCache.set(slug, { at: current?.at ?? 0, value: current?.value ?? null, loading });
+    return loading;
+  }
+
   // ----------------------------------------------------------------- repos
 
   async registerRepo(path: string): Promise<RepoRow> {

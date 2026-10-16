@@ -114,6 +114,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   service.codex.start();
   app = createApp(service, { allowedHosts });
   if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
+  // Warm the GitHub counts for the repo tabs, so the first page already has them.
+  for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubCounts(repo.github_slug);
 
   let polling = false;
   const timer = setInterval(async () => {

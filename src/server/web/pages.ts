@@ -13,6 +13,7 @@ import {
   markdownEditor,
   pullIcon,
   repoCrumbs,
+  repoNav,
   reviewThread,
   stateBadge,
   timelineBadge,
@@ -77,7 +78,13 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${rows.length ? rows : empty}
   </div>
 </div>`;
-  return layout(s, { title: opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux', crumbs: opts.repo ? repoCrumbs(opts.repo) : undefined, body, live: 'all' });
+  return layout(s, {
+    title: opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux',
+    crumbs: opts.repo ? repoCrumbs(opts.repo) : undefined,
+    subnav: opts.repo ? repoNav(s, opts.repo) : undefined,
+    body,
+    live: 'all',
+  });
 }
 
 // ------------------------------------------------------------ pull pages
@@ -159,6 +166,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
   return layout(s, {
     title: `${pull.title} by ${author.login} · Pull Request #${pull.number} · ${repo.owner}/${repo.name}`,
     crumbs: repoCrumbs(repo, html`<span class="crumb-sep">/</span><a href="${p.htmlBase}">#${pull.number}</a>`),
+    subnav: repoNav(s, repo),
     body: html`${header}${content}`,
     live: pull.id,
     data: { 'api-base': p.apiBase, 'pull-id': pull.id, ...extraData },

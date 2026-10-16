@@ -88,7 +88,7 @@ before(async () => {
   const gh = join(dir, 'gh');
   writeFileSync(
     gh,
-    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\nesac\n`,
+    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n  "api graphql") echo '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2}}}}' ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -358,6 +358,25 @@ test('the agent loop, from staging to publishing', async (t) => {
     const again = await cli(['pr', 'wait', '--timeout', '5s']);
     assert.match(again.stdout, /closed .* without publishing/);
     await human('PATCH', '/api/repos/acme/widgets/pulls/1', { state: 'open' });
+  });
+
+  await t.test('repo pages link to the pull requests and issues on GitHub', async () => {
+    await server.service.refreshGithubCounts('acme/widgets');
+    // When counts arrive in the background, open pages are told so they can show them.
+    const events: string[] = [];
+    const listen = (e: { type: string }) => events.push(e.type);
+    server.service.bus.on('change', listen);
+    await server.service.refreshGithubCounts('acme/fresh');
+    server.service.bus.off('change', listen);
+    assert.ok(events.includes('github_counts'), 'a change event when the counts change');
+    // Owner and name go as strings (-f): -F would make a repository called "123" a number.
+    assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^api graphql -f query=.* -f owner=acme -f name=widgets$/m);
+    for (const path of ['/acme/widgets', '/acme/widgets/pull/1']) {
+      const page = await (await fetch(server.url + path)).text();
+      assert.match(page, /<a class="UnderlineNav-item selected" href="\/acme\/widgets">[^]*?Staged <span class="Counter">\d+<\/span><\/a>/, path);
+      assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/pulls" target="_blank"[^]*?Pull requests <span class="Counter">2<\/span>/, path);
+      assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/issues" target="_blank"[^]*?Issues <span class="Counter">4<\/span>/, path);
+    }
   });
 
   await t.test('web pages render', async () => {

@@ -113,6 +113,10 @@
       const next = doc.getElementById('main');
       if (!next) return;
       main().replaceWith(document.adoptNode(next));
+      // The repo tabs live in the header, outside #main, and their counts change too.
+      const tabs = $('.app-header-wrap .UnderlineNav');
+      const nextTabs = doc.querySelector('.app-header-wrap .UnderlineNav');
+      if (tabs && nextTabs) tabs.replaceWith(document.adoptNode(nextTabs));
       document.title = doc.title;
       afterRender();
     })().finally(() => {
