@@ -21,6 +21,9 @@ feedback, and the loop repeats until the user publishes it.
 - Commit unsigned. laatsux signs the commits as the user when they publish. If `git commit`
   tries to sign (it asks for a key, or fails on signing), commit with
   `git -c commit.gpgsign=false commit …`.
+- Never write a staged pull request's number where GitHub shows it: commit messages, the title
+  and description (they become the GitHub pull request), issues and GitHub comments. Refer to a
+  published pull request by its GitHub number, an unpublished one by what it does or its branch.
 - You may rewrite history freely (amend, fixup, rebase, reword). The server records each
   push as a revision and carries review comments to the new lines.
 - Resolve the threads you addressed, in the same command as your reply (`--resolve`). Keep a
