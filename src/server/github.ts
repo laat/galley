@@ -1,6 +1,6 @@
 // Serializers that shape laatsux records like GitHub's REST API (snake_case) and like
 // `gh ... --json` output (camelCase, GraphQL-style), so tools that know GitHub feel at home.
-import type { Commit } from './git.ts';
+import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
 import type { Ctx, Placement, Service, Thread } from './service.ts';
@@ -66,7 +66,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
   return json;
 }
 
-export function commitJson(s: Service, repo: RepoRow, pull: PullRow, c: Commit) {
+/** A commit of a pull request, or with no pull request one of the repository (linking to its tree). */
+export function commitJson(s: Service, repo: RepoRow, pull: PullRow | null, c: Commit) {
   return {
     sha: c.sha,
     commit: {
@@ -75,7 +76,24 @@ export function commitJson(s: Service, repo: RepoRow, pull: PullRow, c: Commit) 
       committer: { name: c.committerName, email: c.committerEmail, date: c.committerDate },
     },
     parents: c.parents.map((sha) => ({ sha })),
-    html_url: `${s.pullUrl(repo, pull)}/commits/${c.sha}`,
+    html_url: pull ? `${s.pullUrl(repo, pull)}/commits/${c.sha}` : `${s.baseUrl}/${repo.owner}/${repo.name}/tree/${c.sha}`,
+  };
+}
+
+/** An entry of GET /repos/{owner}/{repo}/contents/{path} at commit `sha`. */
+export function contentJson(s: Service, repo: RepoRow, sha: string, path: string, e: TreeEntry) {
+  const type = e.type === 'tree' ? 'dir' : e.type === 'commit' ? 'submodule' : e.mode === '120000' ? 'symlink' : 'file';
+  const encoded = path.split('/').map(encodeURIComponent).join('/');
+  const web = `${s.baseUrl}/${repo.owner}/${repo.name}`;
+  return {
+    type,
+    name: e.name,
+    path,
+    sha: e.oid,
+    size: e.size ?? 0,
+    url: `${apiBase(s, repo)}/contents/${encoded}?ref=${sha}`,
+    html_url: `${web}/${type === 'dir' ? 'tree' : 'blob'}/${sha}/${encoded}`,
+    download_url: type === 'file' || type === 'symlink' ? `${web}/raw/${sha}/${encoded}` : null,
   };
 }
 

@@ -1209,4 +1209,61 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     const conversation = await page(`/acme/widgets/pull/${n}`);
     assert.match(conversation.text, new RegExp(`href="/acme/widgets/tree/${head}" title="Browse the repository at this revision"`));
   });
+
+  await t.test('laatsux browse prints the URL of a pull request, file or directory', async () => {
+    const browse = async (...args: string[]) => {
+      const r = await cli(['browse', ...args]);
+      assert.equal(r.code, 0, r.stderr);
+      return r.stdout.trim();
+    };
+    assert.equal(await browse('long.js:12', '--commit', head), `${server.url}/acme/widgets/blob/${head}/long.js#L12`);
+    assert.equal(await browse(`--commit=${head.slice(0, 7)}`, 'long.js:12-14'), `${server.url}/acme/widgets/blob/${head}/long.js#L12-L14`);
+    const now = git('rev-parse', 'HEAD');
+    assert.equal(await browse('dir with space/notes.md:2'), `${server.url}/acme/widgets/blob/${now}/dir%20with%20space/notes.md?plain=1#L2`);
+    assert.equal(await browse('icon.svg:1'), `${server.url}/acme/widgets/blob/${now}/icon.svg?plain=1#L1`);
+    assert.equal(await browse('icon.svg'), `${server.url}/acme/widgets/blob/${now}/icon.svg`);
+    assert.equal(await browse('dir with space/', '-c'), `${server.url}/acme/widgets/tree/${now}/dir%20with%20space`);
+    assert.equal(await browse(String(n)), `${server.url}/acme/widgets/pull/${n}`);
+    assert.equal(await browse(), `${server.url}/acme/widgets`);
+    assert.equal(await browse(head.slice(0, 7)), `${server.url}/acme/widgets/tree/${head}`);
+    const missing = await cli(['browse', 'doomed.txt']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /doomed\.txt does not exist at [0-9a-f]{7}/);
+    // The URLs work.
+    assert.equal((await page(new URL(await browse('long.js:12', '--commit', head)).pathname)).status, 200);
+  });
+
+  await t.test('laatsux browse --repo looks up commits and paths in that repository, through the server', async () => {
+    const other = join(dir, 'other');
+    execFileSync('git', ['init', '-q', '-b', 'main', other]);
+    execFileSync('git', ['-C', other, '-c', 'commit.gpgsign=false', '-c', 'user.name=Other', '-c', 'user.email=other@example.com', 'commit', '-q', '--allow-empty', '-m', 'Other']);
+    const browseFrom = (cwd: string, ...args: string[]) =>
+      exec(process.execPath, [BIN, 'browse', ...args], { cwd, env: { ...process.env, LAATSUX_URL: server.url, LAATSUX_ACTOR: 'agent', NO_COLOR: '1' } }).then(
+        (r) => r.stdout.trim(),
+        (e) => `exit ${e.code}: ${e.stderr.trim()}`,
+      );
+    // Without --commit, HEAD of that repository's checkout.
+    const now = git('rev-parse', 'HEAD');
+    for (const cwd of [other, dir]) {
+      assert.equal(await browseFrom(cwd, '-R', 'acme/widgets', 'dir with space/notes.md:2'), `${server.url}/acme/widgets/blob/${now}/dir%20with%20space/notes.md?plain=1#L2`, cwd);
+    }
+    assert.equal(await browseFrom(other, '-R', 'acme/widgets', 'long.js:3', '--commit', head.slice(0, 7)), `${server.url}/acme/widgets/blob/${head}/long.js#L3`);
+    assert.equal(await browseFrom(other, '--repo=acme/widgets', '-b', 'browse-base', 'doomed.txt'), `${server.url}/acme/widgets/blob/${base}/doomed.txt`);
+    assert.equal(await browseFrom(other, '-R', 'acme/widgets', '/dir with space/'), `${server.url}/acme/widgets/tree/${now}/dir%20with%20space`);
+    assert.match(await browseFrom(other, '-R', 'acme/widgets', 'nope.js'), /^exit 1: nope\.js does not exist at [0-9a-f]{7}$/);
+    assert.match(await browseFrom(other, '-R', 'acme/widgets', '-c', 'nope', 'long.js'), /^exit 1: no commit "nope" in acme\/widgets$/);
+
+    // The GitHub endpoints it uses.
+    const api = async (endpoint: string) => {
+      const r = await cli(['api', endpoint]);
+      return r.code === 0 ? JSON.parse(r.stdout) : r.stderr;
+    };
+    assert.deepEqual((await api(`repos/{owner}/{repo}/contents/dir%20with%20space?ref=${head}`)).map((e: any) => [e.type, e.path]), [['file', 'dir with space/notes.md']]);
+    const file = await api(`repos/{owner}/{repo}/contents/long.js?ref=${base}`);
+    assert.equal(Buffer.from(file.content, 'base64').toString(), numbered(60));
+    assert.equal(file.html_url, `${server.url}/acme/widgets/blob/${base}/long.js`);
+    assert.equal((await api('repos/{owner}/{repo}/commits/browse-base')).sha, base);
+    assert.match(await api(`repos/{owner}/{repo}/contents/nope.js?ref=${head}`), /HTTP 404/);
+    assert.match(await api('repos/{owner}/{repo}/commits/nope'), /No commit found for SHA: nope \(HTTP 422\)/);
+  });
 });

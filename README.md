@@ -81,6 +81,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
+| `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant |
 | `laatsux serve` | Run the server and web UI |
 
 A pull request is found the way gh finds it: by number, URL, branch name, or the current branch.
@@ -131,6 +132,8 @@ GET/POST        /api/repos/{owner}/{repo}/pulls/{n}/reviews           (POST take
 POST            /api/repos/{owner}/{repo}/pulls/{n}/reviews/{id}/events
 GET/POST        /api/repos/{owner}/{repo}/issues/{n}/comments
 GET             /api/repos/{owner}/{repo}/issues/{n}/timeline
+GET             /api/repos/{owner}/{repo}/commits/{ref}
+GET             /api/repos/{owner}/{repo}/contents/{path}?ref=       (ref defaults to HEAD, not the default branch)
 ```
 
 Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n}/publish`,
