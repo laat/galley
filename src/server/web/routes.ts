@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import { HttpError, type Service } from '../service.ts';
 import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, pullList } from './pages.ts';
-import { settingsPage } from './settings.ts';
+import { publishingSettingsPage, settingsPage } from './settings.ts';
 import { browseUrl, type DiffMode } from './diffview.ts';
 import { blobPage, excerpt, locate, rawFile, treePage } from './browse.ts';
 
@@ -24,6 +24,7 @@ export function web(s: Service): Hono {
   app.get('/', (c) => c.html(pullList(s, { repo: null, state: c.req.query('state') ?? 'open' })));
   // Registered before /:owner/:repo, which would otherwise match "settings".
   app.get('/settings', async (c) => c.html(await settingsPage(s)));
+  app.get('/settings/publishing', (c) => c.html(publishingSettingsPage(s)));
   app.get('/:owner/:repo', (c) => c.html(pullList(s, { repo: s.repo(c.req.param('owner'), c.req.param('repo')), state: c.req.query('state') ?? 'open' })));
   app.get('/:owner/:repo/pulls', (c) => c.redirect(`/${c.req.param('owner')}/${c.req.param('repo')}`));
   app.get('/:owner/:repo/pull/:n', async (c) => c.html(await conversationPage(await load(c))));

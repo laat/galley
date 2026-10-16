@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { Repo, run, githubSlug, type Commit, type RawCommit, type RunResult } from './git.ts';
 import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
+import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import {
   Db,
   now,
@@ -128,9 +129,46 @@ export interface AutoPublish {
   draft: boolean;
   /** Force-push if publishing needs it. */
   force: boolean;
+  /** Turn on auto-merge on GitHub after publishing, with this merge method; null for no auto-merge. */
+  autoMerge: MergeMethod | null;
+}
+
+/**
+ * The last time laatsux turned on auto-merge for the published pull request, and what came of
+ * it: on, merged at once (GitHub had nothing to wait for), requested (gh accepted it, but which
+ * of the two it was could not be checked), or failed. It says what GitHub did then; laatsux does
+ * not follow the pull request on GitHub after that.
+ */
+export interface AutoMerge {
+  state: 'enabled' | 'merged' | 'requested' | 'failed';
+  by: number;
+  at: string;
+  url: string;
+  method: MergeMethod;
+  /** gh's message, when it failed. */
+  error?: string;
 }
 
 export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed';
+
+/** A repository on GitHub, as laatsux shows it: the counts on the repo tabs, and what merging there allows. */
+export interface GithubRepo {
+  issues: number;
+  pulls: number;
+  /** Null when the last attempt to ask GitHub failed: the counts may be old, but what merging allows is unknown. */
+  merging: {
+    /** "Allow auto-merge" in the repository's settings. */
+    autoMerge: boolean;
+    methods: MergeMethod[];
+  } | null;
+}
+
+/** Whether publishing can turn on auto-merge in a repository: GitHub allows auto-merge there, and maybe not the method from settings. */
+export interface AutoMergeOption {
+  method: MergeMethod;
+  methodAllowed: boolean;
+  methods: MergeMethod[];
+}
 
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
@@ -197,40 +235,49 @@ export class Service {
     this.bus.emit('change', { pullId, type, actor: actor.login } satisfies ChangeEvent);
   }
 
-  // --------------------------------------------------------- GitHub counts
+  // --------------------------------------------------------- GitHub repos
 
-  private githubCountsCache = new Map<string, { at: number; value: { issues: number; pulls: number } | null; loading?: Promise<void> }>();
+  private githubRepoCache = new Map<string, { at: number; value: GithubRepo | null; loading?: Promise<void> }>();
 
   /**
-   * Open issues and pull requests on GitHub, for the repo tabs. Never waits on the network:
-   * it answers from the cache (or with nothing) and refreshes it in the background.
+   * The repository on GitHub: open issues and pull requests for the repo tabs, and what merging
+   * allows. Never waits on the network: it answers from the cache (or with nothing) and
+   * refreshes it in the background.
    */
-  githubCounts(slug: string): { issues: number; pulls: number } | null {
-    const hit = this.githubCountsCache.get(slug);
-    if (!hit || (Date.now() - hit.at > 5 * 60_000 && !hit.loading)) this.refreshGithubCounts(slug);
+  githubRepo(slug: string): GithubRepo | null {
+    const hit = this.githubRepoCache.get(slug);
+    if (!hit || (Date.now() - hit.at > 5 * 60_000 && !hit.loading)) this.refreshGithubRepo(slug);
     return hit?.value ?? null;
   }
 
-  refreshGithubCounts(slug: string): Promise<void> {
-    const current = this.githubCountsCache.get(slug);
+  refreshGithubRepo(slug: string): Promise<void> {
+    const current = this.githubRepoCache.get(slug);
     if (current?.loading) return current.loading;
     const [owner, name] = slug.split('/');
-    const query = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount}}}';
+    const query =
+      'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount} ' +
+      'autoMergeAllowed squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed}}';
     // -f, not -F: -F would turn a repository named "123" or "true" into a number or boolean.
     const loading = run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
-      .then((r) => {
+      .then((r): GithubRepo => {
         const repo = JSON.parse(r.stdout).data.repository;
-        return { issues: repo.issues.totalCount as number, pulls: repo.pullRequests.totalCount as number };
+        const allowed = { squash: repo.squashMergeAllowed, merge: repo.mergeCommitAllowed, rebase: repo.rebaseMergeAllowed };
+        return {
+          issues: repo.issues.totalCount,
+          pulls: repo.pullRequests.totalCount,
+          merging: { autoMerge: repo.autoMergeAllowed === true, methods: MERGE_METHODS.filter((m) => allowed[m] === true) },
+        };
       })
-      .catch(() => current?.value ?? null)
+      // Old counts are better than none, but what merging allows is not known now.
+      .catch(() => (current?.value ? { ...current.value, merging: null } : null))
       .then((value) => {
-        this.githubCountsCache.set(slug, { at: Date.now(), value });
-        // Pages rendered before this answer came show old or no counts; let them refresh.
+        this.githubRepoCache.set(slug, { at: Date.now(), value });
+        // Pages rendered before this answer came show old or no counts and options; let them refresh.
         if (JSON.stringify(value) !== JSON.stringify(current?.value ?? null)) {
-          this.bus.emit('change', { pullId: null, type: 'github_counts', actor: 'github' } satisfies ChangeEvent);
+          this.bus.emit('change', { pullId: null, type: 'github_repo', actor: 'github' } satisfies ChangeEvent);
         }
       });
-    this.githubCountsCache.set(slug, { at: current?.at ?? 0, value: current?.value ?? null, loading });
+    this.githubRepoCache.set(slug, { at: current?.at ?? 0, value: current?.value ?? null, loading });
     return loading;
   }
 
@@ -238,7 +285,7 @@ export class Service {
   private githubIssueQueue: Map<string, Set<number>> | null = null;
 
   /**
-   * The title and state of an issue or pull request on GitHub, for links to it. Like `githubCounts`, it
+   * The title and state of an issue or pull request on GitHub, for links to it. Like `githubRepo`, it
    * never waits on the network: the lookups one page render asks for go out together, afterwards.
    * `lookUp: false` answers from the cache alone.
    */
@@ -1118,29 +1165,35 @@ export class Service {
 
   /** Auto-publish's options while it is on, or null. */
   autoPublish(pull: PullRow): AutoPublish | null {
-    return pull.auto_publish ? (JSON.parse(pull.auto_publish) as AutoPublish) : null;
+    if (!pull.auto_publish) return null;
+    const auto = JSON.parse(pull.auto_publish) as AutoPublish;
+    // Approvals from before auto-merge was an option leave it out.
+    return { ...auto, autoMerge: auto.autoMerge ?? null };
   }
 
   /**
    * Approve publishing in advance: laatsux publishes on its own once the agents are done (see
    * readiness), even commits pushed after this. The options are fixed now, as the publish box
-   * shows them: signing and draft as checked, and force if it was checked and turns out to be needed.
+   * shows them: signing and draft as checked, force if it was checked and turns out to be needed,
+   * and auto-merge with the merge method `autoMerge`.
    */
-  async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean }, actor: Actor): Promise<AutoPublish> {
+  async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean; autoMerge?: MergeMethod }, actor: Actor): Promise<AutoPublish> {
     const { pull, repo } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'auto-publish is for the reviewer, like publishing; ask the user to turn it on from laatsux');
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
+    const autoMerge = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
     const auto: AutoPublish = {
       by: actor.id,
       at: now(),
       sign: opts.sign ?? (await this.signsByDefault(ctx)),
       draft: opts.draft ?? !!pull.draft,
       force: !!opts.force,
+      autoMerge,
     };
     this.db.transaction(() => {
       this.db.update('pulls', pull.id, { auto_publish: JSON.stringify(auto) });
-      this.addEvent(pull, actor, 'auto_publish_enabled', { sign: auto.sign, draft: auto.draft, force: auto.force }, auto.at);
+      this.addEvent(pull, actor, 'auto_publish_enabled', { sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge }, auto.at);
     });
     this.emit(pull.id, 'auto_publish', actor);
     return auto;
@@ -1304,11 +1357,13 @@ export class Service {
    * Push the head and open (or update) the pull request on GitHub. `approval` is auto-publish
    * doing it, under that approval (pulls.auto_publish as the attempt read it): the attempt only
    * goes ahead while that exact approval is in force, and nobody is there to answer a prompt,
-   * so each step gets UNATTENDED_TIMEOUT_MS.
+   * so each step gets UNATTENDED_TIMEOUT_MS. `autoMerge` turns on auto-merge on GitHub afterwards,
+   * with that merge method: auto-publish's, fixed when it was turned on, or the one in settings
+   * when the request came in.
    */
   async publish(
     ctx: Ctx,
-    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; approval?: string },
+    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; approval?: string; autoMerge?: MergeMethod },
     actor: Actor,
   ): Promise<PullRow> {
     const { repo, git } = ctx;
@@ -1328,8 +1383,9 @@ export class Service {
       const what = work.head_sha === pull.head_sha ? 'this commit' : `an earlier commit (${work.head_sha.slice(0, 7)})`;
       throw new HttpError(428, `${this.codex!.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what}, and its review may ask for changes.`);
     }
+    // Refused before anything is pushed, rather than published without the auto-merge asked for.
+    const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
     const cwd = repo.work_dir ?? tmpdir();
-    const env = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
     const timeoutMs = auto ? UNATTENDED_TIMEOUT_MS : undefined;
 
     let pushed = pull.head_sha;
@@ -1364,7 +1420,7 @@ export class Service {
       }
     }
     // No await may come between the check above and this call, which starts the push at once.
-    const push = await git.run(args, { cwd, env, allowFail: true, timeoutMs });
+    const push = await git.run(args, { cwd, env: UNPROMPTED, allowFail: true, timeoutMs });
     if (push.code !== 0) {
       const stale = /stale info/.test(push.stderr);
       const rejected = stale || /\[rejected\]|non-fast-forward|fetch first/.test(push.stderr);
@@ -1382,7 +1438,7 @@ export class Service {
     if (!url) {
       const args = ['pr', 'create', '--repo', repo.github_slug, '--base', pull.base_ref, '--head', pull.head_ref, '--title', pull.title, '--body-file', '-'];
       if (opts.draft ?? pull.draft) args.push('--draft');
-      const r = await run(this.ghBin, args, { cwd, env, input: pull.body, allowFail: true, timeoutMs });
+      const r = await run(this.ghBin, args, { cwd, env: UNPROMPTED, input: pull.body, allowFail: true, timeoutMs });
       const existing = r.stderr.match(/already exists:?\s*(https:\/\/\S+)/);
       if (r.code === 0) url = r.stdout.trim().split('\n').pop()!.trim();
       else if (existing) {
@@ -1391,7 +1447,7 @@ export class Service {
       } else throw new HttpError(502, `gh pr create failed:\n${failure(r)}`);
     }
     if (update) {
-      const r = await run(this.ghBin, ['pr', 'edit', url, '--title', pull.title, '--body-file', '-', '--base', pull.base_ref], { cwd, env, input: pull.body, allowFail: true, timeoutMs });
+      const r = await run(this.ghBin, ['pr', 'edit', url, '--title', pull.title, '--body-file', '-', '--base', pull.base_ref], { cwd, env: UNPROMPTED, input: pull.body, allowFail: true, timeoutMs });
       if (r.code !== 0) throw new HttpError(502, `gh pr edit failed:\n${failure(r)}`);
     }
 
@@ -1415,9 +1471,91 @@ export class Service {
       this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force, auto }, ts);
     });
     this.emit(pull.id, auto ? 'auto_published' : 'published', actor);
+    if (mergeMethod) await this.enableAutoMerge(ctx, url!, pushed, mergeMethod, actor, timeoutMs);
     return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
   }
+
+  /**
+   * Turn on auto-merge for the pull request just published: GitHub merges it with `method`
+   * once its requirements (such as required checks) are met. `--match-head-commit` makes GitHub
+   * refuse when the branch there is no longer the commit laatsux pushed, but it does not pin the
+   * merge to that commit: a later push by someone without write access turns auto-merge off,
+   * and one by someone with write access is merged too. The pull request is published whatever
+   * happens here, so a failure is recorded on it rather than thrown.
+   */
+  private async enableAutoMerge(ctx: Ctx, url: string, head: string, method: MergeMethod, actor: Actor, timeoutMs?: number): Promise<void> {
+    const { repo, pull } = ctx;
+    const opts = { cwd: repo.work_dir ?? tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs };
+    const merge = () => run(this.ghBin, ['pr', 'merge', url, '--auto', `--${method}`, '--match-head-commit', head], opts);
+    // Unknown until GitHub says.
+    let merged: boolean | null = null;
+    let error: string | null = null;
+    try {
+      let r = await merge();
+      // gh merges at once when GitHub has nothing left to wait for, and asks for auto-merge
+      // otherwise. Right after `gh pr create` GitHub may not have worked that out yet: gh asks for
+      // auto-merge, and GitHub refuses it for a pull request in "clean status". Asked again, gh
+      // sees the clean status itself and merges, as it would have in the first place.
+      if (r.code !== 0 && /clean status/.test(r.stderr)) r = await merge();
+      if (r.code !== 0) throw new Error(failure(r));
+      // Without a terminal gh says nothing either way, so ask GitHub which it was. gh accepted
+      // the request, so a lookup that fails in any way leaves it unknown, not failed.
+      try {
+        const view = await run(this.ghBin, ['pr', 'view', url, '--json', 'state'], opts);
+        if (view.code === 0) merged = JSON.parse(view.stdout).state === 'MERGED';
+      } catch {}
+    } catch (e) {
+      error = (e as Error).message.slice(0, 4000);
+    }
+    const type = error === null ? 'auto_merge_enabled' : 'auto_merge_failed';
+    this.addEvent(pull, actor, type, error === null ? { url, method, merged } : { url, method, error });
+    this.emit(pull.id, type, actor);
+  }
+
+  /**
+   * Whether publishing offers to turn on auto-merge in this repository: only when GitHub allows
+   * auto-merge there. Unknown (not asked yet, or gh failed) counts as not allowed. Never waits on
+   * the network.
+   */
+  autoMergeOption(repo: RepoRow): AutoMergeOption | null {
+    const merging = repo.github_slug ? this.githubRepo(repo.github_slug)?.merging : null;
+    if (!merging?.autoMerge) return null;
+    const method = readSettings(this.db).publish.mergeMethod;
+    return { method, methodAllowed: merging.methods.includes(method), methods: merging.methods };
+  }
+
+  /**
+   * Check that the repository allows auto-merge with `method`, refusing with a reason when it
+   * does not. It asks GitHub first: an answer from before the repository's settings changed must
+   * not let a publish through that `gh pr merge` refuses.
+   */
+  async autoMergeMethod(repo: RepoRow, method: MergeMethod): Promise<MergeMethod> {
+    const slug = repo.github_slug;
+    if (!slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
+    // A lookup already under way may have asked before the change; ask after it.
+    await this.githubRepoCache.get(slug)?.loading;
+    await this.refreshGithubRepo(slug);
+    const merging = this.githubRepo(slug)?.merging;
+    if (!merging) throw new HttpError(502, `could not ask GitHub whether ${slug} allows auto-merge`);
+    if (!merging.autoMerge) throw new HttpError(422, `${slug} does not allow auto-merge. Turn on "Allow auto-merge" in the repository's settings on GitHub.`);
+    if (!merging.methods.includes(method)) {
+      throw new HttpError(422, `${slug} does not allow ${method} merges, the merge method in laatsux's settings (it allows ${merging.methods.join(', ')}). Change it under Settings → Publishing.`);
+    }
+    return method;
+  }
+
+  /** What came of the last time laatsux turned on auto-merge for this pull request on GitHub; null if it never did. */
+  autoMerge(pull: PullRow): AutoMerge | null {
+    const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type IN ('auto_merge_enabled', 'auto_merge_failed') ORDER BY id DESC LIMIT 1", pull.id);
+    if (!e) return null;
+    const data = JSON.parse(e.data);
+    const state = e.type === 'auto_merge_failed' ? 'failed' : data.merged === true ? 'merged' : data.merged === false ? 'enabled' : 'requested';
+    return { state, by: e.actor_id, at: e.created_at, url: data.url, method: data.method, error: data.error };
+  }
 }
+
+/** Environment for git and gh when nobody can answer a prompt. */
+const UNPROMPTED = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
 
 /** Why a command failed: its output, or that it ran out of time (and, given, what it may have waited for). */
 function failure(r: RunResult, waitedFor?: string): string {

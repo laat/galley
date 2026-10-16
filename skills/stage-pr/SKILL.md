@@ -116,7 +116,8 @@ feedback, and the loop repeats until the user publishes it.
    a reviewer such as codex is still reviewing, its review is coming: wait for it before you
    tell the user the pull request is ready. If it says auto-publish is on, the user has approved
    publishing in advance: address the feedback and wait again, and laatsux publishes while you
-   wait once the reviewer agents are done.
+   wait once the reviewer agents are done. If it says it also turns on auto-merge, GitHub merges the
+   pull request once its required checks pass; you do not merge it.
 
 ## Codex reviews
 

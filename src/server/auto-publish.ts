@@ -76,7 +76,7 @@ export class AutoPublisher {
     try {
       // Exactly the head that was checked: a push since then fails the fingerprint and waits for the next round.
       // Force is allowed as approved; publish decides whether the push needs it.
-      await this.s.publish(ctx, { sign: auto.sign, draft: auto.draft, force: auto.force, expected: publishFingerprint(pull), approval }, by);
+      await this.s.publish(ctx, { sign: auto.sign, draft: auto.draft, force: auto.force, autoMerge: auto.autoMerge ?? undefined, expected: publishFingerprint(pull), approval }, by);
     } catch (e) {
       // Changed since the check (a push, an edit, new feedback, a review starting, a new approval): the change brings another check.
       if (e instanceof HttpError && (e.status === 412 || e.status === 428)) return;

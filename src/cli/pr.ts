@@ -9,7 +9,7 @@ import { conversationItems, formatConversation, reviewersAtWork, stillReviewing,
 type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
-  'additions', 'author', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
+  'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
   'createdAt', 'deletions', 'files', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'number', 'publishedUrl',
   'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'updatedAt', 'url', 'waiting',
 ];
@@ -472,8 +472,10 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     'during-review': { type: 'boolean' },
     auto: { type: 'boolean' },
     'disable-auto': { type: 'boolean' },
+    'auto-merge': { type: 'boolean' },
   });
   if (v.auto && v['disable-auto']) throw new CliError('specify only one of --auto or --disable-auto');
+  if (v['auto-merge'] && v['disable-auto']) throw new CliError('--auto-merge goes with publishing; --disable-auto only turns auto-publish off');
   if (v.auto && v['during-review']) throw new CliError('--during-review publishes now; --auto waits for the reviews instead');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const name = `${t.repo.owner}/${t.repo.name}#${t.number}`;
@@ -484,20 +486,31 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     err(`✓ Auto-publish disabled for pull request ${name}`);
     return 0;
   }
+  const autoMerge = !!v['auto-merge'];
   if (v.auto) {
-    await client.json('PUT', `${pullPath(t)}/auto-publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign });
-    err(`✓ Pull request ${name} will be published when the reviewer agents are done and the author has answered them`);
+    await client.json('PUT', `${pullPath(t)}/auto-publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, auto_merge: autoMerge });
+    err(`✓ Pull request ${name} will be published when the reviewer agents are done and the author has answered them${autoMerge ? ', with auto-merge on GitHub' : ''}`);
     return 0;
   }
   err(`Publishing ${name} to GitHub…`);
   const pr = await client
-    .json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'] })
+    .json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'], auto_merge: autoMerge })
     .catch((e) => {
       // A reviewer is at work: the server asks whether to publish anyway.
       if (e instanceof ApiError && e.status === 428) throw new CliError(`${e.message}\nRun \`laatsux pr publish ${t.number} --during-review\` to publish anyway.`);
       throw e;
     });
   out(pr.published_url);
+  // Publishing worked either way; auto-merge comes after it.
+  const merge = pr.auto_merge_result;
+  const via = merge && merge.merge_method !== 'merge' ? ` via ${merge.merge_method}` : '';
+  if (merge?.state === 'enabled') err(`✓ ${pr.published_url} will be automatically merged${via} when all requirements are met`);
+  if (merge?.state === 'merged') err(`✓ Merged ${pr.published_url}${via} right away: GitHub had nothing left to wait for`);
+  if (merge?.state === 'requested') err(`✓ Requested auto-merge${via} for ${pr.published_url}; whether GitHub merged it at once could not be checked`);
+  if (merge?.state === 'failed') {
+    err(`Published, but turning on auto-merge failed:\n${merge.error}`);
+    return 1;
+  }
   return 0;
 }
 
@@ -610,7 +623,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(
         c.gray(
           `Auto-publish is on (${auto.enabledBy.login} turned it on): laatsux publishes this pull request once the reviewer agents are done with ` +
-            `your latest commit and you are waiting in \`laatsux pr wait ${t.number}\` with the feedback addressed.`,
+            `your latest commit and you are waiting in \`laatsux pr wait ${t.number}\` with the feedback addressed` +
+            `${auto.autoMerge ? ', and turns on auto-merge on GitHub' : ''}.`,
         ),
       );
     }
@@ -642,7 +656,8 @@ COMMANDS (same flags as gh)
 
 LAATSUX COMMANDS
   wait:        Block until the reviewer responds, then print the feedback
-  publish:     Push the branch and open the pull request on GitHub (--auto: once the reviews are done)
+  publish:     Push the branch and open the pull request on GitHub (--auto: once the
+               reviews are done; --auto-merge: and turn on auto-merge there)
 
 FLAGS
   -R, --repo [HOST/]OWNER/REPO   Select another repository

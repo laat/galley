@@ -70,6 +70,9 @@ function reviewersLine(pr: GhPull): string {
   ].join(', ');
 }
 
+// As gh describes them.
+const MERGE_METHOD: Record<string, string> = { MERGE: 'a merge commit', REBASE: 'rebase and merge', SQUASH: 'squash and merge' };
+
 /** `gh pr view` without a TTY: key/value header, "--", body. */
 export function viewPlain(pr: GhPull, images?: ImageRef): string {
   const lines = [
@@ -85,7 +88,7 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
     `url:\t${pr.url}`,
     `additions:\t${pr.additions}`,
     `deletions:\t${pr.deletions}`,
-    `auto-merge:\tdisabled`,
+    `auto-merge:\t${pr.autoMergeRequest ? `enabled\t${pr.autoMergeRequest.enabledBy.login}\t${pr.autoMergeRequest.mergeMethod.toLowerCase()}` : 'disabled'}`,
     `auto-publish:\t${pr.autoPublishRequest ? `enabled\t${pr.autoPublishRequest.enabledBy.login}` : 'disabled'}`,
     `base:\t${pr.baseRefName}`,
     `head:\t${pr.headRefName} (${String(pr.headRefOid).slice(0, 7)})`,
@@ -107,7 +110,11 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   ];
   const reviewers = reviewersLine(pr);
   if (reviewers) out.push(`Reviewers: ${reviewers}`);
-  if (pr.autoPublishRequest) out.push(`${c.bold('Auto-publish:')} ${c.green('enabled')} by ${pr.autoPublishRequest.enabledBy.login}, when the reviews are done`);
+  if (pr.autoMergeRequest) out.push(`${c.bold('Auto-merge:')} ${c.green('enabled')} on GitHub by ${pr.autoMergeRequest.enabledBy.login}, using ${MERGE_METHOD[pr.autoMergeRequest.mergeMethod] ?? pr.autoMergeRequest.mergeMethod}`);
+  if (pr.autoPublishRequest) {
+    const then = pr.autoPublishRequest.autoMerge ? ', then auto-merge on GitHub' : '';
+    out.push(`${c.bold('Auto-publish:')} ${c.green('enabled')} by ${pr.autoPublishRequest.enabledBy.login}, when the reviews are done${then}`);
+  }
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved).length;
   if (unresolved) out.push(c.yellow(`${unresolved} unresolved review thread${unresolved === 1 ? '' : 's'}`));
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');

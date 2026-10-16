@@ -1,7 +1,25 @@
 import type { Service } from '../service.ts';
-import { readSettings, MAX_ITERATIONS_LIMIT } from '../settings.ts';
+import { readSettings, MAX_ITERATIONS_LIMIT, MERGE_METHODS } from '../settings.ts';
 import { html, icon, raw, type Safe } from './html.ts';
 import { layout } from './components.ts';
+
+/** Merge methods as GitHub's merge button names them. */
+const MERGE_METHOD_NAMES: Record<string, string> = { squash: 'Squash and merge', merge: 'Create a merge commit', rebase: 'Rebase and merge' };
+
+/** A settings page: the sections, and the selected one's form. */
+function settingsLayout(s: Service, section: string, main: Safe): string {
+  const item = (href: string, octicon: string, label: string) =>
+    html`<a class="settings-nav-item${href === section ? ' selected' : ''}" href="${href}">${icon(octicon)} ${label}</a>`;
+  const body = html`<div class="container container-lg settings-layout">
+  <nav class="settings-nav" aria-label="Settings">
+    <h2 class="settings-nav-heading">Settings</h2>
+    ${item('/settings', 'code-review', 'Code review')}
+    ${item('/settings/publishing', 'mark-github', 'Publishing')}
+  </nav>
+  <div class="settings-main">${main}</div>
+</div>`;
+  return layout(s, { title: 'Settings · laatsux', crumbs: html`<a href="/">laatsux</a><span class="crumb-sep">/</span><a href="/settings"><strong>Settings</strong></a>`, body });
+}
 
 export async function settingsPage(s: Service): Promise<string> {
   const settings = readSettings(s.db).codex;
@@ -26,13 +44,10 @@ export async function settingsPage(s: Service): Promise<string> {
   const efforts = selected?.efforts ?? (settings.effort ? [settings.effort] : []);
   const effortDefault = defaultEffort(selected);
 
-  const body = html`<div class="container container-lg settings-layout">
-  <nav class="settings-nav" aria-label="Settings">
-    <h2 class="settings-nav-heading">Settings</h2>
-    <a class="settings-nav-item selected" href="/settings">${icon('code-review')} Code review</a>
-  </nav>
-  <div class="settings-main">
-    <div class="Subhead" id="codex">
+  return settingsLayout(
+    s,
+    '/settings',
+    html`<div class="Subhead" id="codex">
       <h2 class="Subhead-heading">Codex</h2>
       <p class="Subhead-description">Let Codex review staged pull requests before you do. It reviews a read-only checkout of the pull request and posts its findings as a review from <strong>${s.codex?.actor().login ?? settings.name}</strong>.</p>
     </div>
@@ -70,8 +85,29 @@ export async function settingsPage(s: Service): Promise<string> {
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
-    </form>
-  </div>
-</div>`;
-  return layout(s, { title: 'Settings · laatsux', crumbs: html`<a href="/">laatsux</a><span class="crumb-sep">/</span><a href="/settings"><strong>Settings</strong></a>`, body });
+    </form>`,
+  );
+}
+
+export function publishingSettingsPage(s: Service): string {
+  const settings = readSettings(s.db).publish;
+  return settingsLayout(
+    s,
+    '/settings/publishing',
+    html`<div class="Subhead">
+      <h2 class="Subhead-heading">Auto-merge</h2>
+      <p class="Subhead-description">Publishing can enable auto-merge on the pull request on GitHub, which then merges it once its requirements are met, such as required checks. The option shows for repositories that allow auto-merge, and the repository must allow the merge method too.</p>
+    </div>
+    <form class="settings-form js-api-form" data-api="/api/settings/publish" data-method="PUT" data-toast="Settings saved">
+      <div class="form-group">
+        <label class="form-label" for="merge-method">Merge method</label>
+        <select class="form-select" id="merge-method" name="mergeMethod">
+          ${MERGE_METHODS.map((m) => html`<option value="${m}"${settings.mergeMethod === m ? raw(' selected') : ''}>${MERGE_METHOD_NAMES[m]}</option>`)}
+        </select>
+        <p class="note">How GitHub merges a pull request that laatsux enabled auto-merge for.</p>
+      </div>
+      <div class="flash flash-error js-form-error" hidden></div>
+      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
+    </form>`,
+  );
 }

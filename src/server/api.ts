@@ -1,8 +1,9 @@
 import { Hono, type Context } from 'hono';
 import { GitError } from './git.ts';
-import { HttpError, type Ctx, type ReviewEvent, type Service } from './service.ts';
+import { HttpError, type ChangeEvent, type Ctx, type ReviewEvent, type Service } from './service.ts';
 import { now, type Actor, type ActorType, type PullRow, type RepoRow } from './db.ts';
 import {
+  autoMergeResult,
   commitJson,
   contentJson,
   fileJson,
@@ -17,7 +18,7 @@ import {
 } from './github.ts';
 import { renderMarkdown } from './web/markdown.ts';
 import { pullReferences } from './web/references.ts';
-import { nextSettings, readSettings, saveSettings } from './settings.ts';
+import { nextSettings, readSettings, saveSettings, type MergeMethod } from './settings.ts';
 
 /**
  * A GitHub-compatible subset of the REST API, plus a few laatsux extensions
@@ -97,6 +98,15 @@ export function api(s: Service): Hono {
     // Turning reviews on or raising the limit should not wait for the author's next `pr wait`
     // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
     for (const id of s.waiters.keys()) s.codex?.consider(id);
+    return c.json(settings);
+  });
+
+  app.put('/settings/publish', async (c) => {
+    human(c);
+    const settings = nextSettings(s.db, { publish: await body(c) });
+    saveSettings(s.db, settings);
+    // Open pull request pages show the merge method next to the auto-merge option.
+    s.bus.emit('change', { pullId: null, type: 'settings', actor: 'settings' } satisfies ChangeEvent);
     return c.json(settings);
   });
 
@@ -353,13 +363,28 @@ export function api(s: Service): Hono {
     return c.json({ running: s.codex?.isRunning(x.pull.id) ?? false, runs: s.codex?.runs(x.pull) ?? [], ...s.codex?.config(x.pull) });
   });
 
+  /**
+   * The merge method to turn on auto-merge with: the one in settings now. Extension: the page
+   * sends the one it shows with the auto-merge option, which must still be that.
+   */
+  const mergeMethod = (shown: unknown): MergeMethod => {
+    const method = readSettings(s.db).publish.mergeMethod;
+    if (shown !== undefined && shown !== method) {
+      throw new HttpError(412, `The merge method in Settings changed to ${method} after this page was loaded. Refresh before publishing.`);
+    }
+    return method;
+  };
+
   // laatsux extension: push the branch and open (or update) the pull request on GitHub.
   app.post('/repos/:owner/:repo/pulls/:n/publish', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
     const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
-    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review }, actor(c));
-    return c.json(pullJson(s, x.repo, pull));
+    // Decided now: the setting may change while publishing awaits.
+    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method) : undefined;
+    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review, autoMerge }, actor(c));
+    // Extension: what came of turning on auto-merge, which does not undo the publish when it fails.
+    return c.json({ ...pullJson(s, x.repo, pull), auto_merge_result: autoMerge ? autoMergeResult(s.autoMerge(pull)) : undefined });
   });
 
   // laatsux extension: auto-publish, like GitHub's auto-merge: publish once the agents are done.
@@ -367,7 +392,8 @@ export function api(s: Service): Hono {
     const x = await ctx(c);
     const b = await body(c);
     const flag = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
-    await s.enableAutoPublish(x, { sign: flag(b.sign), draft: flag(b.draft), force: !!b.force }, actor(c));
+    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method) : undefined;
+    await s.enableAutoPublish(x, { sign: flag(b.sign), draft: flag(b.draft), force: !!b.force, autoMerge }, actor(c));
     return c.json(pullJson(s, x.repo, s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id)!));
   });
   app.delete('/repos/:owner/:repo/pulls/:n/auto-publish', async (c) => {

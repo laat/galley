@@ -45,7 +45,7 @@ ${opts.subnav ?? ''}
 export function repoNav(s: Service, repo: RepoRow, selected: 'staged' | null = 'staged'): Safe {
   const staged = s.pulls(repo, { state: 'open' }).length;
   const slug = repo.github_slug;
-  const counts = slug ? s.githubCounts(slug) : null;
+  const counts = slug ? s.githubRepo(slug) : null;
   const counter = (n: number | undefined) => (n === undefined ? '' : html` <span class="Counter">${n}</span>`);
   const external = (path: string, iconName: string, label: string, n: number | undefined) =>
     html`<a class="UnderlineNav-item" href="https://github.com/${slug}/${path}" target="_blank" rel="noopener" title="${label} on GitHub">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
