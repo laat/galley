@@ -162,7 +162,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
     <div class="gh-header-meta">
       ${stateBadge(pull)}
       <div class="gh-header-meta-text">
-        ${authorLink(author)} ${pull.state === 'published' ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
+        ${authorLink(s, author)} ${pull.state === 'published' ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
         <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
       </div>
     </div>
@@ -216,7 +216,7 @@ const AUTO_PUBLISH_OFF: Record<string, string> = {
 
 async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
   const actor = p.s.db.actorById(e.actor_id);
-  const who = html`${avatar(avatarUrl(p.s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(actor)}`;
+  const who = html`${avatar(avatarUrl(p.s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(p.s, actor)}`;
   const data = JSON.parse(e.data);
   const when = relTime(e.created_at);
   switch (e.type) {
@@ -544,9 +544,9 @@ function codexSidebar(p: PullPage): Safe {
       ? ''
       : html`<p class="sidebar-text codex-scope">${icon('pin')} Turned ${onOff(enabled)} for this pull request${settings.enabled !== enabled ? ` (${onOff(settings.enabled)} in Settings)` : ''} <button type="button" class="btn-link js-codex-reset" data-api="${limitApi}" data-field="enabled" title="Follow Settings (automatic reviews ${onOff(settings.enabled)})">reset</button></p>`;
   return html`<div class="sidebar-item"><h3 class="sidebar-heading">Codex</h3>
-    <div class="sidebar-person">${avatar(avatarUrl(p.s, actor), actor.login, 20, 'avatar-bot')} <span class="flex-auto">${actor.login}</span></div>
+    <a class="sidebar-person" href="${codex.settingsUrl()}" title="Settings for ${actor.login}">${avatar(avatarUrl(p.s, actor), actor.login, 20, 'avatar-bot')} <span class="flex-auto">${actor.login}</span></a>
     ${status}
-    <p class="sidebar-text color-fg-muted">${auto} · <a href="/settings">Settings</a></p>
+    <p class="sidebar-text color-fg-muted">${auto} · <a href="${codex.settingsUrl()}">Settings</a></p>
     ${scope}
     <button type="button" class="btn btn-sm js-run-codex" data-api="${p.apiBase}/reviewers/codex"${running || p.pull.state === 'closed' ? raw(' disabled') : ''}>${icon('sync')} Ask Codex to review</button>
   </div>`;
@@ -560,7 +560,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
   if (revisions[0]) {
     const first = revisions[0];
     const commits = await p.ctx.git.log(first.base_sha, first.head_sha).catch(() => [] as Commit[]);
-    const who = html`${avatar(avatarUrl(s, p.author), p.author.login, 20, 'avatar-bot avatar-small')} ${authorLink(p.author)}`;
+    const who = html`${avatar(avatarUrl(s, p.author), p.author.login, 20, 'avatar-bot avatar-small')} ${authorLink(s, p.author)}`;
     items.push({ at: first.created_at, order: 1, html: html`${timelineBadge('repo-push', html`${who} added ${plural(commits.length, 'commit')} ${relTime(first.created_at)}`)}${commitList(p, commits)}` });
   }
   for (const e of s.events(pull)) {
@@ -593,7 +593,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
     const meta = REVIEW_TEXT[r.state] ?? REVIEW_TEXT.COMMENTED;
     const single = r.state === 'COMMENTED' && !r.body.trim() && threads.length === 1;
     const text = single ? (threads[0].root.subject_type === 'commit' ? 'commented on a commit' : html`commented on <code>${threads[0].root.path}</code>`) : meta.text;
-    const who = html`${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(a)}`;
+    const who = html`${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(s, a)}`;
     items.push({
       at: r.submitted_at,
       order: 4,
@@ -622,7 +622,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
       anchor: 'pullrequest-description',
       markdownCtx: { references: p.references },
     },
-    html`${authorLink(p.author)} opened this pull request ${relTime(pull.created_at)}`,
+    html`${authorLink(s, p.author)} opened this pull request ${relTime(pull.created_at)}`,
   );
 
   const newComment = html`<div class="timeline-comment-group new-comment">

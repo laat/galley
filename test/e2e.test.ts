@@ -484,6 +484,7 @@ test('codex reviews when the author waits, within the limits in settings', async
   const settingsPage = await (await fetch(`${server.url}/settings`)).text();
   assert.match(settingsPage, /<option value="gpt-test"[^>]* selected>GPT Test/);
   assert.doesNotMatch(settingsPage, /internal/);
+  assert.match(settingsPage, /<div class="Subhead" id="codex">/);
 
   // The agent waits; Codex reviews first and its review wakes the agent.
   const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
@@ -537,9 +538,14 @@ test('codex reviews when the author waits, within the limits in settings', async
   await human('PUT', '/api/settings/codex', { name: 'codex-bot' });
   const reviews = await human('GET', `${base}/reviews`);
   assert.deepEqual([...new Set(reviews.map((rv: any) => rv.user.login))], ['codex-bot']);
+  await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Looks right.' });
   const renamed = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
   assert.equal(renamed.match(/<span class="flex-auto">codex-bot<\/span>/g)?.length, 2, 'once under Reviewers, once under Codex');
   assert.doesNotMatch(renamed, /<span class="flex-auto">codex<\/span>/);
+  // Its name goes to its settings, under the new name too; a person's name does not.
+  assert.match(renamed, /<a class="sidebar-person" href="\/settings#codex" title="Settings for codex-bot">/);
+  assert.match(renamed, /<a class="author" href="\/settings#codex" title="Settings for codex-bot">codex-bot<\/a><span class="Label Label--bot">bot<\/span> reviewed/);
+  assert.match(renamed, /<a class="author" href="#" title="reviewer">reviewer<\/a> commented/);
   // A name someone else uses is refused, and nobody can post as the reviewer.
   await assert.rejects(human('PUT', '/api/settings/codex', { name: 'agent' }), /already used by someone else/);
   const impostor = await cli(['pr', 'comment', String(number), '-b', 'hi'], { actor: 'codex-bot' });

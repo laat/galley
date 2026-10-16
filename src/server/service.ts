@@ -102,6 +102,8 @@ export interface HeadStatus {
 /** A reviewer agent such as Codex: one actor that reviews on its own. */
 export interface ReviewerAgent {
   actor(): Actor;
+  /** Its section of the Settings page. */
+  settingsUrl(): string;
   headStatus(pull: PullRow): HeadStatus;
 }
 
