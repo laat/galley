@@ -48,6 +48,9 @@ ln -s "$PWD/skills/laatsux" ~/.claude/skills/laatsux
 laatsux serve            # http://localhost:7171
 ```
 
+`laatsux --version` prints the server URL the CLI will talk to, which helps when
+`LAATSUX_URL` or `LAATSUX_PORT` is set.
+
 Run the server outside any agent sandbox: it runs `git push` and `gh pr create` with your
 credentials when you publish. The CLI only talks HTTP to the server, so agents in a sandbox
 can use it.
