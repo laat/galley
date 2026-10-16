@@ -74,14 +74,16 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers) are 
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
 | `laatsux pr wait [<n>]` | Block until someone other than the author responds, then print the new feedback. `--timeout 10m` |
-| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`. Refused for agents |
+| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux serve` | Run the server and web UI |
 
 A pull request is found the way gh finds it: by number, URL, branch name, or the current branch.
 
 `pr view --json` supports gh's fields plus `reviewThreads` (with `isResolved`, `isOutdated`,
-`path`, `line`, `diffHunk` and the comments), `publishedUrl` and `waiting`.
+`path`, `line`, `diffHunk` and the comments), `publishedUrl` and `waiting`. `reviewRequests`
+lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRESS` or
+`QUEUED`), `commit` and `startedAt`.
 
 ## The web UI
 
@@ -201,6 +203,11 @@ How it runs:
   waiting when the limit goes up, Codex starts right away.
 - "Ask Codex to review" in a pull request's sidebar runs a review at any time, regardless of
   the cap. The sidebar also shows a running review and the error of a failed one.
+- While Codex reviews, `pr view` and `pr wait` say so, an approval no longer tells the agent
+  that nothing is left open, and publishing takes a second click on the Publish button (or
+  `pr publish --during-review`). The server decides, so a page loaded before the review
+  started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
+  `"during_review": true`.
 - Codex must be installed and logged in where the server runs.
 
 ## Other review agents

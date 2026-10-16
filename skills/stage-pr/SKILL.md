@@ -84,7 +84,9 @@ feedback, and the loop repeats until the user publishes it.
    - For anything that needs the user's input, ask in a reply or with `laatsux pr comment -b "..."`.
 
 5. Run `laatsux pr wait` again. Repeat until it prints `Published to GitHub: <url>` (you are
-   done; tell the user the GitHub URL) or reports that the pull request was closed.
+   done; tell the user the GitHub URL) or reports that the pull request was closed. If it says
+   a reviewer such as codex is still reviewing, its review is coming: wait for it before you
+   tell the user the pull request is ready.
 
 ## Reference
 

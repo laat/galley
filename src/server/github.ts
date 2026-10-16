@@ -198,6 +198,7 @@ export const GH_FIELDS = [
   'number',
   'publishedUrl',
   'reviewDecision',
+  'reviewRequests',
   'reviewThreads',
   'reviews',
   'state',
@@ -282,6 +283,14 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     return [...latest.values()].map(review);
   });
   set('reviewDecision', () => reviewDecision(reviews));
+  // Reviewers still to be heard from: one that is reviewing now, or about to start.
+  set('reviewRequests', () => {
+    const work = s.codex?.atWork(pull);
+    if (!work) return [];
+    const a = s.codex!.actor();
+    // laatsux extensions: status (as in GitHub's check runs), the commit, and when it started.
+    return [{ __typename: a.type, login: a.login, status: work.status, commit: { oid: work.head_sha }, startedAt: work.started_at }];
+  });
   if (want.has('reviewThreads')) {
     const threads = await s.threads(ctx, viewer, files, commits);
     out.reviewThreads = threads

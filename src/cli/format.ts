@@ -10,10 +10,50 @@ const REVIEW_STATE: Record<string, string> = {
   DISMISSED: 'dismissed',
 };
 
+function ago(iso: string): string {
+  const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (s < 45) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return m === 1 ? '1 minute ago' : `${m} minutes ago`;
+  const h = Math.round(m / 60);
+  return h === 1 ? '1 hour ago' : `${h} hours ago`;
+}
+
+/** What a reviewer in reviewRequests is doing ("reviewing 35ef70b") and since when. */
+function atWork(r: any, pr: GhPull): { what: string; since: string | null } {
+  const sha = String(r.commit?.oid ?? '').slice(0, 7);
+  if (r.status === 'QUEUED') return { what: `about to review ${sha}`, since: null };
+  const earlier = r.commit?.oid && pr.headRefOid && r.commit.oid !== pr.headRefOid ? ', an earlier commit' : '';
+  return { what: `reviewing ${sha}${earlier}`, since: r.startedAt ? `started ${ago(r.startedAt)}` : null };
+}
+
+/** One line per reviewer at work: "codex is reviewing 35ef70b (started 2 minutes ago)". */
+export function reviewersAtWork(pr: GhPull): string[] {
+  return (pr.reviewRequests ?? []).map((r: any) => {
+    const w = atWork(r, pr);
+    return `${r.login} is ${w.what}${w.since ? ` (${w.since})` : ''}`;
+  });
+}
+
+/** "codex is still reviewing", or "codex is about to review" when it has not started yet. */
+export function stillReviewing(pr: GhPull): string {
+  const requests = pr.reviewRequests ?? [];
+  const who = requests.map((r: any) => r.login).join(' and ');
+  const verb = requests.length > 1 ? 'are' : 'is';
+  return `${who} ${verb} ${requests.every((r: any) => r.status === 'QUEUED') ? 'about to review' : 'still reviewing'}`;
+}
+
 function reviewersLine(pr: GhPull): string {
-  return (pr.latestReviews ?? [])
-    .map((r: any) => `${r.author.login} (${REVIEW_STATE[r.state] ?? r.state.toLowerCase()})`)
-    .join(', ');
+  // As in gh, a reviewer asked for a review shows that instead of the state of its last one.
+  const requests = pr.reviewRequests ?? [];
+  const asked = new Set(requests.map((r: any) => r.login));
+  return [
+    ...(pr.latestReviews ?? []).filter((r: any) => !asked.has(r.author.login)).map((r: any) => `${r.author.login} (${REVIEW_STATE[r.state] ?? r.state.toLowerCase()})`),
+    ...requests.map((r: any) => {
+      const w = atWork(r, pr);
+      return `${r.login} (${[w.what, w.since].filter(Boolean).join(', ')})`;
+    }),
+  ].join(', ');
 }
 
 /** `gh pr view` without a TTY: key/value header, "--", body. */

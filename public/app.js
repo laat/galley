@@ -284,12 +284,15 @@
     return body;
   }
 
-  async function submitApiForm(form) {
+  async function submitApiForm(form, submitter) {
     formError(form, null);
     const publishing = form.matches('.js-publish-form');
     busy(form, true, publishing ? 'Publishing…' : null);
     try {
-      await api(form.dataset.method || 'POST', form.dataset.api, formJson(form));
+      const body = formJson(form);
+      // The second click on a Publish button that asked first: publish while a reviewer is at work.
+      if (publishing && submitter && submitter.dataset.confirm) body.during_review = true;
+      await api(form.dataset.method || 'POST', form.dataset.api, body);
       for (const t of $$('textarea[data-draft-key]', form)) clearDraft(t.dataset.draftKey);
       if (form.dataset.reset) form.reset();
       await refresh();
@@ -303,6 +306,11 @@
         if (force) force.hidden = false;
       }
       if (publishing && err.status === 412) toast('The pull request changed.', { label: 'Refresh', run: refresh });
+      // A reviewer started after this page was loaded: ask now, as the page would have.
+      if (publishing && err.status === 428 && submitter) {
+        submitter.dataset.confirm = 'Click again to publish anyway';
+        confirmed(submitter, submitter.dataset.confirm);
+      }
     } finally {
       busy(form, false);
     }
@@ -312,7 +320,9 @@
     const form = e.target;
     if (form.matches('.js-api-form')) {
       e.preventDefault();
-      submitApiForm(form);
+      const prompt = e.submitter && e.submitter.dataset.confirm;
+      if (prompt && !confirmed(e.submitter, prompt)) return;
+      submitApiForm(form, e.submitter);
     } else if (form.matches('.js-new-comment-form')) {
       e.preventDefault();
       submitNewComment(form, e.submitter);
@@ -618,15 +628,25 @@
   }
 
   // Two clicks for destructive actions, instead of a modal dialog.
+  const armed = new WeakMap();
   function confirmed(btn, prompt = 'Click again to confirm') {
-    if (btn.dataset.armed) return true;
-    btn.dataset.armed = '1';
+    const was = armed.get(btn);
+    if (was) {
+      // Put the label back now, so a button still there after the action (an error, say) reads right.
+      clearTimeout(was.timer);
+      armed.delete(btn);
+      btn.innerHTML = was.label;
+      return true;
+    }
     const label = btn.innerHTML;
     btn.textContent = prompt;
-    setTimeout(() => {
-      delete btn.dataset.armed;
-      btn.innerHTML = label;
-    }, 3000);
+    armed.set(btn, {
+      label,
+      timer: setTimeout(() => {
+        armed.delete(btn);
+        btn.innerHTML = label;
+      }, 3000),
+    });
     return false;
   }
 

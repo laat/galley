@@ -93,7 +93,7 @@ export function api(s: Service): Hono {
     if (s.codex) settings.codex.name = s.codex.actor().login;
     saveSettings(s.db, settings);
     // Turning reviews on should not wait for the author's next `pr wait` cycle.
-    if (settings.codex.enabled) for (const id of s.waiters.keys()) s.codex?.maybeReview(id).catch(() => {});
+    if (settings.codex.enabled) for (const id of s.waiters.keys()) s.codex?.consider(id);
     return c.json(settings);
   });
 
@@ -318,7 +318,7 @@ export function api(s: Service): Hono {
     const x = await ctx(c);
     const b = await body(c);
     const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
-    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign }, actor(c));
+    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review }, actor(c));
     return c.json(pullJson(s, x.repo, pull));
   });
 
