@@ -68,6 +68,7 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       case '--version':
       case 'version':
         out(`laatsux version ${VERSION}`);
+        out(`server: ${client.base}`);
         return 0;
       case undefined:
       case 'help':
