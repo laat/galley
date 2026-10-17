@@ -56,6 +56,15 @@ export function indent(text: string, prefix = '    '): string {
     .join('\n');
 }
 
+/** A staged pull request as people and agents write it (#22): s#4, so it is never taken for GitHub's #4. */
+export const stagedRef = (n: number) => `s#${n}`;
+
+/** The number of a staged pull request given as s4, s#4 or S4, or as gh takes one, 4 or #4; null for anything else. */
+export function stagedNumber(arg: string): number | null {
+  const m = arg.match(/^(?:[sS]#?|#)?(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
 /** Parse "90", "90s", "10m", "1h" into milliseconds. */
 export function parseDuration(s: string): number {
   const m = s.trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/);

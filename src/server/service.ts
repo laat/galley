@@ -821,7 +821,7 @@ export class Service {
   async ctx(owner: string, name: string, number: number, opts: { sync?: boolean } = {}): Promise<Ctx> {
     const repo = this.repo(owner, name);
     let pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE repo_id = ? AND number = ?', repo.id, number);
-    if (!pull) throw new HttpError(404, `no pull request found for #${number} in ${owner}/${name}`);
+    if (!pull) throw new HttpError(404, `no pull request found for s#${number} in ${owner}/${name}`);
     if (opts.sync !== false) pull = await this.sync(pull);
     return { repo, pull, git: this.git(repo) };
   }

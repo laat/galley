@@ -301,7 +301,22 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(jq.code, 0, jq.stderr);
     assert.equal(jq.stdout.trim(), 'Add mul');
     const list = await cli(['pr', 'list']);
-    assert.match(list.stdout, /^1\tAdd multiplication\tfeature\/mul\tSTAGED\t/);
+    assert.match(list.stdout, /^s#1\tAdd multiplication\tfeature\/mul\tSTAGED\t/);
+  });
+
+  await t.test('a staged pull request is s#1: the CLI takes s1, s#1 and, as gh, 1 and #1, and its page is at /pull/s1 too', async () => {
+    for (const arg of ['s1', 's#1', 'S1', '1', '#1', `${server.url}/acme/widgets/pull/s1`, `${server.url}/acme/widgets/pull/1/files`]) {
+      const r = await cli(['pr', 'view', arg, '--json', 'number,ref']);
+      assert.equal(r.code, 0, `${arg}: ${r.stderr}`);
+      assert.deepEqual(JSON.parse(r.stdout), { number: 1, ref: 's1' }, arg);
+    }
+    assert.match((await cli(['pr', 'view', '1'])).stdout, /^number:\ts#1$/m);
+    const res = await fetch(`${server.url}/acme/widgets/pull/s1/files?diff=split`, { redirect: 'manual' });
+    assert.equal(res.status, 301);
+    assert.equal(res.headers.get('location'), '/acme/widgets/pull/1/files?diff=split');
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page, /<title>Add multiplication by agent · Pull Request s#1 · acme\/widgets<\/title>/);
+    assert.match(page, /<span class="gh-header-number">s#1<\/span>/);
   });
 
   await t.test('pr wait says when the reviewer agents are done with a commit, once', async () => {
@@ -317,7 +332,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     const r = await cli(['pr', 'wait', '--timeout', '20s']);
     assert.equal(r.code, 0, r.stderr);
     const sha = git('rev-parse', '--short=7', 'HEAD');
-    assert.equal(r.stdout, `No reviewer agent reviews ${sha}; ask the reviewer to review it: ${server.url}/acme/widgets/pull/1\nThen run \`galley pr wait 1\` to wait for the review.\n`);
+    assert.equal(r.stdout, `No reviewer agent reviews ${sha}; ask the reviewer to review it: ${server.url}/acme/widgets/pull/1\nThen run \`galley pr wait s1\` to wait for the review.\n`);
     // A confirmation that arrives late, from an earlier wait about an earlier commit (overlapping
     // waits, a retry), does not take back the newer one.
     const late = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/seen`, {
@@ -604,6 +619,9 @@ test('the agent loop, from staging to publishing', async (t) => {
       assert.equal(res.status, 200, path);
       assert.match(await res.text(), /Add multiplication helper/, path);
     }
+    // Its number here, and where it is on GitHub.
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page, /<span class="gh-header-number">s#1 → <a href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">acme\/widgets#7<\/a><\/span>/);
   });
 
   await t.test('cross-site writes and foreign Host headers are refused', async () => {
@@ -665,6 +683,8 @@ test('Markdown links issues, mentions and commits the way GitHub does', async ()
   assert.match(await preview('See #77', api), /<a class="issue-link" href="https:\/\/github\.com\/acme\/widgets\/issues\/77"/);
   await new Promise((r) => setTimeout(r, 100));
   assert.doesNotMatch(readFileSync(join(dir, 'gh.log'), 'utf8'), /issueOrPullRequest\(number:77\)/);
+  // s#N is a staged pull request here, with its title; one there is none of stays text.
+  assert.match(await preview(`Follows s#${number} and s#999`, api), new RegExp(`Follows <a class="issue-link" href="/acme/widgets/pull/${number}" title="Links · staged">s#${number}</a> and s#999`));
 });
 
 test('codex-review reviews when the author waits, within the limits in settings', async () => {
@@ -1746,7 +1766,7 @@ test('a review still running shows in pr view and pr wait, and publishing before
     assert.equal(approved.code, 0, approved.stderr);
     assert.match(approved.stdout, /reviewer reviewed: approved/);
     assert.match(approved.stdout, new RegExp(`^codex-review is reviewing ${sha} \\(started just now\\)\\.$`, 'm'));
-    assert.match(approved.stdout, new RegExp(`codex-review is still reviewing; run \`galley pr wait ${number}\` to get its review\\.`));
+    assert.match(approved.stdout, new RegExp(`codex-review is still reviewing; run \`galley pr wait s${number}\` to get its review\\.`));
     assert.doesNotMatch(approved.stdout, /nothing left open/);
 
     // Its review wakes the next wait, which says the approval came before it.
@@ -1772,7 +1792,7 @@ test('a review still running shows in pr view and pr wait, and publishing before
     assert.match((await refused.json()).message, /^codex-review is still reviewing this commit, and its review may ask for changes\. Publishing now cancels it\.$/);
     const fromTerminal = await cli(['pr', 'publish', String(number)], { actor: 'reviewer' });
     assert.equal(fromTerminal.code, 1);
-    assert.match(fromTerminal.stderr, new RegExp(`Run \`galley pr publish ${number} --during-review\` to publish anyway\\.`));
+    assert.match(fromTerminal.stderr, new RegExp(`Run \`galley pr publish s${number} --during-review\` to publish anyway\\.`));
     const agent = await cli(['pr', 'publish', String(number), '--during-review']);
     assert.match(agent.stderr, /publishing is for the reviewer/);
     const published = await human('POST', `${base}/publish`, { expected, during_review: true });
@@ -2338,7 +2358,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.match(agent.stderr, /auto-publish is for the reviewer/);
       const on = await cli(['pr', 'publish', String(pr.number), '--auto'], { actor: 'reviewer' });
       assert.equal(on.code, 0, on.stderr);
-      assert.match(on.stderr, new RegExp(`Pull request acme/widgets#${pr.number} will be published when the reviewer agents are done`));
+      assert.match(on.stderr, new RegExp(`Pull request acme/widgets s#${pr.number} will be published when the reviewer agents are done`));
       assert.match((await cli(['pr', 'view', String(pr.number)])).stdout, /^auto-publish:\tenabled\treviewer$/m);
       const { autoPublishRequest } = JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'autoPublishRequest'])).stdout);
       assert.deepEqual(
@@ -2505,7 +2525,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.equal(agent.code, 1);
       const off = await cli(['pr', 'publish', String(pr.number), '--disable-auto'], { actor: 'reviewer' });
       assert.equal(off.code, 0, off.stderr);
-      assert.match(off.stderr, new RegExp(`Auto-publish disabled for pull request acme/widgets#${pr.number}`));
+      assert.match(off.stderr, new RegExp(`Auto-publish disabled for pull request acme/widgets s#${pr.number}`));
       assert.equal((await human('GET', pr.base)).auto_publish, null);
       assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_disabled').reason, 'cancelled');
     } finally {
@@ -3808,7 +3828,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     const woken = await waiting;
     assert.equal(woken.code, 0, woken.stderr);
     assert.match(woken.stdout, new RegExp(`^    !\\[screenshot\\]\\(${path}\\)\n    Image: ${server.url}${path}$`, 'm'));
-    assert.match(woken.stdout, new RegExp(`galley pr view ${number} --comments --download-images <dir>`));
+    assert.match(woken.stdout, new RegExp(`galley pr view s${number} --comments --download-images <dir>`));
 
     await human('POST', `${base}/reviews`, { event: 'COMMENT', comments: [{ path: 'images.js', line: 1, side: 'RIGHT', body: `Like this:\n![after](${path})` }] });
     const view = await cli(['pr', 'view', String(number), '--comments']);
@@ -4063,7 +4083,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal(await browse(digits.slice(0, 7)), `${server.url}/acme/widgets/tree/${digits}`);
     const none = await cli(['browse', '99999']);
     assert.equal(none.code, 1);
-    assert.match(none.stderr, /no pull request #99999 in acme\/widgets/);
+    assert.match(none.stderr, /no pull request s#99999 in acme\/widgets/);
     const neither = await cli(['browse', '1234567']);
     assert.equal(neither.code, 1);
     assert.match(neither.stderr, /no pull request or commit "1234567" in acme\/widgets/);
@@ -4700,7 +4720,7 @@ test('published pull requests are followed until they are merged or closed on Gi
     // The first wait after a publish reports it; the next one waits for GitHub.
     const heard = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
     assert.match(heard.stdout, /^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
-    assert.match(heard.stdout, new RegExp(`Run \`galley pr wait ${number}\` again to hear when it is merged or closed on GitHub`));
+    assert.match(heard.stdout, new RegExp(`Run \`galley pr wait s${number}\` again to hear when it is merged or closed on GitHub`));
     return {
       number,
       id,
@@ -4760,7 +4780,7 @@ test('published pull requests are followed until they are merged or closed on Gi
         turn: { whose: 'NONE', reasons: [] },
       });
       assert.match((await cli(['pr', 'view', String(pr.number)])).stdout, /^state:\tMERGED$[^]*^merged:\tas e468a4e by laat at 2026-10-16T09:00:00Z$/m);
-      assert.match((await cli(['pr', 'list', '--state', 'merged'])).stdout, new RegExp(`^${pr.number}\\tAdd merge\\.js\\tfeature/follow-merge\\tMERGED\\t`, 'm'));
+      assert.match((await cli(['pr', 'list', '--state', 'merged'])).stdout, new RegExp(`^s#${pr.number}\\tAdd merge\\.js\\tfeature/follow-merge\\tMERGED\\t`, 'm'));
       const event = (await pr.timeline()).find((e) => e.event === 'merged');
       assert.deepEqual([event.by, event.commit, event.at, event.url], ['laat', mergeCommit, '2026-10-16T09:00:00Z', 'https://github.com/acme/widgets/pull/7']);
 
@@ -4922,7 +4942,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.match(mine.row, /<span class="turn-reason"><svg [^>]*octicon-mark-github[^]*?<\/svg>ready to merge on GitHub<\/span>/);
       // Its title opens it on GitHub, where the reviewer merges it; its number opens it here.
       assert.match(mine.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
-      assert.match(mine.row, new RegExp(`<a href="/acme/widgets/pull/${n}">#${n}</a> staged`));
+      assert.match(mine.row, new RegExp(`<a href="/acme/widgets/pull/${n}">s#${n}</a> staged`));
       // With auto-merge on, GitHub merges it by itself.
       await githubSays({ [pr.id]: github(passed, { autoMergeRequest: { enabledAt: '2026-10-17T12:00:00Z' } }) });
       assert.deepEqual(await turn(), { whose: 'NONE', reasons: [] });
@@ -4935,7 +4955,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal(blocked.group, 'Waiting on GitHub');
       assert.match(blocked.row, /<\/svg> acme\/widgets#7<\/a><\/span><span class="turn-reason">waiting for review from eskilgh, cbjerkan, acme\/platform<\/span>/);
       assert.match(blocked.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
-      assert.match(blocked.row, new RegExp(`<a class="pr-row-number" href="/acme/widgets/pull/${n}">#${n}</a>`));
+      assert.match(blocked.row, new RegExp(`<a class="pr-row-number" href="/acme/widgets/pull/${n}">s#${n}</a>`));
       // A token without the read:org scope: GitHub refuses the teams' names, so galley asks again without them, from then on.
       const follows = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.includes('reviewRequests('));
       const before = follows().length;
@@ -5145,9 +5165,10 @@ test('published pull requests are followed until they are merged or closed on Gi
       await comment(b.number, 'One more thing on b.');
       const r = await waiting;
       assert.equal(r.code, 0, r.stderr);
-      assert.match(r.stdout, new RegExp(`^acme/widgets#${b.number} \\(feature/multi-b\\): ${server.url}/acme/widgets/pull/${b.number}$`, 'm'));
+      assert.match(r.stdout, new RegExp(`^acme/widgets s#${b.number} \\(feature/multi-b\\): ${server.url}/acme/widgets/pull/${b.number}$`, 'm'));
       assert.match(r.stdout, /One more thing on b\./);
-      assert.match(r.stdout, new RegExp(`then run \`galley pr wait ${both.join(' ')}\` again`));
+      // Given as numbers, as gh takes them, it says to wait again with the s-numbers.
+      assert.match(r.stdout, new RegExp(`then run \`galley pr wait s${a.number} s${b.number}\` again`));
 
       // News on both: a wait brings one, and the next the other. The poll it dropped lost nothing.
       await comment(a.number, 'Note on a.');
@@ -5157,16 +5178,16 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.notEqual(/Note on a\./.test(first), /Note on b\./.test(first), first);
       assert.match(first + second, /Note on a\.[^]*Note on b\.|Note on b\.[^]*Note on a\./);
 
-      // One query asks GitHub about both.
-      const waitingAgain = cli(['pr', 'wait', ...both, '--timeout', '20s']);
+      // One query asks GitHub about both. Given as people write them, s#N, the hints use s-numbers.
+      const waitingAgain = cli(['pr', 'wait', `s#${a.number}`, `s#${b.number}`, '--timeout', '20s']);
       await untilWaiting(a.base, b.base);
       await githubSays({ [a.id]: merged, [b.id]: open });
       const query = readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').findLast((l) => l.includes(`p${a.id}:pullRequest`));
       assert.match(query!, new RegExp(`p${b.id}:pullRequest\\(number:7\\)`));
       const merge = await waitingAgain;
-      assert.match(merge.stdout, new RegExp(`^acme/widgets#${a.number} \\(feature/multi-a\\)`, 'm'));
+      assert.match(merge.stdout, new RegExp(`^acme/widgets s#${a.number} \\(feature/multi-a\\)`, 'm'));
       assert.match(merge.stdout, /^Merged on GitHub as e468a4e by laat/m);
-      assert.match(merge.stdout, new RegExp(`Wait on the others with \`galley pr wait ${b.number}\`\\.`));
+      assert.match(merge.stdout, new RegExp(`Wait on the others with \`galley pr wait s${b.number}\`\\.`));
     });
   } finally {
     rmSync(join(dir, 'gh-pulls.json'), { force: true });
@@ -5508,7 +5529,7 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   /** The tabs and their counts. */
   const counts = (html: string) => Object.fromEntries([...html.matchAll(/<a class="list-tab[^"]*" href="\/acme\/tabs\?state=(\w+)">[^]*?<\/svg> <span data-content="[^"]*">(\d+) /g)].map((m) => [m[1], Number(m[2])]));
   /** The pull requests a page lists, by number. */
-  const listed = (html: string) => [...html.matchAll(/href="\/acme\/tabs\/pull\/(\d+)">#\1<\/a>/g)].map((m) => Number(m[1])).sort();
+  const listed = (html: string) => [...html.matchAll(/href="\/acme\/tabs\/pull\/(\d+)">s#\1<\/a>/g)].map((m) => Number(m[1])).sort();
   const front = await page('/acme/tabs');
   // Each pull request is in one tab; Staged is the first, and shown unless another is asked for.
   assert.deepEqual(counts(front), { staged: 1, published: 1, done: 3 });
@@ -5626,7 +5647,7 @@ test('a repository renamed on GitHub takes its new name, and its old URLs lead t
       assert.equal(res.headers.get('location'), to);
       assert.equal(res.headers.get('cache-control'), 'no-store');
     }
-    assert.match(await (await fetch(`${server.url}/acme/old-name/pull/${pr.number}`)).text(), new RegExp(`<title>Add renamed by agent · Pull Request #${pr.number} · acme/new-name</title>`));
+    assert.match(await (await fetch(`${server.url}/acme/old-name/pull/${pr.number}`)).text(), new RegExp(`<title>Add renamed by agent · Pull Request s#${pr.number} · acme/new-name</title>`));
     // The API answers at the old paths, for pages opened before and for scripts, in the new name.
     assert.equal((await human('GET', `${api}/${pr.number}`)).html_url, `${server.url}/acme/new-name/pull/${pr.number}`);
     await human('POST', `/api/repos/acme/old-name/issues/${pr.number}/comments`, { body: 'Still reachable' });
@@ -5925,7 +5946,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     const told = await waiting;
     assert.equal(told.code, 0, told.stderr);
     assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
-    assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait \d+` again\./);
+    assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait s\d+` again\./);
     assert.deepEqual(await pr.view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
     assert.match((await cli(['pr', 'view', pr.n], { cwd: path })).stdout, /^conflicts:\twith origin\/main in a\.js; rebase onto origin\/main\.$/m);
   });
@@ -6083,7 +6104,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.equal(told.code, 0, told.stderr);
     assert.match(told.stdout, /^reviewer reviewed: approved /m);
     assert.match(told.stdout, /^This branch conflicts with origin\/main in d\.js; rebase onto origin\/main\.$/m);
-    assert.match(told.stdout, /^Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait \d+` again\.$/m);
+    assert.match(told.stdout, /^Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait s\d+` again\.$/m);
     assert.doesNotMatch(told.stdout, /nothing left open/);
     // The wait that hands it the conflict is not an action on it: it is the author's turn until it acts.
     assert.equal(approved.row().author_waited_at, waited);
@@ -6242,7 +6263,7 @@ test('the base branch is fetched when a page opens, at most once a minute per re
     const url = `${server.url}/${fullName}/pull/${mine.n}`;
     const asked = await cli(['pr', 'publish', url, '--no-sign'], { actor: 'reviewer' });
     assert.equal(asked.code, 1);
-    assert.match(asked.stderr, new RegExp(`in a\\.js: GitHub can not merge it until the conflicts are resolved\\.\\nRun \`galley pr publish ${mine.n} --during-conflict\` to publish anyway\\.`));
+    assert.match(asked.stderr, new RegExp(`in a\\.js: GitHub can not merge it until the conflicts are resolved\\.\\nRun \`galley pr publish s${mine.n} --during-conflict\` to publish anyway\\.`));
     const published = await cli(['pr', 'publish', url, '--no-sign', '--during-conflict'], { actor: 'reviewer' });
     assert.equal(published.code, 0, published.stderr);
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr create --repo acme\/fetched --base main --head mine /m);

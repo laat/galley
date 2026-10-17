@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
-import { c, checkFields, err, isTTY, out, parseDuration, printJson } from './output.ts';
+import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, stagedNumber } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
@@ -11,7 +11,7 @@ type Options = NonNullable<ParseArgsConfig['options']>;
 const GH_FIELDS = [
   'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseConflicts', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments',
   'commits', 'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'isPinned', 'latestReviews', 'mergeCommit',
-  'mergeStateStatus', 'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state',
+  'mergeStateStatus', 'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'ref', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state',
   'statusCheckRollup', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
 ];
 
@@ -79,14 +79,14 @@ interface Target {
 
 async function resolvePull(client: Client, cwd: string, repoFlag: string | undefined, arg: string | undefined): Promise<Target> {
   if (arg) {
-    const url = arg.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    const url = arg.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/[sS]?(\d+)/);
     if (url) return { repo: { owner: url[1], name: url[2] }, number: Number(url[3]) };
-    const n = arg.match(/^#?(\d+)$/);
-    if (n) return { repo: await client.repoFor(cwd, repoFlag), number: Number(n[1]) };
+    const n = stagedNumber(arg);
+    if (n !== null) return { repo: await client.repoFor(cwd, repoFlag), number: n };
   }
   const repo = await client.repoFor(cwd, repoFlag);
   const branch = arg ?? currentBranch(cwd);
-  if (!branch) throw new CliError('could not determine the current branch; pass a pull request number');
+  if (!branch) throw new CliError('could not determine the current branch; pass a pull request, as in s4');
   const list = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=all&head=${encodeURIComponent(branch)}&fields=number,state`);
   const pick = list.find((p) => p.state !== 'CLOSED' && p.state !== 'MERGED') ?? list[0];
   if (!pick) throw new CliError(`no pull requests found for branch "${branch}"`);
@@ -122,6 +122,8 @@ async function withImageFiles(client: Client, dir: string | undefined, render: (
 }
 
 const pullPath = (t: Target) => `${repoPath(t.repo)}/pulls/${t.number}`;
+/** A pull request in a message: owner/name s#4. */
+const named = (t: Target) => `${t.repo.owner}/${t.repo.name} ${stagedRef(t.number)}`;
 const ghPath = (t: Target, fields: string[]) => `${repoPath(t.repo)}/gh/pulls/${t.number}${fields.length ? `?fields=${fields.join(',')}` : ''}`;
 
 // ------------------------------------------------------------------- create
@@ -190,7 +192,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
   if (v.web) openBrowser(pr.html_url);
-  err(c.gray(`Review happens in the browser. Run \`galley pr wait ${pr.number}\` to block until the reviewer responds.`));
+  err(c.gray(`Review happens in the browser. Run \`galley pr wait s${pr.number}\` to block until the reviewer responds.`));
   return 0;
 }
 
@@ -240,11 +242,11 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
     for (const p of pulls) {
       // A published pull request with an update not on GitHub yet shows as staged, as in the web UI.
       const published = (p.state === 'PUBLISHED' && !p.unpublishedChanges?.length) || p.state === 'MERGED';
-      const num = p.state === 'CLOSED' ? c.red(`#${p.number}`) : published ? c.magenta(`#${p.number}`) : p.isDraft ? c.gray(`#${p.number}`) : c.blue(`#${p.number}`);
+      const num = p.state === 'CLOSED' ? c.red(stagedRef(p.number)) : published ? c.magenta(stagedRef(p.number)) : p.isDraft ? c.gray(stagedRef(p.number)) : c.blue(stagedRef(p.number));
       out(`${num}\t${p.title.padEnd(w)}  ${c.cyan(p.headRefName)}  ${c.gray(p.createdAt.slice(0, 10))}`);
     }
   } else {
-    for (const p of pulls) out([p.number, p.title, p.headRefName, p.isDraft && p.state === 'STAGED' ? 'DRAFT' : p.state, p.createdAt].join('\t'));
+    for (const p of pulls) out([stagedRef(p.number), p.title, p.headRefName, p.isDraft && p.state === 'STAGED' ? 'DRAFT' : p.state, p.createdAt].join('\t'));
   }
   return 0;
 }
@@ -406,7 +408,7 @@ async function review(client: Client, cwd: string, args: string[]): Promise<numb
   if (event !== 'APPROVE' && !body.trim()) throw new CliError(`body cannot be blank for ${event === 'COMMENT' ? 'comment' : 'request changes'} review`);
   await client.json('POST', `${pullPath(t)}/reviews`, { event, body });
   const verb = { APPROVE: 'Approved', REQUEST_CHANGES: 'Requested changes to', COMMENT: 'Reviewed' }[event];
-  err(`✓ ${verb} pull request ${t.repo.owner}/${t.repo.name}#${t.number}`);
+  err(`✓ ${verb} pull request ${named(t)}`);
   return 0;
 }
 
@@ -417,7 +419,7 @@ async function setState(client: Client, cwd: string, args: string[], state: 'ope
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.comment) await client.json('POST', `${repoPath(t.repo)}/issues/${t.number}/comments`, { body: v.comment });
   const pr = await client.json('PATCH', pullPath(t), { state });
-  err(`✓ ${state === 'closed' ? 'Closed' : 'Reopened'} pull request ${t.repo.owner}/${t.repo.name}#${t.number} (${pr.title})`);
+  err(`✓ ${state === 'closed' ? 'Closed' : 'Reopened'} pull request ${named(t)} (${pr.title})`);
   if (v['delete-branch']) err('The branch was left alone; galley never deletes branches.');
   return 0;
 }
@@ -426,7 +428,7 @@ async function ready(client: Client, cwd: string, args: string[]): Promise<numbe
   const { values: v, positionals } = parse(args, { undo: { type: 'boolean' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   await client.json('PATCH', pullPath(t), { draft: !!v.undo });
-  err(`✓ Pull request ${t.repo.owner}/${t.repo.name}#${t.number} is ${v.undo ? 'converted to "draft"' : 'marked as "ready for review"'}`);
+  err(`✓ Pull request ${named(t)} is ${v.undo ? 'converted to "draft"' : 'marked as "ready for review"'}`);
   return 0;
 }
 
@@ -458,11 +460,11 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
   out(`\nRelevant pull requests in ${repo.owner}/${repo.name}\n`);
   out(c.bold('Current branch'));
   const mine = pulls.find((p) => p.headRefName === branch);
-  out(mine ? `  #${mine.number}  ${mine.title} [${mine.headRefName}]\n    - ${mine.reviewDecision.toLowerCase().replace('_', ' ')}${mine.turn ? `\n    - ${turnLine(mine.turn)}` : ''}` : `  There is no pull request associated with [${branch}]`);
+  out(mine ? `  ${stagedRef(mine.number)}  ${mine.title} [${mine.headRefName}]\n    - ${mine.reviewDecision.toLowerCase().replace('_', ' ')}${mine.turn ? `\n    - ${turnLine(mine.turn)}` : ''}` : `  There is no pull request associated with [${branch}]`);
   out('\n' + c.bold('Staged and published pull requests'));
   if (!pulls.length) out('  You have no staged or published pull requests');
   const label = (p: any) => (p.state === 'PUBLISHED' ? (p.unpublishedChanges?.length ? ' (update not published)' : ' (published)') : '');
-  for (const p of pulls) out(`  #${p.number}  ${p.title} [${p.headRefName}]${label(p)}`);
+  for (const p of pulls) out(`  ${stagedRef(p.number)}  ${p.title} [${p.headRefName}]${label(p)}`);
   out('');
   return 0;
 }
@@ -486,7 +488,7 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
   if (v.auto && v['during-review']) throw new CliError('--during-review publishes now; --auto waits for the reviews instead');
   if (v.auto && v['during-conflict']) throw new CliError('--during-conflict publishes now; --auto waits for a head that merges cleanly instead');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
-  const name = `${t.repo.owner}/${t.repo.name}#${t.number}`;
+  const name = named(t);
   const sign = v.sign ? true : v['no-sign'] ? false : undefined;
   // Like `gh pr merge --auto`: publish once the reviewer agents are done and the author has answered them.
   if (v['disable-auto']) {
@@ -512,7 +514,7 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
         asked = JSON.parse(e.body).acknowledge ?? asked;
       } catch {}
       const flags = new Set([...acknowledged, ...asked.map((field) => field.replace('_', '-'))]);
-      throw new CliError(`${e.message}\nRun \`galley pr publish ${t.number} ${[...flags].map((f) => `--${f}`).join(' ')}\` to publish anyway.`);
+      throw new CliError(`${e.message}\nRun \`galley pr publish s${t.number} ${[...flags].map((f) => `--${f}`).join(' ')}\` to publish anyway.`);
     }
     throw e;
   });
@@ -560,8 +562,10 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
   const targets = positionals.length
     ? await Promise.all(positionals.map((arg) => resolvePull(client, cwd, repoFlag, arg)))
     : [await resolvePull(client, cwd, repoFlag, undefined)];
-  const names = targets.map((t) => `${t.repo.owner}/${t.repo.name}#${t.number}`).join(', ');
-  const all = targets.length > 1 ? positionals.join(' ') : String(targets[0].number);
+  const names = targets.map(named).join(', ');
+  // To wait again: each as given, a number as s4, which looks like no GitHub number and no shell pattern.
+  const again = (i: number) => (positionals[i] === undefined || stagedNumber(positionals[i]) !== null ? `s${targets[i].number}` : positionals[i]);
+  const all = targets.map((_, i) => again(i)).join(' ');
   const deadline = v.timeout ? Date.now() + parseDuration(String(v.timeout)) : Infinity;
   if (isTTY) err(`Waiting for feedback on ${names}…`);
   while (true) {
@@ -571,7 +575,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       // Findings the author has not answered hold up the reviewer agents, which no wait would say.
       for (const t of targets) {
         const pull = await client.get<any>(pullPath(t)).catch(() => null);
-        const which = targets.length > 1 ? `${t.repo.owner}/${t.repo.name}#${t.number}: ` : '';
+        const which = targets.length > 1 ? `${named(t)}: ` : '';
         for (const r of pull?.turn.reasons ?? []) {
           if (r.state !== 'findings') continue;
           const answer = r.description ? 'edit the title or description, or reword the commits, as it asks; a reply does not answer it' : 'reply to or resolve each of its threads, or push a commit';
@@ -592,11 +596,11 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       throw first.error;
     }
     const { t, r } = first;
-    const others = positionals.filter((_, i) => targets[i] !== t);
+    const others = targets.flatMap((other, i) => (other === t ? [] : [again(i)]));
     const url = `${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`;
     const pr = r.pr;
     // Waiting on several: say which one this is about.
-    if (others.length) out(`${c.bold(`${t.repo.owner}/${t.repo.name}#${t.number}`)} (${pr.headRefName}): ${url}\n`);
+    if (others.length) out(`${c.bold(named(t))} (${pr.headRefName}): ${url}\n`);
     const fresh = {
       reviews: new Set<number>(r.reviews),
       comments: new Set<number>(r.comments.filter((cm: any) => cm.kind === 'issue').map((cm: any) => cm.id)),
@@ -608,7 +612,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(`New feedback on ${url} (review decision: ${pr.reviewDecision})\n`);
       out(text + '\n');
     }
-    if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`galley pr view ${t.number} --comments --download-images <dir>\`.`));
+    if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`galley pr view s${t.number} --comments --download-images <dir>\`.`));
     for (const line of approvedBefore(pr, new Set(r.reviews))) out(line);
     // The head conflicts with its base: the author's to rebase, with whatever else there is.
     const conflicts = conflictsText(pr);
@@ -704,7 +708,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(
         c.gray(
           `Address the feedback. Reply to each thread and resolve the ones you fixed with ` +
-            `\`galley pr comment ${t.number} --reply-to <thread> --resolve -b "…"\` ` +
+            `\`galley pr comment s${t.number} --reply-to <thread> --resolve -b "…"\` ` +
             `(leave out --resolve to keep a thread open for the reviewer), then run \`galley pr wait ${all}\` again.`,
         ),
       );
@@ -776,7 +780,7 @@ GALLEY COMMANDS
   wait:        Block until the reviewer responds, then print the feedback, or until the
                reviewer agents are done with the latest commit. After publishing,
                pushes your commits to GitHub, and waits until it is merged or closed
-               there. Several numbers: whichever is first
+               there. Several (as in s4 s5): whichever is first
   publish:     Push the branch and open the pull request on GitHub (--auto: once the
                reviews are done; --auto-merge: and turn on auto-merge there)
 

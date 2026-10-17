@@ -1,4 +1,4 @@
-import { c, indent } from './output.ts';
+import { c, indent, stagedRef } from './output.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type GhPull = Record<string, any>;
@@ -108,7 +108,7 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
     `reviewers:\t${reviewersLine(pr)}`,
     `projects:\t`,
     `milestone:\t`,
-    `number:\t${pr.number}`,
+    `number:\t${stagedRef(pr.number)}`,
     `url:\t${pr.url}`,
     `additions:\t${pr.additions}`,
     `deletions:\t${pr.deletions}`,
@@ -155,7 +155,7 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
         ? `${pr.author.login} published ${commits} into`
         : `${pr.author.login} staged ${commits} for`;
   const out = [
-    `${c.bold(pr.title)} ${c.gray('#' + pr.number)}`,
+    `${c.bold(pr.title)} ${c.gray(stagedRef(pr.number))}`,
     `${state} • ${did} ${pr.baseRefName} from ${pr.headRefName} • ${c.green('+' + pr.additions)} ${c.red('-' + pr.deletions)}`,
   ];
   const reviewers = reviewersLine(pr);

@@ -185,6 +185,17 @@ test('#N links only where GitHub links it, so staged pull requests (s#5) stay te
   assert.equal(md('#12 (#12), #12'), `<p>${twelve} (${twelve}), ${twelve}</p>`);
 });
 
+test('s#N links to the staged pull request here, with its title, never to GitHub', () => {
+  const here: ReferenceContext = { ...refs, staged: (n) => (n === 5 ? { href: '/acme/widgets/pull/5', title: 'Add <mul> · staged' } : null) };
+  const five = '<a class="issue-link" href="/acme/widgets/pull/5" title="Add &lt;mul&gt; · staged">s#5</a>';
+  assert.equal(md('See s#5, (s#5) and s#5.', here), `<p>See ${five}, (${five}) and ${five}.</p>`);
+  // One there is none of, inside a word, followed by a word character, or written otherwise stays text.
+  assert.equal(md('s#6, less#5, s#5x and S#5', here), '<p>s#6, less#5, s#5x and S#5</p>');
+  // Also without a GitHub remote, and it closes nothing there.
+  assert.equal(md('s#5', { ...here, slug: null }), `<p>${five}</p>`);
+  assert.deepEqual(closingIssues('Fixes s#5', here), []);
+});
+
 test('without a GitHub remote, issue references and mentions stay text; commits still link', () => {
   const local = { ...refs, slug: null };
   assert.equal(md('Fixes #12, GH-5, laat/stage-pr#16 and @laat.', local), '<p>Fixes #12, GH-5, laat/stage-pr#16 and @laat.</p>');

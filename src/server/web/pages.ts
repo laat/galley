@@ -114,7 +114,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
     ${ended(p)}
     ${line}
-    <div class="pr-row-meta"><a href="${href(p)}">#${p.number}</a> staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
+    <div class="pr-row-meta"><a href="${href(p)}">s#${p.number}</a> staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
   <div class="pr-row-side">${atWorkAvatars(atWork)}${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
 </div>`;
@@ -131,7 +131,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     return html`<div class="Box-row pr-row pr-row--compact">
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
-    <span class="pr-row-heading">${heading(p)} <a class="pr-row-number" href="${href(p)}">#${p.number}</a></span>
+    <span class="pr-row-heading">${heading(p)} <a class="pr-row-number" href="${href(p)}">s#${p.number}</a></span>
     ${line}
   </div>
   <div class="pr-row-side">${atWorkAvatars(atWork)}</div>
@@ -464,7 +464,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files' | nul
   const header = html`<div class="pr-header">
   <div class="container container-xl">
     <div class="gh-header-title-row js-title-view">
-      <h1 class="gh-header-title"><bdi>${pull.title}</bdi> <span class="gh-header-number">#${pull.number}</span></h1>
+      <h1 class="gh-header-title"><bdi>${pull.title}</bdi> <span class="gh-header-number">s#${pull.number}${pull.published_url ? html` → ${githubPull(pull.published_url)}` : ''}</span></h1>
       <div class="gh-header-actions">
         ${pinButton(p)}
         <button type="button" class="btn btn-sm js-title-edit">Edit</button>
@@ -491,8 +491,8 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files' | nul
   </div>
 </div>`;
   return layout(s, {
-    title: `${pull.title} by ${author.login} · Pull Request #${pull.number} · ${repo.owner}/${repo.name}`,
-    crumbs: repoCrumbs(repo, html`<span class="crumb-sep">/</span><a href="${p.htmlBase}">#${pull.number}</a>`),
+    title: `${pull.title} by ${author.login} · Pull Request s#${pull.number} · ${repo.owner}/${repo.name}`,
+    crumbs: repoCrumbs(repo, html`<span class="crumb-sep">/</span><a href="${p.htmlBase}">s#${pull.number}</a>`),
     body: html`${header}${content}`,
     live: pull.id,
     data: { 'api-base': p.apiBase, 'pull-id': pull.id, ...extraData },

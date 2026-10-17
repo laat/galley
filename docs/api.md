@@ -44,13 +44,13 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 
 ## gh shapes
 
-- `GET …/gh/pulls[/{n}]?fields=<a,b>`: what `gh pr list|view --json` prints. Besides gh's fields: `reviewThreads`, `publishedUrl`, `waiting`, `isPinned`, `autoPublishRequest`, `reviewRequests` (with `status`, `commit`, `startedAt`), `turn`, `unpublishedChanges`, `baseConflicts`, `githubStatus`, and `byReviewerAgent` on each review (such an approval is not in `reviewDecision`). `state` is also `STAGED` and `PUBLISHED`.
+- `GET …/gh/pulls[/{n}]?fields=<a,b>`: what `gh pr list|view --json` prints. Besides gh's fields: `reviewThreads`, `publishedUrl`, `waiting`, `isPinned`, `autoPublishRequest`, `reviewRequests` (with `status`, `commit`, `startedAt`), `turn`, `unpublishedChanges`, `baseConflicts`, `githubStatus`, `ref` (`s4` for staged pull request s#4, as the CLI takes it), and `byReviewerAgent` on each review (such an approval is not in `reviewDecision`). `state` is also `STAGED` and `PUBLISHED`.
 
 ## Other
 
 - `GET /api/settings`, `PUT /api/settings/{codex|claude}`, `PUT /api/settings/publish` (`mergeMethod`).
 - `POST /api/repos` `{path}`: register the repository at that path. Its `full_name` is the GitHub owner/name of its remote, and follows the remote when it names another (a repository renamed on GitHub); the old name still works under `/api/repos`, and its pages redirect.
-- `POST /api/markdown`: also takes `pull` (a pull request's API path), to link references as its pages do.
+- `POST /api/markdown`: also takes `pull` (a pull request's API path), to link references as its pages do, `s#4` to staged pull request 4 among them.
 - `POST /api/uploads`: an image's bytes; answers with its `path`, `/uploads/<sha256>.<ext>`, served by `GET /uploads/<sha256>.<ext>`.
 - `GET /api/meta`: `{"name": "galley", "version": …}`, so the CLI knows it reached galley and not another program on its port. While the server starts, the same with 503.
 - `GET /api/health`, and `GET /events` (server-sent events).
