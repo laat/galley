@@ -344,16 +344,22 @@ test('it reviews again when the title, description or commit messages change, no
   // The merge box's last round counts them: the thread on the commit, and those in the body.
   assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 Medium 2 Low');
   assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
-  // Answered without a change: the thread has a reply, and the findings in the body were seen.
+  // Only a new version answers it: with its findings seen and its thread replied to, auto-publish still waits for one.
   assert.equal((await cli(acme, ['pr', 'comment', String(number), '--reply-to', String(thread.id), '-b', 'The description says why.'])).code, 0);
-  assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules's findings in the description are answered/);
-  assert.match(await page('/'), /house-rules&#39;s findings in the description answered/);
+  await human('PUT', `/api/repos/acme/widgets/pulls/${number}/auto-publish`, {});
+  const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '2s']);
+  assert.equal(held.code, 124);
+  assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\. The reviewer agents are not done with it until then\.$/m);
+  assert.ok((await human('GET', `/api/repos/acme/widgets/pulls/${number}`)).auto_publish, 'auto-publish is still on, and nothing was published');
+  assert.match(await page(`/acme/widgets/pull/${number}`), /house-rules found problems in the description, and reviews it again once it changes/);
+  assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
 
   // A reworded commit: a verdict that is not approve, with nothing to point at, is a finding; one it may not give is a comment.
   process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'The message does not say why.', verdict: 'request_changes', comments: [] });
   git(acme, 'commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Widgets multiply now.');
   out = await wait(acme, number);
   assert.match(out, /The message does not say why\./);
+  await human('DELETE', `/api/repos/acme/widgets/pulls/${number}/auto-publish`);
   review = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviews`)).at(-1);
   assert.equal(review.state, 'COMMENTED');
   assert.deepEqual((await runs()).map((r: any) => r.findings), [0, 3, 1]);

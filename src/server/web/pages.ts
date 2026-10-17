@@ -310,7 +310,7 @@ function turnLine(
       r.state === 'failed'
         ? "'s review failed"
         : r.state === 'answered'
-          ? `'s findings${agent.status.description ? ' in the description' : ''} answered`
+          ? "'s findings answered"
           : ` ${agentPhrase(r.state as HeadStatus['state'], agent.status, pull, author.login, waiting)}`;
     const key = r.state === 'failed' ? `failed ${r.reviewer}` : `agent${words}`;
     const same = phrases.get(key);

@@ -665,7 +665,8 @@ export class Reviewer {
     // It reviews this commit when the author waits.
     if (!last) return { state: 'unreviewed', done: false, commit, automatic };
     // It found something in this commit and reviews the author's next one, unless the author answers it without one.
-    if (this.answered(pull, last)) return { state: 'answered', done: true, commit, automatic };
+    // A reviewer of the description has only a new version of it for an answer.
+    if (this.reviews !== 'description' && this.answered(pull, last)) return { state: 'answered', done: true, commit, automatic };
     return { state: 'findings', done: false, commit, automatic };
   }
 
