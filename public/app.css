@@ -928,7 +928,24 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
 .file-tree .tree-threads:hover .octicon { color: var(--accent); }
 @media (max-width: 1011px) { .files-layout > .file-tree { display: none; } }
 
-.file { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; scroll-margin-top: calc(var(--files-toolbar-height) + 19px); }
+.file { position: relative; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; scroll-margin-top: calc(var(--files-toolbar-height) + 19px); }
+/* The header's top corners are square, so the diff scrolling under a stuck header can't show through them.
+   These round them where the header starts, over it, and scroll away with the top of the file: the
+   file's border, and the page outside it (the shadow, clipped to the corner). */
+.file::before, .file::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  z-index: 11;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--border);
+  box-shadow: 0 0 0 6px var(--bg);
+  clip-path: inset(0);
+  pointer-events: none;
+}
+.file::before { left: -1px; border-left: 1px solid var(--border); border-top-left-radius: 6px; }
+.file::after { right: -1px; border-right: 1px solid var(--border); border-top-right-radius: 6px; }
 .file-header {
   position: sticky;
   top: var(--files-toolbar-height);
@@ -940,9 +957,8 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
   font-size: 12px;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border);
-  border-radius: 6px 6px 0 0;
 }
-.file.is-collapsed .file-header { border-bottom: 0; border-radius: 6px; }
+.file.is-collapsed .file-header { border-bottom: 0; border-radius: 0 0 6px 6px; }
 .file-toggle .when-collapsed { display: none; }
 .file.is-collapsed .file-toggle .when-collapsed { display: inline-block; }
 .file.is-collapsed .file-toggle .when-expanded { display: none; }
