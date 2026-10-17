@@ -50,7 +50,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     const n = all.filter((p) => staging.get(p.id) === key).length;
     const mine = yours.filter((p) => staging.get(p.id) === key).length;
     const turnCount = mine ? html` <span class="list-tab-turn" title="${plural(mine, 'pull request')} waiting for you">${icon('inbox')} ${mine}</span>` : '';
-    return html`<a class="list-tab${state === key ? ' selected' : ''}" href="${base}?state=${key}">${icon(iconName)} ${n} ${label}${turnCount}</a>`;
+    return html`<a class="list-tab${state === key ? ' selected' : ''}" href="${base}?state=${key}">${icon(iconName)} <span data-content="${n} ${label}">${n} ${label}</span>${turnCount}</a>`;
   };
   const href = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);

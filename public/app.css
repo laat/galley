@@ -190,6 +190,8 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .UnderlineNav-item:hover::before { background: var(--neutral-muted); }
 .UnderlineNav-item .octicon { color: var(--fg-muted); }
 .UnderlineNav-item.selected { font-weight: 600; }
+/* A tab's label holds an invisible bold copy of itself, as in Primer, so it is as wide unselected as selected and selecting it moves no other tab. */
+[data-content]::before { content: attr(data-content); display: block; height: 0; overflow: hidden; visibility: hidden; font-weight: 600; }
 .UnderlineNav-item.selected::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 6px; background: #fd8c73; }
 .UnderlineNav-item .UnderlineNav-external { width: 12px; height: 12px; }
 .app-header-logo {

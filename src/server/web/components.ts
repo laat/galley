@@ -54,7 +54,7 @@ export function repoNav(s: Service, repo: RepoRow, selected: 'staged' | null = '
     html`<a class="UnderlineNav-item" href="https://github.com/${slug}${path}" target="_blank" rel="noopener" title="${title}">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
   return html`<nav class="UnderlineNav" aria-label="Repository">
   ${slug ? external('', 'mark-github', 'Repo', `${slug} on GitHub`) : ''}
-  <a class="UnderlineNav-item${selected === 'staged' ? ' selected' : ''}" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} Staged${counter(staged)}</a>
+  <a class="UnderlineNav-item${selected === 'staged' ? ' selected' : ''}" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} <span data-content="Staged">Staged</span>${counter(staged)}</a>
   ${slug ? external('/pulls', 'git-pull-request', 'Pull requests', 'Pull requests on GitHub', counts?.pulls) : ''}
   ${slug ? external('/issues', 'issue-opened', 'Issues', 'Issues on GitHub', counts?.issues) : ''}
 </nav>`;
