@@ -1232,9 +1232,16 @@ export class Service {
     if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can pin a pull request to the top of their front page');
     // Pinned again, it keeps its place.
     const changed = pinned
-      ? this.db.run('UPDATE pulls SET pinned_at = ? WHERE id = ? AND pinned_at IS NULL', now(), pull.id).changes
+      ? this.db.run('UPDATE pulls SET pinned_at = ? WHERE id = ? AND pinned_at IS NULL', this.nextPinAt(), pull.id).changes
       : this.db.run('UPDATE pulls SET pinned_at = NULL WHERE id = ? AND pinned_at IS NOT NULL', pull.id).changes;
     if (changed) this.emit(pull.id, pinned ? 'pinned' : 'unpinned', actor);
+  }
+
+  /** Now, or a millisecond after the newest pin when two pins land in the same millisecond, so the newest pin is always first. */
+  private nextPinAt(): string {
+    const at = now();
+    const newest = this.db.get<{ at: string | null }>('SELECT MAX(pinned_at) AS at FROM pulls')!.at;
+    return newest && newest >= at ? new Date(Date.parse(newest) + 1).toISOString() : at;
   }
 
   // ------------------------------------------------------------ the agent loop
