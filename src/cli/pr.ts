@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
+import { whoReviews } from './reviewers.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
@@ -189,6 +190,8 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   });
   for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
+  // A server from before reviewer_agents does not say.
+  if (pr.reviewer_agents) err(whoReviews(pr.reviewer_agents));
   if (v.web) openBrowser(pr.html_url);
   err(c.gray(`Review happens in the browser. Run \`galley pr wait ${pr.number}\` to block until the reviewer responds.`));
   return 0;

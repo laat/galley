@@ -266,7 +266,8 @@ test('definitions are read when the server starts; those that can not run say wh
 
 test('a reviewer of the description reads no code, and approves what follows its rules; the approval is its own', async () => {
   process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] });
-  const { number } = await stage(acme);
+  const { number, stderr } = await stage(acme);
+  assert.match(stderr, /^When you wait, house-rules reviews the title, description and commit messages\.$/m);
   const base = `/api/repos/acme/widgets/pulls/${number}`;
   const out = await wait(acme, number);
   assert.match(out, /house-rules reviewed: approved/);
@@ -421,6 +422,7 @@ test('a review goes by the definition it started with, also when the definition 
 test('it reviews only the repositories it names', async () => {
   const { number, stderr } = await stage(other, ['--reviewer', 'house-rules']);
   assert.match(stderr, /Ignored reviewer house-rules: galley has no reviewer agent by that name for this repository\./);
+  assert.match(stderr, /^No reviewer agent reviews it\.$/m);
   assert.doesNotMatch(await page(`/other/thing/pull/${number}`), /house-rules/);
   assert.ok(!server.service.readiness(row('other', number)).reviewers.some((r) => r.login === 'house-rules'));
   await human('POST', `/api/repos/other/thing/pulls/${number}/reviewers/house-rules`, undefined, 404);
@@ -430,6 +432,33 @@ test('it reviews only the repositories it names', async () => {
   const solo1 = await stage(solo);
   const { message } = await human('POST', `/api/repos/local/solo/pulls/${solo1.number}/reviewers/house-rules`, undefined, 404);
   assert.equal(message, 'house-rules does not review repositories without a GitHub remote');
+});
+
+test('galley reviewers lists the reviewer agents of the repository, without their instructions', async () => {
+  const text = await cli(acme, ['reviewers']);
+  assert.equal(text.code, 0, text.stderr);
+  assert.equal(
+    text.stdout,
+    [
+      'NAME           ENGINE  REVIEWS      AUTOMATIC  LIMIT',
+      'codex-review   codex   code         no         3',
+      'claude-review  claude  code         no         3',
+      'house-rules    claude  description  yes        3',
+      '',
+    ].join('\n'),
+  );
+  const json = await cli(acme, ['reviewers', '--json']);
+  assert.deepEqual(JSON.parse(json.stdout), [
+    { name: 'codex-review', engine: 'codex', reviews: 'code', automatic: false, limit: 3 },
+    { name: 'claude-review', engine: 'claude', reviews: 'code', automatic: false, limit: 3 },
+    { name: 'house-rules', engine: 'claude', reviews: 'description', automatic: true, limit: 3 },
+  ]);
+  const api = await human('GET', '/api/repos/acme/widgets/reviewers');
+  assert.deepEqual(api.at(-1), { login: 'house-rules', reviewer: 'house-rules', engine: 'claude', reviews: 'description', automatic: true, max_iterations: 3 });
+  assert.doesNotMatch(JSON.stringify(api), /imperative/);
+  // Only those that review the repository; -R names another.
+  assert.doesNotMatch((await cli(other, ['reviewers'])).stdout, /house-rules/);
+  assert.match((await cli(other, ['reviewers', '-R', 'acme/widgets'])).stdout, /^house-rules +claude +description +yes +3$/m);
 });
 
 test('a custom reviewer with the head still to review keeps the pull request with the agents, where it reviews', async () => {

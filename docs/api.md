@@ -40,6 +40,7 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 - `POST …/pulls/{n}/reviewers/{reviewer}`: review now, whatever the limit. Answers 202 with `run_id`.
 - `GET …/pulls/{n}/reviewers/{reviewer}`: its runs (with `usage`, what each cost) and this pull request's settings.
 - `PATCH …/pulls/{n}/reviewers/{reviewer}`: this pull request's `enabled` and `max_iterations`; null follows the settings.
+- `GET …/reviewers`: the reviewer agents that review the repository: `login`, `reviewer` (as `{reviewer}` above), `engine`, `reviews` (`code` or `description`), `automatic` (whether it reviews the caller's pull requests on its own) and `max_iterations`, never their instructions. `POST …/pulls` answers with those of the new pull request, for it, in `reviewer_agents`.
 - `GET|POST /api/settings/reviewers`, `GET|PATCH|DELETE /api/settings/reviewers/{name}`: custom reviewers, with their file's keys plus `path`, `login` and the `error` that keeps one from running. PATCH changes the fields given and refuses `name`.
 
 ## gh shapes

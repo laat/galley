@@ -3,6 +3,7 @@ import { ApiError, CliError, Client, identify } from './client.ts';
 import { pr } from './pr.ts';
 import { api } from './api.ts';
 import { browse } from './browse.ts';
+import { reviewers } from './reviewers.ts';
 import { err, out } from './output.ts';
 import { DEFAULT_PORT, VERSION, dataDir, fromEnv } from '../config.ts';
 
@@ -19,6 +20,7 @@ COMMANDS
   api:         Make an API request (like \`gh api\`)
   serve:       Run the server and web UI
   browse:      Print and open the web UI's URL for a pull request, file or directory (like \`gh browse\`)
+  reviewers:   List the reviewer agents that review the repository
 
 ENVIRONMENT
   GALLEY_URL     Server URL (default http://localhost:${DEFAULT_PORT})
@@ -86,6 +88,8 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return await serve(rest);
       case 'browse':
         return await browse(client, cwd, rest);
+      case 'reviewers':
+        return await reviewers(client, cwd, rest);
       case '--version':
       case 'version':
         out(`galley version ${VERSION}`);
