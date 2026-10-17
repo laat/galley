@@ -435,9 +435,8 @@ kbd {
 .pr-row-side { font-size: 12px; white-space: nowrap; padding-top: 2px; }
 .pr-row-number { color: var(--fg-muted); font-size: 12px; }
 .pr-row--compact { padding: 6px 16px; }
-.pr-row--compact .pr-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
 .pr-row--compact .pr-row-title, .pr-row--compact .pr-row-repo { font-size: 14px; }
-.pr-row--compact .pr-row-turn { margin-top: 0; }
+.pr-row--compact .pr-row-turn { margin-top: 2px; }
 /* The front page: your repositories at the left of the page, in line with the header's logo, and
    the list in the rest; above it on narrow screens. */
 .dashboard { display: grid; grid-template-columns: 256px minmax(0, 1fr); gap: 24px; align-items: start; }
@@ -469,18 +468,17 @@ kbd {
 .turn-empty { padding: 12px 16px; color: var(--fg-muted); }
 .pr-row-turn { margin-top: 4px; font-size: 12px; color: var(--fg-muted); }
 .pr-row-turn a { color: inherit; }
-.turn-reason + .turn-reason::before { content: '·'; margin: 0 6px; color: var(--fg-muted); font-weight: 400; }
-.turn-reason .octicon { width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; }
-.turn-reason .btn-link { display: inline; margin-left: 6px; font-weight: 600; }
-.turn-reason--waiting { color: var(--success); font-weight: 600; }
-.turn-reason--running { color: var(--accent); font-weight: 600; }
-.turn-reason--working { color: var(--attention); }
-.turn-reason--failed { color: var(--danger); font-weight: 600; }
-.turn-reason--threads { color: var(--attention); }
-.turn-reason--github { color: var(--danger); }
-.turn-reason--conflicts { color: var(--danger); }
-.turn-since { color: var(--fg-muted); font-weight: 400; white-space: nowrap; }
+/* A phrase wraps to the next line whole, its mark with it, and the dot after it stays on its line. */
+.turn-reason { display: inline-block; }
+.turn-reason:not(:last-child)::after, .turn-since::before { content: '·'; margin: 0 6px; }
+.turn-since { white-space: nowrap; }
+.turn-mark { width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; }
+.turn-mark.octicon-dot-fill { color: var(--accent); }
+.turn-mark--danger { color: var(--danger); }
+.turn-reason .btn-link { display: inline; margin-left: 4px; font-weight: 600; }
 .turn-pulse { animation: pulse 1.6s ease-in-out infinite; }
+.turn-avatars { display: inline-flex; gap: 4px; margin-right: 12px; vertical-align: middle; }
+.turn-avatar { display: inline-flex; }
 .blankslate { padding: 48px 32px; text-align: center; color: var(--fg-muted); }
 .blankslate h3 { margin: 16px 0 4px; font-size: 20px; color: var(--fg); font-weight: 600; }
 .blankslate p { margin: 8px 0; }
