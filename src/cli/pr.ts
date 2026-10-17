@@ -2,7 +2,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
+import { ApiError, CliError, Client, Help, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, stagedNumber } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews } from './reviewers.ts';
@@ -41,11 +41,16 @@ const JSON_OPTS: Options = {
   template: { type: 'string', short: 't' },
 };
 
-function parse(args: string[], options: Options): { values: Record<string, any>; positionals: string[] } {
+/**
+ * A subcommand's flags, and --repo and --help. --help throws its usage for `main` to print, before
+ * the subcommand asks the server or does anything.
+ */
+function parse(args: string[], usage: string, options: Options): { values: Record<string, any>; positionals: string[] } {
   // gh prints the available fields for a bare `--json`; parseArgs would demand a value.
   const fixed = args.map((a, i) => (a === '--json' && (i === args.length - 1 || args[i + 1].startsWith('-')) ? '--json=' : a));
+  let parsed;
   try {
-    return parseArgs({
+    parsed = parseArgs({
       args: fixed,
       options: { ...options, repo: { type: 'string', short: 'R' }, help: { type: 'boolean', short: 'h' } },
       allowPositionals: true,
@@ -55,7 +60,12 @@ function parse(args: string[], options: Options): { values: Record<string, any>;
     const m = String((e as Error).message).match(/Unknown option '([^']+)'/);
     throw new CliError(m ? `unknown flag: ${m[1]}` : (e as Error).message);
   }
+  if (parsed.values.help) throw new Help(`${usage}\nINHERITED FLAGS\n  -R, --repo [HOST/]OWNER/REPO   Select another repository\n`);
+  return parsed;
 }
+
+/** How subcommands that take one pull request name it; without it, the one for the current branch. */
+const PULL = '[<s-number> | <url> | <branch>]';
 
 function readBody(v: { body?: string; 'body-file'?: string }): string | undefined {
   if (v['body-file'] !== undefined) {
@@ -144,8 +154,33 @@ export function parseReviewers(values: string[]): { login: string; max_iteration
   );
 }
 
+const CREATE_USAGE = `Stage a pull request for the current branch. Mirrors \`gh pr create\`.
+
+USAGE
+  galley pr create --title <title> [--body <text> | --body-file <file>] [flags]
+
+FLAGS
+  -t, --title <title>           The title
+  -b, --body <text>             The description
+  -F, --body-file <file>        Read the description from a file ("-" for stdin)
+  -f, --fill                    Use commit info for the title and description
+      --fill-first              Use the first commit's info for the title and description
+      --fill-verbose            Use the commits' messages and bodies for the description
+  -B, --base <branch>           The branch to merge into (default: the default branch)
+  -H, --head <branch>           The branch to stage (default: the current branch)
+  -d, --draft                   Stage it as a draft, which is published as a draft
+  -r, --reviewer <name>[:<n>]   Have this reviewer agent review it, at most n times (codex:3).
+                                Repeat for more. \`galley reviewers\` lists them
+      --no-review               Have no reviewer agent review it
+      --dry-run                 Say what would be staged, and stage nothing
+  -w, --web                     Open it in the browser
+
+Accepted for gh, with no effect: --assignee, --label, --milestone, --project, --template,
+--recover and --no-maintainer-edit.
+`;
+
 async function create(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v } = parse(args, {
+  const { values: v } = parse(args, CREATE_USAGE, {
     ...IGNORED,
     title: { type: 'string', short: 't' },
     body: { type: 'string', short: 'b' },
@@ -201,8 +236,26 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
 
 // --------------------------------------------------------------------- list
 
+const LIST_USAGE = `List staged and published pull requests. Mirrors \`gh pr list\`.
+
+USAGE
+  galley pr list [flags]
+
+FLAGS
+  -s, --state <state>     open (staged or published, the default), staged, published, done,
+                          merged, closed or all
+  -L, --limit <n>         List at most n (default 30)
+  -H, --head <branch>     Only those of this branch
+  -B, --base <branch>     Only those into this branch
+  -A, --author <login>    Only those by this author
+  -d, --draft             Only drafts
+  -w, --web               Open the list in the browser
+      --json <fields>     Output JSON with these fields (a bare --json lists them)
+  -q, --jq <expression>   Filter the JSON output with jq
+`;
+
 async function list(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v } = parse(args, {
+  const { values: v } = parse(args, LIST_USAGE, {
     ...JSON_OPTS,
     state: { type: 'string', short: 's', default: 'open' },
     limit: { type: 'string', short: 'L', default: '30' },
@@ -256,8 +309,21 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
 
 // --------------------------------------------------------------------- view
 
+const VIEW_USAGE = `Show a staged pull request. Mirrors \`gh pr view\`.
+
+USAGE
+  galley pr view ${PULL} [flags]
+
+FLAGS
+  -c, --comments                Show the reviews, comments and review threads
+      --download-images <dir>   Save its images as files in dir, and show their paths
+  -w, --web                     Open it in the browser
+      --json <fields>           Output JSON with these fields (a bare --json lists them)
+  -q, --jq <expression>         Filter the JSON output with jq
+`;
+
 async function view(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, {
+  const { values: v, positionals } = parse(args, VIEW_USAGE, {
     ...JSON_OPTS,
     comments: { type: 'boolean', short: 'c' },
     web: { type: 'boolean', short: 'w' },
@@ -283,8 +349,20 @@ async function view(client: Client, cwd: string, args: string[]): Promise<number
 
 // --------------------------------------------------------------------- diff
 
+const DIFF_USAGE = `Show the changes of a staged pull request. Mirrors \`gh pr diff\`.
+
+USAGE
+  galley pr diff ${PULL} [flags]
+
+FLAGS
+      --color <when>   always, never or auto (default auto)
+      --patch          Show them as patches, one per commit
+      --name-only      Show only the names of the changed files
+  -w, --web            Open them in the browser
+`;
+
 async function diff(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, {
+  const { values: v, positionals } = parse(args, DIFF_USAGE, {
     color: { type: 'string', default: 'auto' },
     patch: { type: 'boolean' },
     'name-only': { type: 'boolean' },
@@ -319,8 +397,23 @@ async function diff(client: Client, cwd: string, args: string[]): Promise<number
 
 // --------------------------------------------------------------------- edit
 
+const EDIT_USAGE = `Change the title, description or base of a staged pull request. Mirrors \`gh pr edit\`.
+
+USAGE
+  galley pr edit ${PULL} [flags]
+
+FLAGS
+  -t, --title <title>      The new title
+  -b, --body <text>        The new description
+  -F, --body-file <file>   Read the new description from a file ("-" for stdin)
+  -B, --base <branch>      The new base branch
+
+Accepted for gh, with no effect: the flags for assignees, labels, projects, milestones and
+reviewers.
+`;
+
 async function edit(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, {
+  const { values: v, positionals } = parse(args, EDIT_USAGE, {
     ...IGNORED,
     title: { type: 'string', short: 't' },
     body: { type: 'string', short: 'b' },
@@ -347,8 +440,23 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
 
 // ------------------------------------------------------------------ comment
 
+const COMMENT_USAGE = `Comment on a staged pull request, or reply in a review thread. Mirrors \`gh pr comment\`.
+
+USAGE
+  galley pr comment ${PULL} [flags]
+
+FLAGS
+  -b, --body <text>         The comment
+  -F, --body-file <file>    Read the comment from a file ("-" for stdin)
+      --reply-to <thread>   Reply in this review thread (its id, as \`pr wait\` shows it)
+      --resolve             With --reply-to: resolve the thread after replying
+      --edit-last           Edit your last comment
+      --create-if-none      With --edit-last: comment if you have not yet
+      --delete-last         Delete your last comment
+`;
+
 async function comment(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, {
+  const { values: v, positionals } = parse(args, COMMENT_USAGE, {
     body: { type: 'string', short: 'b' },
     'body-file': { type: 'string', short: 'F' },
     'reply-to': { type: 'string' },
@@ -396,8 +504,21 @@ async function comment(client: Client, cwd: string, args: string[]): Promise<num
 
 // ------------------------------------------------------------------- review
 
+const REVIEW_USAGE = `Review a staged pull request. Mirrors \`gh pr review\`.
+
+USAGE
+  galley pr review ${PULL} [flags]
+
+FLAGS
+  -a, --approve            Approve it
+  -r, --request-changes    Request changes
+  -c, --comment            Comment, without approving or requesting changes
+  -b, --body <text>        The review's text
+  -F, --body-file <file>   Read the review's text from a file ("-" for stdin)
+`;
+
 async function review(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, {
+  const { values: v, positionals } = parse(args, REVIEW_USAGE, {
     approve: { type: 'boolean', short: 'a' },
     comment: { type: 'boolean', short: 'c' },
     'request-changes': { type: 'boolean', short: 'r' },
@@ -417,8 +538,28 @@ async function review(client: Client, cwd: string, args: string[]): Promise<numb
 
 // ------------------------------------------------------------ state changes
 
+const CLOSE_USAGE = `Close a staged pull request. Mirrors \`gh pr close\`.
+
+USAGE
+  galley pr close ${PULL} [flags]
+
+FLAGS
+  -c, --comment <text>   Leave a comment first
+  -d, --delete-branch    Accepted for gh; galley never deletes branches
+`;
+
+const REOPEN_USAGE = `Reopen a closed pull request. Mirrors \`gh pr reopen\`.
+
+USAGE
+  galley pr reopen ${PULL} [flags]
+
+FLAGS
+  -c, --comment <text>   Leave a comment first
+`;
+
 async function setState(client: Client, cwd: string, args: string[], state: 'open' | 'closed'): Promise<number> {
-  const { values: v, positionals } = parse(args, { comment: { type: 'string', short: 'c' }, 'delete-branch': { type: 'boolean', short: 'd' } });
+  const usage = state === 'closed' ? CLOSE_USAGE : REOPEN_USAGE;
+  const { values: v, positionals } = parse(args, usage, { comment: { type: 'string', short: 'c' }, 'delete-branch': { type: 'boolean', short: 'd' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.comment) await client.json('POST', `${repoPath(t.repo)}/issues/${t.number}/comments`, { body: v.comment });
   const pr = await client.json('PATCH', pullPath(t), { state });
@@ -427,16 +568,38 @@ async function setState(client: Client, cwd: string, args: string[], state: 'ope
   return 0;
 }
 
+const READY_USAGE = `Mark a staged pull request as ready for review, which decides whether it is published as a
+draft. Mirrors \`gh pr ready\`.
+
+USAGE
+  galley pr ready ${PULL} [flags]
+
+FLAGS
+      --undo   Mark it as a draft instead
+`;
+
 async function ready(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, { undo: { type: 'boolean' } });
+  const { values: v, positionals } = parse(args, READY_USAGE, { undo: { type: 'boolean' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   await client.json('PATCH', pullPath(t), { draft: !!v.undo });
   err(`✓ Pull request ${named(t)} is ${v.undo ? 'converted to "draft"' : 'marked as "ready for review"'}`);
   return 0;
 }
 
+const CHECKOUT_USAGE = `Check out the head branch of a staged pull request. Mirrors \`gh pr checkout\`.
+
+USAGE
+  galley pr checkout ${PULL} [flags]
+
+FLAGS
+      --detach   Check out its head commit, detached
+  -f, --force    Check out even if local changes are lost
+
+Accepted for gh, with no effect: --branch.
+`;
+
 async function checkout(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, { branch: { type: 'string', short: 'b' }, detach: { type: 'boolean' }, force: { type: 'boolean', short: 'f' } });
+  const { values: v, positionals } = parse(args, CHECKOUT_USAGE, { branch: { type: 'string', short: 'b' }, detach: { type: 'boolean' }, force: { type: 'boolean', short: 'f' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const pr = await client.get(ghPath(t, ['headRefName', 'headRefOid']));
   const target = v.detach ? pr.headRefOid : pr.headRefName;
@@ -449,8 +612,19 @@ async function checkout(client: Client, cwd: string, args: string[]): Promise<nu
   return 0;
 }
 
+const STATUS_USAGE = `Show the pull request for the current branch, and the staged and published ones. Mirrors
+\`gh pr status\`.
+
+USAGE
+  galley pr status [flags]
+
+FLAGS
+      --json <fields>     Output JSON with these fields (a bare --json lists them)
+  -q, --jq <expression>   Filter the JSON output with jq
+`;
+
 async function status(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v } = parse(args, { ...JSON_OPTS });
+  const { values: v } = parse(args, STATUS_USAGE, { ...JSON_OPTS });
   const repo = await client.repoFor(cwd, v.repo as string | undefined);
   const branch = currentBranch(cwd);
   const pulls = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=open&fields=number,title,headRefName,state,isDraft,reviewDecision,url,waiting,turn,unpublishedChanges`);
@@ -474,8 +648,27 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
 
 // -------------------------------------------------------------- the loop
 
+const PUBLISH_USAGE = `Push the branch and open the pull request on GitHub, or update it there.
+
+USAGE
+  galley pr publish ${PULL} [flags]
+
+FLAGS
+  -d, --draft             Open it on GitHub as a draft (default: as it is staged)
+      --sign              Sign the commits as you (default: as the last publish did, or as
+                          commit.gpgsign says)
+      --no-sign           Push the commits as they are
+  -f, --force             Force-push over commits on GitHub that this push replaces
+      --during-review     Publish while reviewer agents review it, cancelling their reviews
+      --during-conflict   Publish although the branch conflicts with its base
+      --auto              Publish once the reviewer agents are done and the author has answered
+                          them, like \`gh pr merge --auto\`
+      --auto-merge        Turn on auto-merge on GitHub once it is published
+      --disable-auto      Turn auto-publish off
+`;
+
 async function publish(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, {
+  const { values: v, positionals } = parse(args, PUBLISH_USAGE, {
     draft: { type: 'boolean', short: 'd' },
     force: { type: 'boolean', short: 'f' },
     sign: { type: 'boolean' },
@@ -574,8 +767,20 @@ function transient(e: unknown): boolean {
   return (e instanceof TypeError && e.message === 'fetch failed') || (e instanceof CliError && /not running/.test(e.message));
 }
 
+const WAIT_USAGE = `Block until a staged pull request has news, and print it: feedback, the reviewer agents done
+with the latest commit, a conflict with its base, or a publish, merge or close. Once it is
+published, each commit you wait with is pushed to GitHub. Given several, whichever has news first.
+
+USAGE
+  galley pr wait ${PULL}... [flags]
+
+FLAGS
+      --timeout <duration>      Stop waiting after this long (90, 30s, 10m, 1h), with exit code 124
+      --download-images <dir>   Save the feedback's images as files in dir, and show their paths
+`;
+
 async function wait(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, { timeout: { type: 'string' }, 'download-images': { type: 'string' } });
+  const { values: v, positionals } = parse(args, WAIT_USAGE, { timeout: { type: 'string' }, 'download-images': { type: 'string' } });
   const repoFlag = v.repo as string | undefined;
   // Several pull requests, for an agent that orchestrates others: whichever has news first.
   const targets = positionals.length
@@ -814,6 +1019,8 @@ GALLEY COMMANDS
 
 FLAGS
   -R, --repo [HOST/]OWNER/REPO   Select another repository
+
+Add --help to a command for its flags, as in \`galley pr wait --help\`.
 `;
 
 export async function pr(client: Client, cwd: string, args: string[]): Promise<number> {

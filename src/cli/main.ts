@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { ApiError, CliError, Client, identify } from './client.ts';
+import { ApiError, CliError, Client, Help, identify } from './client.ts';
 import { pr } from './pr.ts';
 import { api } from './api.ts';
 import { browse } from './browse.ts';
@@ -26,22 +26,49 @@ ENVIRONMENT
   GALLEY_URL     Server URL (default http://localhost:${DEFAULT_PORT})
   GALLEY_ACTOR   Who the CLI acts as (default: detected agent, or you)
   GALLEY_HOME    Data directory for the server (default ${dataDir()})
+
+Add --help to a command for its flags, as in \`galley pr wait --help\`.
 `;
 
 /** How long a stopping server lets running reviews finish before it interrupts them. */
 const STOP_GRACE_MS = 10 * 60 * 1000;
 
+const SERVE_USAGE = `Run the server and web UI. Other commands start it in the background when it is not running.
+
+USAGE
+  galley serve [flags]
+
+FLAGS
+  -p, --port <number>    The port to listen on (default $GALLEY_PORT, or ${DEFAULT_PORT})
+      --host <address>   The address to listen on (default 127.0.0.1)
+      --open             Open the web UI in the browser
+      --now              Stop at the first Ctrl-C or SIGTERM, interrupting running reviews,
+                         instead of letting them finish for up to ${STOP_GRACE_MS / 60000} minutes
+`;
+
 async function serve(args: string[]): Promise<number> {
-  const { values: v } = parseArgs({
-    args,
-    options: {
-      port: { type: 'string', short: 'p' },
-      host: { type: 'string', default: '127.0.0.1' },
-      open: { type: 'boolean' },
-      // Stop at the first signal, interrupting running reviews.
-      now: { type: 'boolean' },
-    },
-  });
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        port: { type: 'string', short: 'p' },
+        host: { type: 'string', default: '127.0.0.1' },
+        open: { type: 'boolean' },
+        // Stop at the first signal, interrupting running reviews.
+        now: { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+      },
+    });
+  } catch (e) {
+    const m = String((e as Error).message).match(/Unknown option '([^']+)'/);
+    throw new CliError(m ? `unknown flag: ${m[1]}` : (e as Error).message);
+  }
+  const { values: v } = parsed;
+  if (v.help) {
+    out(SERVE_USAGE);
+    return 0;
+  }
   const { startServer } = await import('../server/server.ts');
   const port = Number(v.port ?? fromEnv('PORT') ?? DEFAULT_PORT);
   const server = await startServer({ port, host: String(v.host), dataDir: dataDir() }).catch(async (e) => {
@@ -105,6 +132,10 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return 1;
     }
   } catch (e) {
+    if (e instanceof Help) {
+      out(e.message);
+      return 0;
+    }
     if (e instanceof ApiError) {
       err(e.message);
       return e.code;

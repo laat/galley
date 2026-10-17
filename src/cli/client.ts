@@ -12,6 +12,9 @@ export class CliError extends Error {
   }
 }
 
+/** `--help` on a command: its usage, which `main` prints instead of running the command. */
+export class Help extends Error {}
+
 export class ApiError extends CliError {
   status: number;
   body: string;

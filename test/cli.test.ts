@@ -2,6 +2,11 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { parseReviewers } from '../src/cli/pr.ts';
@@ -145,6 +150,25 @@ test('the CLI makes sure galley answers before its first request', async (t) => 
     silent.close();
   });
   await assert.rejects(new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`).get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 5 seconds: galley may be stuck there, or another program holds the port/);
+});
+
+test("--help prints a command's usage without running it", async (t) => {
+  const server = await fake(t, () => [200, META]);
+  const home = mkdtempSync(join(tmpdir(), 'galley-help-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  // serve without --help would find the port taken and ask what holds it.
+  const env = { ...process.env, GALLEY_URL: server.url, GALLEY_PORT: new URL(server.url).port, GALLEY_HOME: home, GALLEY_NO_AUTOSTART: '1', NO_COLOR: '1' };
+  // Rejects unless the command exits with 0.
+  const run = (...args: string[]) => promisify(execFile)(process.execPath, [join(import.meta.dirname, '..', 'bin', 'galley.ts'), ...args], { cwd: home, env, timeout: 20_000 });
+  // Without --help, each would close, publish or wait on s#1.
+  for (const [cmd, flag] of [['close', '--comment'], ['publish', '--during-review'], ['wait', '--timeout']]) {
+    const { stdout } = await run('pr', cmd, 's1', '--repo', 'o/r', '--help');
+    assert.match(stdout, new RegExp(`^USAGE\\n  galley pr ${cmd} `, 'm'));
+    assert.match(stdout, new RegExp(`^ +(-\\w, )?${flag} `, 'm'));
+  }
+  assert.match((await run('pr', 'reopen', '-h')).stdout, /^  galley pr reopen /m);
+  assert.match((await run('serve', '--help')).stdout, /^  galley serve \[flags\]\n[\s\S]*^  -p, --port <number> /m);
+  assert.deepEqual(server.paths, []);
 });
 
 test('pr create --reviewer takes repeats and commas like gh, and a number of reviews', () => {
