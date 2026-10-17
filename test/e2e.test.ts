@@ -2324,6 +2324,48 @@ test('findings the author answers without a new commit: the reviewer agents are 
   }
 });
 
+test("a comment after the author's reply in a reviewer agent's thread waits for the author: the findings are not answered until it answers again", async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/answered-again');
+  writeFileSync(join(repo, 'again.js'), 'export const value = 1;\n');
+  git('add', 'again.js');
+  git('commit', '-qm', 'Add again.js');
+  const created = await cli(['pr', 'create', '--title', 'Add again.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const sha = () => git('rev-parse', '--short=7', 'HEAD');
+  const reply = async (thread: number, body: string) => assert.equal((await cli(['pr', 'comment', String(number), '--reply-to', String(thread), '-b', body])).code, 0);
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'again.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name it.' }] });
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  try {
+    assert.match((await cli(['pr', 'wait', String(number), '--timeout', '20s'])).stdout, /codex-review reviewed: commented/);
+    await server.service.codex!.settle(id);
+    const thread = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewThreads'])).stdout).reviewThreads[0].databaseId;
+    await reply(thread, 'The name says what it is.');
+    await human('POST', `${base}/comments/${thread}/replies`, { body: 'It does not say what it counts.' });
+    const told = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    assert.match(told.stdout, /It does not say what it counts\./);
+    assert.match(told.stdout, /^Address the feedback\./m);
+    // Seen and not answered: Codex's findings are not answered either, so no wait says the reviewer agents are done.
+    const held = await cli(['pr', 'wait', String(number), '--timeout', '1s']);
+    assert.equal(held.code, 124, held.stdout);
+    assert.match(held.stderr, new RegExp(`^codex-review commented on ${sha()}: reply to or resolve each of its threads, or push a commit\\.`, 'm'));
+    await reply(thread, 'It counts nothing; it is the value.');
+    assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(codex-review's findings in ${sha()} are answered\\); `, 'm'));
+
+    // The user's approval without comments asks nothing, as it does for the turn: with the thread answered, open or not, nothing is left to address.
+    await human('POST', `${base}/reviews`, { event: 'APPROVE' });
+    const approved = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    assert.match(approved.stdout, new RegExp(`^Unresolved threads: ${thread}$`, 'm'));
+    assert.match(approved.stdout, new RegExp(`^Nothing to address\\. Run \`galley pr wait s${number}\` again\\.$`, 'm'));
+  } finally {
+    await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
+    await human('PATCH', base, { state: 'closed' });
+  }
+});
+
 test('a reviewer agent is told what its earlier reviews found, resolved or not, and the commit it left off at', async () => {
   // On a base of its own, which can move on without moving main under the other tests.
   git('checkout', '-q', 'main');

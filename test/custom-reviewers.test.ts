@@ -731,6 +731,40 @@ test('the reviewer agents\' approvals are their own for `pr wait` too: it says w
   assert.doesNotMatch(out, /The approval from house-rules/);
 });
 
+test('a deleted custom reviewer\'s review is still a reviewer agent\'s: held while another reviews, to come with its review', async () => {
+  await human('POST', '/api/settings/reviewers', { name: 'gone', engine: 'claude', reviews: 'code', repos: 'acme/widgets', instructions: 'Look.' });
+  git(acme, 'checkout', '-qb', 'feature/gone', 'main');
+  writeFileSync(join(acme, 'gone.js'), 'export const gone = 1;\n');
+  git(acme, 'add', 'gone.js');
+  git(acme, 'commit', '-qm', 'Add gone');
+  const { number } = await stage(acme, ['--no-review']);
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const id = row('acme', number).id;
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
+  const gone = reviewer('gone');
+  await human('POST', `${base}/reviewers/gone`);
+  await gone.settle(id);
+  await human('DELETE', '/api/settings/reviewers/gone');
+  const gate = join(dir, 'gate-gone');
+  process.env.FAKE_CODEX_GATE = gate;
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine too.', comments: [] });
+  try {
+    await human('POST', `${base}/reviewers/codex`);
+    // While Codex reviews, its review waits for Codex's, as it would have before its file was deleted.
+    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
+    assert.equal(held.code, 124, held.stdout);
+    writeFileSync(gate, '');
+    const out = await wait(acme, number);
+    assert.match(out, /gone reviewed: commented/);
+    assert.match(out, /codex-review reviewed: commented/);
+  } finally {
+    writeFileSync(gate, '');
+    await server.service.codex!.settle(id);
+    delete process.env.FAKE_CODEX_GATE;
+    await human('PATCH', base, { state: 'closed' });
+  }
+});
+
 test('a restart leaves custom reviewers their runs: Codex takes no other reviewer\'s', async () => {
   const runs = async () => (await human('GET', '/api/repos/acme/widgets/pulls/1/reviewers/house-rules')).runs.map((r: any) => r.id);
   const before = await runs();
