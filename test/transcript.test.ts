@@ -6,7 +6,7 @@ import { ClaudeEvents } from '../src/server/reviewers/claude.ts';
 import { clip, commandKind, MAX_BYTES, MAX_TEXT, MAX_UPDATES, PROGRESS_MS, RunLog, transcript, type SessionUpdate } from '../src/server/reviewers/transcript.ts';
 import { transcriptContent } from '../src/server/web/runs.ts';
 
-const CHECKOUT = '/private/var/folders/xy/T/laatsux-review-abc/checkout';
+const CHECKOUT = '/private/var/folders/xy/T/galley-review-abc/checkout';
 
 /** A run to log, in a database of its own. */
 function setup(): { db: Db; runId: number } {

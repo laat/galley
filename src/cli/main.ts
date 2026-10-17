@@ -4,15 +4,15 @@ import { pr } from './pr.ts';
 import { api } from './api.ts';
 import { browse } from './browse.ts';
 import { err, out } from './output.ts';
-import { DEFAULT_PORT, VERSION, dataDir } from '../config.ts';
+import { DEFAULT_PORT, VERSION, dataDir, fromEnv } from '../config.ts';
 
-const USAGE = `laatsux: a staging area for pull requests.
+const USAGE = `galley: a staging area for pull requests.
 
 Agents stage pull requests with a CLI that mirrors gh. You review them in a
 GitHub-like web UI, loop with the agent, and publish to GitHub when they are right.
 
 USAGE
-  laatsux <command> <subcommand> [flags]
+  galley <command> <subcommand> [flags]
 
 COMMANDS
   pr:          Work with staged pull requests (like \`gh pr\`)
@@ -21,9 +21,9 @@ COMMANDS
   browse:      Print and open the web UI's URL for a pull request, file or directory (like \`gh browse\`)
 
 ENVIRONMENT
-  LAATSUX_URL     Server URL (default http://localhost:${DEFAULT_PORT})
-  LAATSUX_ACTOR   Who the CLI acts as (default: detected agent, or you)
-  LAATSUX_HOME    Data directory for the server (default ${dataDir()})
+  GALLEY_URL     Server URL (default http://localhost:${DEFAULT_PORT})
+  GALLEY_ACTOR   Who the CLI acts as (default: detected agent, or you)
+  GALLEY_HOME    Data directory for the server (default ${dataDir()})
 `;
 
 /** How long a stopping server lets running reviews finish before it interrupts them. */
@@ -41,9 +41,9 @@ async function serve(args: string[]): Promise<number> {
     },
   });
   const { startServer } = await import('../server/server.ts');
-  const port = Number(v.port ?? process.env.LAATSUX_PORT ?? DEFAULT_PORT);
+  const port = Number(v.port ?? fromEnv('PORT') ?? DEFAULT_PORT);
   const server = await startServer({ port, host: String(v.host), dataDir: dataDir() });
-  out(`laatsux is serving ${server.url} (data in ${dataDir()})`);
+  out(`galley is serving ${server.url} (data in ${dataDir()})`);
   if (v.open) (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore' });
   await new Promise<void>((resolve) => {
     // The first signal lets running reviews finish; a second one, or --now, interrupts them, and
@@ -81,7 +81,7 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return await browse(client, cwd, rest);
       case '--version':
       case 'version':
-        out(`laatsux version ${VERSION}`);
+        out(`galley version ${VERSION}`);
         return 0;
       case undefined:
       case 'help':
@@ -90,7 +90,7 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         out(USAGE);
         return 0;
       default:
-        err(`unknown command "${cmd}" for "laatsux"\n\n${USAGE}`);
+        err(`unknown command "${cmd}" for "galley"\n\n${USAGE}`);
         return 1;
     }
   } catch (e) {

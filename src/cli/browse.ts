@@ -11,22 +11,22 @@ they keep pointing at the code you mean. A number is a pull request; when no pul
 has it, a commit SHA.
 
 USAGE
-  laatsux browse [<number> | <path>[:<line>[-<line>]] | <commit-SHA>] [flags]
+  galley browse [<number> | <path>[:<line>[-<line>]] | <commit-SHA>] [flags]
 
 FLAGS
   -c, --commit <sha>   The commit to show the path at (default: HEAD, also for a bare --commit)
   -b, --branch <name>  The commit at the tip of a branch
   -n, --no-browser     Only print the URL
-  -R, --repo <owner/repo>  Another repository in laatsux. Commits and paths are looked up
+  -R, --repo <owner/repo>  Another repository in galley. Commits and paths are looked up
                            there (default commit: HEAD of its checkout), paths from its root
   -s, --settings       Open the settings
 
 EXAMPLES
-  laatsux browse                          # this repository's staged pull requests
-  laatsux browse 12                       # pull request 12
-  laatsux browse src/x.ts:12 --commit 3f2a1c9
-  laatsux browse src/x.ts:12-20           # lines 12 to 20, at HEAD
-  laatsux browse src/                     # a directory
+  galley browse                          # this repository's staged pull requests
+  galley browse 12                       # pull request 12
+  galley browse src/x.ts:12 --commit 3f2a1c9
+  galley browse src/x.ts:12-20           # lines 12 to 20, at HEAD
+  galley browse src/                     # a directory
 `;
 
 const encodePath = (p: string) => p.split('/').map(encodeURIComponent).join('/');

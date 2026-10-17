@@ -161,7 +161,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   const empty = html`<div class="blankslate">
   ${icon('git-pull-request', { size: 24 })}
   <h3>${other ? nothing[state].replace(/^No /, 'No other ') : nothing[state]}${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
-  <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
+  <p>Agents stage pull requests with <code>galley pr create</code>, the same way they would use <code>gh pr create</code>.</p>
 </div>`;
   // The repository on GitHub, by its name there, which can differ from the one here.
   const slug = opts.repo?.github_slug;
@@ -194,7 +194,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ? html`<div class="container container-full dashboard">${sidebar}<div class="dashboard-main">${list}</div></div>`
     : html`<div class="container container-xl">${list}</div>`;
   // The tab's title counts the pull requests waiting for you, as a mail client counts unread mail.
-  const title = opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux';
+  const title = opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · galley';
   return layout(s, {
     title: yours.length ? `(${yours.length}) ${title}` : title,
     crumbs: opts.repo ? repoCrumbs(opts.repo) : undefined,
@@ -639,7 +639,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     case 'iterations_resumed':
       return timelineBadge('iterations', html`${who} resumed automatic reviews ${when}`);
     case 'merged': {
-      // `at` is when GitHub merged it; the event is from when laatsux learned of it.
+      // `at` is when GitHub merged it; the event is from when galley learned of it.
       const commit = data.commit
         ? html`commit <a class="commit-link" href="${String(data.url).replace(/\/pull\/\d+$/, '')}/commit/${data.commit}" target="_blank" rel="noopener"><code>${shortSha(data.commit)}</code></a>`
         : 'this pull request';
@@ -690,7 +690,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     return html`<div class="merge-box merge-box--merged">
       <span class="merge-box-icon">${icon('git-merge', { size: 24 })}</span>
       <div class="Box"><div class="merge-row merge-actions">${icon('git-merge', { cls: 'color-fg-done' })}<div class="flex-auto"><strong>Merged on GitHub</strong>
-        <div class="color-fg-muted">${githubUser(pull.github_closed_by)} merged it${sha} ${relTime(pull.github_closed_at)}. Conversations stay in laatsux.</div></div>
+        <div class="color-fg-muted">${githubUser(pull.github_closed_by)} merged it${sha} ${relTime(pull.github_closed_at)}. Conversations stay in galley.</div></div>
         <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div></div>
     </div>`;
   }
@@ -711,7 +711,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   }
   rows.push(
     unresolved
-      ? html`<div class="merge-row">${icon('comment-discussion', { cls: 'color-fg-attention' })}<div><strong>${plural(unresolved, 'unresolved conversation')}</strong><div class="color-fg-muted">Conversations stay in laatsux; they are not published.</div></div></div>`
+      ? html`<div class="merge-row">${icon('comment-discussion', { cls: 'color-fg-attention' })}<div><strong>${plural(unresolved, 'unresolved conversation')}</strong><div class="color-fg-muted">Conversations stay in galley; they are not published.</div></div></div>`
       : html`<div class="merge-row">${icon('check-circle-fill', { cls: 'color-fg-success' })}<div><strong>All conversations resolved</strong></div></div>`,
   );
 
@@ -727,7 +727,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   const conflicts = s.baseConflicts(pull);
   if (conflicts) rows.push(conflictsRow(p, conflicts, !s.currentConflicts(pull)));
   if (pull.github_state === 'closed') {
-    rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and laatsux follows it again in case it was reopened.</div></div></div>`);
+    rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and galley follows it again in case it was reopened.</div></div></div>`);
   }
 
   const changed = s.unpublishedChanges(pull);
@@ -796,7 +796,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
                 : html`<label class="color-fg-muted"><input type="checkbox" name="auto_merge" disabled> Enable auto-merge on GitHub: ${target} does not allow ${mergeOption.method} merges. <a href="/settings/publishing">Change the merge method</a></label>`
           }
         </div>
-        ${images ? html`<div class="flash flash-warn">${icon('alert')}<span>The description has ${plural(images, 'image')} stored in laatsux, which GitHub cannot show. Remove ${them}, or replace ${them} with ${images === 1 ? 'an image' : 'images'} uploaded to GitHub.</span></div>` : ''}
+        ${images ? html`<div class="flash flash-warn">${icon('alert')}<span>The description has ${plural(images, 'image')} stored in galley, which GitHub cannot show. Remove ${them}, or replace ${them} with ${images === 1 ? 'an image' : 'images'} uploaded to GitHub.</span></div>` : ''}
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
       <div class="merge-buttons">
@@ -911,7 +911,7 @@ function pushFailedRow(p: PullPage, push: GithubPush): Safe {
     <pre class="merge-error">${push.error ?? ''}</pre></div></div>`;
 }
 
-/** What came of the last time laatsux turned on auto-merge on GitHub. */
+/** What came of the last time galley turned on auto-merge on GitHub. */
 function autoMergeRow(p: PullPage, merge: AutoMerge): Safe {
   const by = p.s.db.actorById(merge.by);
   if (merge.state === 'failed') {
@@ -986,7 +986,7 @@ function githubRows(p: PullPage): Safe[] {
 }
 
 /**
- * Whether the head merges cleanly into its base's tip, as laatsux worked it out (Service.baseConflicts),
+ * Whether the head merges cleanly into its base's tip, as galley worked it out (Service.baseConflicts),
  * with the files that conflict and git's words for conflicts in none, or why it could not tell, and
  * how many commits it is behind when it merges cleanly. `again`: the base has moved since, and it
  * is being worked out again. Each says when the base could not be fetched, and why.
@@ -1000,7 +1000,7 @@ function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
   const fetched = error ? html` Could not fetch ${c.ref}: ${error}` : '';
   if (c.clean === null) {
     return html`<div class="merge-row">${icon('alert', { cls: 'color-fg-attention' })}<div class="flex-auto"><strong>Could not check for conflicts with ${ref}</strong>
-      <div class="color-fg-muted">laatsux tries again every few seconds. Auto-publish waits until it can tell.${moved}${fetched}</div>
+      <div class="color-fg-muted">galley tries again every few seconds. Auto-publish waits until it can tell.${moved}${fetched}</div>
       <pre class="merge-error">${c.error}</pre></div></div>`;
   }
   if (c.clean) {
@@ -1428,7 +1428,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
   <form class="timeline-comment js-api-form" data-api="/api/repos/${p.repo.owner}/${p.repo.name}/issues/${pull.number}/comments" data-method="POST" data-reset="true">
     <div class="timeline-comment-header"><h3 class="timeline-comment-header-text"><strong>Add a comment</strong></h3></div>
     <div class="new-comment-body">
-      ${markdownEditor({ placeholder: 'Leave a comment. The agent reads it with `laatsux pr view --comments` or `laatsux pr wait`.', draftKey: 'new-comment' })}
+      ${markdownEditor({ placeholder: 'Leave a comment. The agent reads it with `galley pr view --comments` or `galley pr wait`.', draftKey: 'new-comment' })}
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions">
         ${pull.state === 'closed' ? html`<button type="button" class="btn js-set-state" data-state="open">${icon('git-pull-request')} Reopen pull request</button>` : html`<button type="button" class="btn js-set-state" data-state="closed">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })} Close pull request</button>`}
@@ -1637,7 +1637,7 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
 
 export function notFoundPage(s: Service, message: string): string {
   return layout(s, {
-    title: 'Not found · laatsux',
+    title: 'Not found · galley',
     body: html`<div class="container container-lg"><div class="blankslate">${icon('alert', { size: 24 })}<h3>${message}</h3><p><a href="/">Back to all staged pull requests</a></p></div></div>`,
   });
 }

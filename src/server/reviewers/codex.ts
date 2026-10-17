@@ -18,7 +18,7 @@ import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCallLo
  * out, since repositories and other agents' worktrees can live there. The user's repository
  * stays read-only: Codex protects the checkout's .git and the worktree's git directory it
  * points to, and the rest of the repository is outside what it may write. Network is only for
- * installing dependencies: with it, code from the pull request could reach laatsux's API on
+ * installing dependencies: with it, code from the pull request could reach galley's API on
  * localhost and act as the user.
  */
 function workspaceWrite(network: boolean): string[] {
@@ -136,7 +136,7 @@ export class CodexEngine implements Engine {
     return m && m.efforts.length ? m.efforts : null;
   }
 
-  /** What Codex uses when laatsux does not choose: the top-level settings in its config.toml. */
+  /** What Codex uses when galley does not choose: the top-level settings in its config.toml. */
   defaults(): { model?: string; effort?: string } {
     const file = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml');
     let text = '';
@@ -286,7 +286,7 @@ export class CodexReviewer extends Reviewer {
   protected migrate(): void {
     this.leaveFormerDefault();
     // Earlier versions recorded the reviewer's login in review_runs; fold those identities into
-    // one. Runs from before laatsux knew another engine are all Codex's, also under a login that
+    // one. Runs from before galley knew another engine are all Codex's, also under a login that
     // is another engine's kind now (the bot could be called "claude"). A custom reviewer's runs
     // are under its name, which has its bot in meta from before its first run (CustomReviewers.load).
     let since = this.s.db.getMeta('engines_since');

@@ -73,7 +73,7 @@ export interface PullRow {
   agents_done_sha: string | null;
   /** The head commit `pr wait` last told the author conflicts with its base, so it says so once per commit. */
   conflicts_told_sha: string | null;
-  /** The published pull request on GitHub, as last seen there; null until laatsux has asked. */
+  /** The published pull request on GitHub, as last seen there; null until galley has asked. */
   github_state: GithubState | null;
   /** When it was merged or closed on GitHub, and by whom (a GitHub login). */
   github_closed_at: string | null;

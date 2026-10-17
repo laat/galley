@@ -10,15 +10,15 @@ const REVIEW_STATE: Record<string, string> = {
   DISMISSED: 'dismissed',
 };
 
-/** Where an image uploaded to laatsux (`/uploads/<sha256>.<ext>`) can be had: its URL, or a file it was saved to. */
+/** Where an image uploaded to galley (`/uploads/<sha256>.<ext>`) can be had: its URL, or a file it was saved to. */
 export type ImageRef = (path: string) => string;
 
-/** The images uploaded to laatsux that a text refers to, each once (the server's `uploadsIn`). */
+/** The images uploaded to galley that a text refers to, each once (the server's `uploadsIn`). */
 export function uploadsIn(text: string): string[] {
   return [...new Set(text.match(/\/uploads\/[0-9a-f]{64}\.(?:png|jpg|gif|webp)\b/g) ?? [])];
 }
 
-/** A comment's text, followed by a line for each image uploaded to laatsux in it. */
+/** A comment's text, followed by a line for each image uploaded to galley in it. */
 function withImages(text: string, images?: ImageRef): string {
   const found = images ? uploadsIn(text) : [];
   return [text, ...found.map((path) => `Image: ${images!(path)}`)].join('\n');
@@ -174,7 +174,7 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}${pr.unpublishedChanges?.length ? c.yellow(` (update not published: ${unpublished(pr)})`) : ''}`);
   if (pr.mergedAt) out.push(`Merged on GitHub ${mergedText(pr)}`);
   if (pr.githubStatus) out.push(`On GitHub: ${githubSummary(pr)}`);
-  out.push(c.gray(`View this pull request in laatsux: ${pr.url}`));
+  out.push(c.gray(`View this pull request in galley: ${pr.url}`));
   return out.join('\n') + '\n';
 }
 

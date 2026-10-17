@@ -27,7 +27,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <header class="app-header-wrap">
 <div class="app-header">
   <a class="app-header-logo" href="/" title="All staged pull requests">${icon('git-pull-request', { size: 24 })}</a>
-  <nav class="app-header-context">${opts.crumbs ?? html`<a href="/"><strong>laatsux</strong></a>`}</nav>
+  <nav class="app-header-context">${opts.crumbs ?? html`<a href="/"><strong>galley</strong></a>`}</nav>
   <div class="app-header-actions">
     ${running ? html`<span id="server-stopping" class="stopping-indicator" role="status" title="${waiting}" aria-label="${waiting}">${icon('alert')}<span class="stopping-indicator-long">Stopping · ${plural(running, 'review')} running</span><span class="stopping-indicator-short">${running}</span></span>` : html`<span id="server-stopping" hidden></span>`}
     <a class="app-header-button" href="/settings" title="Settings" aria-label="Settings">${icon('gear')}</a>
@@ -43,7 +43,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 }
 
 export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {
-  return html`<a href="/">laatsux</a><span class="crumb-sep">/</span><a href="/${repo.owner}/${repo.name}"><strong>${repo.owner}/${repo.name}</strong></a>${extra ?? ''}`;
+  return html`<a href="/">galley</a><span class="crumb-sep">/</span><a href="/${repo.owner}/${repo.name}"><strong>${repo.owner}/${repo.name}</strong></a>${extra ?? ''}`;
 }
 
 /**

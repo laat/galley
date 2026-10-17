@@ -1,5 +1,5 @@
 // A reviewer agent. When the author waits for review, it reviews the head commit in a throwaway
-// checkout (where it may run the tests, or read-only, as settings say) and laatsux posts what it
+// checkout (where it may run the tests, or read-only, as settings say) and galley posts what it
 // found as a GitHub-style review from its bot (named in settings), which wakes the author's
 // `pr wait`. The tool that reviews is its Engine (codex.ts, claude.ts): how to run it, its
 // models, and how to read its answer. The rest is the same for every tool, and lives here.
@@ -215,7 +215,7 @@ export interface Engine {
   models(): Promise<ModelInfo[]>;
   /** The efforts a model accepts, from the cached catalog (null when unknown). */
   efforts(model: string): string[] | null;
-  /** What the tool uses when laatsux does not choose. */
+  /** What the tool uses when galley does not choose. */
   defaults(): { model?: string; effort?: string };
 }
 
@@ -343,7 +343,7 @@ export class Reviewer {
    */
   subject(pull: Pick<PullRow, 'head_sha' | 'title' | 'body' | 'messages_sha'>, reads: Reviews = this.reviews): string {
     if (reads === 'code') return pull.head_sha;
-    // Before laatsux has hashed the messages (Service.doSync does), the head stands in for them.
+    // Before galley has hashed the messages (Service.doSync does), the head stands in for them.
     const read = createHash('sha256').update(`${pull.title}\0${pull.body}\0${pull.messages_sha ?? pull.head_sha}`).digest('hex');
     return `description:${read}`;
   }
@@ -897,7 +897,7 @@ export class Reviewer {
       .finally(() => {
         this.jobs.delete(ctx.pull.id);
         // The pages of every pull request say how many reviews a stopping server still waits for.
-        if (this.s.stopping) this.s.bus.emit('change', { pullId: null, type: 'stopping', actor: 'laatsux' } satisfies ChangeEvent);
+        if (this.s.stopping) this.s.bus.emit('change', { pullId: null, type: 'stopping', actor: 'galley' } satisfies ChangeEvent);
       });
     this.jobs.set(ctx.pull.id, { runId, done, abort, log, reads: plan.reads });
     return runId;
@@ -914,7 +914,7 @@ export class Reviewer {
     const { git } = ctx;
     const pull = ctx.pull;
     // The real path (/private/var, not /var), as the tool sees it, so its settings for the checkout apply.
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'laatsux-review-')));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'galley-review-')));
     const checkout = join(dir, 'checkout');
     // The one place besides the checkout that the tool may write to when it runs the tests.
     const tmp = join(dir, 'tmp');
@@ -959,12 +959,12 @@ export class Reviewer {
     const how = await installCommand(git, sha, tmp);
     if (!how) return null;
     const command = how.command.join(' ');
-    // laatsux's own step, the first in the transcript: what the run is doing until the tool starts.
+    // galley's own step, the first in the transcript: what the run is doing until the tool starts.
     const step = (status: 'in_progress' | 'completed' | 'failed', output?: string) =>
       log.update(
         status === 'in_progress'
-          ? { sessionUpdate: 'tool_call', toolCallId: 'laatsux-install', title: command, kind: 'execute', status, rawInput: { command } }
-          : { sessionUpdate: 'tool_call_update', toolCallId: 'laatsux-install', status, content: [{ type: 'content', content: { type: 'text', text: output ?? '' } }] },
+          ? { sessionUpdate: 'tool_call', toolCallId: 'galley-install', title: command, kind: 'execute', status, rawInput: { command } }
+          : { sessionUpdate: 'tool_call_update', toolCallId: 'galley-install', status, content: [{ type: 'content', content: { type: 'text', text: output ?? '' } }] },
       );
     step('in_progress');
     try {
@@ -1152,7 +1152,7 @@ export class Reviewer {
     return this.tool.efforts(model);
   }
 
-  /** What the tool uses when laatsux does not choose. */
+  /** What the tool uses when galley does not choose. */
   defaults(): { model?: string; effort?: string } {
     return this.tool.defaults();
   }
@@ -1214,10 +1214,10 @@ export function onTheDescription(body: string): (Priority | null)[] {
 function testInstructions(installed: Installed | null, localServers: boolean): string[] {
   const indent = (text: string) => text.replace(/^/gm, '    ');
   const out = !installed
-    ? ['No dependencies are installed: the repository root has no lockfile laatsux installs from (pnpm-lock.yaml, package-lock.json, yarn.lock or bun.lock).']
+    ? ['No dependencies are installed: the repository root has no lockfile galley installs from (pnpm-lock.yaml, package-lock.json, yarn.lock or bun.lock).']
     : installed.failure
-      ? [`laatsux could not install the dependencies: \`${installed.command}\` ${installed.failure}. Its output ended with:`, '', indent(installed.output)]
-      : [`laatsux installed the dependencies with \`${installed.command}\`, which runs no install scripts, so a package that needs a build step may not work. Its output ended with:`, '', indent(installed.output)];
+      ? [`galley could not install the dependencies: \`${installed.command}\` ${installed.failure}. Its output ended with:`, '', indent(installed.output)]
+      : [`galley installed the dependencies with \`${installed.command}\`, which runs no install scripts, so a package that needs a build step may not work. Its output ended with:`, '', indent(installed.output)];
   const checks = localServers
     ? "To check your findings, you may run the typecheck, the whole test suite (tests that start servers on localhost included) or the build with the repository's own tooling (its package scripts). There is no network beyond localhost, so you can not install anything"
     : "To check your findings, you may run the typecheck, tests or build with the repository's own tooling (its package scripts). There is no network, so you can not install anything";

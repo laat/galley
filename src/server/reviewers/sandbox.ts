@@ -33,7 +33,7 @@ const PROFILE = `(version 1)
 
 /**
  * `command` wrapped to run in the sandbox, writing only to `writable` (real paths, without
- * symlinks) and not to `readOnly` within them; null where laatsux has no sandbox. `exec` stands
+ * symlinks) and not to `readOnly` within them; null where galley has no sandbox. `exec` stands
  * in for sandbox-exec (in tests).
  */
 export function sandboxed(command: string[], o: { writable: string[]; readOnly: string[] }, exec?: string): { bin: string; args: string[] } | null {

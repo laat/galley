@@ -1,17 +1,17 @@
 ---
-name: stage-pr
-description: Stage a pull request in laatsux, the user's local review server, instead of opening it on GitHub. Use when the user says "stage PR" or "stage a PR". The CLI mirrors `gh pr` and `gh api`; the user reviews in a GitHub-like web UI, you address the feedback, and the user publishes to GitHub.
+name: galley
+description: Stage a pull request in galley, the user's local review server, instead of opening it on GitHub. Use when the user says "stage PR" or "stage a PR". The CLI mirrors `gh pr` and `gh api`; the user reviews in a GitHub-like web UI, you address the feedback, and the user publishes to GitHub.
 ---
 
 # Stage a PR
 
-`laatsux` takes `gh`'s subcommands and flags: `laatsux pr` for `gh pr`, `laatsux api` for `gh api`.
+`galley` takes `gh`'s subcommands and flags: `galley pr` for `gh pr`, `galley api` for `gh api`.
 
 ## Rules
 
 - Do not `git push` or run `gh pr create`. The user publishes. After that, commit and run
-  `laatsux pr wait`: it pushes your commits. Never push to GitHub yourself.
-- Do not run `laatsux pr publish`, `pr close` or `pr review` unless the user asks.
+  `galley pr wait`: it pushes your commits. Never push to GitHub yourself.
+- Do not run `galley pr publish`, `pr close` or `pr review` unless the user asks.
 - Commit on a branch, with at least one commit over the base.
 - Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
 - Never write a staged pull request's number where GitHub shows it: commit messages, the title
@@ -26,7 +26,7 @@ description: Stage a pull request in laatsux, the user's local review server, in
 1. Stage the branch you are on:
 
    ```sh
-   laatsux pr create --title "Add retry to the uploader" --body-file - <<'EOF'
+   galley pr create --title "Add retry to the uploader" --body-file - <<'EOF'
    Why the change is needed, and what it does.
    EOF
    ```
@@ -35,7 +35,7 @@ description: Stage a pull request in laatsux, the user's local review server, in
    first; do not ask for the user's review yet. Say so if the CLI started the server. If the
    user said how to review it, add the flag from [Reviewer agents](#reviewer-agents).
 
-2. Run `laatsux pr wait`. It can block for hours. Tell the user you are waiting, and run it the
+2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
 
    - Claude Code: with `run_in_background`, so you are woken when it returns.
@@ -65,21 +65,21 @@ description: Stage a pull request in laatsux, the user's local review server, in
    - `Image: <url>`: add `--download-images <dir>` to `pr wait` or `pr view --comments`, and
      read the files it prints.
 
-   `laatsux pr view --comments` shows the whole conversation (`--json
+   `galley pr view --comments` shows the whole conversation (`--json
    reviewThreads,reviews,comments` for JSON).
 
 4. Address every thread, with a change or a reply:
 
    - Amend or fix up the commit the feedback is about.
-   - Edit the title or description with `laatsux pr edit --title "..." --body-file -`.
+   - Edit the title or description with `galley pr edit --title "..." --body-file -`.
    - Reply to every thread with what you did or why not:
 
      ```sh
-     laatsux pr comment --reply-to 12 --resolve -b "Switched to backoff() in 3f2a1c9."
-     laatsux pr comment --reply-to 15 -b "Out of scope: the parser did this before. Follow-up issue?"
+     galley pr comment --reply-to 12 --resolve -b "Switched to backoff() in 3f2a1c9."
+     galley pr comment --reply-to 15 -b "Out of scope: the parser did this before. Follow-up issue?"
      ```
 
-   - Ask the user in a reply, or with `laatsux pr comment -b "..."`.
+   - Ask the user in a reply, or with `galley pr comment -b "..."`.
 
    Keep to what the title and description say. A finding outside the change (a bug that was
    there before, an improvement next to it, a case far from it): reply that it is out of scope,
@@ -101,7 +101,7 @@ description: Stage a pull request in laatsux, the user's local review server, in
 
 7. Loop with the user the same way until `pr wait` prints `Published to GitHub: <url>` or says
    it was closed. After a new commit, ask the user again only once `pr wait` says the reviewer
-   agents are done with it. If auto-publish is on, address the feedback and wait; laatsux
+   agents are done with it. If auto-publish is on, address the feedback and wait; galley
    publishes. With auto-merge, GitHub merges it, not you.
 
 8. After `Published to GitHub: <url>`, tell the user the GitHub URL and wait again. From now on
@@ -124,13 +124,13 @@ Unless the user wants to keep something:
 2. Remove your worktree and delete the branch with `git branch -D` (`-d` refuses: GitHub
    merged copies of your commits).
 3. Rebase your other pull requests that touch the merged files onto `origin/<base>` (compare
-   `laatsux pr diff <n> --name-only`).
+   `galley pr diff <n> --name-only`).
 
 Leave the `refs/laatsux/...` refs alone.
 
 ## Several pull requests
 
-`laatsux pr wait 5 6` returns when one has news and says which. Leave a merged or closed one out
+`galley pr wait 5 6` returns when one has news and says which. Leave a merged or closed one out
 of the next wait.
 
 ## Reviewer agents
@@ -139,7 +139,7 @@ Codex, Claude and reviewers the user defined review when you wait, until the pul
 published, and their reviews wake you like the user's. Some review only the title, description
 and commit messages, again whenever you change them. One loop is one review from each and your answer. A reviewer agent's approval
 is not the user's: wait for the user all the same. The settings decide whether they review,
-unless the user says otherwise when asking you to stage. Add to `laatsux pr create`:
+unless the user says otherwise when asking you to stage. Add to `galley pr create`:
 
 - "with codex": `--reviewer codex` (as many loops as the settings allow); "codex 3 loops":
   `--reviewer codex:3`. The same for `claude`, or a reviewer the user defined by its name
@@ -149,9 +149,9 @@ unless the user says otherwise when asking you to stage. Add to `laatsux pr crea
 
 ## Reference
 
-- `laatsux browse <path>[:<line>[-<line>]] [--commit <sha>]` prints a link to those lines in the
+- `galley browse <path>[:<line>[-<line>]] [--commit <sha>]` prints a link to those lines in the
   web UI. Give it to the user when you point at code.
-- `laatsux api <endpoint>` takes GitHub REST paths with `-f`, `-F`, `-X`, `--input` and `--jq`.
+- `galley api <endpoint>` takes GitHub REST paths with `-f`, `-F`, `-X`, `--input` and `--jq`.
   No GraphQL.
 - Your comments are attributed to your agent: `claude` in Claude Code, `codex-agent` in Codex,
-  `opencode` in opencode. `LAATSUX_ACTOR` sets another name.
+  `opencode` in opencode. `GALLEY_ACTOR` sets another name.

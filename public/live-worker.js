@@ -1,4 +1,4 @@
-// One live-update connection shared by every laatsux tab.
+// One live-update connection shared by every galley tab.
 //
 // Browsers allow six HTTP/1.1 connections per host. A long-lived EventSource per tab
 // used them up, after which new pages queued forever. This SharedWorker holds the only

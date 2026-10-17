@@ -1,18 +1,19 @@
 {
-  "name": "laatsux",
+  "name": "galley",
   "version": "0.1.0",
   "description": "A local staging area for pull requests: agents open PRs with a gh-compatible CLI, you review them in a GitHub-like UI, then publish to GitHub.",
   "type": "module",
   "license": "MIT",
   "bin": {
+    "galley": "./bin/galley.ts",
     "laatsux": "./bin/laatsux.ts"
   },
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "start": "node bin/laatsux.ts serve",
-    "dev": "node --watch bin/laatsux.ts serve",
+    "start": "node bin/galley.ts serve",
+    "dev": "node --watch bin/galley.ts serve",
     "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },

@@ -1,5 +1,5 @@
 // Auto-publish, after GitHub's auto-merge. The reviewer approves the first publish in advance, and
-// laatsux publishes on its own once the agents are done with the pull request: the reviewer
+// galley publishes on its own once the agents are done with the pull request: the reviewer
 // agents with its head, and the author with their feedback (Service.readiness). After that, each
 // commit the author waits with is pushed to the published pull request, with no approval and no
 // review here (Service.pushUpdate): GitHub's reviews and checks take over.

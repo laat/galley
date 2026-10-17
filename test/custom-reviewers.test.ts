@@ -89,9 +89,9 @@ let reviewersDir: string;
 let server: Awaited<ReturnType<typeof startServer>>;
 /** How the server is started: again on the same data, or for a server of its own. */
 let options: Parameters<typeof startServer>[0];
-const BIN = join(import.meta.dirname, '..', 'bin', 'laatsux.ts');
+const BIN = join(import.meta.dirname, '..', 'bin', 'galley.ts');
 
-const gitconfig = join(mkdtempSync(join(tmpdir(), 'laatsux-gitconfig-')), 'config');
+const gitconfig = join(mkdtempSync(join(tmpdir(), 'galley-gitconfig-')), 'config');
 writeFileSync(gitconfig, '[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n');
 process.env.GIT_CONFIG_GLOBAL = gitconfig;
 process.env.GIT_CONFIG_NOSYSTEM = '1';
@@ -116,7 +116,7 @@ function makeRepo(name: string, remote: string | null): string {
 }
 
 async function cli(cwd: string, args: string[], opts: { actor?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
-  const child = execFile(process.execPath, [BIN, ...args], { cwd, env: { ...process.env, LAATSUX_URL: server.url, LAATSUX_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' } });
+  const child = execFile(process.execPath, [BIN, ...args], { cwd, env: { ...process.env, GALLEY_URL: server.url, GALLEY_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' } });
   child.stdin!.end();
   let stdout = '';
   let stderr = '';
@@ -148,7 +148,7 @@ let other: string;
 let solo: string;
 
 before(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'laatsux-custom-'));
+  dir = mkdtempSync(join(tmpdir(), 'galley-custom-'));
   reviewersDir = join(dir, 'config', 'reviewers');
   acme = makeRepo('widgets', 'https://github.com/acme/widgets.git');
   other = makeRepo('thing', 'https://github.com/other/thing.git');
@@ -420,7 +420,7 @@ test('a review goes by the definition it started with, also when the definition 
 
 test('it reviews only the repositories it names', async () => {
   const { number, stderr } = await stage(other, ['--reviewer', 'house-rules']);
-  assert.match(stderr, /Ignored reviewer house-rules: laatsux has no reviewer agent by that name for this repository\./);
+  assert.match(stderr, /Ignored reviewer house-rules: galley has no reviewer agent by that name for this repository\./);
   assert.doesNotMatch(await page(`/other/thing/pull/${number}`), /house-rules/);
   assert.ok(!server.service.readiness(row('other', number)).reviewers.some((r) => r.login === 'house-rules'));
   await human('POST', `/api/repos/other/thing/pulls/${number}/reviewers/house-rules`, undefined, 404);
@@ -637,7 +637,7 @@ test('a reviewer keeps its name, which nobody else may have, and comes back with
   assert.match(named, /new\.md/);
   await human('DELETE', '/api/settings/reviewers/new');
   // Agents can not define reviewers.
-  const res = await fetch(`${server.url}/api/settings/reviewers/house-rules`, { method: 'DELETE', headers: { 'x-laatsux-actor': 'agent' } });
+  const res = await fetch(`${server.url}/api/settings/reviewers/house-rules`, { method: 'DELETE', headers: { 'x-galley-actor': 'agent' } });
   assert.equal(res.status, 403);
 
   // Deleted while it reviews: the review is interrupted by the time deleting returns, so the

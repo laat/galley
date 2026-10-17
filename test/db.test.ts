@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Db, now } from '../src/server/db.ts';
 
 test('pull requests stored as open, before staged had a name of its own, are staged', () => {
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-staged-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-staged-'));
   const file = join(data, 'laatsux.db');
   try {
     const old = new Db(file);
@@ -44,7 +44,7 @@ test('pull requests stored as open, before staged had a name of its own, are sta
 });
 
 test('a database opened from another directory, a copy, gets an instance id of its own', () => {
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-instance-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-instance-'));
   const open = (dir: string) => {
     const db = new Db(join(data, dir, 'laatsux.db'));
     db.sql.close();
