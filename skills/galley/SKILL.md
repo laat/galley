@@ -41,12 +41,17 @@ description: Stage a pull request in galley, the user's local review server, ins
 2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
 
-   - Claude Code: with `run_in_background`, so you are woken when it returns.
+   - Claude Code, main session: with `run_in_background`, so you are woken when it returns.
+   - Claude Code, subagent (a session another agent started): in the foreground with
+     `--timeout 270` and a Bash timeout above it, such as 600000, because a background command
+     that finishes does not wake an idle subagent. On exit code 124, run it again.
    - Codex: when the tool call returns a session ID, poll it (`write_stdin` with no input,
      `yield_time_ms` up to 300000) until it exits.
    - A shell tool with a time limit (opencode's is 2 minutes unless you pass a larger
-     `timeout`): add `--timeout` under it, such as `--timeout 9m` with a 10-minute tool timeout.
-     On exit code 124, run it again; nothing is lost.
+     `timeout`): add a `--timeout` under it and under 5 minutes, such as `--timeout 270` with a
+     5-minute tool timeout. Most model providers' prompt caches expire after about 5 minutes
+     without a call, and a longer wait makes the next call re-send the whole conversation
+     uncached. On exit code 124, run it again; nothing is lost.
 
 3. Read what it printed:
 
