@@ -72,7 +72,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | Command | |
 |---|---|
 | `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` turns automatic Codex reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns them off. Without either, the settings decide |
-| `laatsux pr list` | `--state open\|published\|merged\|closed\|all`, `--json`, `--jq` |
+| `laatsux pr list` | `--state staged\|published\|done\|merged\|closed\|open\|all`, `--json`, `--jq`. As in gh, `open` (the default) is the staged and the published ones, and `closed` takes in merged |
 | `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web`. `--download-images <dir>` saves the images in them as files |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
 | `laatsux pr edit [<n>]` | `--title`, `--body`, `--body-file`, `--base` |
@@ -91,16 +91,17 @@ A pull request is found the way gh finds it: by number, URL, branch name, or the
 `path`, `line`, `diffHunk` and the comments), `publishedUrl`, `waiting`, and `autoPublishRequest`
 (who turned [auto-publish](#auto-publish) on and when, and its options; null when it is off).
 `autoMergeRequest` is gh's field for the [auto-merge](#auto-merge) laatsux enabled on the GitHub
-pull request. `reviewRequests`
-lists a reviewer agent that is reviewing or about to, with `status` (`IN_PROGRESS` or
-`QUEUED`), `commit` and `startedAt`. `turn` says whose move it is (`AUTHOR`, `REVIEWER_AGENTS`,
-`REVIEWER` or `NONE`) and why, as on the [front page](#the-front-page). `unpublishedChanges` lists
-what a published pull request has that GitHub does not yet (`COMMITS`, `TITLE`, `BODY`); `state`
-stays `PUBLISHED`, as gh would show it. `pr view` and `pr status` print both. `state` becomes
-`MERGED` or `CLOSED` once that happened on GitHub, with `mergedAt`, `mergedBy` and `mergeCommit` as
-in gh. While it is open on GitHub, `statusCheckRollup`, `mergeable` and `mergeStateStatus` are
-GitHub's, and `githubStatus` has all laatsux saw there: checks, running workflow runs, a pending
-Copilot review, the review decision and unresolved review threads.
+pull request. `reviewRequests` lists a reviewer agent that is reviewing or about to, with `status`
+(`IN_PROGRESS` or `QUEUED`), `commit` and `startedAt`. `turn` says whose move it is (`AUTHOR`,
+`REVIEWER_AGENTS`, `REVIEWER` or `NONE`) and why, as on the [front page](#the-front-page). `state`
+is `STAGED` where gh would say `OPEN`, until the pull request is published, and `PUBLISHED` while
+it is open on GitHub. `unpublishedChanges` lists what a published pull request has that GitHub does
+not yet (`COMMITS`, `TITLE`, `BODY`); `state` stays `PUBLISHED`, as gh would show it. `pr view` and
+`pr status` print both. `state` becomes `MERGED` or `CLOSED` once that happened on GitHub, with
+`mergedAt`, `mergedBy` and `mergeCommit` as in gh, and `CLOSED` when it is closed here. While it is
+open on GitHub, `statusCheckRollup`, `mergeable` and `mergeStateStatus` are GitHub's, and
+`githubStatus` has all laatsux saw there: checks, running workflow runs, a pending Copilot review,
+the review decision and unresolved review threads.
 
 ## The web UI
 
@@ -130,20 +131,31 @@ Copilot review, the review decision and unresolved review threads.
 
 ### The front page
 
-The Open tab lists the pull requests whose turn it is for you first, oldest first, then those
-with the agents, then those published with nothing new. The author agent's turn starts when
-`pr wait` (or `pr view --comments`) hands it feedback that asks something of it, and lasts until
-its next action: a push, an edit, a reply, or waiting again. A reviewer agent's turn lasts while
-it reviews the pull request or is about to. After that it is your turn: the author has answered
-and waits, or has stopped ("claude is not waiting"), and the reviewer agents are done with the
-latest commit. A failed review is your turn too, with a Retry button, and so is feedback the
-author has not been handed while it is not waiting ("claude has not seen the latest feedback"):
-it hears of it only when you tell it.
+The list has a tab for each state a pull request is in, with counts that do not overlap:
+
+| Tab | |
+|---|---|
+| **Staged** (the default) | Under review here, never published |
+| **Published** | Published and still open on GitHub: the ones to keep track of. With changes not on GitHub yet, it stays here, marked "Update not published" |
+| **Done** | Merged or closed on GitHub, or closed here, each saying which |
+
+Staged pull requests are blue, not GitHub's green for open: they are not open anywhere yet.
+
+The Staged and Published tabs list the pull requests whose turn it is for you first, oldest first,
+then those with the agents; Published then those waiting on GitHub, with nothing new here. A tab
+with pull requests whose turn it is for you says how many, whichever tab is shown. The author
+agent's turn starts when `pr wait` (or `pr view --comments`) hands it feedback that asks something
+of it, and lasts until its next action: a push, an edit, a reply, or waiting again. A reviewer
+agent's turn lasts while it reviews the pull request or is about to. After that it is your turn:
+the author has answered and waits, or has stopped ("claude is not waiting"), and the reviewer
+agents are done with the latest commit. A failed review is your turn too, with a Retry button, and
+so is feedback the author has not been handed while it is not waiting ("claude has not seen the
+latest feedback"): it hears of it only when you tell it.
 
 Each row says why: whether the author waits and for how long, pushes and answered threads since
 your last review, what each reviewer agent made of the latest commit, your decision, unresolved
 threads, and an update not published yet (a published pull request that changed since shows as
-open, "Update not published: commits, title"). The tab's title counts your turn, "(2) Staged pull
+staged, "Update not published: commits, title"). The tab's title counts your turn, "(2) Staged pull
 requests", and **Notify me** shows a desktop notification when a pull request in any repository
 becomes your turn, while a list page (any tab) is open.
 
@@ -180,10 +192,13 @@ request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's 
 `max_iterations`; null follows the settings, and fields left out stay as they are),
 `GET /api/settings`, `PUT /api/settings/codex` and `PUT /api/settings/publish` (`mergeMethod`), `POST /api/uploads` (an image's bytes; answers
 with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, and `GET /events`
-(server-sent events). A pull request also has `turn` (`whose`: `author`, `reviewer_agents`,
-`reviewer` or `none`, and `reasons`) and `unpublished_changes`, and once published `github_state`
-(`open`, `merged` or `closed` on GitHub; null until laatsux has asked), `github_closed_at` and
-`github_closed_by`, and GitHub's own `merged`, `merged_at`, `merged_by` and `merge_commit_sha`.
+(server-sent events). A pull request's `state` is `open` or `closed`, as on GitHub: closed once it
+is done (merged included), and `?state=` on the list takes laatsux's states too, as `pr list
+--state` does. A pull request also has `staging_state` (`staged`, `published` or `done`), `turn`
+(`whose`: `author`, `reviewer_agents`, `reviewer` or `none`, and `reasons`) and
+`unpublished_changes`, and once published `github_state` (`open`, `merged` or `closed` on GitHub;
+null until laatsux has asked), `github_closed_at` and `github_closed_by`, and GitHub's own
+`merged`, `merged_at`, `merged_by` and `merge_commit_sha`.
 
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or

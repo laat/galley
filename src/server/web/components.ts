@@ -44,7 +44,7 @@ ${opts.subnav ?? ''}
  * and issues of the repository on GitHub (opening there).
  */
 export function repoNav(s: Service, repo: RepoRow, selected: 'staged' | null = 'staged'): Safe {
-  const staged = s.pulls(repo, { state: 'open' }).length;
+  const staged = s.pulls(repo, { state: 'staged' }).length;
   const slug = repo.github_slug;
   const counts = slug ? s.githubRepo(slug) : null;
   const counter = (n: number | undefined) => (n === undefined ? '' : html` <span class="Counter">${n}</span>`);
@@ -62,25 +62,29 @@ export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {
   return html`<a href="/">laatsux</a><span class="crumb-sep">/</span><a href="/${repo.owner}/${repo.name}"><strong>${repo.owner}/${repo.name}</strong></a>${extra ?? ''}`;
 }
 
-/** `unpublished`: published, with changes GitHub does not have yet (Service.unpublishedChanges), which shows as open. */
+/**
+ * Staged in a colour of its own, not GitHub's green for open: a staged pull request is not open
+ * anywhere yet. `unpublished`: published, with changes GitHub does not have yet
+ * (Service.unpublishedChanges), which are staged.
+ */
 export function stateBadge(pull: PullRow, size: 'md' | 'sm' = 'md', unpublished = false): Safe {
   const cls = size === 'sm' ? ' State--small' : '';
   if (pull.github_state === 'merged') return html`<span class="State State--merged${cls}" title="Merged on GitHub">${icon('git-merge')} Merged</span>`;
   if (pull.state === 'closed') return html`<span class="State State--closed${cls}">${icon('git-pull-request-closed')} Closed</span>`;
   if (pull.github_state === 'closed') return html`<span class="State State--closed${cls}" title="Closed on GitHub">${icon('git-pull-request-closed')} Closed on GitHub</span>`;
-  if (pull.state === 'published' && unpublished) return html`<span class="State State--open${cls}">${icon('git-pull-request')} Update not published</span>`;
+  if (pull.state === 'published' && unpublished) return html`<span class="State State--staged${cls}">${icon('git-pull-request')} Update not published</span>`;
   if (pull.state === 'published') return html`<span class="State State--published${cls}">${icon('mark-github')} Published</span>`;
   if (pull.draft) return html`<span class="State State--draft${cls}">${icon('git-pull-request-draft')} Draft</span>`;
-  return html`<span class="State State--open${cls}">${icon('git-pull-request')} Open</span>`;
+  return html`<span class="State State--staged${cls}">${icon('git-pull-request')} Staged</span>`;
 }
 
 export function pullIcon(pull: PullRow, unpublished = false): Safe {
   if (pull.github_state === 'merged') return icon('git-merge', { cls: 'color-fg-done' });
   if (pull.state === 'closed' || pull.github_state === 'closed') return icon('git-pull-request-closed', { cls: 'color-fg-closed' });
-  if (pull.state === 'published' && unpublished) return icon('git-pull-request', { cls: 'color-fg-open' });
+  if (pull.state === 'published' && unpublished) return icon('git-pull-request', { cls: 'color-fg-staged' });
   if (pull.state === 'published') return icon('mark-github', { cls: 'color-fg-done' });
   if (pull.draft) return icon('git-pull-request-draft', { cls: 'color-fg-muted' });
-  return icon('git-pull-request', { cls: 'color-fg-open' });
+  return icon('git-pull-request', { cls: 'color-fg-staged' });
 }
 
 /** A published pull request's checks on GitHub as one icon, as GitHub's lists show them. */

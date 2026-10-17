@@ -19,7 +19,8 @@ export interface RepoRow {
   created_at: string;
 }
 
-export type PullState = 'open' | 'closed' | 'published';
+/** Staged here and never published, published to GitHub, or closed here. Merged or closed on GitHub is github_state. */
+export type PullState = 'staged' | 'published' | 'closed';
 
 export interface PullRow {
   id: number;
@@ -158,7 +159,7 @@ CREATE TABLE IF NOT EXISTS pulls (
   number INTEGER NOT NULL,
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
-  state TEXT NOT NULL DEFAULT 'open',
+  state TEXT NOT NULL DEFAULT 'staged',
   draft INTEGER NOT NULL DEFAULT 0,
   base_ref TEXT NOT NULL,
   head_ref TEXT NOT NULL,
@@ -305,6 +306,8 @@ export class Db {
       const cols = this.sql.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
     }
+    // A staged pull request was stored as open, GitHub's word for what others can see.
+    this.sql.exec("UPDATE pulls SET state = 'staged' WHERE state = 'open'");
   }
 
   get<T>(query: string, ...params: SQLInputValue[]): T | undefined {

@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
-import { githubStatus, publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
@@ -31,20 +31,21 @@ import type { Span } from '../diff.ts';
 
 export function pullList(s: Service, opts: { repo: RepoRow | null; state: string }): string {
   const all = s.pulls(opts.repo, { state: 'all' });
-  // "Open" means not closed: publishing does not end the review loop.
-  const counts = {
-    open: all.filter((p) => p.state !== 'closed').length,
-    published: all.filter((p) => p.state === 'published').length,
-    closed: all.filter((p) => p.state === 'closed').length,
-  };
-  const state = ['open', 'published', 'closed', 'all'].includes(opts.state) ? opts.state : 'open';
-  const shown = state === 'all' ? all : state === 'open' ? all.filter((p) => p.state !== 'closed') : all.filter((p) => p.state === state);
+  // A tab per state, each pull request in one of them (stagingState), so the counts do not overlap.
+  const staging = new Map(all.map((p) => [p.id, stagingState(p)]));
+  const state = ['staged', 'published', 'done', 'all'].includes(opts.state) ? opts.state : 'staged';
+  const shown = state === 'all' ? all : all.filter((p) => staging.get(p.id) === state);
   const base = opts.repo ? `/${opts.repo.owner}/${opts.repo.name}` : '/';
-  const tab = (key: string, iconName: string, label: string, n: number) =>
-    html`<a class="list-tab${state === key ? ' selected' : ''}" href="${base}?state=${key}">${icon(iconName)} ${n} ${label}</a>`;
   const turns = new Map(all.map((p) => [p.id, s.turn(p)]));
   const turn = (p: PullRow) => turns.get(p.id)!;
   const yours = all.filter((p) => turn(p).whose === 'reviewer');
+  /** A tab with its count, and how many of them wait for you, also when another tab is shown. */
+  const tab = (key: string, iconName: string, label: string) => {
+    const n = all.filter((p) => staging.get(p.id) === key).length;
+    const mine = yours.filter((p) => staging.get(p.id) === key).length;
+    const turnCount = mine ? html` <span class="list-tab-turn" title="${plural(mine, 'pull request')} waiting for you">${icon('inbox')} ${mine}</span>` : '';
+    return html`<a class="list-tab${state === key ? ' selected' : ''}" href="${base}?state=${key}">${icon(iconName)} ${n} ${label}${turnCount}</a>`;
+  };
   const href = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
     return `/${repo.owner}/${repo.name}/pull/${p.number}`;
@@ -65,9 +66,15 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
-  /** Merged or closed on GitHub, once published. */
-  const onGithub = (p: PullRow) =>
-    p.github_state === 'merged' ? html`<span class="Label Label--merged">Merged</span>` : p.github_state === 'closed' && p.state !== 'closed' ? html`<span class="Label">Closed on GitHub</span>` : '';
+  /** How a pull request that is done ended: merged or closed on GitHub, or closed here. */
+  const ended = (p: PullRow) =>
+    p.github_state === 'merged'
+      ? html`<span class="Label Label--merged">Merged</span>`
+      : p.state === 'closed'
+        ? html`<span class="Label">Closed</span>`
+        : p.github_state === 'closed'
+          ? html`<span class="Label">Closed on GitHub</span>`
+          : '';
 
   /** A pull request with what it waits for: whose turn it is and why, the decision, and what GitHub does not have yet. */
   const row = (p: PullRow) => {
@@ -79,13 +86,13 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <span class="pr-row-icon">${pullIcon(p, !!unpublished)}</span>
   <div class="pr-row-main">
     ${heading(p)}
-    ${p.draft && p.state === 'open' ? html`<span class="Label">Draft</span>` : ''}
+    ${p.draft && p.state === 'staged' ? html`<span class="Label">Draft</span>` : ''}
     ${t.reasons.some((r) => r.kind === 'approved') ? html`<span class="Label Label--success">${icon('check')} Approved</span>` : ''}
     ${t.reasons.some((r) => r.kind === 'changes_requested') ? html`<span class="Label Label--danger">${icon('file-diff')} Changes requested</span>` : ''}
     ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
-    ${onGithub(p)}
+    ${ended(p)}
     ${turnReasons(t, apiBase(p))}
-    <div class="pr-row-meta">#${p.number} opened ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
+    <div class="pr-row-meta">#${p.number} staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
   <div class="pr-row-side">${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
 </div>`;
@@ -99,28 +106,31 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
     <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
-    ${t.whose === 'none' ? html`<span class="pr-row-turn">${onGithub(p)} ${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
+    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
   </div>
 </div>`;
   };
 
   let rows: Safe[] = shown.map(row);
-  if (state === 'open' && shown.length) {
+  // Staged and published: those waiting for you first, oldest first, then those with the agents.
+  if ((state === 'staged' || state === 'published') && shown.length) {
     const group = (iconName: string, title: string, n: number, note = '') =>
       html`<div class="Box-row turn-group">${icon(iconName)} <h2 class="turn-group-title">${title}</h2> <span class="Counter">${n}</span>${note ? html` <span class="turn-group-note">${note}</span>` : ''}</div>`;
     const mine = shown.filter((p) => turn(p).whose === 'reviewer').sort((a, b) => a.updated_at.localeCompare(b.updated_at));
     const agents = shown.filter((p) => turn(p).whose === 'author' || turn(p).whose === 'reviewer_agents');
-    const done = shown.filter((p) => turn(p).whose === 'none');
+    // Published with nothing new here: the next move is on GitHub (its review, checks, the merge).
+    const github = shown.filter((p) => turn(p).whose === 'none');
     rows = [
       group('inbox', 'Your turn', mine.length, mine.length > 1 ? 'oldest first' : ''),
       ...(mine.length ? mine.map(row) : [html`<div class="Box-row turn-empty">Nothing is waiting for you.</div>`]),
       ...(agents.length ? [group('hubot', 'With agents', agents.length), ...agents.map(compactRow)] : []),
-      ...(done.length ? [group('mark-github', 'Published', done.length, 'nothing new since'), ...done.map(compactRow)] : []),
+      ...(github.length ? [group('mark-github', 'Waiting on GitHub', github.length, 'nothing new since publishing'), ...github.map(compactRow)] : []),
     ];
   }
+  const nothing: Record<string, string> = { staged: 'No staged pull requests', published: 'No published pull requests open on GitHub', done: 'No merged or closed pull requests', all: 'No pull requests' };
   const empty = html`<div class="blankslate">
   ${icon('git-pull-request', { size: 24 })}
-  <h3>No ${state === 'all' ? '' : state + ' '}staged pull requests${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
+  <h3>${nothing[state]}${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
   <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
 </div>`;
   const body = html`<div class="container container-lg">
@@ -128,9 +138,9 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     <button type="button" class="btn btn-sm notify-toggle js-notify" hidden title="A desktop notification when a pull request becomes your turn, while a page like this is open">${icon('bell')} <span class="js-notify-label">Notify me</span></button></div>
   <div class="Box pr-list" data-your-turn="${JSON.stringify(notify)}">
     <div class="Box-header list-tabs">
-      ${tab('open', 'git-pull-request', 'Open', counts.open)}
-      ${tab('published', 'mark-github', 'Published', counts.published)}
-      ${tab('closed', 'git-pull-request-closed', 'Closed', counts.closed)}
+      ${tab('staged', 'git-pull-request', 'Staged')}
+      ${tab('published', 'mark-github', 'Published')}
+      ${tab('done', 'check', 'Done')}
     </div>
     ${rows.length ? rows : empty}
   </div>
@@ -237,6 +247,13 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
   const unpublished = s.unpublishedChanges(pull).length > 0;
   const tabLink = (key: string, href: string, iconName: string, label: string, count: number) =>
     html`<a class="tabnav-tab${tab === key ? ' selected' : ''}" href="${href}">${icon(iconName)} ${label} <span class="Counter">${count}</span></a>`;
+  // "Wants to merge" is GitHub's: a staged pull request asks nobody to merge it yet.
+  const did =
+    pull.github_state === 'merged'
+      ? html`${githubUser(pull.github_closed_by)} merged ${plural(commits.length, 'commit')} into`
+      : pull.state === 'published' && !unpublished
+        ? html`${authorLink(s, author)} published ${plural(commits.length, 'commit')} into`
+        : html`${authorLink(s, author)} staged ${plural(commits.length, 'commit')} for`;
   const header = html`<div class="pr-header">
   <div class="container container-xl">
     <div class="gh-header-title-row js-title-view">
@@ -254,8 +271,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
     <div class="gh-header-meta">
       ${stateBadge(pull, 'md', unpublished)}
       <div class="gh-header-meta-text">
-        ${pull.github_state === 'merged' ? html`${githubUser(pull.github_closed_by)} merged` : html`${authorLink(s, author)} ${pull.state === 'published' && !unpublished ? 'published' : 'wants to merge'}`} ${plural(commits.length, 'commit')} into
-        <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
+        ${did} <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
       </div>
     </div>
     <nav class="tabnav">
@@ -858,7 +874,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
       anchor: 'pullrequest-description',
       markdownCtx: { references: p.references },
     },
-    html`${authorLink(s, p.author)} opened this pull request ${relTime(pull.created_at)}`,
+    html`${authorLink(s, p.author)} staged this pull request ${relTime(pull.created_at)}`,
   );
 
   const newComment = html`<div class="timeline-comment-group new-comment">

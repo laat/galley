@@ -11,6 +11,7 @@ export const c = {
   red: wrap(31, 39),
   green: wrap(32, 39),
   yellow: wrap(33, 39),
+  blue: wrap(34, 39),
   magenta: wrap(35, 39),
   cyan: wrap(36, 39),
   gray: wrap(90, 39),

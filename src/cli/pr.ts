@@ -217,6 +217,8 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
     return 0;
   }
   const state = String(v.state);
+  // gh's open is staged and published here; the server says which states there are.
+  const what = state === 'all' ? '' : state === 'open' ? 'staged or published ' : `${state} `;
   const fields = v.json !== undefined ? checkFields(String(v.json), GH_FIELDS) : ['number', 'title', 'headRefName', 'state', 'createdAt', 'isDraft', 'author'];
   const q = new URLSearchParams({ state, limit: String(v.limit), fields: [...new Set([...fields, 'isDraft', 'author', 'unpublishedChanges'])].join(',') });
   if (v.head) q.set('head', String(v.head));
@@ -229,20 +231,20 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
     return 0;
   }
   if (!pulls.length) {
-    if (isTTY) err(`no ${state === 'all' ? '' : state + ' '}pull requests match your search in ${repo.owner}/${repo.name}`);
+    if (isTTY) err(`no ${what}pull requests match your search in ${repo.owner}/${repo.name}`);
     return 0;
   }
   if (isTTY) {
-    out(`\nShowing ${pulls.length} of ${pulls.length} ${state === 'all' ? '' : state + ' '}pull requests in ${repo.owner}/${repo.name}\n`);
+    out(`\nShowing ${pulls.length} of ${pulls.length} ${what}pull requests in ${repo.owner}/${repo.name}\n`);
     const w = Math.max(...pulls.map((p) => p.title.length));
     for (const p of pulls) {
-      // A published pull request with an update not on GitHub yet shows as open, as in the web UI.
+      // A published pull request with an update not on GitHub yet shows as staged, as in the web UI.
       const published = (p.state === 'PUBLISHED' && !p.unpublishedChanges?.length) || p.state === 'MERGED';
-      const num = p.state === 'CLOSED' ? c.red(`#${p.number}`) : published ? c.magenta(`#${p.number}`) : p.isDraft ? c.gray(`#${p.number}`) : c.green(`#${p.number}`);
+      const num = p.state === 'CLOSED' ? c.red(`#${p.number}`) : published ? c.magenta(`#${p.number}`) : p.isDraft ? c.gray(`#${p.number}`) : c.blue(`#${p.number}`);
       out(`${num}\t${p.title.padEnd(w)}  ${c.cyan(p.headRefName)}  ${c.gray(p.createdAt.slice(0, 10))}`);
     }
   } else {
-    for (const p of pulls) out([p.number, p.title, p.headRefName, p.isDraft && p.state === 'OPEN' ? 'DRAFT' : p.state, p.createdAt].join('\t'));
+    for (const p of pulls) out([p.number, p.title, p.headRefName, p.isDraft && p.state === 'STAGED' ? 'DRAFT' : p.state, p.createdAt].join('\t'));
   }
   return 0;
 }
@@ -457,10 +459,9 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
   out(c.bold('Current branch'));
   const mine = pulls.find((p) => p.headRefName === branch);
   out(mine ? `  #${mine.number}  ${mine.title} [${mine.headRefName}]\n    - ${mine.reviewDecision.toLowerCase().replace('_', ' ')}${mine.turn ? `\n    - ${turnLine(mine.turn)}` : ''}` : `  There is no pull request associated with [${branch}]`);
-  out('\n' + c.bold('Open staged pull requests'));
-  if (!pulls.length) out('  You have no open pull requests');
-  const label = (p: any) =>
-    p.state === 'PUBLISHED' ? (p.unpublishedChanges?.length ? ' (update not published)' : ' (published)') : p.state === 'MERGED' ? ' (merged on GitHub)' : p.state === 'CLOSED' ? ' (closed on GitHub)' : '';
+  out('\n' + c.bold('Staged and published pull requests'));
+  if (!pulls.length) out('  You have no staged or published pull requests');
+  const label = (p: any) => (p.state === 'PUBLISHED' ? (p.unpublishedChanges?.length ? ' (update not published)' : ' (published)') : '');
   for (const p of pulls) out(`  #${p.number}  ${p.title} [${p.headRefName}]${label(p)}`);
   out('');
   return 0;
@@ -697,7 +698,7 @@ USAGE
 
 COMMANDS (same flags as gh)
   create:      Stage a pull request for the current branch
-  list:        List staged pull requests
+  list:        List staged and published pull requests (--state staged, published, done, all)
   view:        Show a pull request (--comments for reviews and review threads,
                --download-images <dir> to save the images in them as files)
   diff:        Show the diff

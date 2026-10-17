@@ -89,6 +89,20 @@ const EVENT_STATE: Record<ReviewEvent, ReviewState> = {
 /** Wait statuses after which nothing more is coming: closed here, or merged or closed on GitHub. */
 const ENDED: WaitResult['status'][] = ['closed', 'merged', 'closed_on_github'];
 
+/**
+ * What each `state` of a list takes in: a staging state (see stagingState), merged on GitHub, or
+ * gh's open and closed. Open is staged and published, so agents that know gh find theirs; closed
+ * takes in merged, as on GitHub.
+ */
+const LISTED = new Map([
+  ['staged', "state = 'staged'"],
+  ['published', "state = 'published' AND COALESCE(github_state, 'open') = 'open'"],
+  ['done', "(state = 'closed' OR COALESCE(github_state, 'open') != 'open')"],
+  ['merged', "github_state = 'merged'"],
+  ['open', "state != 'closed' AND COALESCE(github_state, 'open') = 'open'"],
+  ['closed', "(state = 'closed' OR COALESCE(github_state, 'open') != 'open')"],
+]);
+
 export interface WaitResult {
   /** `merged` and `closed_on_github` are about the published pull request on GitHub. */
   status: 'feedback' | 'published' | 'closed' | 'merged' | 'closed_on_github' | 'timeout';
@@ -578,12 +592,9 @@ export class Service {
       params.push(repo.id);
     }
     if (filter.state && filter.state !== 'all') {
-      if (filter.state === 'open') where.push("state IN ('open', 'published')");
-      else if (filter.state === 'merged') where.push("state = 'published' AND github_state = 'merged'");
-      else {
-        where.push('state = ?');
-        params.push(filter.state);
-      }
+      const listed = LISTED.get(filter.state);
+      if (!listed) throw new HttpError(422, `state must be one of ${[...LISTED.keys(), 'all'].join(', ')}`);
+      where.push(listed);
     }
     if (filter.head) {
       where.push('head_ref = ?');
@@ -674,7 +685,7 @@ export class Service {
         number,
         title,
         body,
-        state: 'open',
+        state: 'staged',
         draft: input.draft ? 1 : 0,
         base_ref: base,
         head_ref: head,
@@ -813,7 +824,7 @@ export class Service {
         this.addEvent(pull, actor, 'closed', {}, ts);
         this.autoPublishOff(pull, actor, 'closed', ts);
       } else if (input.state === 'open' && pull.state === 'closed') {
-        changes.state = pull.published_url ? 'published' : 'open';
+        changes.state = pull.published_url ? 'published' : 'staged';
         changes.closed_at = null;
         this.addEvent(pull, actor, 'reopened', {}, ts);
       }
@@ -1383,7 +1394,7 @@ export class Service {
   /** Whose move the pull request waits for, and why (see Turn). */
   turn(pull: PullRow): Turn {
     // Closed here, or merged or closed on GitHub: nothing more is coming.
-    if (pull.state === 'closed' || pull.github_state === 'merged' || pull.github_state === 'closed') return { whose: 'none', reasons: [] };
+    if (stagingState(pull) === 'done') return { whose: 'none', reasons: [] };
     const r = this.readiness(pull);
     const author = this.db.actorById(pull.author_id).login;
     const acted = this.authorActedAt(pull);
@@ -2002,6 +2013,18 @@ export function issueSummary(node: { __typename?: string; title?: string; state?
   if (node.stateReason === 'NOT_PLANNED') return { title: node.title, state: 'Closed as not planned' };
   if (node.stateReason === 'DUPLICATE') return { title: node.title, state: 'Closed as duplicate' };
   return { title: node.title, state: 'Closed issue' };
+}
+
+export type StagingState = 'staged' | 'published' | 'done';
+
+/**
+ * Which one of three states a pull request is in, and the list's tab it shows under: staged (only
+ * here, never published), published (and open on GitHub), or done (merged or closed on GitHub, or
+ * closed here). LISTED says the same in SQL.
+ */
+export function stagingState(pull: Pick<PullRow, 'state' | 'github_state'>): StagingState {
+  if (pull.state === 'closed' || pull.github_state === 'merged' || pull.github_state === 'closed') return 'done';
+  return pull.state;
 }
 
 /** What laatsux last saw of a published pull request on GitHub, while it is open there. */

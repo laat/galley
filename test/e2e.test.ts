@@ -183,12 +183,12 @@ test('the agent loop, from staging to publishing', async (t) => {
 
   await t.test('pr view --json and --jq', async () => {
     const r = await cli(['pr', 'view', '--json', 'number,title,state,author,headRefName,isDraft']);
-    assert.deepEqual(JSON.parse(r.stdout), { number: 1, title: 'Add multiplication', state: 'OPEN', author: { login: 'agent', is_bot: true }, headRefName: 'feature/mul', isDraft: false });
+    assert.deepEqual(JSON.parse(r.stdout), { number: 1, title: 'Add multiplication', state: 'STAGED', author: { login: 'agent', is_bot: true }, headRefName: 'feature/mul', isDraft: false });
     const jq = await cli(['pr', 'view', '1', '--json', 'commits', '--jq', '.commits[].messageHeadline']);
     assert.equal(jq.code, 0, jq.stderr);
     assert.equal(jq.stdout.trim(), 'Add mul');
     const list = await cli(['pr', 'list']);
-    assert.match(list.stdout, /^1\tAdd multiplication\tfeature\/mul\tOPEN\t/);
+    assert.match(list.stdout, /^1\tAdd multiplication\tfeature\/mul\tSTAGED\t/);
   });
 
   await t.test('pr wait returns the review the reviewer submits', async () => {
@@ -445,7 +445,8 @@ test('the agent loop, from staging to publishing', async (t) => {
   });
 
   await t.test('web pages render', async () => {
-    for (const path of ['/', '/acme/widgets', '/acme/widgets/pull/1', '/acme/widgets/pull/1/commits', '/acme/widgets/pull/1/files', '/acme/widgets/pull/1/files?diff=split']) {
+    // Published by now, it is on the Published tab.
+    for (const path of ['/?state=published', '/acme/widgets?state=published', '/acme/widgets/pull/1', '/acme/widgets/pull/1/commits', '/acme/widgets/pull/1/files', '/acme/widgets/pull/1/files?diff=split']) {
       const res = await fetch(server.url + path);
       assert.equal(res.status, 200, path);
       assert.match(await res.text(), /Add multiplication helper/, path);
@@ -1689,7 +1690,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       await refresh({});
     }
     // Refused before anything was pushed or opened on GitHub.
-    assert.equal((await human('GET', pr.base)).staging_state, 'open');
+    assert.equal((await human('GET', pr.base)).staging_state, 'staged');
     assert.ok(!calls().some((c) => c.startsWith('pr ')), calls().join('\n'));
     assert.throws(() => execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '-q', 'feature/merge-stale'], { stdio: 'pipe' }));
   });
@@ -1772,7 +1773,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     }
     assert.match(await pr.page(), checkbox);
     // Nothing was pushed or published while it refused.
-    assert.equal((await human('GET', pr.base)).staging_state, 'open');
+    assert.equal((await human('GET', pr.base)).staging_state, 'staged');
     assert.ok(!calls().some((c) => c.startsWith('pr ')), calls().join('\n'));
   });
 });
@@ -2465,10 +2466,13 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
     const { turn } = await human('GET', base);
     return { whose: turn.whose, reasons: turn.reasons.map((r: any) => r.text) };
   };
-  /** The group the front page shows this pull request in. */
+  /** The tab and the group the front page shows this pull request in. */
   const group = async () => {
-    const groups = (await page('/')).split('<div class="Box-row turn-group">').slice(1);
-    return groups.find((g) => g.includes(`href="/acme/widgets/pull/${number}"`))?.match(/<h2 class="turn-group-title">([^<]+)<\/h2>/)?.[1];
+    for (const tab of ['staged', 'published']) {
+      const groups = (await page(`/?state=${tab}`)).split('<div class="Box-row turn-group">').slice(1);
+      const title = groups.find((g) => g.includes(`href="/acme/widgets/pull/${number}"`))?.match(/<h2 class="turn-group-title">([^<]+)<\/h2>/)?.[1];
+      if (title) return `${tab}: ${title}`;
+    }
   };
   const until = async (done: () => boolean | Promise<boolean>, what: string) => {
     for (let i = 0; i < 400 && !(await done()); i++) await new Promise((r) => setTimeout(r, 25));
@@ -2505,7 +2509,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       // gh JSON says it in words, with how long it has been so.
       const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
       assert.deepEqual(view, { turn: { whose: 'REVIEWER_AGENTS', reasons: [`codex is reviewing ${sha()}, 1 min`, 'agent is waiting for review, 1 min'] } });
-      assert.equal(await group(), 'With agents');
+      assert.equal(await group(), 'staged: With agents');
       assert.match(await page('/'), new RegExp(`<span class="turn-reason turn-reason--running">.*?codex is reviewing ${sha()}<span class="turn-since">, <relative-time [^>]*data-format="duration"`));
     });
 
@@ -2517,7 +2521,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       rmSync(gate);
       await server.service.codex!.settle(id);
       assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex commented on ${sha()}`, '1 unresolved thread'] });
-      assert.equal(await group(), 'With agents');
+      assert.equal(await group(), 'staged: With agents');
     });
 
     await t.test("answered and not waiting: the reviewer's", async () => {
@@ -2529,7 +2533,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         reasons: ['agent is not waiting', 'no review from reviewer yet', 'agent answered 1 thread', `codex commented on ${sha()}`, '1 unresolved thread'],
       });
       const front = await page('/');
-      assert.equal(await group(), 'Your turn');
+      assert.equal(await group(), 'staged: Your turn');
       assert.deepEqual(yourTurn(front).find((x) => x.id === id), {
         id,
         title: 'Take turns',
@@ -2605,7 +2609,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       // Codex's review of this commit failed before it was published: that holds nothing up now.
       await human('POST', `${base}/publish`, {});
       assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
-      assert.equal(await group(), 'Published');
+      assert.equal(await group(), 'published: Waiting on GitHub');
       // A review asked for after publishing that fails is the reviewer's to retry, and a retry that finds nothing ends it.
       process.env.FAKE_CODEX_FAIL = '1';
       await human('POST', `${base}/reviewers/codex`);
@@ -2614,8 +2618,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const failed = await turn();
       assert.equal(failed.whose, 'reviewer');
       assert.ok(failed.reasons.includes(`codex's review of ${sha()} failed`));
-      assert.equal(await group(), 'Your turn');
-      assert.match(await page('/'), new RegExp(`data-api="${base}/reviewers/codex">Retry</button>`));
+      assert.equal(await group(), 'published: Your turn');
+      assert.match(await page('/?state=published'), new RegExp(`data-api="${base}/reviewers/codex">Retry</button>`));
       await human('POST', `${base}/reviewers/codex`);
       await server.service.codex!.settle(id);
       assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
@@ -2625,7 +2629,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const told = await turn();
       assert.equal(told.whose, 'reviewer');
       assert.deepEqual(told.reasons.slice(0, 2), ['agent has not seen the latest feedback', 'agent is not waiting']);
-      assert.equal(await group(), 'Your turn');
+      assert.equal(await group(), 'published: Your turn');
       // Handed over, it is the author's; answered, nobody's again.
       await cli(['pr', 'view', String(number), '--comments']);
       assert.equal((await turn()).whose, 'author');
@@ -2645,9 +2649,9 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const plain = (await cli(['pr', 'view', String(number)])).stdout;
       assert.match(plain, /^unpublished:\tcommits, title$/m);
       assert.match(plain, /^turn:\treviewer\tagent is not waiting, 1 min; 1 push since reviewer's review;/m);
-      assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="State State--open">.*?Update not published<\/span>/);
+      assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="State State--staged">.*?Update not published<\/span>/);
       assert.match(await page('/acme/widgets?state=published'), /<span class="Label Label--attention">.*?Update not published: commits, title<\/span>/);
-      assert.equal(await group(), 'Your turn');
+      assert.equal(await group(), 'published: Your turn');
     });
 
     await t.test("an update Codex reviews: the reviewer agents', not the reviewer's", async () => {
@@ -2734,7 +2738,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       delete process.env.FAKE_CODEX_FAIL;
       assert.match(await page('/acme/pull'), new RegExp(`data-api="/api/repos/acme/pull/pulls/${otherNumber}/reviewers/codex">Retry</button>`));
       // Every list page carries your turn in every repository, whatever its tab or repository shows.
-      for (const path of ['/', '/?state=closed', '/?state=published', '/acme/pull', '/acme/pull?state=closed']) {
+      for (const path of ['/', '/?state=done', '/?state=published', '/acme/pull', '/acme/pull?state=done']) {
         const ids = yourTurn(await page(path)).map((x) => x.id);
         assert.ok(ids.includes(id) && ids.includes(otherId), path);
       }
@@ -2959,6 +2963,15 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal((await pr.timeline()).filter((e) => e.event === 'closed_on_github').length, 1);
       assert.equal((await human('GET', pr.base)).auto_publish, null);
       assert.deepEqual((await pr.timeline()).filter((e) => e.event === 'auto_publish_disabled').map((e) => e.reason), ['closed_on_github', 'closed_on_github']);
+
+      // Reopened on GitHub and published again: open, with no close time, though laatsux keeps the close to know it if GitHub reports it again.
+      writeFileSync(join(repo, 'close.js'), 'export const reopened = 1;\n');
+      git('commit', '-qam', 'Reopened');
+      await human('POST', `${pr.base}/publish`, { sign: false });
+      await githubSays({ [pr.id]: open });
+      const reopened = await human('GET', pr.base);
+      assert.deepEqual([reopened.state, reopened.staging_state, reopened.github_state, reopened.closed_at], ['open', 'published', 'open', null]);
+      assert.deepEqual(JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'state,closed,closedAt'])).stdout), { state: 'PUBLISHED', closed: false, closedAt: null });
     });
 
     await t.test('how it stands on GitHub is shown to the reviewer, and makes it their turn; the agent waits on', async () => {
@@ -2996,7 +3009,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.deepEqual(view.statusCheckRollup[0], { __typename: 'CheckRun', name: 'test', workflowName: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://github.com/acme/widgets/actions/runs/1/job/11' });
       assert.deepEqual([view.mergeable, view.mergeStateStatus], ['MERGEABLE', 'CLEAN']);
       assert.match(await pr.page(), /<strong>All checks have passed<\/strong>/);
-      assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), /Add checks\.js<\/a> <span class="checks-indicator" title="All 2 checks passed on GitHub">/);
+      assert.match(await (await fetch(`${server.url}/acme/widgets?state=published`)).text(), /Add checks\.js<\/a> <span class="checks-indicator" title="All 2 checks passed on GitHub">/);
       assert.equal((await turn()).whose, 'NONE');
 
       // More checks than one page reads, and one past it failed: GitHub's sum says so.
@@ -3004,7 +3017,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       many.commits.nodes[0].commit.statusCheckRollup = { state: 'FAILURE', contexts: { totalCount: 130, nodes: [run('test', 11, 'COMPLETED', 'SUCCESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')] } } as any;
       await githubSays({ [pr.id]: many });
       assert.match(await pr.page(), /<strong>Some checks were not successful<\/strong><div class="color-fg-muted">2 successful of the first 2 of 130 checks\./);
-      assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), /<span class="checks-indicator" title="Checks failed on GitHub">/);
+      assert.match(await (await fetch(`${server.url}/acme/widgets?state=published`)).text(), /<span class="checks-indicator" title="Checks failed on GitHub">/);
       assert.deepEqual((await turn()).reasons.filter((r: string) => /GitHub/.test(r)), ['checks failed on GitHub']);
       assert.match((await cli(['pr', 'view', n])).stdout, /^github:\tchecks: failed \(first 2 of 130: 2 passed\)$/m);
 
@@ -3043,7 +3056,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       const yours = await turn();
       assert.equal(yours.whose, 'REVIEWER');
       assert.match(yours.reasons.join(' · '), /1 check failed on GitHub · changes requested on GitHub · 1 unresolved thread on GitHub · conflicts with main on GitHub/);
-      assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), /<span class="turn-reason turn-reason--github"><svg [^>]*octicon-mark-github[^]*?<\/svg>1 check failed on GitHub<\/span>/);
+      assert.match(await (await fetch(`${server.url}/acme/widgets?state=published`)).text(), /<span class="turn-reason turn-reason--github"><svg [^>]*octicon-mark-github[^]*?<\/svg>1 check failed on GitHub<\/span>/);
       assert.doesNotMatch((await cli(['pr', 'view', n, '--comments'])).stdout, /Export a function/);
       // The earlier page cannot be read this time (gh-pulls-earlier.json is gone): its thread stays.
       await githubSays({
@@ -3207,4 +3220,115 @@ test('published pull requests are followed until they are merged or closed on Gi
   } finally {
     rmSync(join(dir, 'gh-pulls.json'), { force: true });
   }
+});
+
+test('the list has a tab for each state: staged, published and open on GitHub, and done', async () => {
+  // A repository of its own, so the tabs count only these pull requests.
+  const tabs = join(dir, 'tabs');
+  const tabsRemote = join(dir, 'tabs.git');
+  execFileSync('git', ['init', '-q', '--bare', tabsRemote]);
+  execFileSync('git', ['init', '-q', '-b', 'main', tabs]);
+  const g = (...args: string[]) => execFileSync('git', ['-C', tabs, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
+  g('remote', 'add', 'origin', 'https://github.com/acme/tabs.git');
+  g('config', `url.${tabsRemote}.pushInsteadOf`, 'https://github.com/acme/tabs.git');
+  writeFileSync(join(tabs, 'a.js'), 'export {};\n');
+  g('add', '.');
+  g('commit', '-qm', 'Initial commit');
+  g('push', '-q', 'origin', 'main');
+  g('update-ref', 'refs/remotes/origin/main', 'main');
+  await human('POST', '/api/repos', { path: tabs });
+  const api = '/api/repos/acme/tabs/pulls';
+  /** A pull request with a commit on a branch of its own, staged by the agent. */
+  const stage = async (name: string): Promise<{ id: number; number: number }> => {
+    g('checkout', '-q', 'main');
+    g('checkout', '-qb', name);
+    writeFileSync(join(tabs, `${name}.js`), 'export {};\n');
+    g('add', '.');
+    g('commit', '-qm', `Add ${name}`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Add ${name}`, head: name, base: 'main', automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    return res.json();
+  };
+  const staged = await stage('staged');
+  const published = await stage('published');
+  const merged = await stage('merged');
+  const closedOnGithub = await stage('closed-on-github');
+  const closedHere = await stage('closed-here');
+  for (const p of [published, merged, closedOnGithub]) await human('POST', `${api}/${p.number}/publish`, { sign: false });
+  await human('PATCH', `${api}/${closedHere.number}`, { state: 'closed' });
+  // What GitHub says about the published ones.
+  const node = (state: string, by: string | null) => ({
+    state,
+    mergedAt: state === 'MERGED' ? '2026-10-16T09:00:00Z' : null,
+    closedAt: state === 'OPEN' ? null : '2026-10-16T09:00:00Z',
+    mergedBy: state === 'MERGED' ? { login: by } : null,
+    mergeCommit: state === 'MERGED' ? { oid: 'e468a4e' + '1'.repeat(33) } : null,
+    timelineItems: { nodes: by ? [{ __typename: 'ClosedEvent', actor: { login: by } }] : [] },
+  });
+  const repository = { [`p${published.id}`]: node('OPEN', null), [`p${merged.id}`]: node('MERGED', 'laat'), [`p${closedOnGithub.id}`]: node('CLOSED', 'octocat') };
+  writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository } }));
+  try {
+    await server.service.followGithub();
+  } finally {
+    rmSync(join(dir, 'gh-pulls.json'), { force: true });
+  }
+
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  /** The tabs and their counts. */
+  const counts = (html: string) => Object.fromEntries([...html.matchAll(/<a class="list-tab[^"]*" href="\/acme\/tabs\?state=(\w+)">[^]*?<\/svg> (\d+) /g)].map((m) => [m[1], Number(m[2])]));
+  /** The pull requests a page lists, by number. */
+  const listed = (html: string) => [...html.matchAll(/<a class="pr-row-title" href="\/acme\/tabs\/pull\/(\d+)">/g)].map((m) => Number(m[1])).sort();
+  const front = await page('/acme/tabs');
+  // Each pull request is in one tab; Staged is the first, and shown unless another is asked for.
+  assert.deepEqual(counts(front), { staged: 1, published: 1, done: 3 });
+  // The repository's Staged counts the same: the staged one, not the published one.
+  assert.match(front, /<a class="UnderlineNav-item selected" href="\/acme\/tabs">[^]*?Staged <span class="Counter">1<\/span><\/a>/);
+  assert.match(front, /<a class="list-tab selected" href="\/acme\/tabs\?state=staged">/);
+  assert.deepEqual(listed(front), [staged.number]);
+  assert.deepEqual(listed(await page('/acme/tabs?state=published')), [published.number]);
+  const done = await page('/acme/tabs?state=done');
+  assert.deepEqual(listed(done), [merged.number, closedOnGithub.number, closedHere.number].sort());
+  // Done says how each ended.
+  const row = (html: string, n: number) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/tabs/pull/${n}"`))!;
+  assert.match(row(done, merged.number), /octicon-git-merge color-fg-done[^]*<span class="Label Label--merged">Merged<\/span>/);
+  assert.match(row(done, closedOnGithub.number), /<span class="Label">Closed on GitHub<\/span>/);
+  assert.match(row(done, closedHere.number), /<span class="Label">Closed<\/span>/);
+  // The staged one waits for the reviewer: its tab says so, whichever tab is shown. The published one waits on GitHub.
+  assert.match(done, /href="\/acme\/tabs\?state=staged">[^]*? 1 Staged <span class="list-tab-turn" title="1 pull request waiting for you">/);
+  assert.match(front, /<h2 class="turn-group-title">Your turn<\/h2>[^]*?href="\/acme\/tabs\/pull\/1">/);
+  assert.match(await page('/acme/tabs?state=published'), /<h2 class="turn-group-title">Waiting on GitHub<\/h2>/);
+  // Staged in a colour of its own, and said in words: staged, not asking to merge.
+  const pullPage = await page(`/acme/tabs/pull/${staged.number}`);
+  assert.match(pullPage, /<span class="State State--staged"><svg [^>]*octicon-git-pull-request[^>]*>[^]*?<\/svg> Staged<\/span>/);
+  assert.match(pullPage, />agent<\/a><span class="Label Label--bot">bot<\/span> staged 1 commit for\s*<span class="branch-name">main<\/span>/);
+
+  // The REST API keeps GitHub's open and closed, with the staging state as an extension.
+  const rest = async (state: string) => ((await human('GET', `${api}?state=${state}`)) as any[]).map((p) => [p.number, p.state, p.staging_state]).sort();
+  assert.deepEqual(await rest('open'), [[staged.number, 'open', 'staged'], [published.number, 'open', 'published']]);
+  assert.deepEqual(await rest('closed'), [[merged.number, 'closed', 'done'], [closedOnGithub.number, 'closed', 'done'], [closedHere.number, 'closed', 'done']].sort());
+  assert.deepEqual(await rest('staged'), [[staged.number, 'open', 'staged']]);
+  assert.deepEqual(await rest('published'), [[published.number, 'open', 'published']]);
+  assert.deepEqual((await rest('done')).length, 3);
+  assert.deepEqual(await rest('merged'), [[merged.number, 'closed', 'done']]);
+  const bad = await fetch(`${server.url}${api}?state=opened`);
+  assert.equal(bad.status, 422);
+  assert.match((await bad.json()).message, /^state must be one of staged, published, done, merged, open, closed, all$/);
+
+  // gh's JSON names the state; --state open finds the staged and the published ones, as gh finds open ones.
+  const list = async (...args: string[]) => {
+    const r = await cli(['pr', 'list', '-R', 'acme/tabs', '--json', 'number,state', ...args]);
+    assert.equal(r.code, 0, r.stderr);
+    return (JSON.parse(r.stdout) as { number: number; state: string }[]).map((p) => [p.number, p.state]).sort();
+  };
+  assert.deepEqual(await list(), [[staged.number, 'STAGED'], [published.number, 'PUBLISHED']]);
+  assert.deepEqual(await list('--state', 'staged'), [[staged.number, 'STAGED']]);
+  assert.deepEqual(await list('--state', 'done'), [[merged.number, 'MERGED'], [closedOnGithub.number, 'CLOSED'], [closedHere.number, 'CLOSED']].sort());
+  assert.deepEqual(await list('--state', 'closed'), await list('--state', 'done'));
+  const wrong = await cli(['pr', 'list', '-R', 'acme/tabs', '--state', 'opened']);
+  assert.equal(wrong.code, 1);
+  assert.match(wrong.stderr, /state must be one of staged, published, done/);
 });

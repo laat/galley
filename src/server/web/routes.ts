@@ -21,11 +21,11 @@ export function web(s: Service): Hono {
     return loadPull(s, c.req.param('owner')!, c.req.param('repo')!, n);
   };
 
-  app.get('/', (c) => c.html(pullList(s, { repo: null, state: c.req.query('state') ?? 'open' })));
+  app.get('/', (c) => c.html(pullList(s, { repo: null, state: c.req.query('state') ?? 'staged' })));
   // Registered before /:owner/:repo, which would otherwise match "settings".
   app.get('/settings', async (c) => c.html(await settingsPage(s)));
   app.get('/settings/publishing', (c) => c.html(publishingSettingsPage(s)));
-  app.get('/:owner/:repo', (c) => c.html(pullList(s, { repo: s.repo(c.req.param('owner'), c.req.param('repo')), state: c.req.query('state') ?? 'open' })));
+  app.get('/:owner/:repo', (c) => c.html(pullList(s, { repo: s.repo(c.req.param('owner'), c.req.param('repo')), state: c.req.query('state') ?? 'staged' })));
   app.get('/:owner/:repo/pulls', (c) => c.redirect(`/${c.req.param('owner')}/${c.req.param('repo')}`));
   app.get('/:owner/:repo/pull/:n', async (c) => c.html(await conversationPage(await load(c))));
   app.get('/:owner/:repo/pull/:n/commits', async (c) => c.html(commitsPage(await load(c))));
