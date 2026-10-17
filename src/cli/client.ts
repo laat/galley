@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliActor, dataDir, DEFAULT_PORT, fromEnv, serverUrl } from '../config.ts';
+import { cliActor, dataDir, DEFAULT_PORT, fromEnv, PORT_BEFORE, serverUrl } from '../config.ts';
 
 export class CliError extends Error {
   code: number;
@@ -36,6 +36,34 @@ const unreachable = (e: unknown) => {
   return code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ECONNRESET';
 };
 
+const notRunning = (base: string) => `the galley server is not running at ${base}, and it could not be started. Run \`galley serve\` to see why.`;
+const silent = (base: string) =>
+  `nothing answered at ${base} within 5 seconds: galley may be stuck there, or another program holds the port. If it is another program, run galley on another port with GALLEY_PORT=<port>, and set GALLEY_PORT for your agents too.`;
+
+/**
+ * What answers at `base`: galley, galley still starting, another program, one that takes the
+ * connection but does not answer in time, or nothing. galley from before GET /api/meta (#41) is
+ * known by its GET /api/health.
+ */
+export async function identify(base: string): Promise<'galley' | 'starting' | 'other' | 'silent' | 'none'> {
+  const signal = AbortSignal.timeout(5000);
+  let res: Response;
+  try {
+    res = await fetch(`${base}/api/meta`, { signal });
+  } catch (e) {
+    if (unreachable(e)) return 'none';
+    if (signal.aborted) return 'silent';
+    throw e;
+  }
+  const meta = await res.json().catch(() => null);
+  if (meta?.name === 'galley') return res.ok ? 'galley' : 'starting';
+  if (res.status !== 404) return 'other';
+  const health = await fetch(`${base}/api/health`, { signal })
+    .then((r) => r.json())
+    .catch(() => null);
+  return health?.ok === true && typeof health.pid === 'number' && 'viewer' in health ? 'galley' : 'other';
+}
+
 /**
  * Start `galley serve` in the background for a local server URL that nothing answers on.
  * The server is detached, so it outlives this command and the agent that ran it.
@@ -54,24 +82,78 @@ async function autostart(base: string): Promise<boolean> {
   spawn(process.execPath, [bin, 'serve', '--port', url.port || String(DEFAULT_PORT)], { detached: true, stdio: ['ignore', out, out] }).unref();
   for (let i = 0; i < 50; i++) {
     await new Promise((r) => setTimeout(r, 200));
-    try {
-      if ((await fetch(`${base}/api/health`)).ok) {
-        process.stderr.write(`Started the galley server at ${base} (log: ${logFile})\n`);
-        return true;
-      }
-    } catch {}
+    if ((await identify(base).catch(() => 'none')) === 'galley') {
+      process.stderr.write(`Started the galley server at ${base} (log: ${logFile})\n`);
+      return true;
+    }
   }
   return false;
 }
 
 export class Client {
   base: string;
+  /** Where galley may still be when nothing answers at `base`: its port before #41, when the CLI looks on the default one. */
+  before: string | null;
   private triedAutostart = false;
-  constructor(base = serverUrl()) {
+  /** Making sure that galley answers at `base`, before the first request (check). */
+  private checking: Promise<void> | null = null;
+  constructor(base = serverUrl(), before = base === serverUrl() && !fromEnv('URL') && !fromEnv('PORT') ? `http://localhost:${PORT_BEFORE}` : null) {
     this.base = base;
+    this.before = before;
+  }
+
+  /**
+   * Make sure galley answers at `base`, so that no request goes to another program on its port.
+   * When nothing answers there, galley may still be at `before`; otherwise one is started.
+   */
+  private async check(): Promise<void> {
+    let found = await identify(this.base);
+    if (found === 'none' && this.before) {
+      // Also one starting there: a second server on the default port would share its data.
+      const there = await identify(this.before);
+      if (there === 'silent') throw new CliError(`${silent(this.before)} (${this.before} is galley's port before ${DEFAULT_PORT}; set GALLEY_PORT=${DEFAULT_PORT} not to look there.)`);
+      if (there === 'galley' || there === 'starting') {
+        process.stderr.write(`galley answers at ${this.before}, its port before ${DEFAULT_PORT}. Restart it without --port to move it.\n`);
+        this.base = this.before;
+        found = there;
+      }
+    }
+    if (found === 'none') {
+      // Once per command: a wait that asks again while the server is away starts no more.
+      if (!this.triedAutostart) {
+        this.triedAutostart = true;
+        if (await autostart(this.base)) return;
+      }
+      throw new CliError(notRunning(this.base));
+    }
+    for (let i = 0; found === 'starting' && i < 150; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      found = await identify(this.base);
+    }
+    if (found === 'none') throw new CliError(notRunning(this.base));
+    if (found === 'silent') throw new CliError(silent(this.base));
+    if (found === 'other') {
+      throw new CliError(`something other than galley answers at ${this.base}. Stop it, or run galley on another port with GALLEY_PORT=<port>, and set GALLEY_PORT for your agents too.`);
+    }
+  }
+
+  /** Once galley answers (check): where it is. */
+  private ready(): Promise<void> {
+    this.checking ??= this.check().catch((e) => {
+      this.checking = null;
+      throw e;
+    });
+    return this.checking;
+  }
+
+  /** A link to `path` in the web UI, on the server that answers (check), as some commands make no request first. */
+  async url(path = ''): Promise<string> {
+    await this.ready();
+    return this.base + path;
   }
 
   async raw(method: string, path: string, opts: { body?: unknown; rawBody?: string; headers?: Record<string, string>; signal?: AbortSignal } = {}): Promise<Response> {
+    await this.ready();
     const headers: Record<string, string> = { accept: 'application/json', ...opts.headers };
     const actor = cliActor();
     if (actor) {
@@ -93,7 +175,7 @@ export class Client {
         this.triedAutostart = true;
         if (await autostart(this.base)) return send();
       }
-      throw new CliError(`the galley server is not running at ${this.base}, and it could not be started. Run \`galley serve\` to see why.`);
+      throw new CliError(notRunning(this.base));
     }
   }
 

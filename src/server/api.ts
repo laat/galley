@@ -19,6 +19,7 @@ import {
 import { renderMarkdown } from './web/markdown.ts';
 import { pullReferences } from './web/references.ts';
 import { nextSettings, readSettings, REVIEWER_KINDS, saveSettings, type MergeMethod, type ReviewerKind } from './settings.ts';
+import { META } from '../config.ts';
 
 /**
  * A GitHub-compatible subset of the REST API, plus a few galley extensions
@@ -158,6 +159,7 @@ export function api(s: Service): Hono {
   });
 
   app.get('/health', (c) => c.json({ ok: true, pid: process.pid, viewer: s.viewer().login }));
+  app.get('/meta', (c) => c.json(META));
   app.get('/user', (c) => c.json(userJson(s, actor(c))));
 
   app.post('/markdown', async (c) => {

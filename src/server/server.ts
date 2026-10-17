@@ -12,7 +12,7 @@ import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
 import { ClaudeReviewer } from './reviewers/claude.ts';
 import { CustomReviewers } from './reviewers/custom.ts';
-import { configDir, fromEnv } from '../config.ts';
+import { configDir, fromEnv, META } from '../config.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
 import { databaseFile, moveFromLaatsux } from './rename.ts';
@@ -125,7 +125,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const drained = new EventEmitter();
   const port = await new Promise<number>((resolve, reject) => {
     const fetch = async (req: Request) => {
-      if (!app) return new Response('starting', { status: 503 });
+      // Starting, it says it is galley all the same, so the CLI waits for it instead of taking it for another program.
+      if (!app) return new URL(req.url).pathname === '/api/meta' ? Response.json(META, { status: 503 }) : new Response('starting', { status: 503 });
       // Count handlers that are still running, so closing can let them finish with the database.
       inflight++;
       try {

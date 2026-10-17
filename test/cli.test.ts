@@ -1,14 +1,15 @@
-import { test } from 'node:test';
+import { mock, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
+import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { parseReviewers } from '../src/cli/pr.ts';
 import { checkPriority, fillFromCommits, splitPriorityPrefix } from '../src/server/service.ts';
 import { Client } from '../src/cli/client.ts';
-import { cliActor } from '../src/config.ts';
+import { cliActor, META } from '../src/config.ts';
 import type { Commit } from '../src/server/git.ts';
 
 test('setField builds nested bodies like gh api -f/-F', () => {
@@ -99,7 +100,7 @@ test('the names from before the rename still work: the laatsux command, LAATSUX_
   let heard: IncomingHttpHeaders = {};
   const server = createServer((req, res) => {
     heard = req.headers;
-    res.end('{}');
+    res.end(JSON.stringify(req.url === '/api/meta' ? META : {}));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const saved = { ...process.env };
@@ -113,6 +114,68 @@ test('the names from before the rename still work: the laatsux command, LAATSUX_
   for (const name of ['galley', 'laatsux']) {
     assert.equal(heard[`x-${name}-actor`], 'agent');
     assert.equal(heard[`x-${name}-actor-type`], 'Bot');
+  }
+});
+
+/** A server on a free local port that answers each path as `answer` says (404 for null), and notes the paths asked for. */
+async function fake(t: TestContext, answer: (path: string) => [number, unknown] | null) {
+  const paths: string[] = [];
+  const server = createServer((req, res) => {
+    paths.push(req.url!);
+    const [status, body] = answer(req.url!) ?? [404, { message: 'Not Found' }];
+    res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, paths };
+}
+
+test('the CLI makes sure galley answers before its first request', async (t) => {
+  // Another program on the port hears only the question.
+  const other = await fake(t, () => [200, { name: 'something else' }]);
+  await assert.rejects(new Client(other.url, null).get('/api/repos'), /something other than galley answers at http:\/\/127\.0\.0\.1:\d+\. Stop it, or run galley on another port with GALLEY_PORT/);
+  assert.deepEqual(other.paths, ['/api/meta']);
+  // galley from before /api/meta is known by its /api/health.
+  const older = await fake(t, (path) => (path === '/api/health' ? [200, { ok: true, pid: 1, viewer: 'laat' }] : path === '/api/repos' ? [200, []] : null));
+  assert.deepEqual(await new Client(older.url, null).get('/api/repos'), []);
+  // galley that is still starting is waited for.
+  let starting = 2;
+  const later = await fake(t, (path) => (path === '/api/meta' ? [starting-- > 0 ? 503 : 200, META] : [200, []]));
+  assert.deepEqual(await new Client(later.url, null).get('/api/repos'), []);
+  assert.deepEqual(later.paths, ['/api/meta', '/api/meta', '/api/meta', '/api/repos']);
+  // A program that takes the connection and never answers: galley stuck, or another one.
+  const sockets: Socket[] = [];
+  const silent = createTcpServer((socket) => sockets.push(socket));
+  await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    silent.close();
+  });
+  await assert.rejects(new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`, null).get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 5 seconds: galley may be stuck there, or another program holds the port/);
+
+  // Nothing on the port, and galley on its port from before #41: the CLI goes there, also to
+  // one still starting, and says so. Links lead there too, without a request first.
+  const free = await new Promise<number>((resolve) => {
+    const probe = createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+  const said = mock.method(process.stderr, 'write', () => true);
+  const saved = { ...process.env };
+  // Were it to start a server instead, it would fail.
+  process.env.GALLEY_NO_AUTOSTART = '1';
+  try {
+    let booting = 1;
+    const old = await fake(t, (path) => (path === '/api/meta' ? [booting-- > 0 ? 503 : 200, META] : [200, []]));
+    const client = new Client(`http://127.0.0.1:${free}`, old.url);
+    assert.equal(await client.url('/settings'), `${old.url}/settings`);
+    assert.deepEqual(await client.get('/api/repos'), []);
+    assert.equal(client.base, old.url);
+    assert.match(String(said.mock.calls[0].arguments[0]), new RegExp(`galley answers at ${old.url}, its port before 24823\\. Restart it without --port to move it\\.`));
+  } finally {
+    process.env = saved;
+    said.mock.restore();
   }
 });
 

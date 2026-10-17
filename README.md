@@ -43,11 +43,12 @@ mkdir -p "$dir" && ln -s "$PWD/bin/galley.ts" "$dir/gh-galley"
 ## Run
 
 ```sh
-galley serve            # http://localhost:7171
+galley serve            # http://localhost:24823
 ```
 
 You rarely need to: when no server is running, the CLI starts one in the background (log in
-`~/.local/share/galley/server.log`). `GALLEY_NO_AUTOSTART=1` turns that off.
+`~/.local/share/galley/server.log`). `GALLEY_NO_AUTOSTART=1` turns that off. When another
+program has the port, the CLI and `galley serve` say so; `GALLEY_PORT` moves galley to another.
 
 The server publishes with your `git push`, `gh` and signing key, so they must work where it
 runs. If an agent's sandbox blocks them, start the server yourself. Stopping the server lets
@@ -128,8 +129,8 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 
 | Variable | Default | |
 |---|---|---|
-| `GALLEY_URL` | `http://localhost:7171` | Where the CLI finds the server |
-| `GALLEY_PORT` | `7171` | Port for `serve` and the default URL |
+| `GALLEY_URL` | `http://localhost:24823` | Where the CLI finds the server |
+| `GALLEY_PORT` | `24823` | Port for `serve` and the default URL |
 | `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
 | `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
@@ -141,7 +142,9 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 
 galley was called laatsux before. For a while, the `laatsux` command and the `LAATSUX_*` variables
 still work. The server moves `~/.local/share/laatsux` and `~/.config/laatsux` to galley's names
-when it starts, unless a server from before the rename still runs from them.
+when it starts, unless a server from before the rename still runs from them. galley's port
+was 7171: until that server restarts, the CLI finds it there. After the restart, open
+http://localhost:24823; pages still open at 7171 stop updating.
 
 ## Security
 
