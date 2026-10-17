@@ -47,7 +47,7 @@ galley serve            # http://localhost:7171
 ```
 
 You rarely need to: when no server is running, the CLI starts one in the background (log in
-`~/.local/share/laatsux/server.log`). `GALLEY_NO_AUTOSTART=1` turns that off.
+`~/.local/share/galley/server.log`). `GALLEY_NO_AUTOSTART=1` turns that off.
 
 The server publishes with your `git push`, `gh` and signing key, so they must work where it
 runs. If an agent's sandbox blocks them, start the server yourself. Stopping the server lets
@@ -92,7 +92,7 @@ or ask for a review now. **Stop iterating** in the merge box ends the automatic 
 also name reviewers when you ask an agent to stage.
 
 You can add reviewer agents of your own, each with its own instructions, in
-`~/.config/laatsux/reviewers/<name>.md` or under **Settings** → Custom reviewers (saving there
+`~/.config/galley/reviewers/<name>.md` or under **Settings** → Custom reviewers (saving there
 rewrites the file without its comments). The front matter holds the settings, the body the
 instructions:
 
@@ -130,8 +130,8 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 |---|---|---|
 | `GALLEY_URL` | `http://localhost:7171` | Where the CLI finds the server |
 | `GALLEY_PORT` | `7171` | Port for `serve` and the default URL |
-| `GALLEY_HOME` | `~/.local/share/laatsux` | Server data directory |
-| `GALLEY_CONFIG_DIR` | `~/.config/laatsux` | Custom reviewers, in `reviewers/` |
+| `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
+| `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
 | `GALLEY_USER` | your `gh` login | Your name in the UI |
 | `GALLEY_GH` | `gh` | gh binary used for publishing |
@@ -140,7 +140,8 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 | `GALLEY_NO_AUTOSTART` | unset | Do not start a server when none is running |
 
 galley was called laatsux before. For a while, the `laatsux` command and the `LAATSUX_*` variables
-still work.
+still work. The server moves `~/.local/share/laatsux` and `~/.config/laatsux` to galley's names
+when it starts, unless a server from before the rename still runs from them.
 
 ## Security
 

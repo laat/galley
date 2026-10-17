@@ -15,6 +15,7 @@ import { CustomReviewers } from './reviewers/custom.ts';
 import { configDir, fromEnv } from '../config.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
+import { databaseFile, moveFromLaatsux } from './rename.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
@@ -93,6 +94,8 @@ export interface StartOptions {
   port: number;
   host?: string;
   dataDir: string;
+  /** Move the data and config directories from their names before the rename, as `galley serve` does (rename.ts). */
+  moveFromLaatsux?: boolean;
   ghBin?: string;
   codexBin?: string;
   claudeBin?: string;
@@ -114,8 +117,6 @@ export interface CloseOptions {
 }
 
 export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; close: (o?: CloseOptions) => Promise<void> }> {
-  mkdirSync(opts.dataDir, { recursive: true });
-  const db = new Db(join(opts.dataDir, 'laatsux.db'));
   const host = opts.host ?? '127.0.0.1';
 
   let server: ServerType;
@@ -136,6 +137,18 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     server = serve({ fetch, port: opts.port, hostname: host }, (info) => resolve(info.port));
     server.once('error', reject);
   });
+  // The database opens once the port is ours: a second server on the port stops before it, and
+  // moving the directories from laatsux's names can not pull them from under the first.
+  let db: Db;
+  let dataDir = opts.dataDir;
+  try {
+    if (opts.moveFromLaatsux) dataDir = moveFromLaatsux(dataDir);
+    mkdirSync(dataDir, { recursive: true });
+    db = new Db(databaseFile(dataDir));
+  } catch (e) {
+    server!.close();
+    throw e;
+  }
   const url = `http://localhost:${port}`;
   const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? fromEnv('GH'), viewerLogin: opts.viewerLogin ?? fromEnv('USER'), fetchEveryMs: opts.fetchMs });
   // A new instance id (a copied database, or one from before namespaces) pins what it has first.
@@ -152,7 +165,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   service.custom.start();
   const autoPublisher = new AutoPublisher(service);
   autoPublisher.start();
-  app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
+  app = createApp(service, { allowedHosts, uploadsDir: join(dataDir, 'uploads') });
   if (!opts.viewerLogin && !fromEnv('USER')) service.detectViewer();
   // Warm what the pages show about the repositories on GitHub, so the first page already has it.
   for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubRepo(repo.github_slug);

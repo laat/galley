@@ -35,14 +35,14 @@ function amend(name: string): string {
   return git('rev-parse', 'HEAD');
 }
 
-function refs(prefix = 'refs/laatsux/'): Record<string, string> {
+function refs(prefix = 'refs/galley/'): Record<string, string> {
   const out = git('for-each-ref', '--format=%(refname) %(objectname)', prefix);
   return Object.fromEntries(out.split('\n').filter(Boolean).map((line) => line.split(' ')));
 }
 
 /** A server: a database in a data directory of its own, and the service on it. */
 function server(data = mkdtempSync(join(dir, 'data-'))): { db: Db; s: Service; data: string } {
-  const db = new Db(join(data, 'laatsux.db'));
+  const db = new Db(join(data, 'galley.db'));
   return { db, s: new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' }), data };
 }
 
@@ -75,15 +75,15 @@ test('two servers staging from one repository keep to their own refs', async () 
     const second = amend('feature/a');
     await a.s.sync(pull);
     assert.deepEqual(refs(), {
-      [`refs/laatsux/${a.db.instance}/pull/1/1`]: first,
-      [`refs/laatsux/${a.db.instance}/pull/1/2`]: second,
-      [`refs/laatsux/${b.db.instance}/pull/1/1`]: theirs,
+      [`refs/galley/${a.db.instance}/pull/1/1`]: first,
+      [`refs/galley/${a.db.instance}/pull/1/2`]: second,
+      [`refs/galley/${b.db.instance}/pull/1/1`]: theirs,
     });
     // Deleting its pull request takes only its own refs.
     await b.s.deletePull(await b.s.ctx('local', 'repo', 1, { sync: false }), b.s.viewer());
     assert.deepEqual(refs(), {
-      [`refs/laatsux/${a.db.instance}/pull/1/1`]: first,
-      [`refs/laatsux/${a.db.instance}/pull/1/2`]: second,
+      [`refs/galley/${a.db.instance}/pull/1/1`]: first,
+      [`refs/galley/${a.db.instance}/pull/1/2`]: second,
     });
   } finally {
     a.db.sql.close();
@@ -97,7 +97,7 @@ test('a ref that is not where the server left it is left alone, and logged', asy
   try {
     branch('feature/c');
     const elsewhere = git('rev-parse', 'main');
-    const ref = `refs/laatsux/${db.instance}/pull/1/1`;
+    const ref = `refs/galley/${db.instance}/pull/1/1`;
     git('update-ref', ref, elsewhere);
     const pull = await stage(s, 'feature/c');
     assert.equal(git('rev-parse', ref), elsewhere);
@@ -124,18 +124,18 @@ test('a copied database pins the revisions it came with, so the original deletin
   before.db.run('UPDATE pulls SET published_source_sha = ?, published_head_sha = ? WHERE id = ?', second, signed, pull.id);
   before.db.sql.close();
   const copied = mkdtempSync(join(dir, 'data-'));
-  copyFileSync(join(before.data, 'laatsux.db'), join(copied, 'laatsux.db'));
+  copyFileSync(join(before.data, 'galley.db'), join(copied, 'galley.db'));
   const original = server(before.data);
   const copy = server(copied);
   try {
     await copy.s.pinRevisions();
-    assert.deepEqual(refs(`refs/laatsux/${copy.db.instance}/`), {
-      [`refs/laatsux/${copy.db.instance}/pull/1/1`]: first,
-      [`refs/laatsux/${copy.db.instance}/pull/1/2`]: second,
-      [`refs/laatsux/${copy.db.instance}/pull/1/published`]: signed,
+    assert.deepEqual(refs(`refs/galley/${copy.db.instance}/`), {
+      [`refs/galley/${copy.db.instance}/pull/1/1`]: first,
+      [`refs/galley/${copy.db.instance}/pull/1/2`]: second,
+      [`refs/galley/${copy.db.instance}/pull/1/published`]: signed,
     });
     await original.s.deletePull(await original.s.ctx('local', 'repo', 1, { sync: false }), original.s.viewer());
-    assert.deepEqual(refs(`refs/laatsux/${original.db.instance}/`), {});
+    assert.deepEqual(refs(`refs/galley/${original.db.instance}/`), {});
     // The rewritten first revision and the signed copy are reachable from the copy's refs alone, and survive garbage collection.
     git('reflog', 'expire', '--expire=now', '--all');
     git('gc', '-q', '--prune=now');
@@ -155,30 +155,30 @@ test('pins that failed at startup are tried again on the next start, while they 
   await before.s.sync(pull);
   before.db.sql.close();
   const copied = mkdtempSync(join(dir, 'data-'));
-  copyFileSync(join(before.data, 'laatsux.db'), join(copied, 'laatsux.db'));
+  copyFileSync(join(before.data, 'galley.db'), join(copied, 'galley.db'));
   let copy = server(copied);
   // The first revision's commit is gone, and with it what its pin was for.
   copy.db.run('UPDATE revisions SET head_sha = ? WHERE seq = 1', 'f'.repeat(40));
   // A git that crashed left a lock where the second revision's pin goes.
-  const lock = join(repo, '.git', 'refs', 'laatsux', copy.db.instance, 'pull', '1', '2.lock');
+  const lock = join(repo, '.git', 'refs', 'galley', copy.db.instance, 'pull', '1', '2.lock');
   mkdirSync(dirname(lock), { recursive: true });
   writeFileSync(lock, '');
   // Something else already holds the third pin's name: retrying would not change that.
   copy.db.run('INSERT INTO revisions (pull_id, seq, head_sha, base_sha, actor_id, created_at) SELECT pull_id, 3, ?, base_sha, actor_id, created_at FROM revisions WHERE seq = 2', second);
   const elsewhere = git('rev-parse', 'main');
-  git('update-ref', `refs/laatsux/${copy.db.instance}/pull/1/3`, elsewhere);
+  git('update-ref', `refs/galley/${copy.db.instance}/pull/1/3`, elsewhere);
   const errors = mock.method(console, 'error', () => {});
   try {
     await copy.s.pinRevisions();
-    assert.deepEqual(refs(`refs/laatsux/${copy.db.instance}/`), { [`refs/laatsux/${copy.db.instance}/pull/1/3`]: elsewhere });
+    assert.deepEqual(refs(`refs/galley/${copy.db.instance}/`), { [`refs/galley/${copy.db.instance}/pull/1/3`]: elsewhere });
     assert.equal(errors.mock.calls.length, 3);
     rmSync(lock);
     copy.db.sql.close();
     copy = server(copied);
     await copy.s.pinRevisions();
-    assert.deepEqual(refs(`refs/laatsux/${copy.db.instance}/`), {
-      [`refs/laatsux/${copy.db.instance}/pull/1/2`]: second,
-      [`refs/laatsux/${copy.db.instance}/pull/1/3`]: elsewhere,
+    assert.deepEqual(refs(`refs/galley/${copy.db.instance}/`), {
+      [`refs/galley/${copy.db.instance}/pull/1/2`]: second,
+      [`refs/galley/${copy.db.instance}/pull/1/3`]: elsewhere,
     });
     assert.equal(errors.mock.calls.length, 5, 'what could not be pinned is logged again');
     // Every pin that can be is in place: later starts leave it at that.
@@ -201,23 +201,93 @@ test('a database from before namespaces pins its revisions in one, and leaves th
   // As an older galley left it: no instance id, its revisions pinned under names every server shared.
   for (const [seq, sha] of [[1, first], [2, second]] as const) {
     git('update-ref', `refs/laatsux/pull/1/${seq}`, sha);
-    git('update-ref', '-d', `refs/laatsux/${before.db.instance}/pull/1/${seq}`);
+    git('update-ref', '-d', `refs/galley/${before.db.instance}/pull/1/${seq}`);
   }
-  before.db.run("DELETE FROM meta WHERE key IN ('instance_id', 'data_dir', 'pinned_instance')");
+  before.db.run("DELETE FROM meta WHERE key IN ('instance_id', 'data_dir', 'pinned_namespace')");
   before.db.sql.close();
   const { db, s } = server(before.data);
   const errors = mock.method(console, 'error', () => {});
   try {
     await s.pinRevisions();
-    assert.deepEqual(refs(`refs/laatsux/${db.instance}/`), {
-      [`refs/laatsux/${db.instance}/pull/1/1`]: first,
-      [`refs/laatsux/${db.instance}/pull/1/2`]: second,
+    assert.deepEqual(refs(`refs/galley/${db.instance}/`), {
+      [`refs/galley/${db.instance}/pull/1/1`]: first,
+      [`refs/galley/${db.instance}/pull/1/2`]: second,
     });
     // A copy of the database from before may count on the old refs: deleting leaves them.
     await s.deletePull(await s.ctx('local', 'repo', pull.number, { sync: false }), s.viewer());
-    assert.deepEqual(refs(`refs/laatsux/${db.instance}/`), {});
+    assert.deepEqual(refs(`refs/galley/${db.instance}/`), {});
     assert.deepEqual(refs('refs/laatsux/pull/'), { 'refs/laatsux/pull/1/1': first, 'refs/laatsux/pull/1/2': second });
     assert.deepEqual(errors.mock.calls, []);
+  } finally {
+    errors.mock.restore();
+    db.sql.close();
+  }
+});
+
+test('a server moves its refs from before the rename to refs/galley, and leaves the rest', async () => {
+  const { db, s } = server();
+  const errors = mock.method(console, 'error', () => {});
+  try {
+    const first = branch('feature/renamed');
+    const pull = await stage(s, 'feature/renamed');
+    const second = amend('feature/renamed');
+    await s.sync(pull);
+    // As galley left them while it was called laatsux: its namespace under refs/laatsux, pinned there.
+    const old = (seq: number) => `refs/laatsux/${db.instance}/pull/${pull.number}/${seq}`;
+    for (const [seq, sha] of [[1, first], [2, second]] as const) {
+      git('update-ref', old(seq), sha);
+      git('update-ref', '-d', `refs/galley/${db.instance}/pull/${pull.number}/${seq}`);
+    }
+    db.run("DELETE FROM meta WHERE key = 'pinned_namespace'");
+    db.setMeta('pinned_instance', db.instance);
+    // One of its old refs that someone moved, another server's, and one from before namespaces.
+    const third = branch('feature/renamed-elsewhere');
+    git('update-ref', old(2), third);
+    git('update-ref', 'refs/laatsux/0ther000/pull/1/1', first);
+    git('update-ref', 'refs/laatsux/pull/9/1', first);
+
+    await s.pinRevisions();
+    assert.deepEqual(refs(`refs/galley/${db.instance}/`), {
+      [`refs/galley/${db.instance}/pull/${pull.number}/1`]: first,
+      [`refs/galley/${db.instance}/pull/${pull.number}/2`]: second,
+    });
+    // Its own go where it left them; the one moved since, another server's and the older ones stay.
+    assert.deepEqual(refs(`refs/laatsux/${db.instance}/`), { [old(2)]: third });
+    assert.deepEqual(refs('refs/laatsux/0ther000/'), { 'refs/laatsux/0ther000/pull/1/1': first });
+    assert.deepEqual(refs('refs/laatsux/pull/9/'), { 'refs/laatsux/pull/9/1': first });
+    // Once.
+    await s.pinRevisions();
+    assert.deepEqual(errors.mock.calls, []);
+  } finally {
+    errors.mock.restore();
+    db.sql.close();
+  }
+});
+
+test('a ref from before the rename stays while its new one is not at its commit, or it could not be deleted', async () => {
+  const { db, s } = server();
+  const errors = mock.method(console, 'error', () => {});
+  try {
+    const first = branch('feature/kept');
+    const pull = await stage(s, 'feature/kept');
+    const second = amend('feature/kept');
+    await s.sync(pull);
+    const old = (seq: number) => `refs/laatsux/${db.instance}/pull/${pull.number}/${seq}`;
+    const now = (seq: number) => `refs/galley/${db.instance}/pull/${pull.number}/${seq}`;
+    for (const [seq, sha] of [[1, first], [2, second]] as const) git('update-ref', old(seq), sha);
+    db.run("DELETE FROM meta WHERE key = 'pinned_namespace'");
+    // Someone moved the new ref for revision 1: the old one is all that keeps that commit.
+    git('update-ref', now(1), git('rev-parse', 'main'));
+    // And the old ref for revision 2 is locked.
+    const lock = join(repo, '.git', 'refs', 'laatsux', db.instance, 'pull', String(pull.number), '2.lock');
+    writeFileSync(lock, '');
+    await s.pinRevisions();
+    assert.deepEqual(refs(`refs/laatsux/${db.instance}/`), { [old(1)]: first, [old(2)]: second });
+    // Unlocked, the next start deletes the one whose new ref holds its commit.
+    rmSync(lock);
+    await s.pinRevisions();
+    assert.deepEqual(refs(`refs/laatsux/${db.instance}/`), { [old(1)]: first });
+    assert.equal(db.getMeta('pinned_namespace'), `refs/galley/${db.instance}`);
   } finally {
     errors.mock.restore();
     db.sql.close();

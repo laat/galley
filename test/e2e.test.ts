@@ -379,8 +379,8 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(reviewThreads[0].originalLine, 6);
     assert.equal(reviewThreads[0].isOutdated, false);
     // The old head is kept reachable for the revision history.
-    const pins = git('for-each-ref', '--format=%(refname)', `refs/laatsux/${server.service.db.instance}/pull/1/`);
-    assert.deepEqual(pins.split('\n'), [1, 2].map((seq) => `refs/laatsux/${server.service.db.instance}/pull/1/${seq}`));
+    const pins = git('for-each-ref', '--format=%(refname)', `refs/galley/${server.service.db.instance}/pull/1/`);
+    assert.deepEqual(pins.split('\n'), [1, 2].map((seq) => `refs/galley/${server.service.db.instance}/pull/1/${seq}`));
     const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
     assert.ok(timeline.some((e: any) => e.event === 'pushed' && e.forced === true));
   });
@@ -512,7 +512,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     const after = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
     assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${after}^`], { encoding: 'utf8' }).trim(), before);
     // The signed copies are kept from garbage collection: the ref moves from the earlier ones.
-    assert.equal(git('rev-parse', `refs/laatsux/${server.service.db.instance}/pull/1/published`), after);
+    assert.equal(git('rev-parse', `refs/galley/${server.service.db.instance}/pull/1/published`), after);
     const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
     assert.equal(timeline.filter((e: any) => e.event === 'published').at(-1).signed, 1);
     // The signed copies count as the staged commits: nothing is left to publish.
@@ -524,7 +524,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     git('commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Reworded.');
     await assert.rejects(human('POST', '/api/repos/acme/widgets/pulls/1/publish', {}), /409|rejected|git push failed/);
     // A published ref at a commit galley did not sign is not its to move.
-    const published = `refs/laatsux/${server.service.db.instance}/pull/1/published`;
+    const published = `refs/galley/${server.service.db.instance}/pull/1/published`;
     const unsigned = git('rev-parse', 'main');
     git('update-ref', published, unsigned);
     const errors = mock.method(console, 'error', () => {});
@@ -2534,7 +2534,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
   await t.test('checks again after signing, which can wait for a prompt', async () => {
     const pr = await stage('feature/auto-sign', 'sign.js');
     const signing = gateSigning();
-    const signedCopy = () => git('for-each-ref', '--format=%(objectname)', `refs/laatsux/${server.service.db.instance}/pull/${pr.number}/published`);
+    const signedCopy = () => git('for-each-ref', '--format=%(objectname)', `refs/galley/${server.service.db.instance}/pull/${pr.number}/published`);
     try {
       // Cancelled while signing waits: nothing is pushed.
       await human('PUT', `${pr.base}/auto-publish`, {});
@@ -3212,7 +3212,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
     await s.close();
     assert.notEqual((await authorWaits)?.status, 'agents_done');
     {
-      const db = new Db(join(data, 'laatsux.db'));
+      const db = new Db(join(data, 'galley.db'));
       const pull = db.get<any>('SELECT * FROM pulls WHERE id = ?', pr.id);
       const service = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
       service.codex = new CodexReviewer(service, join(dir, 'codex'));
@@ -3325,7 +3325,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
     await ask();
     await s.close();
     {
-      const db = new Db(join(data, 'laatsux.db'));
+      const db = new Db(join(data, 'galley.db'));
       db.run("UPDATE pulls SET state = 'published', published_url = ?, published_head_sha = head_sha, published_source_sha = head_sha WHERE id = ?", 'https://github.com/acme/widgets/pull/7', pr.id);
       db.sql.close();
     }
@@ -3380,7 +3380,7 @@ test('an author an older CLI called "codex" moves to "codex-agent" when the revi
   // As the reviewer took the name "codex", it moved such an author; on its new default it does so when it starts.
   for (const current of [false, true]) {
     const data = mkdtempSync(join(tmpdir(), 'galley-upgrade-'));
-    const db = new Db(join(data, 'laatsux.db'));
+    const db = new Db(join(data, 'galley.db'));
     try {
       const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
       const registered = await s.registerRepo(repo);
@@ -3434,7 +3434,7 @@ test('a Codex reviewer on the former default name "codex" becomes "codex-review"
 
 test('Codex reviews from before findings were counted are counted from their review', async () => {
   const data = mkdtempSync(join(tmpdir(), 'galley-findings-'));
-  const db = new Db(join(data, 'laatsux.db'));
+  const db = new Db(join(data, 'galley.db'));
   const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
   const reviewer = new CodexReviewer(s, join(dir, 'codex'));
   s.codex = reviewer;
@@ -3501,7 +3501,7 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
 
   // Learned later (from gh): the reviewer gives the name up.
   const data2 = mkdtempSync(join(tmpdir(), 'galley-viewer-'));
-  const db = new Db(join(data2, 'laatsux.db'));
+  const db = new Db(join(data2, 'galley.db'));
   try {
     const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'someone' });
     s.codex = new CodexReviewer(s, join(dir, 'codex'));
@@ -3769,7 +3769,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     for (const src of [
       '/api/repos/acme/widgets/pulls/1',
       `/uploads/${hash}.svg`,
-      `/uploads/${hash}.png/../../laatsux.db`,
+      `/uploads/${hash}.png/../../galley.db`,
       '//evil.example/a.png',
       'javascript:alert(1)',
       'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
