@@ -2,7 +2,7 @@ import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
 import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
-import type { Reviewer, RunUsage } from '../reviewers/reviewer.ts';
+import { outsideTheDiff, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
@@ -17,6 +17,7 @@ import {
   copyButton,
   layout,
   markdownEditor,
+  priorityCounts,
   pullIcon,
   repoCrumbs,
   repoNav,
@@ -665,14 +666,14 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   </div>`;
 }
 
-/** Stop iterating, while a reviewer agent may still review on its own; Resume once stopped. */
+/** Stop iterating, while a reviewer agent may still review on its own; Resume once stopped. Both say what the last round found. */
 function iterationsRows(p: PullPage): Safe[] {
   const { s, pull, author } = p;
   const api = `${p.apiBase}/stop-iterating`;
   const stop = s.iterationsStopped(pull);
   if (stop) {
     return [
-      html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Iterations stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>
+      html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Iterations stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>${lastRound(p)}
         <div class="color-fg-muted">No reviewer agent starts another automatic review, so ${author.login} hands its next commit to you. Asking one to review still works, and Resume lets them go on up to their limits.</div></div>
         <button type="button" class="btn btn-sm js-iterations" data-method="DELETE" data-api="${api}">Resume</button></div>`,
     ];
@@ -680,10 +681,37 @@ function iterationsRows(p: PullPage): Safe[] {
   // Shown while a reviewer agent may still review on its own; the round is the one stopping records.
   if (!s.reviewerAgents().some((r) => r.enabled(pull) && r.automaticReviews(pull) < r.limit(pull))) return [];
   return [
-    html`<div class="merge-row">${icon('iterations', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${plural(s.automaticRound(pull), 'automatic review round')} so far</strong>
+    html`<div class="merge-row">${icon('iterations', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${plural(s.automaticRound(pull), 'automatic review round')} so far</strong>${lastRound(p)}
       <div class="color-fg-muted">The reviewer agents review each commit ${author.login} waits with. Good enough, or going in circles? Stop iterating: a review in progress still finishes, and no new one starts.</div></div>
       <button type="button" class="btn btn-sm js-iterations" data-method="PUT" data-api="${api}">Stop iterating</button></div>`,
   ];
+}
+
+/**
+ * What each reviewer agent's latest review found, by priority and linked to the review, and the
+ * automatic round under way: "Round 3 running · last round: codex-review 1 High · claude-review
+ * nothing". A review found the threads it opened, resolved since or not, and the findings its
+ * body lists outside the diff.
+ */
+function lastRound(p: PullPage): Safe {
+  const { s, pull } = p;
+  let running = false;
+  const parts: Safe[] = [];
+  for (const reviewer of s.reviewerAgents()) {
+    const runs = reviewer.runs(pull);
+    running ||= runs.some((r) => r.status === 'running' && r.trigger === 'auto');
+    const last = runs.findLast((r) => r.status === 'done' && r.review_id !== null);
+    const review = last && p.reviews.find((r) => r.id === last.review_id);
+    if (!review) continue;
+    const pills = priorityCounts([...p.threads.filter((t) => t.root.review_id === review.id).map((t) => t.root.priority), ...outsideTheDiff(review.body)]);
+    const login = reviewer.actor().login;
+    parts.push(
+      html`${parts.length ? ' · ' : ''}<a class="iterations-review" href="#pullrequestreview-${review.id}" title="${login}'s latest review, of ${shortSha(last.head_sha)}">${login} ${pills.length ? pills.map((pill, i) => html`${i ? ' ' : ''}${pill}`) : html`<span class="color-fg-muted">nothing</span>`}</a>`,
+    );
+  }
+  if (!running && !parts.length) return raw('');
+  const round = running ? `Round ${s.automaticRound(pull)} running` : '';
+  return html`<div class="iterations-found">${round}${round && parts.length ? ' · ' : ''}${parts.length ? html`${round ? 'last' : 'Last'} round: ${parts}` : ''}</div>`;
 }
 
 /** What came of the last time laatsux turned on auto-merge on GitHub. */

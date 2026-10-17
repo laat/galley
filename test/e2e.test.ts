@@ -1547,6 +1547,80 @@ test('Stop iterating shows the round it records, also when a reviewer ahead of t
   }
 });
 
+test('beside Stop iterating and Resume, what each reviewer agent last found, by priority, and the round running', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/last-round');
+  writeFileSync(join(repo, 'last-round.js'), 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+  git('add', 'last-round.js');
+  git('commit', '-qm', 'Add last-round.js');
+  const created = await cli(['pr', 'create', '--title', 'Add last-round.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  // The summary line, as text, and where its links go.
+  const found = async () => {
+    const line = (await page()).match(/<div class="iterations-found">([^]*?)<\/div>/)?.[1] ?? '';
+    return { text: line.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim(), links: [...line.matchAll(/href="#pullrequestreview-(\d+)"/g)].map((m) => Number(m[1])) };
+  };
+  const reviewId = async (kind: string) => (await human('GET', `${base}/reviewers/${kind}`)).runs.at(-1).review_id;
+  const until = async (ok: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400; i++) {
+      if (await ok()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(`timed out waiting until ${what}`);
+  };
+  const comment = (line: number, priority: string | null, body: string, path = 'last-round.js') => ({ path, line, start_line: null, side: 'RIGHT', priority, body });
+  // Codex finds things of every priority, one of them on a line outside the diff; Claude finds nothing.
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({
+    summary: 'Codex has five things.',
+    comments: [comment(1, 'high', 'One.'), comment(2, 'medium', 'Two.'), comment(3, 'medium', 'Three.'), comment(3, null, 'Four.'), comment(1, 'high', 'Five.', 'math.js')],
+  });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Nothing to say.', comments: [] });
+  const gate = join(dir, 'claude-gate');
+  process.env.FAKE_CLAUDE_GATE = gate;
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 3 });
+  try {
+    assert.deepEqual(await found(), { text: '', links: [] });
+    // Codex is done and Claude is still at it: the round is running, beside what Codex found.
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    await until(async () => (await human('GET', `${base}/reviewers/codex`)).runs[0]?.status === 'done', 'Codex has reviewed');
+    await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews');
+    const codexReview = await reviewId('codex');
+    assert.deepEqual(await found(), { text: 'Round 1 running · last round: codex-review 2 High 2 Medium 1 unprioritized', links: [codexReview] });
+    assert.match(await page(), /<strong>1 automatic review round so far<\/strong><div class="iterations-found">[^]*>Stop iterating<\/button>/);
+
+    // Claude found nothing; the round is over.
+    writeFileSync(gate, '');
+    assert.equal((await waiting).code, 0);
+    await server.service.claude!.settle(id);
+    const claudeReview = await reviewId('claude');
+    const done = { text: 'Last round: codex-review 2 High 2 Medium 1 unprioritized · claude-review nothing', links: [codexReview, claudeReview] };
+    assert.deepEqual(await found(), done);
+
+    // A thread the author resolves still counts: it is what the round surfaced.
+    const threads = await human('GET', `${base}/comments`);
+    const high = threads.find((c: any) => c.body === 'One.');
+    const resolved = await cli(['pr', 'comment', '--reply-to', String(high.id), '--resolve', '-b', 'Fixed.']);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    assert.deepEqual(await found(), done);
+
+    // After a stop, the Resume row says the same.
+    await human('PUT', `${base}/stop-iterating`);
+    assert.match(await page(), /<strong>Iterations stopped by reviewer after round 1<\/strong><div class="iterations-found">[^]*>Resume<\/button>/);
+    assert.deepEqual(await found(), done);
+  } finally {
+    delete process.env.FAKE_CLAUDE_GATE;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
+  }
+});
+
 test('symlinks in a pull request lead the reviewer nowhere: not to /dev/zero, not outside the checkout', async () => {
   const outside = mkdtempSync(join(tmpdir(), 'laatsux-outside-'));
   writeFileSync(join(outside, 'secret'), 'keep\n');

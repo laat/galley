@@ -402,6 +402,10 @@ How they run:
   says "Iterations stopped by laat after round 2", and **Resume** lets them go on up to their
   limits; setting a limit by hand resumes them too. A review that fails after the stop does not
   hold things up, and the sidebar still shows it. Asking a reviewer to review still works.
+  Beside **Stop iterating** and **Resume**, the merge box says which round is running and what
+  each reviewer agent's latest review found, by priority, with a link to the review ("Last
+  round: codex-review 1 High 2 Medium · claude-review nothing"): the threads it opened,
+  resolved since or not, and the lines outside the diff its text lists.
 - Staging can decide for one pull request, whatever the setting says:
   `laatsux pr create --reviewer codex:3` turns Codex's automatic reviews on with a limit of 3,
   `--reviewer claude` turns Claude's on with the limit from settings (a reviewer's name works

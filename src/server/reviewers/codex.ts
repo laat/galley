@@ -299,7 +299,7 @@ export class CodexReviewer extends Reviewer {
       const review = this.s.db.get<{ body: string }>('SELECT body FROM reviews WHERE id = ?', run.review_id);
       if (!review) continue;
       const inline = this.s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE review_id = ?', run.review_id)!.n;
-      this.s.db.update('review_runs', run.id, { findings: inline + outsideTheDiff(review.body) });
+      this.s.db.update('review_runs', run.id, { findings: inline + outsideTheDiff(review.body).length });
     }
     // Earlier reviews carried the priority in the text ("[P1] ..."); move it into the field.
     const me = this.actor();

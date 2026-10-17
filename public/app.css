@@ -753,6 +753,9 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
 .checks-indicator { margin-left: 2px; }
 .checks-indicator .octicon { vertical-align: text-bottom; }
 .merge-error { margin: 8px 0 0; max-height: 200px; overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
+/* What the last review round found, beside Stop iterating: each reviewer's part wraps as one. */
+.iterations-found { margin: 2px 0 4px; }
+.iterations-review { display: inline-block; }
 
 /* -------------------------------------------------------------- sidebar */
 
