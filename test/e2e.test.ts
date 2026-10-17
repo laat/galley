@@ -29,6 +29,9 @@ let server: Awaited<ReturnType<typeof startServer>>;
 // Keep the user's git config out of the test, and use settings that change diff output,
 // which the server must override.
 // The reviewer signs with an SSH key, like a user with commit.gpgsign = true; agents commit unsigned.
+// Nothing reaches GitHub: the server's fetches from the github.com remotes fail at once on a proxy
+// that is not there, as from a remote it can not reach (pushes go to local bare repositories). The
+// server allows https whatever the config says, so it can not be turned off that way.
 const configDir = mkdtempSync(join(tmpdir(), 'laatsux-gitconfig-'));
 const gitconfig = join(configDir, 'config');
 const signingKey = join(configDir, 'id_ed25519');
@@ -36,8 +39,11 @@ execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'reviewer', '
 writeFileSync(
   gitconfig,
   '[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n\tinterHunkContext = 10\n[log]\n\tshowSignature = true\n' +
-    `[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n\tsigningkey = ${signingKey}\n[gpg]\n\tformat = ssh\n[commit]\n\tgpgsign = true\n`,
+    `[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n\tsigningkey = ${signingKey}\n[gpg]\n\tformat = ssh\n[commit]\n\tgpgsign = true\n` +
+    '[http]\n\tproxy = http://127.0.0.1:1\n',
 );
+delete process.env.NO_PROXY;
+delete process.env.no_proxy;
 process.env.GIT_CONFIG_GLOBAL = gitconfig;
 process.env.GIT_CONFIG_NOSYSTEM = '1';
 
@@ -250,7 +256,9 @@ console.log('Packages: +1\\nDone in 1s');
 `,
   );
   chmodSync(sandboxExec, 0o755);
-  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, viewerLogin: 'reviewer', pollMs: 50 });
+  // Tests ask GitHub and fetch base branches themselves (followGithub, page loads, publishing), so its
+  // timer does not run in between; it has a test of its own.
+  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, viewerLogin: 'reviewer', pollMs: 50, followMs: 60 * 60_000 });
 });
 
 after(async () => {
@@ -4942,7 +4950,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
 
   await t.test('a head that merges cleanly says so', async () => {
     await until(async () => (await pr.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
-    assert.deepEqual(await pr.view(), { mergeable: 'MERGEABLE', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: false, files: [], messages: [] } });
+    assert.deepEqual(await pr.view(), { mergeable: 'MERGEABLE', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: false, files: [], messages: [], behindBy: 0 } });
     assert.match(await pr.page(), new RegExp(`<strong>This branch has no conflicts with <span class="branch-name branch-name-sm">origin/main</span></strong><div class="color-fg-muted">Checked against <code>${g('rev-parse', '--short=7', 'main')}</code>`));
     const first = await pr.wait();
     assert.equal(first.code, 0, first.stderr);
@@ -4962,7 +4970,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.equal(told.code, 0, told.stderr);
     assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
     assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `laatsux pr wait \d+` again\./);
-    assert.deepEqual(await pr.view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: ['a.js'], messages: [] } });
+    assert.deepEqual(await pr.view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
     assert.match((await cli(['pr', 'view', pr.n], { cwd: path })).stdout, /^conflicts:\twith origin\/main in a\.js; rebase onto origin\/main\.$/m);
   });
 
@@ -5157,7 +5165,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     g('update-ref', 'refs/remotes/origin/main', 'main');
     await until(async () => (await view()).mergeable === 'CONFLICTING', 'the split conflicts with main');
     const said = 'CONFLICT (directory rename split): Unclear where to rename old to; it was renamed to multiple other directories, with no destination getting a majority of the files.';
-    assert.deepEqual(await view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: [], messages: [said] } });
+    assert.deepEqual(await view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: [], messages: [said], behindBy: 1 } });
     const told = await cli(['pr', 'wait', n, '--timeout', '10s'], { cwd: path });
     assert.equal(told.code, 0, told.stderr);
     assert.ok(told.stdout.includes(`This branch conflicts with origin/main; rebase onto origin/main. git says: ${said}\n`), told.stdout);
@@ -5171,4 +5179,362 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.equal(server.service.autoPublishReady(server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', (await human('GET', `${api}/${n}`)).id)), false);
     await human('PATCH', `${api}/${n}`, { state: 'closed' });
   });
+});
+
+/** Run git in `cwd` as a developer, without signing. */
+function gitIn(cwd: string) {
+  return (...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args], { encoding: 'utf8' }).trim();
+}
+
+/** Wait until `done`, for up to 10 seconds. */
+async function until(done: () => boolean | Promise<boolean>, what: string): Promise<void> {
+  for (let i = 0; i < 400 && !(await done()); i++) await new Promise((r) => setTimeout(r, 25));
+  assert.ok(await done(), what);
+}
+
+/** Another clone of `bare`, where other pull requests are merged: `merge` commits a file on a branch there (main) and pushes it. */
+function otherClone(bare: string, name: string) {
+  const path = join(dir, name);
+  execFileSync('git', ['clone', '-q', '-b', 'main', bare, path]);
+  const g = gitIn(path);
+  return (file: string, text: string, branch = 'main'): string => {
+    g('checkout', '-q', branch);
+    writeFileSync(join(path, file), text);
+    g('add', file);
+    g('commit', '-qm', `Set ${file}`);
+    g('push', '-q', 'origin', branch);
+    return g('rev-parse', 'HEAD');
+  };
+}
+
+test('the base branch is fetched when a page opens, at most once a minute per repository, and right before publishing', async (t) => {
+  const { fullName, api, path, g } = await scratchRepo('fetched');
+  // Fetches reach the bare repository too, as pushes do. Set after registering the repository:
+  // `git remote get-url` would then give the bare repository's path, not GitHub's URL.
+  g('config', `url.${join(dir, 'fetched.git')}.insteadOf`, 'https://github.com/acme/fetched.git');
+  const merge = otherClone(join(dir, 'fetched.git'), 'fetched-other');
+  const tracking = () => g('rev-parse', 'refs/remotes/origin/main');
+  const stage = async (branch: string, file: string, text: string) => {
+    g('checkout', '-q', '-b', branch, 'main');
+    writeFileSync(join(path, file), text);
+    g('add', file);
+    g('commit', '-qm', `Set ${file} in ${branch}`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Set ${file}`, head: branch, base: 'main', automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    const { number } = await res.json();
+    // Through the API: the CLI would register the repository again, with the bare repository's path for a URL.
+    const view = () => human('GET', `/api/repos/${fullName}/gh/pulls/${number}?fields=mergeable,mergeStateStatus,baseConflicts`);
+    await until(async () => (await view()).mergeable === 'MERGEABLE', `${branch} merges cleanly into main`);
+    return { n: number as number, view, page: async () => (await fetch(`${server.url}/${fullName}/pull/${number}`)).text(), json: () => human('GET', `${api}/${number}`) };
+  };
+  const mine = await stage('mine', 'a.js', 'export const a = 1;\n');
+  const theirs = await stage('theirs', 'c.js', 'export const c = 1;\n');
+  const main = g('rev-parse', 'main');
+  let merged = '';
+
+  await t.test('opening a pull request fetches its base, and the merge box says how far behind it is', async () => {
+    merged = merge('b.js', 'export const b = 1;\n');
+    assert.equal(tracking(), main);
+    await mine.page();
+    await until(() => tracking() === merged, 'origin/main is fetched');
+    await until(async () => (await mine.view()).mergeStateStatus === 'BEHIND', 'the head is behind the new base');
+    assert.deepEqual(await mine.view(), {
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'BEHIND',
+      baseConflicts: { ref: 'origin/main', oid: merged, conflicting: false, files: [], messages: [], behindBy: 1 },
+    });
+    const json = await mine.json();
+    assert.deepEqual([json.mergeable, json.mergeable_state], [true, 'behind']);
+    // For information only: nobody is asked to rebase it.
+    assert.equal(json.turn.reasons.find((r: any) => r.kind === 'conflicts'), undefined);
+    const box = await mine.page();
+    assert.match(box, /<strong>1 commit behind <span class="branch-name branch-name-sm">origin\/main<\/span>, no conflicts<\/strong>/);
+    // A fetch that worked says nothing: its time would be out of date by the next one.
+    assert.match(box, new RegExp(`Checked against <code>${merged.slice(0, 7)}</code>, its tip in this repository\\.</div>`));
+    assert.doesNotMatch(box, /data-confirm/);
+    // Only origin/main moved: not the local main, nor FETCH_HEAD.
+    assert.equal(g('rev-parse', 'main'), main);
+    assert.equal(existsSync(join(path, '.git', 'FETCH_HEAD')), false);
+  });
+
+  await t.test('pages opened again, of any pull request in the repository, wait a minute to fetch', async () => {
+    merge('a.js', 'export const a = 2;\n');
+    for (const pr of [mine, theirs, mine]) await pr.page();
+    // The poll would have seen a fetch by now.
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(tracking(), merged);
+    assert.equal((await mine.view()).mergeable, 'MERGEABLE');
+  });
+
+  await t.test('publishing fetches first, and a head that conflicts takes a second click', async () => {
+    const expected = (await mine.page()).match(/name="expected" value="([^"]+)"/)![1];
+    const refused = await fetch(`${server.url}${api}/${mine.n}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected, sign: false }) });
+    assert.equal(refused.status, 428);
+    assert.deepEqual(await refused.json(), {
+      message: 'This branch conflicts with origin/main in a.js: GitHub can not merge it until the conflicts are resolved.',
+      status: '428',
+      acknowledge: ['during_conflict'],
+    });
+    assert.notEqual(tracking(), merged);
+    const box = await mine.page();
+    assert.match(box, /class="btn btn-primary btn-publish" data-confirm="Click again to publish anyway" data-acknowledge="during_conflict"/);
+    assert.match(box, /GitHub can not merge it until the conflicts are resolved, so publishing takes a second click\./);
+    const url = `${server.url}/${fullName}/pull/${mine.n}`;
+    const asked = await cli(['pr', 'publish', url, '--no-sign'], { actor: 'reviewer' });
+    assert.equal(asked.code, 1);
+    assert.match(asked.stderr, new RegExp(`in a\\.js: GitHub can not merge it until the conflicts are resolved\\.\\nRun \`laatsux pr publish ${mine.n} --during-conflict\` to publish anyway\\.`));
+    const published = await cli(['pr', 'publish', url, '--no-sign', '--during-conflict'], { actor: 'reviewer' });
+    assert.equal(published.code, 0, published.stderr);
+    assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr create --repo acme\/fetched --base main --head mine /m);
+    assert.equal((await mine.json()).staging_state, 'published');
+    await human('PATCH', `${api}/${theirs.n}`, { state: 'closed' });
+  });
+});
+
+test('publishing fetches its base also while a fetch of the other base branches runs', async (t) => {
+  const { fullName, api, path, g } = await scratchRepo('releases');
+  g('push', '-q', 'origin', 'main:release');
+  g('update-ref', 'refs/remotes/origin/release', 'main');
+  // Fetches reach the bare repository, as in the test above.
+  g('config', `url.${join(dir, 'releases.git')}.insteadOf`, 'https://github.com/acme/releases.git');
+  const merge = otherClone(join(dir, 'releases.git'), 'releases-other');
+  const stage = async (branch: string, base: string, file: string) => {
+    g('checkout', '-q', '-b', branch, `origin/${base}`);
+    writeFileSync(join(path, file), `export const ${branch.replace('-', '_')} = 1;\n`);
+    g('add', file);
+    g('commit', '-qm', `Set ${file}`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Set ${file}`, head: branch, base, automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    return (await res.json()).number as number;
+  };
+  // Fetching main is held up, as a slow network would, until released.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const fetchBranch = Repo.prototype.fetchBranch;
+  t.mock.method(Repo.prototype, 'fetchBranch', async function (this: Repo, ...args: Parameters<Repo['fetchBranch']>) {
+    if (args[1] === 'main') await held;
+    return fetchBranch.apply(this, args);
+  });
+  try {
+    const onMain = await stage('on-main', 'main', 'b.js');
+    // Opening its page starts fetching main, the only base so far.
+    await fetch(`${server.url}/${fullName}/pull/${onMain}`);
+    // A pull request into release is staged, and release moves on GitHub to a commit it conflicts with.
+    const onRelease = await stage('on-release', 'release', 'a.js');
+    merge('a.js', 'export const a = 2;\n', 'release');
+    const publishing = fetch(`${server.url}${api}/${onRelease}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: false }) });
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    const refused = await publishing;
+    assert.equal(refused.status, 428);
+    assert.equal((await refused.json()).message, 'This branch conflicts with origin/release in a.js: GitHub can not merge it until the conflicts are resolved.');
+  } finally {
+    release();
+  }
+});
+
+test('publishing fetches its own base alone, and a repository with nothing to fetch does not hold up the next fetch', async () => {
+  const { fullName, api, path, g } = await scratchRepo('quiet');
+  g('push', '-q', 'origin', 'main:release');
+  g('update-ref', 'refs/remotes/origin/release', 'main');
+  g('config', `url.${join(dir, 'quiet.git')}.insteadOf`, 'https://github.com/acme/quiet.git');
+  const merge = otherClone(join(dir, 'quiet.git'), 'quiet-other');
+  const tracking = (base: string) => g('rev-parse', `refs/remotes/origin/${base}`);
+  const stage = async (branch: string, base: string, file: string) => {
+    g('checkout', '-q', '-b', branch, `origin/${base}`);
+    writeFileSync(join(path, file), 'export {};\n');
+    g('add', file);
+    g('commit', '-qm', `Add ${file}`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Add ${file}`, head: branch, base, automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    const { number } = await res.json();
+    return { n: number as number, page: () => fetch(`${server.url}/${fullName}/pull/${number}`).then((r) => r.text()) };
+  };
+  const intoRelease = await stage('into-release', 'release', 'r.js');
+  const published = await stage('published', 'main', 'p.js');
+  // Publishing fetches main, its base, and not release: a slow GitHub costs it one fetch.
+  const before = tracking('release');
+  merge('r2.js', 'export {};\n', 'release');
+  const mainNow = merge('m.js', 'export {};\n');
+  assert.equal((await human('POST', `${api}/${published.n}/publish`, { sign: false })).staging_state, 'published');
+  assert.equal(tracking('main'), mainNow);
+  assert.equal(tracking('release'), before);
+  // With no other pull request open, the published one's page has nothing to fetch, and fetches nothing.
+  await human('PATCH', `${api}/${intoRelease.n}`, { state: 'closed' });
+  await published.page();
+  // So a pull request staged next is fetched when its page opens, not a minute later.
+  const next = await stage('next', 'main', 'n.js');
+  const merged = merge('m2.js', 'export {};\n');
+  await next.page();
+  await until(() => tracking('main') === merged, 'origin/main is fetched');
+});
+
+test('a page whose base is a local branch does not hold up fetching the bases staged after it', async () => {
+  const { fullName, api, path, g } = await scratchRepo('stacked');
+  g('config', `url.${join(dir, 'stacked.git')}.insteadOf`, 'https://github.com/acme/stacked.git');
+  const merge = otherClone(join(dir, 'stacked.git'), 'stacked-other');
+  const stage = async (branch: string, base: string, from: string) => {
+    g('checkout', '-q', '-b', branch, from);
+    writeFileSync(join(path, `${branch}.js`), 'export {};\n');
+    g('add', `${branch}.js`);
+    g('commit', '-qm', `Add ${branch}.js`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Add ${branch}.js`, head: branch, base, automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    const { number } = await res.json();
+    return () => fetch(`${server.url}/${fullName}/pull/${number}`).then((r) => r.text());
+  };
+  // Stacked on a branch that is not on GitHub: its base is the local branch, which is not fetched.
+  g('branch', 'stack', 'main');
+  await (await stage('on-stack', 'stack', 'stack'))();
+  const onMain = await stage('on-main', 'main', 'origin/main');
+  const merged = merge('m.js', 'export {};\n');
+  await onMain();
+  await until(() => g('rev-parse', 'refs/remotes/origin/main') === merged, 'origin/main is fetched');
+});
+
+test('a fetch that fails shows in the merge box, is logged once, and does not hold up publishing', async (t) => {
+  const { fullName, api, path, g } = await scratchRepo('unfetched');
+  g('checkout', '-q', '-b', 'mine');
+  writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+  g('commit', '-qam', 'Set a');
+  const res = await fetch(server.url + api, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+    body: JSON.stringify({ title: 'Set a', head: 'mine', base: 'main', automatic_reviews: false }),
+  });
+  const { number } = await res.json();
+  const errors = t.mock.method(console, 'error');
+  const logged = () => errors.mock.calls.filter((c) => /^could not fetch origin\/main into .*\/unfetched\/\.git: /.test(String(c.arguments[0]))).map((c) => c.arguments[0]);
+  const page = async () => (await fetch(`${server.url}/${fullName}/pull/${number}`)).text();
+  // The remote is out of reach (see the git config at the top).
+  await page();
+  await until(async () => /Could not fetch origin\/main: /.test(await page()), 'the merge box says the fetch failed');
+  assert.match(await page(), /<strong>This branch has no conflicts with <span class="branch-name branch-name-sm">origin\/main<\/span><\/strong><div class="color-fg-muted">Checked against <code>[0-9a-f]{7}<\/code>, its tip in this repository\. Could not fetch origin\/main: fatal: unable to access &#39;https:\/\/github\.com\/acme\/unfetched\.git\/&#39;: Failed to connect to 127\.0\.0\.1 port 1 [^<]*<\/div>/);
+  const published = await human('POST', `${api}/${number}/publish`, { sign: false });
+  assert.equal(published.staging_state, 'published');
+  assert.equal(logged().length, 1);
+  assert.ok(logged()[0].startsWith(`could not fetch origin/main into ${g('rev-parse', '--path-format=absolute', '--git-common-dir')}: fatal: unable to access 'https://github.com/acme/unfetched.git/': Failed to connect to 127.0.0.1 port 1 `), logged()[0]);
+});
+
+test('a remote with an ssh URL is fetched from GitHub over https with gh, and never over ssh', async () => {
+  const bare = join(dir, 'sshremote.git');
+  const path = join(dir, 'sshremote');
+  execFileSync('git', ['init', '-q', '--bare', bare]);
+  execFileSync('git', ['init', '-q', '-b', 'main', path]);
+  const g = gitIn(path);
+  writeFileSync(join(path, 'a.js'), 'export {};\n');
+  g('add', 'a.js');
+  g('commit', '-qm', 'Initial commit');
+  g('push', '-q', bare, 'main');
+  g('remote', 'add', 'origin', 'git@github.com:acme/sshremote.git');
+  g('update-ref', 'refs/remotes/origin/main', 'main');
+  // ssh is a stand-in that says it ran: the agent behind the real one may ask for approval in a window.
+  const sshLog = join(dir, 'ssh.log');
+  const ssh = join(dir, 'ssh');
+  writeFileSync(ssh, `#!/bin/sh\necho "$@" >> "${sshLog}"\nexit 255\n`);
+  chmodSync(ssh, 0o755);
+  g('config', 'core.sshCommand', ssh);
+  // As some set up git: GitHub's https URLs turned into ssh ones.
+  g('config', 'url.ssh://git@github.com/.insteadOf', 'https://github.com/');
+  const { full_name: fullName } = await human('POST', '/api/repos', { path });
+  assert.equal(fullName, 'acme/sshremote');
+  g('checkout', '-q', '-b', 'mine');
+  writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+  g('commit', '-qam', 'Set a');
+  const res = await fetch(`${server.url}/api/repos/${fullName}/pulls`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+    body: JSON.stringify({ title: 'Set a', head: 'mine', base: 'main', automatic_reviews: false }),
+  });
+  const { number } = await res.json();
+  const page = async () => (await fetch(`${server.url}/${fullName}/pull/${number}`)).text();
+  const merged = otherClone(bare, 'sshremote-other')('b.js', 'export const b = 1;\n');
+
+  // Also when the server was started with ssh allowed, which git would put above its config.
+  process.env.GIT_ALLOW_PROTOCOL = 'ssh';
+  try {
+    await page();
+    await until(async () => /Could not fetch origin\/main: fatal: transport &#39;ssh&#39; not allowed/.test(await page()), 'the fetch over ssh is refused');
+  } finally {
+    delete process.env.GIT_ALLOW_PROTOCOL;
+  }
+  assert.equal(existsSync(sshLog), false, 'ssh never ran');
+
+  // Over https, which reaches the bare repository here, it is fetched.
+  g('config', '--unset', 'url.ssh://git@github.com/.insteadOf');
+  g('config', `url.${bare}.insteadOf`, 'https://github.com/acme/sshremote.git');
+  const every = server.service.fetchEveryMs;
+  server.service.fetchEveryMs = 0;
+  try {
+    await page();
+    await until(() => g('rev-parse', 'refs/remotes/origin/main') === merged, 'origin/main is fetched over https');
+  } finally {
+    server.service.fetchEveryMs = every;
+  }
+  await until(async () => /1 commit behind .*, no conflicts/.test(await page()), 'the merge box has the fetched base');
+  assert.doesNotMatch(await page(), /Could not fetch/);
+  assert.equal(existsSync(sshLog), false, 'ssh never ran');
+});
+
+test('the server fetches base branches on its timer, and a waiting author hears when its head conflicts with the new base', async () => {
+  const bare = join(dir, 'timer.git');
+  const path = join(dir, 'timer');
+  execFileSync('git', ['init', '-q', '--bare', bare]);
+  execFileSync('git', ['init', '-q', '-b', 'main', path]);
+  const g = gitIn(path);
+  writeFileSync(join(path, 'a.js'), 'export {};\n');
+  g('add', 'a.js');
+  g('commit', '-qm', 'Initial commit');
+  g('push', '-q', bare, 'main');
+  g('remote', 'add', 'origin', 'https://github.com/acme/timer.git');
+  g('update-ref', 'refs/remotes/origin/main', 'main');
+  const merge = otherClone(bare, 'timer-other');
+  g('checkout', '-q', '-b', 'mine');
+  writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+  g('commit', '-qam', 'Set a');
+  const head = g('rev-parse', 'HEAD');
+  const timed = await startServer({ port: 0, dataDir: join(dir, 'timer-data'), ghBin: 'false', viewerLogin: 'reviewer', pollMs: 50, followMs: 50, fetchMs: 100 });
+  try {
+    const agent = { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' };
+    const call = async (method: string, p: string, body?: unknown) => {
+      const res = await fetch(timed.url + p, { method, headers: agent, body: body === undefined ? undefined : JSON.stringify(body) });
+      const text = await res.text();
+      assert.ok(res.ok, `${method} ${p} -> ${res.status} ${text}`);
+      return text ? JSON.parse(text) : null;
+    };
+    const { full_name } = await call('POST', '/api/repos', { path });
+    // Fetches from GitHub reach the bare repository. Set after registering, since `git remote get-url` would give its path.
+    g('config', `url.${bare}.insteadOf`, 'https://github.com/acme/timer.git');
+    const { number } = await call('POST', `/api/repos/${full_name}/pulls`, { title: 'Set a', head: 'mine', base: 'main', automatic_reviews: false });
+    const base = `/api/repos/${full_name}/pulls/${number}`;
+    // The first wait hands the head to the reviewer; the author says so and waits again.
+    const first = await call('GET', `${base}/wait?timeout=10`);
+    assert.equal(first.status, 'agents_done');
+    await call('PUT', `${base}/seen`, { at: first.seen_at, agents_done: first.agents_done.sha });
+    const waiting = call('GET', `${base}/wait?timeout=10`);
+    // Another pull request sets a too, and is merged on the remote. Nobody opens a page.
+    const merged = merge('a.js', 'export const a = 2;\n');
+    const told = await waiting;
+    assert.equal(told.status, 'conflicts');
+    assert.equal(told.conflicts, head);
+    assert.deepEqual(told.pr.baseConflicts, { ref: 'origin/main', oid: merged, conflicting: true, files: ['a.js'], messages: [], behindBy: 1 });
+  } finally {
+    await timed.close();
+  }
 });

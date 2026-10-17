@@ -28,7 +28,7 @@ export function api(s: Service): Hono {
   const app = new Hono();
 
   app.onError((err, c) => {
-    if (err instanceof HttpError) return c.json({ message: err.message, status: String(err.status) }, err.status as 400);
+    if (err instanceof HttpError) return c.json({ message: err.message, status: String(err.status), ...err.fields }, err.status as 400);
     if (err instanceof GitError) return c.json({ message: err.message, status: '500' }, 500);
     console.error(err);
     return c.json({ message: String((err as Error)?.message ?? err), status: '500' }, 500);
@@ -421,7 +421,7 @@ export function api(s: Service): Hono {
     const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
     // Decided now: the setting may change while publishing awaits.
     const autoMerge = b.auto_merge ? mergeMethod(b.merge_method, x.pull) : undefined;
-    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review, autoMerge }, actor(c));
+    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review, duringConflict: !!b.during_conflict, autoMerge }, actor(c));
     // Extension: what came of turning on auto-merge, which does not undo the publish when it fails.
     return c.json({ ...pullJson(s, x.repo, pull), auto_merge_result: autoMerge ? autoMergeResult(s.autoMerge(pull)) : undefined });
   });

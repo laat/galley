@@ -76,7 +76,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
   const author = s.db.actorById(pull.author_id);
   const merged = pull.github_state === 'merged';
   const github = githubStatus(pull);
-  const clean = s.baseConflicts(pull)?.clean ?? null;
+  const conflicts = s.baseConflicts(pull);
+  const clean = conflicts?.clean ?? null;
   const local = clean === null ? null : !clean;
   const staging = stagingState(pull);
   const json: Record<string, unknown> = {
@@ -100,9 +101,10 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     merge_commit_sha: pull.github_merge_sha,
     // GitHub's auto_merge, for the published pull request: on when laatsux last turned it on there.
     auto_merge: autoMergeJson(s, pull),
-    // GitHub's mergeability, while it is open there; for a head GitHub does not have, whether it conflicts with its base here.
+    // GitHub's mergeability, while it is open there; for a head GitHub does not have, whether it conflicts with its base here,
+    // and whether it is behind it.
     mergeable: local !== null ? !local : github && github.mergeable !== 'UNKNOWN' ? github.mergeable === 'MERGEABLE' : null,
-    mergeable_state: local ? 'dirty' : local === null && github ? github.mergeStateStatus.toLowerCase() : 'unknown',
+    mergeable_state: local ? 'dirty' : local === false && conflicts?.behind ? 'behind' : local === null && github ? github.mergeStateStatus.toLowerCase() : 'unknown',
     head: { label: `${repo.owner}:${pull.head_ref}`, ref: pull.head_ref, sha: pull.head_sha },
     base: { label: `${repo.owner}:${pull.base_ref}`, ref: pull.base_ref, sha: pull.base_sha },
     // laatsux extensions:
@@ -375,17 +377,21 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('mergedBy', () => (merged && pull.github_closed_by ? { login: pull.github_closed_by, is_bot: false } : null));
   set('mergeCommit', () => (merged && pull.github_merge_sha ? { oid: pull.github_merge_sha } : null));
   // As gh has them for the pull request on GitHub, while it is open there. For a head GitHub does
-  // not have, whether it conflicts with its base as laatsux worked it out; the rest of
-  // mergeStateStatus (checks, reviews, behind) is GitHub's to say.
+  // not have, whether it conflicts with its base as laatsux worked it out, and BEHIND when it merges
+  // cleanly but the base has commits it does not; the rest of mergeStateStatus (checks, reviews)
+  // is GitHub's to say.
   const github = githubStatus(pull);
   const conflicts = s.baseConflicts(pull);
   const local = conflicts && conflicts.clean !== null ? !conflicts.clean : null;
   set('mergeable', () => (local === null ? (github?.mergeable ?? 'UNKNOWN') : local ? 'CONFLICTING' : 'MERGEABLE'));
-  set('mergeStateStatus', () => (local === null ? (github?.mergeStateStatus ?? 'UNKNOWN') : local ? 'DIRTY' : 'UNKNOWN'));
+  set('mergeStateStatus', () => (local === null ? (github?.mergeStateStatus ?? 'UNKNOWN') : local ? 'DIRTY' : conflicts!.behind ? 'BEHIND' : 'UNKNOWN'));
   // laatsux extension: the base branch the head was merged into here (origin/main) and its tip, whether it
-  // conflicts, the files that do, and git's message for each conflict in none of them.
+  // conflicts, the files that do, git's message for each conflict in none of them, and how many commits
+  // the base has that the head does not (`behindBy`, as in GitHub's compare API).
   set('baseConflicts', () =>
-    conflicts && conflicts.clean !== null ? { ref: conflicts.ref, oid: conflicts.base, conflicting: !conflicts.clean, files: conflicts.files, messages: conflicts.messages } : null,
+    conflicts && conflicts.clean !== null
+      ? { ref: conflicts.ref, oid: conflicts.base, conflicting: !conflicts.clean, files: conflicts.files, messages: conflicts.messages, behindBy: conflicts.behind }
+      : null,
   );
   set('statusCheckRollup', () =>
     (github?.checks ?? []).map((c) =>
