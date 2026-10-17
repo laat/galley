@@ -125,18 +125,18 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   // Warm what the pages show about the repositories on GitHub, so the first page already has it.
   for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubRepo(repo.github_slug);
 
-  let polling = false;
-  const timer = setInterval(async () => {
-    if (polling) return;
-    polling = true;
+  // The running poll, which closing waits for before the database closes.
+  let polling: Promise<void> | null = null;
+  const poll = async () => {
     try {
       await service.pollAll();
       autoPublisher.considerAll();
     } catch (e) {
       console.error('poll failed:', e);
-    } finally {
-      polling = false;
     }
+  };
+  const timer = setInterval(() => {
+    polling ??= poll().finally(() => (polling = null));
   }, opts.pollMs ?? 2000);
   timer.unref();
 
@@ -156,6 +156,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     close: async () => {
       clearInterval(timer);
       clearInterval(follow);
+      await polling;
       await following;
       // Running reviews and publishes write to the database when they end, so they go first.
       await autoPublisher.stop();

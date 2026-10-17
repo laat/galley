@@ -596,6 +596,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(`${done}; ask the reviewer to review it: ${url}`);
       out(c.gray(`Then run \`laatsux pr wait ${all}\` to wait for the review.`));
     }
+    // Before the confirmation below, like the feedback: once confirmed, no wait says it again.
+    if (r.status === 'published') out(`Published to GitHub: ${r.published_url}`);
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
@@ -632,7 +634,6 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       return 0;
     }
     if (r.status === 'published') {
-      out(`Published to GitHub: ${r.published_url}`);
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
       else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
       out(c.gray(`Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
