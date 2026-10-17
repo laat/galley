@@ -161,12 +161,21 @@ The Staged and Published tabs list the pull requests whose turn it is for you fi
 then those with the agents; Published then those waiting on GitHub, with nothing new here. A tab
 with pull requests whose turn it is for you says how many, whichever tab is shown. The author
 agent's turn starts when `pr wait` (or `pr view --comments`) hands it feedback that asks something
-of it, and lasts until its next action: a push, an edit, a reply, or waiting again. A reviewer
-agent's turn lasts while it reviews the pull request or is about to. After that it is your turn:
-the author has answered and waits, or has stopped ("claude is not waiting"), and the reviewer
-agents are done with the latest commit. A failed review is your turn too, with a Retry button, and
-so is feedback the author has not been handed while it is not waiting ("claude has not seen the
-latest feedback"): it hears of it only when you tell it.
+of it, and lasts until its next action: a push, an edit, a reply, or waiting again. While a
+[reviewer agent](#reviewer-agents) still has the latest commit to review, the pull request is with
+the agents: theirs while one reviews it, is about to, or runs again after a restart, and the
+author's while they wait for it to run `pr wait`, as after staging or a push ("claude has not asked
+for review yet (pr wait)"). It is your turn:
+
+- when the reviewer agents are done with the latest commit, as `pr wait` tells the author, whether
+  it waits or has stopped ("claude is not waiting"). A failed review counts as done, and shows with
+  a Retry button;
+- after staging or a push, when no reviewer agent reviews the pull request;
+- when there is feedback the author has not been handed while it is not waiting ("claude has not
+  seen the latest feedback"): it hears of it only when you tell it;
+- when the author has kept the reviewer agents waiting for 30 minutes since its last action (staging,
+  a push, a comment, a wait), and its session has probably ended ("claude stopped without asking for
+  review"). Open list pages move the pull request when the 30 minutes are up.
 
 Each row says why: whether the author waits and for how long, pushes and answered threads since
 your last review, what each reviewer agent made of the latest commit, your decision, unresolved
@@ -381,7 +390,8 @@ How they run:
 - Stopping the server (Ctrl-C or SIGTERM) gives running reviews up to 10 minutes to post, while
   pages say what it waits for. A second signal, or `laatsux serve --now`, stops at once. A review
   cut off by a stop is interrupted, not failed: it does not count toward the cap, and it runs
-  again when the server starts, at once if it was asked for by hand, or when the author waits.
+  again when the server starts, at once if it was asked for by hand, or when the author waits. One
+  asked for by hand that can not run again then (the repository moved, say) fails, with the error.
 - While a review runs, its section shows its latest steps (the files it read, linked to the
   reviewed commit, and the commands it runs), what it last said, how long it has run and the
   tokens so far (Claude reports them as it goes, Codex when it is done). Each run has a
