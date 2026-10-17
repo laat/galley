@@ -4,7 +4,7 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 
 ## Commands
 
-- `pnpm test`: node:test, `test/*.test.ts`. `test/e2e.test.ts` runs the whole agent loop against a temp repo, a bare remote and a fake `gh`. In a reviewer agent's sandbox the end-to-end tests need the setting "Let Claude's tests listen on localhost", and the `sandbox-exec` tests skip themselves, since macOS does not nest sandboxes.
+- `pnpm test`: node:test, `test/*.test.ts`. `test/e2e.test.ts` runs the whole agent loop against a temp repo, a bare remote and a fake `gh`. A test file that starts a server or runs the CLI imports `./helpers/env.ts` first, which keeps it off the user's galley, config, `gh`, `codex`, `claude` and the network. In a reviewer agent's sandbox the end-to-end tests need the setting "Let Claude's tests listen on localhost", and the `sandbox-exec` tests skip themselves, since macOS does not nest sandboxes.
 - `pnpm typecheck`: `tsc --noEmit` (TypeScript 7).
 - `pnpm dev`: server on :24823 with `--watch`. Use `GALLEY_HOME=<tmp> node bin/galley.ts serve --port 0` for a throwaway instance (it prints the URL of the port it got), and stage against a scratch repository or a mirror, not the one you work in.
 - `GALLEY_NO_AUTOSTART=1 node bin/galley.ts …`: the CLI from a worktree. Without the variable, a call made while the server is away starts one from the branch's code.

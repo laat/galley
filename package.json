@@ -13,7 +13,7 @@
   "scripts": {
     "start": "node bin/galley.ts serve",
     "dev": "node --watch bin/galley.ts serve",
-    "test": "node --test 'test/**/*.test.ts'",
+    "test": "node --test --test-timeout=120000 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
