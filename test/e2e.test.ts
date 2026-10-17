@@ -1,6 +1,6 @@
 // The whole loop: an agent stages a pull request with the CLI, a reviewer comments
 // through the API (as the web UI does), the agent rewrites history, and the reviewer publishes.
-import { after, before, test } from 'node:test';
+import { after, before, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -3444,8 +3444,14 @@ test('the reviewer pins pull requests to the top of the front page, until they u
     }
 
     const updated = (await human('GET', `${api}/${a.number}`)).updated_at;
-    await human('PUT', `${api}/${a.number}/pinned`);
-    await human('PUT', `${api}/${c.number}/pinned`);
+    // Pinned in the same millisecond, the later pin is still the newer.
+    mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    try {
+      await human('PUT', `${api}/${a.number}/pinned`);
+      await human('PUT', `${api}/${c.number}/pinned`);
+    } finally {
+      mock.timers.reset();
+    }
     // Pinned again, it keeps its place: no news.
     await human('PUT', `${api}/${a.number}/pinned`);
     assert.deepEqual(events, [`pinned ${a.id}`, `pinned ${c.id}`]);
