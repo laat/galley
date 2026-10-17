@@ -102,6 +102,12 @@ test('githubAsks: GitHub would merge it now, and auto-merge is off', () => {
   assert.deepEqual(githubAsks(before, 'main'), [], 'a status stored before galley asked about auto-merge');
 });
 
+test('githubAsks: of a commit a push replaces, the checks and the merge ask nothing', () => {
+  const status = readGithub(pull({ mergeable: 'CONFLICTING', reviewDecision: 'CHANGES_REQUESTED', reviewThreads: { nodes: [thread('T1')] } }, [run('test', 'COMPLETED', 'FAILURE')]), null, 'now');
+  assert.deepEqual(githubAsks(status, 'main', true), ['changes requested on GitHub', '1 unresolved thread on GitHub', 'conflicts with main on GitHub']);
+  assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: null }), null, 'now'), 'main', true), []);
+});
+
 test('githubWaits: a required review, from those asked for one', () => {
   const requests = (...who: object[]) => ({ totalCount: who.length + 2, nodes: who.map((requestedReviewer) => ({ requestedReviewer })) });
   const blocked = (more: Partial<GithubPull>) => readGithub(pull({ mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', ...more }), null, 'now');
