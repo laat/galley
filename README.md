@@ -1,6 +1,6 @@
 # galley
 
-![The loop: an agent stages a pull request, reviewer agents comment, you review it in a GitHub-like UI, and you publish it to GitHub.](https://github.com/user-attachments/assets/9f2bd780-8f65-4857-ba22-9b3934e6208b)
+![An agent stages a pull request, reviewer agents review it, you review it in a GitHub-like UI, and you publish it to GitHub. The conversation stays in galley; GitHub gets the branch, title and description.](docs/galley.jpg)
 
 A local staging area for pull requests. Agents stage a pull request with a CLI that mirrors
 `gh`, reviewer agents review it, and you review it in a web UI that looks like GitHub. When the
