@@ -6,7 +6,7 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 
 - `pnpm test`: node:test, `test/*.test.ts`. `test/e2e.test.ts` runs the whole agent loop against a temp repo, a bare remote and a fake `gh`.
 - `pnpm typecheck`: `tsc --noEmit` (TypeScript 7).
-- `pnpm dev`: server on :7171 with `--watch`. Use `LAATSUX_HOME=<tmp> node bin/laatsux.ts serve --port <p>` for a throwaway instance.
+- `pnpm dev`: server on :7171 with `--watch`. Use `LAATSUX_HOME=<tmp> node bin/laatsux.ts serve --port <p>` for a throwaway instance, and stage against a scratch repository or a mirror, not the one you work in.
 
 ## Conventions
 

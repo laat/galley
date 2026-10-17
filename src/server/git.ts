@@ -444,8 +444,17 @@ export class Repo {
     return counts;
   }
 
-  async updateRef(ref: string, sha: string): Promise<void> {
-    await this.run(['update-ref', ref, sha]);
+  /**
+   * Move a ref from `from` to `to`, where null is no ref (create, update or delete it), only if
+   * it is still at `from`. Returns why it did not, in git's words; a ref already at `to` is fine.
+   */
+  async moveRef(ref: string, from: string | null, to: string | null): Promise<string | null> {
+    // `update-ref -d` with an empty old value deletes the ref wherever it points, so a delete always names one.
+    const args = to ? ['update-ref', ref, to, from ?? ''] : from ? ['update-ref', '-d', ref, from] : null;
+    if (!args) return null;
+    const r = await this.run(args, { allowFail: true });
+    if (r.code === 0 || (await this.resolve(ref)) === to) return null;
+    return r.stderr.trim();
   }
 
   async remoteUrl(remote: string): Promise<string | null> {
