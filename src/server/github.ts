@@ -3,7 +3,7 @@
 import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
-import { githubStatus, type AutoMerge, type Ctx, type Placement, type Service, type Thread, type Turn, type TurnReason } from './service.ts';
+import { githubStatus, stagingState, type AutoMerge, type Ctx, type Placement, type Service, type Thread, type Turn, type TurnReason } from './service.ts';
 import { duration } from './web/html.ts';
 
 /**
@@ -64,23 +64,30 @@ export function repoJson(s: Service, repo: RepoRow) {
   };
 }
 
+/** When it was closed here, or on GitHub, while it is done: a pull request reopened on GitHub keeps the old close in github_closed_at. */
+function closedAt(pull: PullRow) {
+  return stagingState(pull) === 'done' ? (pull.closed_at ?? pull.github_closed_at) : null;
+}
+
 export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { files?: FileDiff[]; commits?: Commit[] } = {}) {
   const author = s.db.actorById(pull.author_id);
   const merged = pull.github_state === 'merged';
   const github = githubStatus(pull);
+  const staging = stagingState(pull);
   const json: Record<string, unknown> = {
     url: `${apiBase(s, repo)}/pulls/${pull.number}`,
     id: pull.id,
     number: pull.number,
     html_url: s.pullUrl(repo, pull),
-    state: pull.state === 'closed' ? 'closed' : 'open',
+    // As GitHub has it: closed once done (merged included), so gh's open takes in staged and published.
+    state: staging === 'done' ? 'closed' : 'open',
     title: pull.title,
     body: pull.body,
     user: userJson(s, author),
     draft: !!pull.draft,
     created_at: pull.created_at,
     updated_at: pull.updated_at,
-    closed_at: pull.closed_at,
+    closed_at: closedAt(pull),
     // Merged on GitHub, once it was published there.
     merged,
     merged_at: merged ? pull.github_closed_at : null,
@@ -94,7 +101,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     head: { label: `${repo.owner}:${pull.head_ref}`, ref: pull.head_ref, sha: pull.head_sha },
     base: { label: `${repo.owner}:${pull.base_ref}`, ref: pull.base_ref, sha: pull.base_sha },
     // laatsux extensions:
-    staging_state: pull.state,
+    // staged, published (and open on GitHub), or done (merged or closed on GitHub, or closed here).
+    staging_state: staging,
     published_url: pull.published_url,
     published_at: pull.published_at,
     // The published pull request on GitHub: open, merged or closed there (null until laatsux has asked),
@@ -258,7 +266,7 @@ function ghAuthor(s: Service, id: number) {
   return { login: a.login, is_bot: a.type === 'Bot' };
 }
 
-/** As gh says it, with PUBLISHED (a laatsux state) until the pull request is merged or closed on GitHub. */
+/** As gh says it, with laatsux's STAGED and PUBLISHED for gh's OPEN: PUBLISHED until the pull request is merged or closed on GitHub. */
 function ghState(pull: PullRow) {
   if (pull.github_state === 'merged') return 'MERGED';
   if (pull.github_state === 'closed') return 'CLOSED';
@@ -338,12 +346,12 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('title', () => pull.title);
   set('body', () => pull.body);
   set('state', () => ghState(pull));
-  set('closed', () => pull.state === 'closed' || pull.github_state === 'merged' || pull.github_state === 'closed');
+  set('closed', () => stagingState(pull) === 'done');
   set('url', () => s.pullUrl(repo, pull));
   set('isDraft', () => !!pull.draft);
   set('createdAt', () => pull.created_at);
   set('updatedAt', () => pull.updated_at);
-  set('closedAt', () => pull.closed_at ?? pull.github_closed_at);
+  set('closedAt', () => closedAt(pull));
   const merged = pull.github_state === 'merged';
   set('mergedAt', () => (merged ? pull.github_closed_at : null));
   set('mergedBy', () => (merged && pull.github_closed_by ? { login: pull.github_closed_by, is_bot: false } : null));

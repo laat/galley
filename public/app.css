@@ -27,6 +27,9 @@
   --done: #8250df;
   --done-emphasis: #8250df;
   --done-subtle: #fbefff;
+  /* Staged: only here, not open on GitHub, so not GitHub's green for open. */
+  --staged: #0969da;
+  --staged-emphasis: #0969da;
   --attention: #9a6700;
   --attention-subtle: #fff8c5;
   --attention-muted: #d4a72c66;
@@ -86,6 +89,8 @@
     --done: #ab7df8;
     --done-emphasis: #8957e5;
     --done-subtle: #ab7df826;
+    --staged: #4493f8;
+    --staged-emphasis: #1f6feb;
     --attention: #d29922;
     --attention-subtle: #bb800926;
     --attention-muted: #bb800966;
@@ -145,7 +150,7 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .color-fg-danger { color: var(--danger) !important; }
 .color-fg-done { color: var(--done) !important; }
 .color-fg-attention { color: var(--attention) !important; }
-.color-fg-open { color: var(--success); }
+.color-fg-staged { color: var(--staged); }
 .color-fg-closed { color: var(--danger); }
 .link-muted { color: var(--fg-muted); }
 .link-muted:hover { color: var(--accent); }
@@ -325,7 +330,7 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
   white-space: nowrap;
 }
 .State--small { padding: 0 8px; font-size: 12px; line-height: 24px; }
-.State--open { background: var(--success-emphasis); }
+.State--staged { background: var(--staged-emphasis); }
 .State--draft { background: var(--neutral-emphasis); }
 .State--closed { background: var(--danger-emphasis); }
 .State--published { background: var(--done-emphasis); }
@@ -423,10 +428,13 @@ kbd {
 
 .list-header-row { display: flex; align-items: center; margin: 24px 0 16px; }
 .page-title { margin: 0; font-size: 24px; font-weight: 400; }
-.list-tabs { display: flex; gap: 16px; padding: 14px 16px; }
+.list-tabs { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 14px 16px; }
 .list-tab { color: var(--fg-muted); font-weight: 500; display: inline-flex; align-items: center; gap: 4px; }
 .list-tab.selected { color: var(--fg); font-weight: 600; }
 .list-tab:hover { color: var(--fg); text-decoration: none; }
+/* How many of a tab's pull requests wait for you. */
+.list-tab-turn { display: inline-flex; align-items: center; gap: 3px; margin-left: 2px; padding: 0 6px; font-size: 12px; font-weight: 600; line-height: 18px; color: var(--attention); background: var(--attention-subtle); border-radius: 2em; }
+.list-tab-turn .octicon { width: 12px; height: 12px; }
 .pr-row { display: flex; gap: 8px; padding: 8px 16px; }
 .pr-row:hover { background: var(--bg-subtle); }
 .pr-row-icon { padding-top: 2px; }
@@ -447,7 +455,7 @@ kbd {
 
 /* Whose turn: groups on the front page, and each row's reasons. */
 .turn-group { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--bg-subtle); color: var(--fg-muted); }
-.turn-group-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--fg); }
+.turn-group-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--fg); white-space: nowrap; }
 .turn-group-note { margin-left: auto; font-size: 12px; }
 .turn-empty { padding: 12px 16px; color: var(--fg-muted); }
 .pr-row-turn { margin-top: 4px; font-size: 12px; color: var(--fg-muted); }
@@ -659,7 +667,7 @@ kbd {
   width: 40px;
   height: 40px;
   color: #fff;
-  background: var(--success-emphasis);
+  background: var(--staged-emphasis);
   border-radius: 6px;
 }
 .merge-box--published .merge-box-icon { background: var(--done-emphasis); }

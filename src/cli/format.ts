@@ -119,21 +119,30 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
 }
 
 export function viewTTY(pr: GhPull, images?: ImageRef): string {
-  const state =
-    pr.state === 'OPEN'
-      ? pr.isDraft
-        ? c.gray('Draft')
-        : c.green('Open')
-      : pr.state === 'PUBLISHED'
-        ? pr.unpublishedChanges?.length
-          ? c.green('Update not published')
-          : c.magenta('Published')
-        : pr.state === 'MERGED'
-          ? c.magenta('Merged')
-          : c.red('Closed');
+  // A server older than the CLI says OPEN for STAGED.
+  const staged = pr.state === 'STAGED' || pr.state === 'OPEN';
+  const update = pr.state === 'PUBLISHED' && pr.unpublishedChanges?.length > 0;
+  const state = staged
+    ? pr.isDraft
+      ? c.gray('Draft')
+      : c.blue('Staged')
+    : pr.state === 'PUBLISHED'
+      ? update
+        ? c.blue('Update not published')
+        : c.magenta('Published')
+      : pr.state === 'MERGED'
+        ? c.magenta('Merged')
+        : c.red('Closed');
+  const commits = `${pr.commits.length} commit${pr.commits.length === 1 ? '' : 's'}`;
+  const did =
+    pr.state === 'MERGED'
+      ? `${pr.mergedBy?.login ?? 'Someone'} merged ${commits} into`
+      : pr.state === 'PUBLISHED' && !update
+        ? `${pr.author.login} published ${commits} into`
+        : `${pr.author.login} staged ${commits} for`;
   const out = [
     `${c.bold(pr.title)} ${c.gray('#' + pr.number)}`,
-    `${state} • ${pr.author.login} wants to merge ${pr.commits.length} commit${pr.commits.length === 1 ? '' : 's'} into ${pr.baseRefName} from ${pr.headRefName} • ${c.green('+' + pr.additions)} ${c.red('-' + pr.deletions)}`,
+    `${state} • ${did} ${pr.baseRefName} from ${pr.headRefName} • ${c.green('+' + pr.additions)} ${c.red('-' + pr.deletions)}`,
   ];
   const reviewers = reviewersLine(pr);
   if (reviewers) out.push(`Reviewers: ${reviewers}`);
