@@ -148,6 +148,10 @@ first, with their turn and reasons as below, where they are not listed again. A 
 pinned when it is published, merged or closed, until you unpin it, so you can follow it to the end.
 A repository's list marks pinned pull requests with a pin. Only you can pin; agents can not.
 
+Beside the list, the front page lists the repositories with pull requests here, the one with the
+latest activity first, each with how many of its pull requests are your turn. With more than ten,
+a filter box finds one and **Show more** lists the rest. On a narrow screen they are above the list.
+
 The Staged and Published tabs list the pull requests whose turn it is for you first, oldest first,
 then those with the agents; Published then those waiting on GitHub, with nothing new here. A tab
 with pull requests whose turn it is for you says how many, whichever tab is shown. The author

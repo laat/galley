@@ -140,8 +140,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <h3>${other ? nothing[state].replace(/^No /, 'No other ') : nothing[state]}${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
   <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
 </div>`;
-  const body = html`<div class="container container-lg">
-  <div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>
+  const list = html`<div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>
     <button type="button" class="btn btn-sm notify-toggle js-notify" hidden title="A desktop notification when a pull request becomes your turn, while a page like this is open">${icon('bell')} <span class="js-notify-label">Notify me</span></button></div>
   ${
     pinned.length
@@ -158,8 +157,12 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
       ${tab('done', 'check', 'Done')}
     </div>
     ${rows.length ? rows : empty}
-  </div>
-</div>`;
+  </div>`;
+  // The front page has your repositories beside the list.
+  const sidebar = opts.repo ? null : repoSidebar(s, all, yours);
+  const body = sidebar
+    ? html`<div class="container container-xl dashboard">${sidebar}<div class="dashboard-main">${list}</div></div>`
+    : html`<div class="container container-lg">${list}</div>`;
   // The tab's title counts the pull requests waiting for you, as a mail client counts unread mail.
   const title = opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux';
   return layout(s, {
@@ -169,6 +172,37 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     body,
     live: 'all',
   });
+}
+
+/** How many repositories the front page's sidebar shows before "Show more". */
+const SIDEBAR_REPOS = 10;
+
+/**
+ * The front page's repositories: those with pull requests, latest activity first (the latest
+ * update of a pull request in each), with how many of them are your turn. With more than
+ * SIDEBAR_REPOS, a filter and "Show more" (public/app.js). Null when there are none.
+ */
+function repoSidebar(s: Service, all: PullRow[], yours: PullRow[]): Safe | null {
+  // Newest first, so a repository's first pull request is its latest activity.
+  const repos = [...new Set(all.map((p) => p.repo_id))].map((id) => s.repoById(id));
+  if (!repos.length) return null;
+  const many = repos.length > SIDEBAR_REPOS;
+  const items = repos.map((repo, i) => {
+    const name = `${repo.owner}/${repo.name}`;
+    const owner = repo.github_slug?.split('/')[0];
+    const mine = yours.filter((p) => p.repo_id === repo.id).length;
+    return html`<li class="repo-list-item" data-name="${name}"${i >= SIDEBAR_REPOS ? raw(' hidden') : ''}>
+      ${avatar(owner ? `https://github.com/${owner}.png?size=40` : `/avatars/${encodeURIComponent(repo.owner)}.svg`, owner ?? repo.owner, 20)}
+      <a class="repo-list-name" href="/${name}" title="${name}">${name}</a>
+      ${mine ? html`<span class="list-tab-turn" title="${plural(mine, 'pull request')} waiting for you">${icon('inbox')} ${mine}</span>` : ''}
+    </li>`;
+  });
+  return html`<aside class="dashboard-sidebar" aria-labelledby="repo-list-title">
+  <h2 class="dashboard-sidebar-title" id="repo-list-title">Repositories</h2>
+  ${many ? html`<input type="search" class="form-control repo-filter js-repo-filter" placeholder="Find a repository…" aria-label="Find a repository" autocomplete="off">` : ''}
+  <ul class="repo-list js-repo-list" data-shown="${SIDEBAR_REPOS}">${items}</ul>
+  ${many ? html`<p class="repo-list-none js-repo-none" hidden>No repository matches.</p><button type="button" class="btn-link repo-list-more js-repo-more">Show more</button>` : ''}
+</aside>`;
 }
 
 /**

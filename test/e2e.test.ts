@@ -3333,20 +3333,25 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   assert.match(wrong.stderr, /state must be one of staged, published, done/);
 });
 
-/** A repository of its own, acme/<name> on GitHub (pushing to a bare repository), where `stage` stages a branch with a commit of its own as the agent. */
-async function scratchRepo(name: string) {
+/**
+ * A repository of its own, acme/<name> on GitHub (pushing to a bare repository), or with `github`
+ * false local/<name> with no remote, where `stage` stages a branch with a commit of its own as the agent.
+ */
+async function scratchRepo(name: string, { github = true } = {}) {
   const path = join(dir, name);
   const bare = join(dir, `${name}.git`);
-  execFileSync('git', ['init', '-q', '--bare', bare]);
   execFileSync('git', ['init', '-q', '-b', 'main', path]);
   const g = (...args: string[]) => execFileSync('git', ['-C', path, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
-  g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
-  g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
   writeFileSync(join(path, 'a.js'), 'export {};\n');
   g('add', '.');
   g('commit', '-qm', 'Initial commit');
-  g('push', '-q', 'origin', 'main');
-  g('update-ref', 'refs/remotes/origin/main', 'main');
+  if (github) {
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
+    g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
+    g('push', '-q', 'origin', 'main');
+    g('update-ref', 'refs/remotes/origin/main', 'main');
+  }
   const { full_name } = await human('POST', '/api/repos', { path });
   const api = `/api/repos/${full_name}/pulls`;
   const stage = async (branch: string): Promise<{ id: number; number: number }> => {
@@ -3451,4 +3456,66 @@ test('the reviewer pins pull requests to the top of the front page, until they u
   } finally {
     server.service.bus.off('change', listen);
   }
+});
+
+test('the front page lists the repositories with pull requests, latest activity first, with your turn in each', async () => {
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  /** The front page's repositories: name, link, avatar, how many are your turn, and whether shown. */
+  const sidebar = async (path = '/') => {
+    const html = await page(path);
+    const aside = html.match(/<aside class="dashboard-sidebar"[^]*?<\/aside>/)?.[0] ?? '';
+    const repos = [...aside.matchAll(/<li class="repo-list-item" data-name="([^"]+)"( hidden)?>\s*<img class="avatar " src="([^"]+)"[^>]*>\s*<a class="repo-list-name" href="([^"]+)"[^>]*>[^<]*<\/a>\s*(?:<span class="list-tab-turn" title="([^"]+)">[^]*?<\/svg> (\d+)<\/span>)?/g)].map((m) => ({
+      name: m[1],
+      shown: !m[2],
+      avatar: m[3],
+      href: m[4],
+      turn: m[6] ? Number(m[6]) : 0,
+      title: m[5],
+    }));
+    return { aside, repos };
+  };
+  const north = await scratchRepo('north');
+  const south = await scratchRepo('south');
+  const local = await scratchRepo('sidebar-local', { github: false });
+  const n1 = await north.stage('n1');
+  await south.stage('s1');
+  await south.stage('s2');
+  const s3 = await south.stage('s3');
+  // Closed: not your turn, but activity.
+  await human('PATCH', `${south.api}/${s3.number}`, { state: 'closed' });
+  await local.stage('l1');
+
+  let { repos } = await sidebar();
+  const mine = (names: string[]) => repos.filter((r) => names.includes(r.name));
+  // Latest activity first, each with how many are your turn; a link to the repository, and the owner's avatar.
+  assert.deepEqual(mine([local.fullName, south.fullName, north.fullName]), [
+    { name: local.fullName, shown: true, avatar: '/avatars/local.svg', href: `/${local.fullName}`, turn: 1, title: '1 pull request waiting for you' },
+    { name: 'acme/south', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/south', turn: 2, title: '2 pull requests waiting for you' },
+    { name: 'acme/north', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/north', turn: 1, title: '1 pull request waiting for you' },
+  ]);
+  assert.equal(repos[0].name, local.fullName);
+  // A GitHub owner's avatar falls back to the generated one; a generated one needs none.
+  assert.match((await sidebar()).aside, /src="https:\/\/github\.com\/acme\.png\?size=40" data-fallback="\/avatars\/acme\.svg"/);
+  // A comment is activity; a repository with nothing for you has no count.
+  await human('POST', `/api/repos/acme/north/issues/${n1.number}/comments`, { body: 'Moving.' });
+  await human('PATCH', `${north.api}/${n1.number}`, { state: 'closed' });
+  ({ repos } = await sidebar('/?state=done'));
+  assert.deepEqual(repos[0], { name: 'acme/north', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/north', turn: 0, title: undefined });
+  // Only on the front page.
+  assert.doesNotMatch(await page('/acme/north'), /dashboard-sidebar/);
+
+  // Ten at most, then a filter and "Show more".
+  for (let i = repos.length; i < 10; i++) await (await scratchRepo(`more-${i}`)).stage('more');
+  let { aside } = await sidebar();
+  ({ repos } = await sidebar());
+  assert.equal(repos.length, 10);
+  assert.doesNotMatch(aside, /js-repo-filter|js-repo-more/);
+  await (await scratchRepo('eleventh')).stage('more');
+  ({ aside, repos } = await sidebar());
+  assert.equal(repos.length, 11);
+  assert.deepEqual(repos.map((r) => r.shown), [...Array(10).fill(true), false]);
+  assert.equal(repos[0].name, 'acme/eleventh');
+  assert.match(aside, /<input type="search" class="form-control repo-filter js-repo-filter" placeholder="Find a repository…"/);
+  assert.match(aside, /<ul class="repo-list js-repo-list" data-shown="10">/);
+  assert.match(aside, /<button type="button" class="btn-link repo-list-more js-repo-more">Show more<\/button>/);
 });
