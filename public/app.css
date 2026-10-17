@@ -392,6 +392,7 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 }
 .dropdown-item:hover { background: var(--neutral-muted); text-decoration: none; }
 .dropdown-item.selected { background: var(--accent-subtle); }
+.dropdown-item:disabled { color: var(--fg-muted); background: none; cursor: default; }
 .dropdown-item-danger { color: var(--danger); }
 .dropdown-item-danger:hover { background: var(--danger-subtle); }
 .dropdown-item-desc { display: block; font-size: 12px; color: var(--fg-muted); }
@@ -567,7 +568,6 @@ kbd {
 .input-medium { width: 240px; }
 .form-actions-left { justify-content: flex-start; }
 .flash-warn { color: var(--fg); background: var(--attention-subtle); border-color: var(--attention-muted); display: flex; gap: 8px; align-items: center; }
-.codex-status { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 8px 0 4px; }
 .codex-status--running { color: var(--accent); font-weight: 600; }
 .codex-status--running .octicon { animation: pulse 1.6s ease-in-out infinite; }
 .codex-error { width: 100%; }
@@ -577,10 +577,27 @@ kbd {
 .codex-step:hover:not(:disabled) { color: var(--fg); background: var(--btn-hover); }
 .codex-step:disabled { opacity: 0.4; cursor: default; }
 .codex-step .octicon { width: 12px; height: 12px; }
-.codex-scope .octicon { color: var(--fg-muted); vertical-align: text-bottom; margin-right: 2px; }
 .codex-error pre { max-height: 200px; overflow: auto; padding: 8px; font-size: 11px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
+/* Reviewer agents in the sidebar: a row each, a second line only when it has something to say, and a menu of controls. */
+.agent-list > li { padding: 4px 0; }
+.agent-row { display: flex; align-items: center; gap: 8px; }
+.agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+.agent-state { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; white-space: nowrap; color: var(--fg-muted); }
+a.agent-state:hover { color: var(--accent); text-decoration: none; }
+.agent-state code { font-size: 11px; }
+.agent-state--running { color: var(--accent); font-weight: 600; }
+.agent-state--running > .octicon { animation: pulse 1.6s ease-in-out infinite; }
+.agent-menu { flex-shrink: 0; }
+.agent-menu .dropdown-menu { width: 264px; font-size: 14px; }
+.agent-menu-limit { display: flex; align-items: center; gap: 8px; margin: 0 8px; padding: 6px 8px; }
+.agent-menu-limit .codex-step { width: 22px; height: 22px; }
+.agent-menu-limit .codex-limit { gap: 6px; }
+.agent-menu-limit .codex-limit strong { margin: 0; text-align: center; }
+.agent-meta { margin: 2px 0 0 28px; color: var(--fg-muted); }
+.agent-chunk { white-space: nowrap; }
+.agent-error { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.agent-list .run-progress { margin: 8px 0 0 28px; }
 /* A reviewer agent's run: its progress in the sidebar, and its transcript page. */
-.run-progress .codex-status { margin-bottom: 6px; }
 .run-steps { list-style: none; margin: 0 0 6px; padding: 0; }
 .run-step { display: flex; align-items: center; gap: 6px; padding: 1px 0; color: var(--fg-muted); }
 .run-step > .octicon { flex-shrink: 0; }
@@ -589,6 +606,7 @@ kbd {
 .run-step-running { color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
 .run-command { font-size: 11px; }
 .run-said { margin: 0 0 6px; color: var(--fg-muted); font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-foot { margin: 0; }
 .run-link { display: inline-flex; align-items: center; gap: 4px; }
 .review-run-link { display: inline-flex; align-items: center; gap: 4px; margin: 0 16px 12px; font-size: 12px; color: var(--fg-muted); }
 .run-page { padding-top: 24px; padding-bottom: 32px; }

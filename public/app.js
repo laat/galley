@@ -113,6 +113,12 @@
   const userState = { collapsed: new Map(), threads: new Map(), expanded: new Map() };
   let refreshing = null;
   let refreshAgain = null;
+  // The control in a reviewer agent's menu that has the focus, or had it last.
+  let menuFocus = null;
+  document.addEventListener('focusin', (e) => {
+    const menu = e.target.closest && e.target.closest('.agent-menu');
+    menuFocus = menu ? { id: e.target.id, menu: menu.id } : null;
+  });
 
   async function refresh() {
     // What asks for this may have changed after the page in flight was rendered: fetch it once
@@ -133,9 +139,13 @@
       const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
       const next = doc.getElementById('main');
       if (!next) return;
-      // The repository filter keeps its focus and caret.
+      // The repository filter keeps its focus and caret. A reviewer agent's menu keeps the focus on
+      // its control, also one that lost it by disabling itself while its change saves.
       const active = document.activeElement;
       const filtering = active && active.matches('.js-repo-filter') ? [active.selectionStart, active.selectionEnd] : null;
+      const lost = !active || active === document.body;
+      const menuOpen = menuFocus && document.getElementById(menuFocus.menu);
+      const refocus = menuFocus && ((active && active.closest('.agent-menu')) || (lost && menuOpen && menuOpen.open)) ? menuFocus : null;
       // Steps of a transcript the reviewer opened stay open while the run goes on.
       const open = $$('details.js-keep-open[open]').map((d) => d.id);
       main().replaceWith(document.adoptNode(next));
@@ -149,6 +159,13 @@
       if (tabs && nextTabs) tabs.replaceWith(document.adoptNode(nextTabs));
       document.title = doc.title;
       afterRender();
+      // On its button, when the control is gone or disabled.
+      if (refocus) {
+        const control = document.getElementById(refocus.id);
+        const menu = document.getElementById(refocus.menu);
+        const target = control && !control.disabled ? control : menu && $('summary', menu);
+        if (target) target.focus({ preventScroll: true });
+      }
       const filter = filtering && $('.js-repo-filter');
       if (filter) {
         filter.focus();
@@ -466,6 +483,16 @@
   });
 
   // ⌘/Ctrl+Enter submits; Escape closes an empty inline form.
+  // Escape closes an open menu, outside its text fields, and gives the focus back to its button
+  // (also when a control in it lost the focus by disabling itself).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.target.matches('textarea, input, select')) return;
+    for (const d of $$('details.dropdown[open]')) {
+      d.open = false;
+      if (d.contains(e.target) || e.target === document.body) $('summary', d).focus();
+    }
+  });
+
   document.addEventListener('keydown', (e) => {
     const t = e.target;
     if (!(t instanceof HTMLTextAreaElement)) return;
@@ -1378,6 +1405,12 @@
       refresh();
     } else if ((el = on('.js-run-codex'))) {
       el.disabled = true;
+      // Asked from its menu, the menu closes; the row shows the review starting.
+      const menu = el.closest('details.dropdown');
+      if (menu) {
+        menu.open = false;
+        $('summary', menu).focus();
+      }
       await api('POST', el.dataset.api).catch((err) => toast(err.message));
       refresh();
     } else if ((el = on('.js-set-state'))) {

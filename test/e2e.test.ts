@@ -820,8 +820,9 @@ test('codex-review reviews when the author waits, within the limits in settings'
   assert.match(runs[2].error, /model overloaded/);
   const page = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
   assert.match(page, /failed/);
-  assert.match(page, /Automatic reviews: 2 of <span class="codex-limit"[^>]*data-limit="2"/);
-  assert.match(page, /js-codex-reset" data-api="[^"]*" data-field="max_iterations"/);
+  assert.match(page, /<span class="agent-chunk">Automatic: 2 of 2<\/span>/);
+  assert.match(page, /class="codex-limit" data-api="[^"]*\/reviewers\/codex" data-limit="2"/);
+  assert.match(page, /js-codex-reset"[^>]* data-field="max_iterations"/);
   assert.doesNotMatch(page, /for this pull request/, 'following the setting, as without --reviewer');
   assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: null }), { enabled: true, max_iterations: 1, overrides: { enabled: null, max_iterations: null } });
 
@@ -831,10 +832,10 @@ test('codex-review reviews when the author waits, within the limits in settings'
   assert.deepEqual([...new Set(reviews.map((rv: any) => rv.user.login))], ['codex-bot']);
   await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Looks right.' });
   const renamed = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
-  assert.equal(renamed.match(/<span class="flex-auto">codex-bot<\/span>/g)?.length, 2, 'once under Reviewers, once under Codex');
+  assert.equal(renamed.match(/<span class="flex-auto">codex-bot<\/span>/g)?.length, 1, 'under Reviewers');
   assert.doesNotMatch(renamed, /<span class="flex-auto">codex<\/span>/);
   // Its name goes to its settings, under the new name too; a person's name does not.
-  assert.match(renamed, /<a class="sidebar-person" href="\/settings#codex" title="Settings for codex-bot">/);
+  assert.match(renamed, /<a class="agent-name" href="\/settings#codex" title="Settings for codex-bot">codex-bot<\/a>/);
   assert.match(renamed, /<a class="author" href="\/settings#codex" title="Settings for codex-bot">codex-bot<\/a><span class="Label Label--bot">bot<\/span> reviewed/);
   assert.match(renamed, /<a class="author" href="#" title="reviewer">reviewer<\/a> commented/);
   // A name someone else uses is refused, and nobody can post as the reviewer.
@@ -990,8 +991,9 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   });
   assert.match((await human('GET', `${base}/reviews`)).at(-1).body, /<sub>Claude \(haiku, low effort\) reviewed `[0-9a-f]{7}`, automatic review 1 of 2\.<\/sub>$/);
   let html = await page();
-  assert.match(html, /<h3 class="sidebar-heading">Claude<\/h3>\s*<a class="sidebar-person" href="\/settings#claude" title="Settings for claude-review">/);
-  assert.match(html, /Last run: \$0\.01 · 45k tokens in, 2k out · 7 turns/);
+  assert.match(html, /<a class="agent-name" href="\/settings#claude" title="Settings for claude-review">claude-review<\/a>/);
+  // What its runs cost, and the latest in detail on hover.
+  assert.match(html, /<span class="agent-chunk"><span title="Last run: \$0\.01 · 45k tokens in, 2k out · 7 turns\n[^"]*">\$0\.01<\/span><\/span>/);
   assert.match(html, /Ask Claude to review/);
   // Its transcript: the file it read by its full path, linked as the repository's own at the
   // reviewed commit, what it said, and its answer.
@@ -1032,7 +1034,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   // What it cost before it failed counts too.
   assert.equal(failed.usage.cost_usd, 0.004);
   assert.equal(failed.usage.output_tokens, 300);
-  assert.match(await page(), /Last run: \$0\.0040 · 5 tokens in, 300 out · 2 turns\. 2 runs: \$0\.02/);
+  assert.match(await page(), /<span title="2 runs: \$0\.02\nLast run: \$0\.0040 · 5 tokens in, 300 out · 2 turns\n[^"]*">\$0\.02<\/span>/);
 
   // With the tests and localhost on, the tests may start servers there, and Claude is told so.
   // They still can not connect to other hosts.
@@ -1063,14 +1065,15 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   }
   await human('PUT', '/api/settings/claude', { name: 'claude-review' });
 
-  // Its own switch and limit on each pull request, in the sidebar as for Codex.
+  // Its own switch and limit on each pull request, in its menu in the sidebar as for Codex.
   html = await page();
   assert.match(html, new RegExp(`data-api="${base}/reviewers/claude" data-limit="2"`));
-  assert.match(html, new RegExp(`class="btn-link js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="false"[^>]*>Turn off</button>`));
+  assert.match(html, new RegExp(`class="dropdown-item js-reviewer-switch"[^>]* data-api="${base}/reviewers/claude" data-enabled="false">Turn off<`));
   assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: false }), { enabled: false, max_iterations: 2, overrides: { enabled: false, max_iterations: null } });
   html = await page();
-  assert.match(html, /Turned off for this pull request \(on in Settings\)/);
-  assert.match(html, new RegExp(`js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="true"[^>]*>Turn on</button>`));
+  assert.match(html, /<span class="agent-chunk">Off for this pull request<\/span>/);
+  assert.match(html, /data-field="enabled">Follow Settings<span class="dropdown-item-desc">On in Settings<\/span>/);
+  assert.match(html, new RegExp(`js-reviewer-switch"[^>]* data-api="${base}/reviewers/claude" data-enabled="true">Turn on<`));
   assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: null }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: null } });
   await human('PUT', '/api/settings/claude', { enabled: false, model: '', effort: '', maxIterations: 3 });
 });
@@ -1144,10 +1147,10 @@ test("a reviewer agent's progress shows while it runs, and its transcript stays"
   assert.equal((await fetch(`${server.url}${pullPath}/runs/${runId}/progress`)).status, 204);
   const html = await page();
   assert.doesNotMatch(html, /js-run-progress/);
-  assert.match(html, new RegExp(`Reviewed <code>[0-9a-f]{7}</code></a> <relative-time[^>]*>[^<]*</relative-time> · <a href="${pullPath}/runs/${runId}">Transcript</a>`));
+  assert.match(html, new RegExp(`<a class="agent-state" href="${pullPath}/runs/${runId}" title="Reviewed [0-9a-f]{7}">`));
   assert.match(html, new RegExp(`<a class="review-run-link" href="${pullPath}/runs/${runId}">`));
   // Codex says how many tokens it used.
-  assert.match(html, /Last run: 12k tokens in, 300 out/);
+  assert.match(html, /<span title="Last run: 12k tokens in, 300 out[^"]*">12k tokens<\/span>/);
 
   const transcript = await page(`/runs/${runId}`);
   assert.doesNotMatch(transcript, /data-run-live/);
@@ -1478,7 +1481,9 @@ test('a review that fails after iterations stop holds nothing up, and the next c
     for (let i = 0; i < 200 && !server.service.waiters.get(id); i++) await new Promise((r) => setTimeout(r, 25));
     assert.equal(server.service.readiness(row()).agentsDone, true);
     assert.equal((await again).code, 124);
-    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /Review of <code>[0-9a-f]{7}<\/code> failed/);
+    const html = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+    assert.match(html, /title="Review of [0-9a-f]{7} failed"/);
+    assert.match(html, /<span class="agent-chunk">Automatic: stopped at \d+ of \d+<\/span>/);
 
     // The next commit still gets no automatic review: pr wait hands it to the reviewer.
     writeFileSync(join(repo, 'stop-fail.js'), 'export const fail = 2;\n');
@@ -1839,7 +1844,7 @@ test('a running review is cancelled when the pull request is published, closed, 
       const { reviewers } = server.service.readiness(row(pr));
       assert.deepEqual(reviewers.map((x) => [x.status.state, x.status.done, x.status.cancelled]), [['cancelled', true, 'published'], ['cancelled', true, 'published']]);
       const page = await pr.page();
-      assert.match(page, /Review of <code>[0-9a-f]{7}<\/code> cancelled .*?: published/);
+      assert.match(page, /title="Review of [0-9a-f]{7} cancelled">[^]*?<span class="agent-chunk">Published<\/span>/);
       assert.match(page, /codex-review<\/a><span class="Label Label--bot">bot<\/span> stopped reviewing <code>[0-9a-f]{7}<\/code> .*?: published/);
       // Turned on afterwards, Codex does not review the commit again when the author waits.
       await human('PATCH', `${pr.base}/reviewers/codex`, { enabled: true });
@@ -1861,13 +1866,13 @@ test('a running review is cancelled when the pull request is published, closed, 
       assert.match(r.stdout, /closed .* without publishing it/);
       await reviewer('codex').settle(pr.id);
       assert.deepEqual(await runs(pr, 'codex'), [['cancelled', 'closed']]);
-      assert.match(await pr.page(), /Review of <code>[0-9a-f]{7}<\/code> cancelled .*?: closed here/);
+      assert.match(await pr.page(), /title="Review of [0-9a-f]{7} cancelled">[^]*?<span class="agent-chunk">Closed here<\/span>/);
       // Its live box is gone, and its transcript keeps what it did until then, and why it stopped.
       const [{ id: runId }] = (await human('GET', `${pr.base}/reviewers/codex`)).runs;
       const runPath = `/acme/widgets/pull/${pr.number}/runs/${runId}`;
       const html = await pr.page();
       assert.doesNotMatch(html, /js-run-progress/);
-      assert.ok(html.includes(`: closed here · <a href="${runPath}">Transcript</a>`), 'the sidebar links to its transcript');
+      assert.ok(html.includes(`<a class="agent-state" href="${runPath}" title="Review of `), 'the sidebar links to its transcript');
       assert.equal((await fetch(server.url + runPath + '/progress')).status, 204);
       const transcript = await (await fetch(server.url + runPath)).text();
       assert.doesNotMatch(transcript, /data-run-live/);
@@ -1888,7 +1893,7 @@ test('a running review is cancelled when the pull request is published, closed, 
       assert.equal(reviewer('codex').atWork(row(pr)), null);
       await reviewer('codex').settle(pr.id);
       assert.deepEqual(await runs(pr, 'codex'), [['cancelled', 'merged']]);
-      assert.match(await pr.page(), /Review of <code>[0-9a-f]{7}<\/code> cancelled .*?: merged on GitHub/);
+      assert.match(await pr.page(), /title="Review of [0-9a-f]{7} cancelled">[^]*?<span class="agent-chunk">Merged on GitHub<\/span>/);
       const again = await fetch(`${server.url}${pr.base}/reviewers/codex`, { method: 'POST' });
       assert.equal(again.status, 422);
       assert.match((await again.json()).message, /merged on GitHub/);
@@ -2033,8 +2038,9 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     const { enabled, max_iterations, overrides } = await human('GET', `${api(n)}/reviewers/codex`);
     assert.deepEqual({ enabled, max_iterations, overrides }, { enabled: true, max_iterations: 2, overrides: { enabled: true, max_iterations: 2 } });
     const html = await page(n);
-    assert.match(html, /Turned on for this pull request \(off in Settings\)/);
-    assert.match(html, /Automatic reviews: 0 of <span class="codex-limit"[^>]*data-limit="2"/);
+    assert.match(html, /data-field="enabled">Follow Settings<span class="dropdown-item-desc">Off in Settings<\/span>/);
+    assert.match(html, /<span class="agent-chunk">Automatic: 0 of 2<\/span>/);
+    assert.match(html, /class="codex-limit"[^>]*data-limit="2"/);
     // Queued as soon as Codex considers it, although automatic reviews are off in settings.
     assert.equal((await considered(n))?.status, 'QUEUED');
     for (const i of [1, 2]) {
@@ -2086,9 +2092,9 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     assert.equal(config.enabled, false);
     assert.equal(config.overrides.enabled, false);
     const html = await page(n);
-    assert.match(html, /Automatic reviews are off/);
-    assert.match(html, /Turned off for this pull request \(on in Settings\)/);
-    assert.match(html, /js-codex-reset" data-api="[^"]*" data-field="enabled"/);
+    assert.match(html, /<span class="agent-state" title="Off for this pull request"><span>Off<\/span><\/span>/);
+    assert.match(html, /data-field="enabled">Follow Settings<span class="dropdown-item-desc">On in Settings<\/span>/);
+    assert.match(html, /js-codex-reset"[^>]* data-field="enabled"/);
     // Back to the setting (the page's reset) while the author waits: Codex starts at once.
     const resumed = cli(['pr', 'wait', String(n), '--timeout', '20s']);
     await authorWaiting(n);
@@ -3011,7 +3017,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
     // Its transcript keeps what it did until the stop, and says why it ended.
     const [{ id: interrupted }] = (await (await fetch(`${s.url}${base}/reviewers/codex`)).json()).runs;
     const runPath = `/${registered.full_name}/pull/${pr.number}/runs/${interrupted}`;
-    assert.match(await page(), new RegExp(`Review of <code>[0-9a-f]{7}</code> interrupted by a restart; it will run again · <a href="${runPath}">Transcript</a>`));
+    assert.match(await page(), new RegExp(`<a class="agent-state" href="${runPath}" title="Review of [0-9a-f]{7} interrupted by a restart">[^]*?<span class="agent-chunk">Runs again</span>`));
     const transcript = await (await fetch(s.url + runPath)).text();
     assert.match(transcript, /Interrupted by a restart <relative-time/);
     assert.match(transcript, /I will read math\.js and the diff\./);
