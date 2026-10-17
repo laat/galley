@@ -104,12 +104,21 @@ const LISTED = new Map([
 ]);
 
 export interface WaitResult {
-  /** `merged` and `closed_on_github` are about the published pull request on GitHub. */
-  status: 'feedback' | 'published' | 'closed' | 'merged' | 'closed_on_github' | 'timeout';
+  /** `merged` and `closed_on_github` are about the published pull request on GitHub; `agents_done`, see Service.agentsDone. */
+  status: 'feedback' | 'published' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'timeout';
   reviews: ReviewRow[];
   comments: CommentRow[];
   /** What the author confirms with markSeen once it has shown this feedback. */
   seenAt?: string;
+  /** With `agents_done`: the head the reviewer agents are done with, and what each made of it. */
+  agentsDone?: AgentsDone;
+}
+
+/** The reviewer agents are done with the head: what `pr wait` tells the author once per commit. */
+export interface AgentsDone {
+  sha: string;
+  /** What each reviewer agent made of the commit ("codex found nothing in 8c64534"); none for those turned off. */
+  reviewers: string[];
 }
 
 /** Where a reviewer agent stands with a pull request's head commit. */
@@ -1264,15 +1273,23 @@ export class Service {
     return { reviews, comments };
   }
 
-  /** Record that the author has been shown everything up to `at` (taken before reading the feedback). */
-  markSeen(pull: PullRow, at: string): void {
+  /**
+   * Record that the author has been shown everything up to `at` (taken before reading the
+   * feedback), and that the reviewer agents are done with `agentsDone`, when it was told so.
+   */
+  markSeen(pull: PullRow, at: string, agentsDone?: string): void {
     const moved = this.db.transaction(() => {
       const before = this.db.get<{ seen: string }>('SELECT author_seen_at AS seen FROM pulls WHERE id = ?', pull.id)!.seen;
-      // Only forward: a late confirmation must not bring back feedback seen since.
+      // Only forward: a late confirmation must not bring back feedback seen since, nor take back
+      // that the reviewer agents are done with a later commit.
       if (before >= at) return false;
       // Among it, feedback that asks something of the author: from now, its turn (see turn).
       const asked = this.askedAt(pull, at);
-      this.db.update('pulls', pull.id, asked !== null && asked > before ? { author_seen_at: at, author_handed_at: at } : { author_seen_at: at });
+      this.db.update('pulls', pull.id, {
+        author_seen_at: at,
+        ...(asked !== null && asked > before ? { author_handed_at: at } : {}),
+        ...(agentsDone ? { agents_done_sha: agentsDone } : {}),
+      });
       return true;
     });
     if (moved) this.emit(pull.id, 'seen', this.db.actorById(pull.author_id));
@@ -1357,6 +1374,9 @@ export class Service {
         const remaining = deadline - Date.now();
         if (remaining <= 0 || signal?.aborted) return { status: 'timeout', reviews: [], comments: [] };
         this.recordWait(pull, checkedAt, author);
+        // The reviewer's turn with a commit the author has not handed over yet: it asks the reviewer.
+        const agentsDone = this.agentsDone(pull);
+        if (agentsDone) return { status: 'agents_done', reviews: [], comments: [], seenAt: checkedAt, agentsDone };
         await new Promise<void>((resolve) => {
           const done = () => {
             clearTimeout(timer);
@@ -1392,6 +1412,23 @@ export class Service {
   /** The reviewer agents this server runs. */
   reviewerAgents(): ReviewerAgent[] {
     return this.codex ? [this.codex] : [];
+  }
+
+  /**
+   * For a waiting author with all feedback seen: none of the reviewer agents reviews the head or
+   * is about to, so it is the reviewer's turn with a commit the author has not handed over yet.
+   * They found nothing in it, used up their automatic reviews, are off, or have nothing more to
+   * say (the author answered their comments without a new commit, or a review failed). `pr wait`
+   * says so once per commit, so the author asks the reviewer to review it. Not under
+   * auto-publish, which publishes then instead, nor for a commit that is published already.
+   */
+  private agentsDone(pull: PullRow): AgentsDone | null {
+    if (pull.state === 'closed' || pull.auto_publish || pull.agents_done_sha === pull.head_sha) return null;
+    if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha)) return null;
+    const author = this.db.actorById(pull.author_id).login;
+    const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
+    if (reviewers.some((r) => r.status.state === 'reviewing' || r.status.state === 'queued' || r.status.state === 'unreviewed')) return null;
+    return { sha: pull.head_sha, reviewers: reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true) ?? []) };
   }
 
   /**

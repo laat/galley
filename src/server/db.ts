@@ -57,6 +57,8 @@ export interface PullRow {
   author_waited_at: string | null;
   /** When the author was last handed feedback that asks something of it (`pr wait`, `pr view --comments`); its turn until its next action. */
   author_handed_at: string | null;
+  /** The head commit `pr wait` last told the author the reviewer agents are done with, so it says so once per commit. */
+  agents_done_sha: string | null;
   /** The published pull request on GitHub, as last seen there; null until laatsux has asked. */
   github_state: GithubState | null;
   /** When it was merged or closed on GitHub, and by whom (a GitHub login). */
@@ -296,6 +298,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'github_merge_sha', 'TEXT'],
   ['pulls', 'github_status', 'TEXT'],
   ['pulls', 'pinned_at', 'TEXT'],
+  ['pulls', 'agents_done_sha', 'TEXT'],
 ];
 
 export class Db {

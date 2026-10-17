@@ -434,16 +434,22 @@ export function api(s: Service): Hono {
       // Everything needed to show the feedback, so no second request can fail in between.
       pr: r.status !== 'timeout' && pull ? await ghPullJson(s, await s.ctx(x.repo.owner, x.repo.name, pull.number), actor(c), []) : undefined,
       seen_at: r.seenAt,
+      // With status agents_done: the head the reviewer agents are done with, and what each made of it.
+      agents_done: r.agentsDone ?? null,
     });
   });
 
-  // laatsux extension: the author confirms it has shown the feedback a wait returned.
+  // laatsux extension: the author confirms it has shown the feedback a wait returned, and that
+  // the reviewer agents are done with a commit (`agents_done`, the SHA), when it said so.
   app.put('/repos/:owner/:repo/pulls/:n/seen', async (c) => {
     const x = await ctx(c, { sync: false });
     if (actor(c).id !== x.pull.author_id) throw new HttpError(403, 'only the author marks feedback as seen');
-    const at = String((await body(c)).at ?? '');
+    const b = await body(c);
+    const at = String(b.at ?? '');
     if (!/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(at)) throw new HttpError(422, 'at must be the seen_at of a wait response');
-    s.markSeen(x.pull, at);
+    const done = b.agents_done === undefined ? undefined : String(b.agents_done);
+    if (done !== undefined && !/^[0-9a-f]{40}$/.test(done)) throw new HttpError(422, 'agents_done must be the SHA of a wait response');
+    s.markSeen(x.pull, at, done);
     return c.body(null, 204);
   });
 

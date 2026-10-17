@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer, type AddressInfo } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../src/server/server.ts';
 import { Db, now } from '../src/server/db.ts';
 import { Service } from '../src/server/service.ts';
@@ -67,6 +68,17 @@ async function cli(args: string[], opts: { input?: string; actor?: string } = {}
   child.stderr!.on('data', (d) => (stderr += d));
   const code = await new Promise<number>((resolve) => child.on('close', (c) => resolve(c ?? 1)));
   return { stdout, stderr, code };
+}
+
+/**
+ * The wait that says the reviewer agents are done with the head, so the author asks the reviewer
+ * to review it. It comes once per commit, before a wait that waits for the reviewer.
+ */
+async function handedOver(n?: number, opts: { actor?: string } = {}): Promise<string> {
+  const r = await cli(['pr', 'wait', ...(n === undefined ? [] : [String(n)]), '--timeout', '20s'], opts);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /; ask the reviewer to review it: /);
+  return r.stdout;
 }
 
 /** Requests without an actor header act as the human reviewer, like the web UI. */
@@ -189,6 +201,32 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(jq.stdout.trim(), 'Add mul');
     const list = await cli(['pr', 'list']);
     assert.match(list.stdout, /^1\tAdd multiplication\tfeature\/mul\tSTAGED\t/);
+  });
+
+  await t.test('pr wait says when the reviewer agents are done with a commit, once', async () => {
+    // Codex is off in settings, so no reviewer agent reviews it: the reviewer's turn at once. The
+    // API tells it apart from feedback, and says it again until the author confirms it.
+    const earlier: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/wait?timeout=5`, { headers: { 'x-laatsux-actor': 'agent' } });
+      const body = await res.json();
+      assert.deepEqual([body.status, body.reviews, body.comments, body.agents_done], ['agents_done', [], [], { sha: git('rev-parse', 'HEAD'), reviewers: [] }]);
+      earlier.push(body.seen_at);
+    }
+    const r = await cli(['pr', 'wait', '--timeout', '20s']);
+    assert.equal(r.code, 0, r.stderr);
+    const sha = git('rev-parse', '--short=7', 'HEAD');
+    assert.equal(r.stdout, `No reviewer agent reviews ${sha}; ask the reviewer to review it: ${server.url}/acme/widgets/pull/1\nThen run \`laatsux pr wait 1\` to wait for the review.\n`);
+    // A confirmation that arrives late, from an earlier wait about an earlier commit (overlapping
+    // waits, a retry), does not take back the newer one.
+    const late = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/seen`, {
+      method: 'PUT',
+      headers: { 'x-laatsux-actor': 'agent', 'content-type': 'application/json' },
+      body: JSON.stringify({ at: earlier[0], agents_done: git('rev-parse', 'main') }),
+    });
+    assert.equal(late.status, 204);
+    // Once per commit: the next wait waits for the reviewer.
+    assert.equal((await cli(['pr', 'wait', '--timeout', '1s'])).code, 124);
   });
 
   await t.test('pr wait returns the review the reviewer submits', async () => {
@@ -337,6 +375,7 @@ test('the agent loop, from staging to publishing', async (t) => {
   });
 
   await t.test('publishing pushes the reviewed commit and opens the pull request', async () => {
+    await handedOver();
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
     await new Promise((r) => setTimeout(r, 300));
     const pr = await human('POST', '/api/repos/acme/widgets/pulls/1/publish', {});
@@ -400,6 +439,7 @@ test('the agent loop, from staging to publishing', async (t) => {
   await t.test('pr wait reports feedback that comes with a close', async () => {
     // The agent has seen everything so far (including the last publish).
     await cli(['pr', 'view', '--comments']);
+    await handedOver();
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
     await new Promise((r) => setTimeout(r, 300));
     await human('POST', '/api/repos/acme/widgets/issues/1/comments', { body: 'Closing: we went another way.' });
@@ -609,11 +649,13 @@ test('codex reviews when the author waits, within the limits in settings', async
   assert.equal(existsSync(dirname(checkout)), false);
   assert.doesNotMatch(git('worktree', 'list'), /laatsux-review-/);
 
-  // The cap: after one automatic review, a new commit and another wait start nothing.
+  // The cap: after one automatic review, a new commit and another wait start nothing. The
+  // reviewer agents are done with it, and the wait says so.
   writeFileSync(join(repo, 'codex.js'), 'export const answer = 42;\n');
   git('commit', '-qam', 'Fix the answer');
   const capped = await cli(['pr', 'wait', String(number), '--timeout', '2s']);
-  assert.equal(capped.code, 124);
+  assert.equal(capped.code, 0, capped.stderr);
+  assert.match(capped.stdout, new RegExp(`^The reviewer agents are done with ${git('rev-parse', '--short=7', 'HEAD')} \\(codex used 1 of 1 automatic reviews\\); ask the reviewer to review it: `));
 
   // Raising this pull request's limit lets Codex go on, at once when the author is waiting.
   assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /data-limit="1"[^]*js-codex-step[^]*js-codex-step/);
@@ -872,7 +914,8 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
       git('commit', '-qam', `Change two.js (${i})`);
     }
     const capped = await cli(['pr', 'wait', String(n), '--timeout', '2s']);
-    assert.equal(capped.code, 124);
+    assert.equal(capped.code, 0, capped.stderr);
+    assert.match(capped.stdout, /\(codex used 2 of 2 automatic reviews\); ask the reviewer to review it/);
     assert.equal((await human('GET', `${api(n)}/reviewers/codex`)).runs.length, 2);
   });
 
@@ -887,10 +930,10 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     assert.match(first.stdout, /automatic review 1 of 1/);
     writeFileSync(join(repo, 'limit.js'), 'export const n = 1;\n');
     git('commit', '-qam', 'Change limit.js');
+    // Codex finds the cap reached, so the reviewer agents are done with the new commit.
+    assert.match(await handedOver(n), /codex used 1 of 1 automatic reviews/);
     const waiting = cli(['pr', 'wait', String(n), '--timeout', '20s']);
     await authorWaiting(n);
-    // Let Codex see the new commit and find the cap reached before the limit goes up.
-    await new Promise((r) => setTimeout(r, 500));
     assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).runs.length, 1);
     await human('PUT', '/api/settings/codex', { maxIterations: 2 });
     const second = await waiting;
@@ -905,8 +948,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     const r = await create(['--no-review']);
     assert.equal(r.code, 0, r.stderr);
     const n = numberOf(r);
-    const w = await cli(['pr', 'wait', String(n), '--timeout', '2s']);
-    assert.equal(w.code, 124);
+    assert.match(await handedOver(n), /^No reviewer agent reviews /);
     assert.equal(await considered(n), null, 'nothing queued, although automatic reviews are on in settings');
     const config = await human('GET', `${api(n)}/reviewers/codex`);
     assert.deepEqual(config.runs, []);
@@ -933,7 +975,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     assert.equal(r.code, 0, r.stderr);
     const n = numberOf(r);
     assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).overrides, { enabled: null, max_iterations: null });
-    assert.equal((await cli(['pr', 'wait', String(n), '--timeout', '2s'])).code, 124);
+    assert.match(await handedOver(n), /^No reviewer agent reviews /);
     assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).runs, []);
     assert.doesNotMatch(await page(n), /for this pull request/);
     // Turned on in Settings while the author waits, Codex reviews this one too.
@@ -1207,8 +1249,10 @@ test('auto-publish publishes once the agents are done', async (t) => {
       await new Promise((r) => setTimeout(r, 300));
       assert.equal(pr.created(), false);
       assert.throws(() => execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', 'refs/heads/feature/auto-sign'], { stdio: 'ignore' }));
+      // Without auto-publish, the reviewer agents being done with the commit makes it the reviewer's to review.
+      assert.match((await cancelled).stdout, /^No reviewer agent reviews .*; ask the reviewer to review it: /);
       await comment(pr.number, 'Hold on.');
-      assert.match((await cancelled).stdout, /Hold on\./);
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Hold on\./);
 
       // Feedback while signing waits: it reaches the agent first, and the next wait publishes.
       signing.reset();
@@ -1238,11 +1282,13 @@ test('auto-publish publishes once the agents are done', async (t) => {
       await human('PUT', `${pr.base}/auto-publish`, { draft: false });
       const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       await until(signing.started, 'signing started');
-      // Turned off and on again, now as a draft, while the first attempt signs.
+      // Turned off and on again, now as a draft, while the first attempt signs. Turned off, it is
+      // the reviewer's to review, and the agent hears so; the new approval publishes when it waits again.
       await human('DELETE', `${pr.base}/auto-publish`);
+      assert.match((await waiting).stdout, /ask the reviewer to review it/);
       await human('PUT', `${pr.base}/auto-publish`, { draft: true });
       signing.open();
-      assert.match((await waiting).stdout, /Published to GitHub/);
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Published to GitHub/);
       // Published once, with the options of the approval in force: as a draft.
       const creates = readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.startsWith('pr create ') && l.includes(' --head feature/auto-replace '));
       assert.equal(creates.length, 1);
@@ -1297,8 +1343,9 @@ test('auto-publish publishes once the agents are done', async (t) => {
       await new Promise((r) => setTimeout(r, 500));
       assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/auto-lease'], { encoding: 'utf8' }).trim(), theirs);
       assert.equal(pr.created(), false);
+      assert.match((await waiting).stdout, /ask the reviewer to review it/);
       await comment(pr.number, 'Not yet.');
-      assert.match((await waiting).stdout, /Not yet\./);
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Not yet\./);
     } finally {
       Repo.prototype.resolve = resolve;
       release();
@@ -1425,11 +1472,12 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.match(page, /<strong>Auto-publish failed [^]*?<\/strong>[^]*?<pre class="merge-error">gh pr create failed:\nHTTP 502: gh is down<\/pre>/);
     assert.match(page, /Auto-publish failed and turned itself off/);
     assert.match(page, /Publish when reviews are done/);
-    // The reviewer tells the agent; it was never told it was published.
-    await human('POST', `/api/repos/acme/widgets/issues/${pr.number}/comments`, { body: 'I will publish this by hand.' });
+    // The agent is told to ask the reviewer, never that it was published.
     const told = await waiting;
-    assert.match(told.stdout, /I will publish this by hand\./);
+    assert.match(told.stdout, /^No reviewer agent reviews .*; ask the reviewer to review it: /);
     assert.doesNotMatch(told.stdout, /Published to GitHub/);
+    await human('POST', `/api/repos/acme/widgets/issues/${pr.number}/comments`, { body: 'I will publish this by hand.' });
+    assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /I will publish this by hand\./);
   });
 });
 
@@ -1937,10 +1985,10 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
       body: JSON.stringify({ title: 'Survives restarts', head: 'feature/by-codex', base: 'main' }),
     })
   ).json();
-  const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], {
-    cwd: repo,
-    env: { ...process.env, LAATSUX_URL: first.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1' },
-  });
+  const env = { ...process.env, LAATSUX_URL: first.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1' };
+  // No reviewer agent reviews it, which the first wait says; the next one waits for the reviewer.
+  assert.match((await exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env })).stdout, /ask the reviewer to review it/);
+  const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env });
   // Close the server while the wait's request is open, then bring it back on the same port.
   for (let i = 0; i < 100; i++) {
     if ((await (await fetch(`${first.url}/api/repos/${registered.full_name}/pulls/${pr.number}`)).json()).author_waiting) break;
@@ -1970,6 +2018,48 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
     await second.close();
     rmSync(data, { recursive: true, force: true });
   }
+});
+
+test('pr wait says the reviewer agents are done before it confirms that it said so', async () => {
+  const { stage } = await scratchRepo('handover');
+  const pr = await stage('handover');
+  const head = execFileSync('git', ['-C', join(dir, 'handover'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  // Between the CLI and the server: the server takes the confirmation, and its answer is lost.
+  let confirmed = false;
+  const proxy = createHttpServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const headers = { ...req.headers } as Record<string, string>;
+    for (const h of ['host', 'connection', 'content-length']) delete headers[h];
+    const answer = await fetch(server.url + req.url, { method: req.method, headers, body: chunks.length ? Buffer.concat(chunks) : undefined });
+    const body = Buffer.from(await answer.arrayBuffer());
+    if (req.method === 'PUT' && req.url!.endsWith('/seen')) {
+      confirmed = true;
+      return;
+    }
+    res.writeHead(answer.status, { 'content-type': answer.headers.get('content-type') ?? 'text/plain' });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  const child = execFile(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '20s'], {
+    cwd: join(dir, 'handover'),
+    env: { ...process.env, LAATSUX_URL: `http://localhost:${(proxy.address() as AddressInfo).port}`, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1', NO_COLOR: '1' },
+  });
+  let stdout = '';
+  child.stdout!.on('data', (d) => (stdout += d));
+  try {
+    for (let i = 0; i < 200 && !(confirmed && stdout); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(confirmed, 'the confirmation reached the server');
+    // Stopped while it waits for the answer, the agent was told all the same.
+    assert.match(stdout, new RegExp(`^No reviewer agent reviews ${head.slice(0, 7)}; ask the reviewer to review it: `));
+  } finally {
+    child.kill();
+    proxy.closeAllConnections();
+    proxy.close();
+  }
+  // The server will not say it again.
+  const res = await fetch(`${server.url}/api/repos/acme/handover/pulls/${pr.number}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'agent' } });
+  assert.equal((await res.json()).status, 'timeout');
 });
 
 test('auto-publish stays on when the server restarts', async () => {
@@ -2129,6 +2219,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
   });
 
   await t.test('pr wait and pr view --comments list the images, and --download-images saves them', async () => {
+    await handedOver(number);
     const waiting = cli(['pr', 'wait', String(number), '--timeout', '20s']);
     for (let i = 0; i < 100 && !(await human('GET', base)).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
     await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: `It is cut off:\n\n![screenshot](${path})` });
@@ -2616,6 +2707,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
       assert.match(r.stdout, /Fine now\./);
       await server.service.codex!.settle(id);
+      // Nothing more is coming from Codex for this commit, so the next wait says to ask the reviewer.
+      assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(codex found nothing in ${sha()}\\); ask the reviewer to review it: ${server.url}/acme/widgets/pull/${number}\n`));
       await waitEnded();
       // The clean review asks nothing of the author, so its turn does not come back.
       assert.deepEqual(await turn(), {
@@ -2632,7 +2725,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
       assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex's review of ${sha()} failed`, engine: 'codex' });
       assert.match(await page('/'), new RegExp(`codex&#39;s review of ${sha()} failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
-      // Also while the author waits: nothing more is coming from Codex for this commit.
+      // Also while the author waits: nothing more is coming from Codex for this commit. The author
+      // was told so when Codex found nothing in it, and is not told again.
       const waited = cli(['pr', 'wait', String(number), '--timeout', '2s']);
       await until(async () => (await human('GET', base)).author_waiting, 'the author waits');
       const { whose, reasons } = await turn();
@@ -2704,6 +2798,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
 
     await t.test("an update Codex reviews: the reviewer agents', not the reviewer's", async () => {
       process.env.FAKE_CODEX_GATE = gate;
+      assert.match(await handedOver(number), /codex used 2 of 2 automatic reviews/);
       const waited = cli(['pr', 'wait', String(number), '--timeout', '20s']);
       await until(async () => (await human('GET', base)).author_waiting, 'the author waits');
       await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 3 });

@@ -40,14 +40,16 @@ feedback, and the loop repeats until the user publishes it.
    EOF
    ```
 
-   It prints the review URL. Give that URL to the user. `--fill`, `--base`, `--head` and
+   It prints the review URL. Tell the user you staged it, with the URL, and that the reviewer
+   agents review it first. Do not ask for the user's review yet. `--fill`, `--base`, `--head` and
    `--draft` work as in gh. If the user said how the pull request should be reviewed, add the
    flag from [Codex reviews](#codex-reviews). If the server is not running, the CLI starts it
    and says so; mention that to the user along with the URL.
 
-2. Wait for the review. This blocks until the user submits a review or comment, publishes,
-   or closes the pull request (and once published, until it is merged or closed on GitHub),
-   then prints only the new feedback:
+2. Wait for the review. This blocks until a reviewer agent or the user submits a review or
+   comment, the reviewer agents are done with your latest commit, or the user publishes or closes
+   the pull request (and once published, until it is merged or closed on GitHub), then prints
+   only what is new:
 
    ```sh
    laatsux pr wait
@@ -112,15 +114,30 @@ feedback, and the loop repeats until the user publishes it.
      propose the structural fix to the user before you rewrite, instead of patching case after
      case.
 
-5. Run `laatsux pr wait` again. Repeat until it prints `Published to GitHub: <url>` or reports
-   that the pull request was closed. If it says a reviewer such as codex is still reviewing, its
-   review is coming: wait for it before you tell the user the pull request is ready. If it says
-   auto-publish is on, the user has approved publishing in advance: address the feedback and
-   wait again, and laatsux publishes while you wait once the reviewer agents are done. If it
+5. Run `laatsux pr wait` again, and repeat steps 2 to 4 with the reviewer agents until it says
+   they are done with your latest commit:
+
+   ```
+   The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it: <url>
+   ```
+
+   It says so once per commit, when none of them reviews it or is about to: their review was
+   clean, they used up their automatic reviews, or they have nothing more to say. When none is
+   turned on, it says `No reviewer agent reviews 3f2a1c9; ask the reviewer to review it` instead.
+
+6. Ask the user to review. Tell them the pull request is ready for their review, with the URL,
+   and in a few lines what the reviewer agents found and what you changed. Then run
+   `laatsux pr wait` again.
+
+7. Loop with the user the same way until `pr wait` prints `Published to GitHub: <url>` or
+   reports that the pull request was closed. After a new commit the reviewer agents may review
+   it first: ask the user again, as in step 6, when `pr wait` says they are done with it. If it
+   says auto-publish is on, the user has approved publishing in advance: address the feedback
+   and wait again, and laatsux publishes while you wait once the reviewer agents are done. If it
    says it also turns on auto-merge, GitHub merges the pull request once its required checks
    pass; you do not merge it.
 
-6. After `Published to GitHub: <url>`, tell the user the GitHub URL, and run `laatsux pr wait`
+8. After `Published to GitHub: <url>`, tell the user the GitHub URL, and run `laatsux pr wait`
    once more, the same way. laatsux follows the pull request on GitHub, so this blocks until it
    is merged or closed there, or new feedback arrives:
 
@@ -178,7 +195,7 @@ setting, unless they say otherwise when they ask you to stage:
 | `gh pr list`, `diff`, `edit`, `comment`, `checkout`, `status`, `ready`, `close`, `reopen` | same | |
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |
 | `gh api repos/{owner}/{repo}/pulls/N/comments` | same path | REST subset; see `laatsux api --help` |
-| | `laatsux pr wait [<n>...]` | block until feedback, or after publishing until merged or closed on GitHub; several numbers return the first with news |
+| | `laatsux pr wait [<n>...]` | block until feedback or the reviewer agents are done with your latest commit, or after publishing until merged or closed on GitHub; several numbers return the first with news |
 | | `laatsux pr comment --reply-to ID [--resolve]` | reply to a review thread, and resolve it |
 | `gh browse path:line --commit sha` | `laatsux browse path:line[-line] [--commit sha]` | prints a link to those lines in the web UI (default: HEAD); give it to the user when you point at code |
 
