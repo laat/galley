@@ -690,14 +690,15 @@ function iterationsRows(p: PullPage): Safe[] {
 /**
  * What each reviewer agent's latest review found, by priority and linked to the review, and the
  * automatic round under way: "Round 3 running · last round: codex-review 1 High · claude-review
- * nothing". A review found the threads it opened, resolved since or not, and the findings its
- * body lists outside the diff.
+ * nothing · house-rules approved". A review found the threads it opened, resolved since or not,
+ * and the findings its body lists outside the diff or on the title and description.
  */
 function lastRound(p: PullPage): Safe {
   const { s, pull } = p;
   let running = false;
   const parts: Safe[] = [];
-  for (const reviewer of s.reviewerAgents()) {
+  // Those that review the pull request: a custom reviewer whose repositories changed since is none of them.
+  for (const reviewer of s.reviewersFor(pull)) {
     const runs = reviewer.runs(pull);
     running ||= runs.some((r) => r.status === 'running' && r.trigger === 'auto');
     const last = runs.findLast((r) => r.status === 'done' && r.review_id !== null);
@@ -709,7 +710,14 @@ function lastRound(p: PullPage): Safe {
     const pills = priorityCounts(found);
     const login = reviewer.actor().login;
     parts.push(
-      html`${parts.length ? ' · ' : ''}<a class="iterations-review" href="#pullrequestreview-${review.id}" title="${login}'s latest review, of ${shortSha(last.head_sha)}">${login} ${pills.length ? pills.map((pill, i) => html`${i ? ' ' : ''}${pill}`) : html`<span class="color-fg-muted">nothing</span>`}</a>`,
+      html`${parts.length ? ' · ' : ''}<a class="iterations-review" href="#pullrequestreview-${review.id}" title="${login}'s latest review, of ${shortSha(last.head_sha)}">${login} ${
+        pills.length
+          ? pills.map((pill, i) => html`${i ? ' ' : ''}${pill}`)
+          : // A custom reviewer that may approve found nothing and said so.
+            review.state === 'APPROVED'
+            ? html`<span class="color-fg-success">approved</span>`
+            : html`<span class="color-fg-muted">nothing</span>`
+      }</a>`,
     );
   }
   if (!running && !parts.length) return raw('');
