@@ -171,6 +171,13 @@ CREATE TABLE IF NOT EXISTS repos (
   created_at TEXT NOT NULL,
   UNIQUE (owner, name)
 );
+-- The keys repositories had in URLs before their GitHub slug changed (Service.followSlug).
+CREATE TABLE IF NOT EXISTS repo_aliases (
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
+  repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  PRIMARY KEY (owner, name)
+);
 CREATE TABLE IF NOT EXISTS pulls (
   id INTEGER PRIMARY KEY,
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,

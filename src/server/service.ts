@@ -334,6 +334,11 @@ interface FetchRound {
  */
 export const REFS = 'refs/laatsux';
 
+/** The key a repository gets in URLs: the GitHub owner/name of its remote, or local/<dir> without one. */
+function repoKey(slug: string | null, gitDir: string, workDir: string | null): [string, string] {
+  return slug ? (slug.split('/') as [string, string]) : ['local', basename(workDir ?? gitDir.replace(/\.git$/, ''))];
+}
+
 export interface ServiceOptions {
   db: Db;
   baseUrl: string;
@@ -624,30 +629,90 @@ export class Service {
     if (r.code !== 0) throw new HttpError(422, `not a git repository: ${path}`);
     const gitDir = r.stdout.trim();
     const workDir = basename(gitDir) === '.git' ? dirname(gitDir) : null;
-    const git = new Repo(gitDir);
-    const remotes = await git.remotes();
-    const remote = remotes.includes('origin') ? 'origin' : (remotes[0] ?? 'origin');
-    const slug = githubSlug(await git.remoteUrl(remote));
+    const { remote, slug } = await this.remoteOf(new Repo(gitDir));
 
     const existing = this.db.get<RepoRow>('SELECT * FROM repos WHERE git_dir = ?', gitDir);
     if (existing) {
-      if (existing.github_slug !== slug || existing.remote !== remote || existing.work_dir !== workDir) {
-        this.db.update('repos', existing.id, { github_slug: slug, remote, work_dir: workDir });
-      }
+      if (existing.remote !== remote || existing.work_dir !== workDir) this.db.update('repos', existing.id, { remote, work_dir: workDir });
+      this.followSlug(existing, slug);
       return this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', existing.id)!;
     }
 
-    const [owner, baseName] = slug ? slug.split('/') : ['local', basename(workDir ?? gitDir.replace(/\.git$/, ''))];
-    let name = baseName;
-    for (let i = 2; this.db.get('SELECT 1 FROM repos WHERE owner = ? AND name = ?', owner, name); i++) name = `${baseName}-${i}`;
-    const id = this.db.insert('repos', { git_dir: gitDir, work_dir: workDir, owner, name, remote, github_slug: slug, created_at: now() });
+    const [owner, name] = this.freeKey(repoKey(slug, gitDir, workDir), null);
+    const id = this.db.transaction(() => {
+      // A repository's own key wins over another's old one.
+      this.db.run('DELETE FROM repo_aliases WHERE owner = ? AND name = ?', owner, name);
+      return this.db.insert('repos', { git_dir: gitDir, work_dir: workDir, owner, name, remote, github_slug: slug, created_at: now() });
+    });
     return this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', id)!;
   }
 
+  /** The remote a repository follows, origin or else its first, and the GitHub repository it names. */
+  private async remoteOf(git: Repo): Promise<{ remote: string; slug: string | null }> {
+    const remotes = await git.remotes();
+    const remote = remotes.includes('origin') ? 'origin' : (remotes[0] ?? 'origin');
+    return { remote, slug: githubSlug(await git.remoteUrl(remote)) };
+  }
+
+  /**
+   * Record the GitHub repository that a registered one's remote names now. When it is another
+   * one than the key names (renamed or transferred there, or added to a local repository), the
+   * key follows, as registering the repository now would give it, and the old one stays an
+   * alias: its pages redirect, and its API paths still work.
+   */
+  private followSlug(repo: RepoRow, slug: string | null): void {
+    if (slug !== repo.github_slug) this.db.update('repos', repo.id, { github_slug: slug });
+    // Without a GitHub repository to follow, the key stays.
+    if (!slug) return;
+    const [owner, base] = repoKey(slug, repo.git_dir, repo.work_dir);
+    // A number it got because another repository had the name stays while the remote names the
+    // same repository and the name is the other's, or its old one. A name ending in digits, or
+    // one kept from before keys followed the remote, is no such number.
+    const numbered =
+      slug === repo.github_slug &&
+      repo.name.startsWith(base) &&
+      /^-\d+$/.test(repo.name.slice(base.length)) &&
+      !!this.db.get('SELECT 1 FROM repos WHERE owner = ? AND name = ? AND id != ? UNION ALL SELECT 1 FROM repo_aliases WHERE owner = ? AND name = ? AND repo_id != ?', owner, base, repo.id, owner, base, repo.id);
+    if (repo.owner === owner && (repo.name === base || numbered)) return;
+    const [, name] = this.freeKey([owner, base], repo.id);
+    this.db.transaction(() => {
+      this.db.run('DELETE FROM repo_aliases WHERE owner = ? AND name = ?', owner, name);
+      this.db.run('INSERT OR REPLACE INTO repo_aliases (owner, name, repo_id) VALUES (?, ?, ?)', repo.owner, repo.name, repo.id);
+      this.db.update('repos', repo.id, { owner, name });
+    });
+    this.bus.emit('change', { pullId: null, type: 'repo_renamed', actor: 'git' } satisfies ChangeEvent);
+  }
+
+  /** Follow each repository's remote to the GitHub repository it names now (followSlug), as registering it again would. */
+  async followRemotes(): Promise<void> {
+    for (const repo of this.repos()) {
+      if (!existsSync(repo.git_dir)) continue;
+      try {
+        const { remote, slug } = await this.remoteOf(this.git(repo));
+        if (remote !== repo.remote) this.db.update('repos', repo.id, { remote });
+        this.followSlug(repo, slug);
+      } catch (e) {
+        console.error(`could not read the remotes of ${repo.git_dir}:`, e);
+      }
+    }
+  }
+
+  /** The key `owner/name`, or `name-2` and on when another repository has it. */
+  private freeKey([owner, base]: [string, string], self: number | null): [string, string] {
+    let name = base;
+    for (let i = 2; this.db.get('SELECT 1 FROM repos WHERE owner = ? AND name = ? AND id IS NOT ?', owner, name, self); i++) name = `${base}-${i}`;
+    return [owner, name];
+  }
+
   repo(owner: string, name: string): RepoRow {
-    const repo = this.db.get<RepoRow>('SELECT * FROM repos WHERE owner = ? AND name = ?', owner, name);
+    const repo = this.db.get<RepoRow>('SELECT * FROM repos WHERE owner = ? AND name = ?', owner, name) ?? this.movedRepo(owner, name);
     if (!repo) throw new HttpError(404, `repository ${owner}/${name} is not known to laatsux`);
     return repo;
+  }
+
+  /** The repository that had the key `owner/name` before its GitHub slug changed (followSlug). */
+  movedRepo(owner: string, name: string): RepoRow | undefined {
+    return this.db.get<RepoRow>('SELECT repos.* FROM repo_aliases JOIN repos ON repos.id = repo_aliases.repo_id WHERE repo_aliases.owner = ? AND repo_aliases.name = ?', owner, name);
   }
 
   repos(): RepoRow[] {
