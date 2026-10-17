@@ -1853,6 +1853,32 @@ test('closing the server stops a running review and records why', async () => {
   rmSync(data, { recursive: true, force: true });
 });
 
+test('closing the server waits for a running poll before it closes the database', async () => {
+  const data = mkdtempSync(join(tmpdir(), 'laatsux-poll-'));
+  const second = await startServer({ port: 0, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 10 });
+  const errors = mock.method(console, 'error', () => {});
+  // A slow poll: it reads the database once the server is closing.
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => (started = resolve));
+  let polled = false;
+  const pollAll = second.service.pollAll.bind(second.service);
+  second.service.pollAll = async () => {
+    started();
+    await new Promise((r) => setTimeout(r, 200));
+    await pollAll();
+    polled = true;
+  };
+  try {
+    await running;
+    await second.close();
+    assert.ok(polled, 'the poll finished before the server closed');
+    assert.deepEqual(errors.mock.calls.map((c) => c.arguments.join(' ')), []);
+  } finally {
+    errors.mock.restore();
+    rmSync(data, { recursive: true, force: true });
+  }
+});
+
 test('the reviewer does not take over an author an older CLI called "codex"', async () => {
   const data = mkdtempSync(join(tmpdir(), 'laatsux-upgrade-'));
   const db = new Db(join(data, 'laatsux.db'));
