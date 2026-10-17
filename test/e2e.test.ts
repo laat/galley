@@ -412,7 +412,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     await human('PATCH', '/api/repos/acme/widgets/pulls/1', { state: 'open' });
   });
 
-  await t.test('repo pages link to the pull requests and issues on GitHub', async () => {
+  await t.test('repo pages link to the repository, its pull requests and its issues on GitHub', async () => {
     await server.service.refreshGithubRepo('acme/widgets');
     // When counts arrive in the background, open pages are told so they can show them.
     const events: string[] = [];
@@ -428,7 +428,20 @@ test('the agent loop, from staging to publishing', async (t) => {
       assert.match(page, /<a class="UnderlineNav-item selected" href="\/acme\/widgets">[^]*?Staged <span class="Counter">\d+<\/span><\/a>/, path);
       assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/pulls" target="_blank"[^]*?Pull requests <span class="Counter">2<\/span>/, path);
       assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/issues" target="_blank"[^]*?Issues <span class="Counter">4<\/span>/, path);
+      // Repo ↗ · Staged · Pull requests ↗ · Issues ↗, and only Repo has the GitHub mark.
+      const tabs = [...page.match(/<nav class="UnderlineNav" aria-label="Repository">[^]*?<\/nav>/)![0].matchAll(/<a [^>]*href="([^"]*)"[^>]*><svg class="octicon octicon-([\w-]+)/g)].map((m) => [m[1], m[2]]);
+      const github = 'https://github.com/acme/widgets';
+      assert.deepEqual(tabs, [[github, 'mark-github'], ['/acme/widgets', 'git-pull-request'], [`${github}/pulls`, 'git-pull-request'], [`${github}/issues`, 'issue-opened']], path);
+      assert.match(page, /<a class="UnderlineNav-item" href="https:\/\/github\.com\/acme\/widgets" target="_blank" rel="noopener" title="acme\/widgets on GitHub">[^]*? Repo <svg class="octicon octicon-link-external /, path);
     }
+    // Without a GitHub remote, only the staged pull requests.
+    const elsewhere = join(dir, 'elsewhere');
+    execFileSync('git', ['init', '-q', '-b', 'main', elsewhere]);
+    execFileSync('git', ['-C', elsewhere, 'remote', 'add', 'origin', 'https://gitlab.com/acme/elsewhere.git']);
+    const local = await human('POST', '/api/repos', { path: elsewhere });
+    const nav = (await (await fetch(`${server.url}/${local.full_name}`)).text()).match(/<nav class="UnderlineNav" aria-label="Repository">[^]*?<\/nav>/)![0];
+    assert.doesNotMatch(nav, /github\.com/);
+    assert.match(nav, /Staged/);
   });
 
   await t.test('web pages render', async () => {
