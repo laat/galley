@@ -1,8 +1,8 @@
 // A reviewer agent. When the author waits for review, it reviews the head commit in a throwaway
 // checkout (where it may run the tests, or read-only, as settings say) and laatsux posts what it
 // found as a GitHub-style review from its bot (named in settings), which wakes the author's
-// `pr wait`. The tool that reviews is its Engine (codex.ts): how to run it, its models, and how
-// to read its answer. The rest is the same for every tool, and lives here.
+// `pr wait`. The tool that reviews is its Engine (codex.ts, claude.ts): how to run it, its
+// models, and how to read its answer. The rest is the same for every tool, and lives here.
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
 import { checkPriority, HttpError, splitPriorityPrefix, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
-import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
+import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
 import { cacheEnv, installCommand } from './install.ts';
 
 export interface ModelInfo {
@@ -98,12 +98,46 @@ export interface EngineJob {
   /** The review's own directory, removed afterwards. The checkout is in it, and the engine may keep files there. */
   dir: string;
   checkout: string;
-  /** The environment to run in: caches and TMPDIR in the review's directory when it runs the tests. */
+  /** The user's repository's git directory, which the checkout's .git points into: it stays read-only. */
+  gitDir: string;
+  /** The review's TMPDIR, beside the checkout, when it may run the tests; null when it only reads. */
+  tmp: string | null;
+  /** The environment to run in: caches and TMPDIR in `tmp` when it runs the tests. */
   env: NodeJS.ProcessEnv | undefined;
   prompt: string;
   settings: ReviewerSettings;
   timeoutMs: number;
   signal: AbortSignal;
+}
+
+/** What a run cost, as the tool reports it (Claude Code does, Codex does not). */
+export interface RunUsage {
+  cost_usd: number | null;
+  /** Input tokens besides those written to and read from the prompt cache. */
+  input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+  output_tokens: number;
+  /** Turns of the conversation: the model's answers to the prompt and to its tools' results. */
+  turns: number | null;
+  duration_ms: number | null;
+  /** The models that answered, as the tool names them. */
+  models: string[];
+}
+
+/** A run that failed after the tool reported what it cost: the run keeps the cost with its error. */
+export class EngineError extends Error {
+  usage: RunUsage | null;
+  constructor(message: string, usage: RunUsage | null) {
+    super(message);
+    this.usage = usage;
+  }
+}
+
+/** An engine's answer, and what it cost when the tool says. */
+export interface EngineResult {
+  answer: Answer;
+  usage: RunUsage | null;
 }
 
 /** A tool that reviews. It runs a review the reviewer has prepared and reads the answer; the reviewer does the rest. */
@@ -112,13 +146,19 @@ export interface Engine {
   readonly id: ReviewerKind;
   /** Its name in prose. */
   readonly label: string;
+  /** What the CLI calls an author agent running in this tool (cliActor in src/config.ts): its own kind of agent. */
+  readonly authorLogin: string;
+  /** The tool such an author runs in, in prose. */
+  readonly authorTool: string;
   /**
    * Run an install command in the checkout, in a sandbox with network that writes only to the
-   * checkout and the TMPDIR in `env`.
+   * checkout and `tmp`, the TMPDIR in `env`.
    */
-  install(command: string[], o: { checkout: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult>;
+  install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult>;
   /** Run the review and read its answer. Throws with what went wrong. */
-  review(job: EngineJob): Promise<Answer>;
+  review(job: EngineJob): Promise<EngineResult>;
+  /** Where its models come from, when they are read from the tool (`codex debug models`). */
+  readonly catalogSource?: string;
   /** The models it offers, cached; empty when the tool is not available. */
   models(): Promise<ModelInfo[]>;
   /** The efforts a model accepts, from the cached catalog (null when unknown). */
@@ -202,18 +242,36 @@ export class Reviewer {
     const login = checkReviewerName(name);
     if (me.login === login) return;
     const other = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', login);
+    if (other && !this.onlyReviewedForUs(other)) {
+      const who = other.id === this.s.viewer().id ? 'you' : 'someone else (an author agent or another reviewer)';
+      throw new HttpError(422, `the name "${login}" is already used by ${who}; choose another`);
+    }
+    this.unambiguous(login);
     if (!other) {
       this.s.db.run('UPDATE actors SET login = ? WHERE id = ?', login, me.id);
       return;
-    }
-    if (!this.onlyReviewedForUs(other)) {
-      const who = other.id === this.s.viewer().id ? 'you' : 'someone else (an author agent or another reviewer)';
-      throw new HttpError(422, `the name "${login}" is already used by ${who}; choose another`);
     }
     this.s.db.transaction(() => {
       this.absorb(other, me);
       this.s.db.run('UPDATE actors SET login = ? WHERE id = ?', login, me.id);
     });
+  }
+
+  /**
+   * Refuse a name that `--reviewer` would take for another reviewer agent: its kind or its name,
+   * in any case (see answersTo). Staging with it would turn on the other one.
+   */
+  private unambiguous(login: string): void {
+    const l = login.toLowerCase();
+    for (const kind of REVIEWER_KINDS) {
+      if (kind === this.engine) continue;
+      const id = Number(this.s.db.getMeta(`${kind}_actor_id`));
+      const name = (id && this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || readSettings(this.s.db)[kind].name;
+      if (l === kind || l === name.toLowerCase()) {
+        const label = this.s.reviewerAgents().find((r) => r.engine === kind)?.label ?? kind;
+        throw new HttpError(422, `"${login}" would ask for the ${label} reviewer (--reviewer ${login}); choose another`);
+      }
+    }
   }
 
   /** Move everything `other` did over to `me`, and drop `other`: two names for one actor. */
@@ -231,10 +289,11 @@ export class Reviewer {
     this.s.db.run('DELETE FROM actors WHERE id = ?', other.id);
   }
 
-  /** Whether an actor has done nothing but post reviews that came from reviewer runs. */
+  /** Whether an actor has done nothing but post reviews that came from reviewer runs, and is no other reviewer. */
   protected onlyReviewedForUs(a: Actor): boolean {
     if (a.id === this.s.viewer().id) return false;
     const db = this.s.db;
+    if (REVIEWER_KINDS.some((kind) => kind !== this.engine && db.getMeta(`${kind}_actor_id`) === String(a.id))) return false;
     if (db.get('SELECT 1 FROM pulls WHERE author_id = ?', a.id)) return false;
     if (db.get('SELECT 1 FROM comments WHERE author_id = ? AND review_id IS NULL', a.id)) return false;
     if (db.get('SELECT 1 FROM events WHERE actor_id = ?', a.id)) return false;
@@ -329,9 +388,29 @@ export class Reviewer {
     return this.own(pull).maxIterations ?? this.settings().maxIterations;
   }
 
-  /** Whether the reviewer reviews this pull request automatically: its own choice, or the setting. */
+  /** Whether the reviewer reviews this pull request automatically: its own choice, or the settings. */
   enabled(pull: PullRow): boolean {
-    return this.own(pull).enabled ?? this.settings().enabled;
+    return this.own(pull).enabled ?? this.bySettings(pull);
+  }
+
+  /** Whether the settings have the reviewer review this pull request automatically. */
+  bySettings(pull: PullRow): boolean {
+    return this.settings().enabled && !this.skips(pull);
+  }
+
+  /** Whether the settings leave this pull request to the other reviewers: it is by the reviewer's own kind of agent. */
+  skips(pull: PullRow): boolean {
+    return this.settings().skipOwnKind && this.s.db.actorById(pull.author_id).login === this.tool.authorLogin;
+  }
+
+  /** The tool its own kind of agent runs in ("Claude Code"), for saying what it skips. */
+  get authorTool(): string {
+    return this.tool.authorTool;
+  }
+
+  /** Where its models come from, when they are read from the tool. */
+  get catalogSource(): string | undefined {
+    return this.tool.catalogSource;
   }
 
   /** Whether a reviewer asked for by login (`pr create --reviewer`) is this one: its kind ("codex"), or its name. */
@@ -482,16 +561,18 @@ export class Reviewer {
         if (signal.aborted) throw new Error(STOPPED);
       }
       const prompt = await this.prompt(ctx, trigger, settings, installed);
-      const answer = await this.tool.review({ dir, checkout, env, prompt, settings, timeoutMs, signal }).catch((e: Error) => {
+      const job = { dir, checkout, gitDir: git.gitDir, tmp: settings.runTests ? tmp : null, env, prompt, settings, timeoutMs, signal };
+      const result = await this.tool.review(job).catch((e: Error) => {
+        if (e instanceof EngineError && e.usage) this.s.db.update('review_runs', runId, { usage: JSON.stringify(e.usage) });
         throw signal.aborted ? new Error(STOPPED) : e;
       });
       if (signal.aborted) throw new Error(STOPPED);
-      await this.post(ctx, runId, answer, settings, trigger);
+      if (result.usage) this.s.db.update('review_runs', runId, { usage: JSON.stringify(result.usage) });
+      await this.post(ctx, runId, result.answer, settings, trigger);
     } finally {
-      // Some tools leave read-only directories (Go's module cache), which neither git nor rmSync can remove.
-      if (settings.runTests) await run('chmod', ['-R', 'u+w', dir], { allowFail: true });
+      if (settings.runTests) await makeWritable(dir);
       await git.run(['worktree', 'remove', '--force', checkout], { allowFail: true });
-      rmSync(dir, { recursive: true, force: true });
+      removeDir(dir);
     }
   }
 
@@ -505,7 +586,7 @@ export class Reviewer {
     if (!how) return null;
     const command = how.command.join(' ');
     try {
-      const r = await this.tool.install(how.command, { checkout, env: { ...env, ...how.env }, timeoutMs: INSTALL_TIMEOUT_MS, signal });
+      const r = await this.tool.install(how.command, { checkout, tmp, env: { ...env, ...how.env }, timeoutMs: INSTALL_TIMEOUT_MS, signal });
       const failure = r.code === 0 ? null : r.timedOut ? `timed out after ${INSTALL_TIMEOUT_MS / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
       return { command, failure, output: lastLines(`${r.stdout}\n${r.stderr}`, 20) };
     } catch (e) {
@@ -636,6 +717,20 @@ function testInstructions(installed: Installed | null): string[] {
     "To check your findings, you may run the typecheck, tests or build with the repository's own tooling (its package scripts). There is no network, so you can not install anything: a check that fails for lack of network, a missing dependency or tool, or the sandbox is not a finding. You can write only to this checkout and $TMPDIR (point caches there). The checkout is thrown away after the review, so changes you make to it are lost: report findings only in your answer.",
   );
   return out;
+}
+
+/** Some tools leave read-only directories (Go's module cache), which neither git nor rmSync can remove. */
+export async function makeWritable(dir: string): Promise<void> {
+  await run('chmod', ['-R', 'u+w', dir], { allowFail: true }).catch(() => {});
+}
+
+/** Remove a directory a review worked in. Failing to is logged: it must not replace the review's result. */
+export function removeDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    console.error(`could not remove ${dir}:`, (e as Error).message);
+  }
 }
 
 export function lastLines(text: string, n: number): string {

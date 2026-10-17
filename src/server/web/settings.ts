@@ -1,4 +1,5 @@
 import type { Service } from '../service.ts';
+import type { Reviewer } from '../reviewers/reviewer.ts';
 import { readSettings, MAX_ITERATIONS_LIMIT, MERGE_METHODS } from '../settings.ts';
 import { html, icon, raw, type Safe } from './html.ts';
 import { layout } from './components.ts';
@@ -22,15 +23,25 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
 }
 
 export async function settingsPage(s: Service): Promise<string> {
-  const settings = readSettings(s.db).codex;
-  const models = s.codex ? await s.codex.models() : [];
-  const defaults = s.codex ? s.codex.defaults() : {};
+  const sections: Safe[] = [];
+  for (const reviewer of s.reviewerAgents()) sections.push(await reviewerSection(reviewer));
+  return settingsLayout(s, '/settings', html`${sections}`);
+}
+
+/** A reviewer agent's settings. */
+async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
+  const kind = reviewer.engine;
+  const label = reviewer.label;
+  const settings = reviewer.settings();
+  const models = await reviewer.models();
+  const defaults = reviewer.defaults();
   const defaultModel = models.find((m) => m.slug === defaults.model);
+  const byDefault = `${label} default`;
 
   // "Codex default" means whatever config.toml says, falling back to the model's own default effort.
   const defaultEffort = (efforts: { defaultEffort: string } | undefined) => defaults.effort ?? efforts?.defaultEffort ?? '';
   const modelOptions: Safe[] = [
-    html`<option value="" data-efforts="${defaultModel?.efforts.join(',') ?? ''}" data-default-effort="${defaultEffort(defaultModel)}"${settings.model ? '' : raw(' selected')}>Codex default${defaults.model ? ` (${defaults.model})` : ''}</option>`,
+    html`<option value="" data-efforts="${(defaultModel?.efforts ?? reviewer.efforts('') ?? []).join(',')}" data-default-effort="${defaultEffort(defaultModel)}"${settings.model ? '' : raw(' selected')}>${byDefault}${defaults.model ? ` (${defaults.model})` : ''}</option>`,
     ...models.map(
       (m) =>
         html`<option value="${m.slug}" data-efforts="${m.efforts.join(',')}" data-default-effort="${defaultEffort(m)}"${settings.model === m.slug ? raw(' selected') : ''}>${m.name}${m.description ? ` – ${m.description}` : ''}</option>`,
@@ -41,56 +52,57 @@ export async function settingsPage(s: Service): Promise<string> {
     modelOptions.push(html`<option value="${settings.model}" data-efforts="" data-default-effort="${defaults.effort ?? ''}" selected>${settings.model}</option>`);
   }
   const selected = models.find((m) => m.slug === (settings.model || defaults.model));
-  const efforts = selected?.efforts ?? (settings.effort ? [settings.effort] : []);
+  const efforts = selected?.efforts ?? reviewer.efforts(settings.model) ?? (settings.effort ? [settings.effort] : []);
   const effortDefault = defaultEffort(selected);
+  const name = reviewer.actor().login;
 
-  return settingsLayout(
-    s,
-    '/settings',
-    html`<div class="Subhead" id="codex">
-      <h2 class="Subhead-heading">Codex</h2>
-      <p class="Subhead-description">Let Codex review staged pull requests before you do. It reviews a throwaway checkout of the pull request and posts its findings as a review from <strong>${s.codex?.actor().login ?? settings.name}</strong>.</p>
+  return html`<div class="Subhead" id="${kind}">
+      <h2 class="Subhead-heading">${label}</h2>
+      <p class="Subhead-description">Let ${label} review staged pull requests before you do. It reviews a throwaway checkout of the pull request and posts its findings as a review from <strong>${name}</strong>.</p>
     </div>
     ${
-      s.codex && models.length === 0
-        ? html`<div class="flash flash-warn">${icon('alert')} Could not read the model list from <code>codex debug models</code>. Check that Codex is installed and logged in on the machine running laatsux.</div>`
+      models.length === 0 && reviewer.catalogSource
+        ? html`<div class="flash flash-warn">${icon('alert')} Could not read the model list from <code>${reviewer.catalogSource}</code>. Check that ${label} is installed and logged in on the machine running laatsux.</div>`
         : ''
     }
-    <form class="settings-form js-api-form" data-api="/api/settings/codex" data-method="PUT" data-toast="Settings saved">
+    <form class="settings-form js-api-form" data-api="/api/settings/${kind}" data-method="PUT" data-toast="Settings saved">
       <div class="form-checkbox">
         <label><input type="checkbox" name="enabled"${settings.enabled ? raw(' checked') : ''}> Review automatically</label>
-        <p class="note">When the author agent runs <code>laatsux pr wait</code>, Codex reviews the new commits first. Its review wakes the agent, which addresses the comments before you look. Each commit is reviewed once.</p>
+        <p class="note">When the author agent runs <code>laatsux pr wait</code>, ${label} reviews the new commits first. Its review wakes the agent, which addresses the comments before you look. Each commit is reviewed once.</p>
       </div>
       <div class="form-group">
-        <label class="form-label" for="codex-name">Name</label>
-        <input class="form-control input-medium" type="text" id="codex-name" name="name" value="${s.codex?.actor().login ?? settings.name}" autocomplete="off" spellcheck="false">
+        <label class="form-label" for="${kind}-name">Name</label>
+        <input class="form-control input-medium" type="text" id="${kind}-name" name="name" value="${name}" autocomplete="off" spellcheck="false">
         <p class="note">Who the reviews are from. Renaming keeps the earlier reviews with the reviewer.</p>
       </div>
       <div class="form-group">
-        <label class="form-label" for="codex-model">Model</label>
-        <select class="form-select js-codex-model" id="codex-model" name="model">${modelOptions}</select>
+        <label class="form-label" for="${kind}-model">Model</label>
+        <select class="form-select js-codex-model" id="${kind}-model" name="model">${modelOptions}</select>
       </div>
       <div class="form-group">
-        <label class="form-label" for="codex-effort">Reasoning effort</label>
-        <select class="form-select js-codex-effort" id="codex-effort" name="effort">
-          <option value=""${settings.effort ? '' : raw(' selected')}>Codex default${effortDefault ? ` (${effortDefault})` : ''}</option>
+        <label class="form-label" for="${kind}-effort">Reasoning effort</label>
+        <select class="form-select js-codex-effort" id="${kind}-effort" name="effort" data-default-label="${byDefault}">
+          <option value=""${settings.effort ? '' : raw(' selected')}>${byDefault}${effortDefault ? ` (${effortDefault})` : ''}</option>
           ${efforts.map((e) => html`<option value="${e}"${settings.effort === e ? raw(' selected') : ''}>${e}</option>`)}
         </select>
         <p class="note">Higher effort finds more and takes longer. The levels depend on the model.</p>
       </div>
       <div class="form-group">
-        <label class="form-label" for="codex-iterations">Max iterations</label>
-        <input class="form-control input-narrow" type="number" id="codex-iterations" name="maxIterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${settings.maxIterations}">
-        <p class="note">Automatic reviews per pull request, so Codex and the author agent do not go back and forth forever. "Ask Codex to review" on a pull request is not limited.</p>
+        <label class="form-label" for="${kind}-iterations">Max iterations</label>
+        <input class="form-control input-narrow" type="number" id="${kind}-iterations" name="maxIterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${settings.maxIterations}">
+        <p class="note">Automatic reviews per pull request, so ${label} and the author agent do not go back and forth forever. "Ask ${label} to review" on a pull request is not limited.</p>
       </div>
       <div class="form-checkbox">
-        <label><input type="checkbox" name="runTests"${settings.runTests ? raw(' checked') : ''}> Let Codex install dependencies and run tests</label>
-        <p class="note">Before Codex starts, laatsux installs the pull request's dependencies from its lockfile, without running its install scripts. Codex may then run the typecheck, tests or build to check what it finds, without network access. It writes only to its checkout and a temporary directory, both removed after the review; your repository stays read-only. Off, Codex only reads the code.</p>
+        <label><input type="checkbox" name="runTests"${settings.runTests ? raw(' checked') : ''}> Let ${label} install dependencies and run tests</label>
+        <p class="note">Before ${label} starts, laatsux installs the pull request's dependencies from its lockfile, without running its install scripts. ${label} may then run the typecheck, tests or build to check what it finds, without network access. It writes only to its checkout and a temporary directory, both removed after the review; your repository stays read-only. Off, ${label} only reads the code.</p>
+      </div>
+      <div class="form-checkbox">
+        <label><input type="checkbox" name="skipOwnKind"${settings.skipOwnKind ? raw(' checked') : ''}> Skip pull requests by agents in ${reviewer.authorTool}</label>
+        <p class="note">Leave pull requests that an agent running in ${reviewer.authorTool} wrote to the other reviewers, so authors get a second opinion. Staging with <code>--reviewer ${kind}</code>, or turning it on in a pull request's sidebar, still has ${label} review it.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
-    </form>`,
-  );
+    </form>`;
 }
 
 export function publishingSettingsPage(s: Service): string {

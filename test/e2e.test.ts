@@ -14,6 +14,7 @@ import { startServer } from '../src/server/server.ts';
 import { Db, now } from '../src/server/db.ts';
 import { Service } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
+import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { Repo } from '../src/server/git.ts';
 
 const BIN = join(import.meta.dirname, '..', 'bin', 'laatsux.ts');
@@ -168,7 +169,56 @@ if (gate) {
 `,
   );
   chmodSync(codex, 0o755);
-  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, viewerLogin: 'reviewer', pollMs: 50 });
+
+  // A stand-in for Claude Code: `claude -p` answering with FAKE_CLAUDE_REVIEW and what the run
+  // cost, after FAKE_CLAUDE_SLEEP milliseconds or once the file FAKE_CLAUDE_GATE exists; with
+  // FAKE_CLAUDE_FAIL, the error result Claude Code gives. Every server in this file uses it.
+  const claude = join(dir, 'claude');
+  process.env.LAATSUX_CLAUDE = claude;
+  process.env.FAKE_CLAUDE_LOG = join(dir, 'claude.log');
+  writeFileSync(
+    claude,
+    `#!${process.execPath}
+const fs = require('fs');
+const args = process.argv.slice(2);
+if (args[0] !== '-p') process.exit(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const env = process.env;
+fs.appendFileSync(env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt, cwd: process.cwd(), sawFile: fs.existsSync('claude.js'), tmpdir: env.TMPDIR, claudeTmpdir: env.CLAUDE_CODE_TMPDIR, claudeTmpdirExists: fs.existsSync(env.CLAUDE_CODE_TMPDIR), session: env.CLAUDECODE ?? env.CLAUDE_CODE_SESSION_ID ?? null }) + '\\n');
+// As a test run can (Go's module cache): a read-only directory with a file in it.
+fs.mkdirSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', { recursive: true });
+fs.writeFileSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache/file', 'x');
+fs.chmodSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', 0o555);
+fs.chmodSync(env.CLAUDE_CODE_TMPDIR + '/mod', 0o555);
+if (env.FAKE_CLAUDE_FAIL) {
+  console.log(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded', num_turns: 2, total_cost_usd: 0.004, usage: { input_tokens: 5, output_tokens: 300 } }));
+  process.exit(1);
+}
+const answer = () => console.log(JSON.stringify({
+  type: 'result', subtype: 'success', is_error: false, result: 'Done.', num_turns: 7, duration_ms: 4200, total_cost_usd: 0.0123,
+  usage: { input_tokens: 12, cache_creation_input_tokens: 15000, cache_read_input_tokens: 30000, output_tokens: 2100 },
+  modelUsage: { 'claude-haiku-5-5': { costUSD: 0.0123 } },
+  structured_output: JSON.parse(env.FAKE_CLAUDE_REVIEW),
+}));
+const gate = env.FAKE_CLAUDE_GATE;
+if (gate) {
+  const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t), answer()), 20);
+} else setTimeout(answer, Number(env.FAKE_CLAUDE_SLEEP || 0));
+`,
+  );
+  chmodSync(claude, 0o755);
+  // A stand-in for sandbox-exec, which installs dependencies for Claude: it logs and runs nothing.
+  const sandboxExec = join(dir, 'sandbox-exec');
+  process.env.FAKE_SANDBOX_LOG = join(dir, 'sandbox-exec.log');
+  writeFileSync(
+    sandboxExec,
+    `#!${process.execPath}
+require('fs').appendFileSync(process.env.FAKE_SANDBOX_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), store: process.env.npm_config_store_dir }) + '\\n');
+console.log('Packages: +1\\nDone in 1s');
+`,
+  );
+  chmodSync(sandboxExec, 0o755);
+  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, viewerLogin: 'reviewer', pollMs: 50 });
 });
 
 after(async () => {
@@ -677,7 +727,8 @@ test('codex reviews when the author waits, within the limits in settings', async
   // tests turned off, Codex gets today's read-only sandbox and is told not to modify files.
   process.env.FAKE_CODEX_FAIL = '1';
   await human('PUT', '/api/settings/codex', { runTests: false });
-  assert.doesNotMatch(await (await fetch(`${server.url}/settings`)).text(), /name="runTests" checked/);
+  // In the Codex section, which comes before Claude's.
+  assert.doesNotMatch((await (await fetch(`${server.url}/settings`)).text()).split('id="claude"')[0], /name="runTests" checked/);
   const pull = await human('GET', base);
   await human('POST', `${base}/reviewers/codex`);
   await server.service.codex!.settle(pull.id);
@@ -740,6 +791,275 @@ test('codex reviews when the author waits, within the limits in settings', async
   assert.match(noLockfile.prompt, /No dependencies are installed: the repository root has no lockfile/);
   assert.equal(installs().length, 2);
   await human('PUT', '/api/settings/codex', { enabled: false });
+});
+
+test('claude reviews when the author waits, in its own sandbox, and says what it cost', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/claude');
+  writeFileSync(join(repo, 'claude.js'), 'export const answer = 41;\n');
+  writeFileSync(join(repo, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+  git('add', 'claude.js', 'pnpm-lock.yaml');
+  git('commit', '-qm', 'Add the answer for Claude');
+  const created = await cli(['pr', 'create', '--title', 'Add the answer', '--body', 'It is 42.']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  const lastCall = () => JSON.parse(readFileSync(process.env.FAKE_CLAUDE_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({
+    summary: 'Off by one.',
+    comments: [{ path: 'claude.js', line: 1, start_line: null, side: 'RIGHT', priority: 'high', body: 'It should be 42.' }],
+  });
+
+  // Its section of the settings is next to Codex's, with the same settings.
+  await assert.rejects(human('PUT', '/api/settings/claude', { model: 'haiku', effort: 'extreme' }), /does not support effort \\?"extreme"?/);
+  await human('PUT', '/api/settings/claude', { enabled: true, model: 'haiku', effort: 'low', maxIterations: 2 });
+  const settingsPage = await (await fetch(`${server.url}/settings`)).text();
+  assert.match(settingsPage, /<div class="Subhead" id="claude">/);
+  assert.match(settingsPage, /posts its findings as a review from <strong>claude-review<\/strong>/);
+  assert.match(settingsPage, /<option value="haiku"[^>]* selected>Haiku/);
+  assert.match(settingsPage, /<input type="checkbox" name="skipOwnKind"> Skip pull requests by agents in Claude Code/);
+  assert.match(settingsPage, /<input type="checkbox" name="skipOwnKind"> Skip pull requests by agents in Codex/);
+
+  const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /claude-review reviewed: commented/);
+  assert.match(r.stdout, /Off by one\./);
+  assert.match(r.stdout, /thread \d+ on claude\.js:1 \[unresolved\] \(high priority\)/);
+
+  // Claude Code headless in a checkout of the head, with the user's own login (no --bare), the
+  // prompt on stdin and the answer in the schema, as the reviewer bot asked for.
+  const call = lastCall();
+  const flag = (name: string) => call.args[call.args.indexOf(name) + 1];
+  assert.equal(call.sawFile, true, 'claude runs in a checkout of the head commit');
+  assert.match(call.prompt, /Title: Add the answer/);
+  assert.equal(flag('--model'), 'haiku');
+  assert.equal(flag('--effort'), 'low');
+  assert.equal(flag('--output-format'), 'json');
+  assert.deepEqual(JSON.parse(flag('--json-schema')).required, ['summary', 'comments']);
+  // The checkout is untrusted: none of its settings (hooks), MCP servers, CLAUDE.md, skills or agents.
+  for (const f of ['--restricted', '--safe-mode', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) assert.ok(call.args.includes(f), f);
+  assert.equal(flag('--disallowedTools'), 'mcp__*');
+  assert.ok(!call.args.includes('--bare'));
+  // Tools for reading and for running commands, with nobody to ask: what is not allowed is denied.
+  assert.equal(flag('--tools'), 'Read,Grep,Glob,Bash');
+  assert.deepEqual(call.args.slice(call.args.indexOf('--allowedTools') + 1, call.args.indexOf('--disallowedTools')), ['Read', 'Grep', 'Glob']);
+  assert.equal(flag('--permission-mode'), 'dontAsk');
+  assert.equal(flag('--permission-prompts'), 'none');
+  // Commands run in Claude Code's sandbox, never outside it: no network, writes to the checkout,
+  // Claude Code's own temporary directory and the review's, and not to the user's repository (nor
+  // to /tmp/claude-<uid>, where the user's own Claude Code sessions keep theirs).
+  const checkout = call.cwd;
+  const tmp = join(dirname(checkout), 'tmp');
+  const uid = process.getuid!();
+  const { git_dir } = await human('GET', '/api/repos/acme/widgets');
+  assert.deepEqual(JSON.parse(flag('--settings')), {
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      excludedCommands: [],
+      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true },
+      filesystem: { allowWrite: [tmp], denyWrite: [join(checkout, '.git'), git_dir, `/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`] },
+    },
+  });
+  assert.equal(call.tmpdir, tmp);
+  // Short, or Claude Code falls back to /tmp/claude-<uid>.
+  assert.ok(Buffer.byteLength(`${call.claudeTmpdir}/claude-${uid}`) <= 30, call.claudeTmpdir);
+  assert.equal(call.claudeTmpdirExists, true);
+  assert.equal(existsSync(call.claudeTmpdir), false, 'removed after the review');
+  assert.equal(call.session, null, 'not taken for part of a Claude Code session the server was started from');
+  // The dependencies were installed first, in laatsux's own sandbox: network, and writes only to the checkout and the review's TMPDIR.
+  const install = JSON.parse(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  assert.match(install.args[1], /^\(version 1\)\n\(deny default\)/);
+  assert.deepEqual(install.args.slice(2), [
+    `-DWRITABLE_0=${checkout}`,
+    `-DWRITABLE_1=${tmp}`,
+    `-DREAD_ONLY_0=${join(checkout, '.git')}`,
+    'pnpm',
+    'install',
+    '--frozen-lockfile',
+    '--ignore-scripts',
+    '--ignore-pnpmfile',
+    '--config.manage-package-manager-versions=false',
+  ]);
+  assert.equal(install.cwd, checkout);
+  assert.equal(install.store, join(tmp, 'pnpm-store'));
+  assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install [^`]*`[^]*\n    Packages: \+1\n/);
+
+  // The review is Claude's, and the run says what it cost, in the API and in the sidebar.
+  const { runs } = await human('GET', `${base}/reviewers/claude`);
+  assert.deepEqual(
+    runs.map((x: any) => [x.trigger, x.status, x.findings, x.model, x.effort]),
+    [['auto', 'done', 1, 'haiku', 'low']],
+  );
+  assert.deepEqual(runs[0].usage, {
+    cost_usd: 0.0123,
+    input_tokens: 12,
+    cache_creation_input_tokens: 15000,
+    cache_read_input_tokens: 30000,
+    output_tokens: 2100,
+    turns: 7,
+    duration_ms: 4200,
+    models: ['claude-haiku-5-5'],
+  });
+  assert.match((await human('GET', `${base}/reviews`)).at(-1).body, /<sub>Claude \(haiku, low effort\) reviewed `[0-9a-f]{7}`, automatic review 1 of 2\.<\/sub>$/);
+  let html = await page();
+  assert.match(html, /<h3 class="sidebar-heading">Claude<\/h3>\s*<a class="sidebar-person" href="\/settings#claude" title="Settings for claude-review">/);
+  assert.match(html, /Last run: \$0\.01 · 45k tokens in, 2k out · 7 turns/);
+  assert.match(html, /Ask Claude to review/);
+
+  // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
+  // read-only too, and nothing installed. A failed run keeps Claude Code's error.
+  const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
+  await human('PUT', '/api/settings/claude', { runTests: false });
+  process.env.FAKE_CLAUDE_FAIL = '1';
+  const pull = await human('GET', base);
+  await human('POST', `${base}/reviewers/claude`);
+  await server.service.claude!.settle(pull.id);
+  delete process.env.FAKE_CLAUDE_FAIL;
+  const readOnly = lastCall();
+  const readOnlyFlag = (name: string) => readOnly.args[readOnly.args.indexOf(name) + 1];
+  const allowed = readOnly.args.slice(readOnly.args.indexOf('--allowedTools') + 1, readOnly.args.indexOf('--disallowedTools'));
+  assert.deepEqual(allowed.slice(0, 5), ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)']);
+  assert.ok(allowed.every((t: string) => !t.startsWith('Bash') || t.startsWith('Bash(git ')));
+  const { sandbox } = JSON.parse(readOnlyFlag('--settings'));
+  assert.equal(sandbox.autoAllowBashIfSandboxed, false);
+  assert.deepEqual(sandbox.filesystem.allowWrite, []);
+  assert.ok(sandbox.filesystem.denyWrite.includes(readOnly.cwd));
+  assert.match(readOnly.prompt, /Do not modify any files\./);
+  assert.equal(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length, installs, 'nothing is installed for a read-only review');
+  await human('PUT', '/api/settings/claude', { runTests: true });
+  const failed = (await human('GET', `${base}/reviewers/claude`)).runs.at(-1);
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error, /^claude stopped \(error_during_execution\):\nAPI Error: 529 overloaded$/);
+  // What it cost before it failed counts too.
+  assert.equal(failed.usage.cost_usd, 0.004);
+  assert.equal(failed.usage.output_tokens, 300);
+  assert.match(await page(), /Last run: \$0\.0040 · 5 tokens in, 300 out · 2 turns\. 2 runs: \$0\.02/);
+
+  // One identity whose name is a setting. It can not take an author agent's name, nor another
+  // reviewer's, and nobody can post under it.
+  await assert.rejects(human('PUT', '/api/settings/claude', { name: 'claude' }), /is what the CLI calls author agents/);
+  await assert.rejects(human('PUT', '/api/settings/claude', { name: 'codex' }), /already used by someone else/);
+  await assert.rejects(human('PUT', '/api/settings/codex', { name: 'claude-review' }), /already used by someone else/);
+  await human('PUT', '/api/settings/claude', { name: 'claude-bot' });
+  assert.deepEqual([...new Set((await human('GET', `${base}/reviews`)).map((rv: any) => rv.user.login))], ['claude-bot']);
+  for (const actor of ['claude-bot', 'codex']) {
+    const impostor = await cli(['pr', 'comment', String(number), '-b', 'hi'], { actor });
+    assert.equal(impostor.code, 1);
+    assert.match(impostor.stderr, new RegExp(`"${actor}" is the name of the ${actor === 'codex' ? 'Codex' : 'Claude'} reviewer`));
+  }
+  await human('PUT', '/api/settings/claude', { name: 'claude-review' });
+
+  // Its own switch and limit on each pull request, in the sidebar as for Codex.
+  html = await page();
+  assert.match(html, new RegExp(`data-api="${base}/reviewers/claude" data-limit="2"`));
+  assert.match(html, new RegExp(`class="btn-link js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="false"[^>]*>Turn off</button>`));
+  assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: false }), { enabled: false, max_iterations: 2, overrides: { enabled: false, max_iterations: null } });
+  html = await page();
+  assert.match(html, /Turned off for this pull request \(on in Settings\)/);
+  assert.match(html, new RegExp(`js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="true"[^>]*>Turn on</button>`));
+  assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: null }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: null } });
+  await human('PUT', '/api/settings/claude', { enabled: false, model: '', effort: '', maxIterations: 3 });
+});
+
+test('a reviewer can not take a name that --reviewer would take for the other one', async () => {
+  // The other's kind or name, in any case: staging with it would turn on the other reviewer.
+  const codex = server.service.codex!.actor().login;
+  for (const name of ['CODEX', 'Codex', codex.toUpperCase()]) {
+    await assert.rejects(human('PUT', '/api/settings/claude', { name }), new RegExp(`${name}\\\\?" would ask for the Codex reviewer \\(--reviewer ${name}\\)`));
+  }
+  await assert.rejects(human('PUT', '/api/settings/codex', { name: 'Claude-Review' }), /Claude-Review\\?" would ask for the Claude reviewer/);
+  const { codex: codexSettings, claude: claudeSettings } = await human('GET', '/api/settings');
+  assert.deepEqual([codexSettings.name, claudeSettings.name], [codex, 'claude-review']);
+  assert.deepEqual([server.service.codex!.actor().login, server.service.claude!.actor().login], [codex, 'claude-review']);
+});
+
+test('runs of a Codex bot called "claude", from before there was a Claude reviewer, stay Codex\'s', async () => {
+  const db = new Db(':memory:');
+  try {
+    const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
+    const registered = await s.registerRepo(repo);
+    const pull = await s.createPull(registered, { title: 'Reviewed by a bot called claude', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
+    // An older version recorded the bot's login in its runs, and "claude" was a name it could have.
+    const review = await s.createReview(await s.ctx(registered.owner, registered.name, pull.number), { event: 'COMMENT', body: 'Fine.' }, db.actor('claude', 'Bot'));
+    const run = { pull_id: pull.id, head_sha: pull.head_sha, trigger: 'auto', status: 'done', review_id: review.id, findings: 0 };
+    db.insert('review_runs', { ...run, reviewer: 'claude', started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z' });
+    const start = () => {
+      s.codex = new CodexReviewer(s, join(dir, 'codex'));
+      s.claude = new ClaudeReviewer(s, join(dir, 'claude'));
+      for (const r of s.reviewerAgents()) r.start();
+    };
+    const reviewers = () => db.all<{ reviewer: string }>('SELECT reviewer FROM review_runs ORDER BY id').map((r) => r.reviewer);
+    start();
+    // Codex's run, counted as Codex's automatic review; Claude has not reviewed the head.
+    const row = db.get<any>('SELECT * FROM pulls WHERE id = ?', pull.id);
+    assert.deepEqual(reviewers(), ['codex']);
+    assert.equal(s.codex!.automaticReviews(row), 1);
+    assert.equal(s.claude!.headStatus(row).state, 'off');
+    // A run of the Claude reviewer stays Claude's, also when the server starts again.
+    db.insert('review_runs', { ...run, reviewer: 'claude', started_at: now(), finished_at: now() });
+    for (const r of s.reviewerAgents()) await r.stop();
+    start();
+    assert.deepEqual(reviewers(), ['codex', 'claude']);
+    for (const r of s.reviewerAgents()) await r.stop();
+  } finally {
+    db.sql.close();
+  }
+});
+
+test('a reviewer can leave pull requests by its own kind of agent to the other', async (t) => {
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine by Codex.', comments: [] });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine by Claude.', comments: [] });
+  const stage = async (branch: string, file: string, actor: string, flags: string[] = []) => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', branch);
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+    const r = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', ...flags], { actor });
+    assert.equal(r.code, 0, r.stderr);
+    return Number(r.stdout.trim().split('/').pop());
+  };
+  const config = async (n: number, kind: string) => {
+    const { enabled, runs } = await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/${kind}`);
+    return { enabled, runs: runs.length };
+  };
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1, skipOwnKind: true });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 1, skipOwnKind: true });
+  try {
+    await t.test('Codex reviews what an agent in Claude Code wrote, and Claude does not', async () => {
+      const n = await stage('feature/by-claude', 'by-claude.js', 'claude');
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, /codex reviewed: commented/);
+      assert.doesNotMatch(w.stdout, /claude-review/);
+      assert.deepEqual(await config(n, 'claude'), { enabled: false, runs: 0 });
+      assert.deepEqual(await config(n, 'codex'), { enabled: true, runs: 1 });
+      const html = await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text();
+      assert.match(html, /Settings leave pull requests by agents in Claude Code to other reviewers/);
+    });
+    await t.test('and the other way round', async () => {
+      const n = await stage('feature/by-codex-agent', 'by-codex-agent.js', 'codex-agent');
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'codex-agent' });
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, /claude-review reviewed: commented/);
+      assert.deepEqual(await config(n, 'codex'), { enabled: false, runs: 0 });
+    });
+    await t.test('asked for when staging, it reviews all the same', async () => {
+      const n = await stage('feature/by-claude-asked', 'by-claude-asked.js', 'claude', ['--reviewer', 'claude:1']);
+      assert.deepEqual((await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/claude`)).overrides, { enabled: true, max_iterations: 1 });
+      await human('PATCH', `/api/repos/acme/widgets/pulls/${n}/reviewers/codex`, { enabled: false });
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, /claude-review reviewed: commented/);
+    });
+  } finally {
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3, skipOwnKind: false });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3, skipOwnKind: false });
+  }
 });
 
 test('symlinks in a pull request lead the reviewer nowhere: not to /dev/zero, not outside the checkout', async () => {

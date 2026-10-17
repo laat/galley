@@ -18,7 +18,7 @@ import {
 } from './github.ts';
 import { renderMarkdown } from './web/markdown.ts';
 import { pullReferences } from './web/references.ts';
-import { nextSettings, readSettings, saveSettings, type MergeMethod } from './settings.ts';
+import { nextSettings, readSettings, REVIEWER_KINDS, saveSettings, type MergeMethod, type ReviewerKind } from './settings.ts';
 
 /**
  * A GitHub-compatible subset of the REST API, plus a few laatsux extensions
@@ -39,10 +39,9 @@ export function api(s: Service): Hono {
   const actor = (c: Context): Actor => {
     const login = c.req.header('x-laatsux-actor');
     if (!login) return s.viewer();
-    // The reviewer posts from inside the server; anyone else using its name would be mistaken for it.
-    if (s.codex && login === s.codex.actor().login) {
-      throw new HttpError(409, `"${login}" is the name of the Codex reviewer. Set LAATSUX_ACTOR to another name.`);
-    }
+    // A reviewer agent posts from inside the server; anyone else using its name would be mistaken for it.
+    const reviewer = s.reviewerAgents().find((r) => r.actor().login === login);
+    if (reviewer) throw new HttpError(409, `"${login}" is the name of the ${reviewer.label} reviewer. Set LAATSUX_ACTOR to another name.`);
     const type = (c.req.header('x-laatsux-actor-type') as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
     return s.db.actor(login, type === 'User' ? 'User' : 'Bot');
   };
@@ -80,24 +79,35 @@ export function api(s: Service): Hono {
     return a;
   };
 
+  /** The reviewer agent of a kind (`codex`, `claude`) in the path. */
+  const reviewerOf = (c: Context) => {
+    const kind = c.req.param('kind');
+    const reviewer = s.reviewerAgents().find((r) => r.engine === kind);
+    if (!reviewer) throw new HttpError(REVIEWER_KINDS.includes(kind as ReviewerKind) ? 501 : 404, `this server has no ${kind} reviewer`);
+    return reviewer;
+  };
+
   app.get('/settings', async (c) => {
-    const codex = s.codex;
-    return c.json({ ...readSettings(s.db), codexModels: codex ? await codex.models() : [], codexDefaults: codex ? codex.defaults() : {} });
+    const catalogs: Record<string, unknown> = {};
+    for (const r of s.reviewerAgents()) Object.assign(catalogs, { [`${r.engine}Models`]: await r.models(), [`${r.engine}Defaults`]: r.defaults() });
+    return c.json({ ...readSettings(s.db), ...catalogs });
   });
 
-  app.put('/settings/codex', async (c) => {
+  app.put('/settings/:kind{codex|claude}', async (c) => {
     human(c);
+    const reviewer = reviewerOf(c);
+    const kind = reviewer.engine;
     const b = await body(c);
-    await s.codex?.models(); // so efforts can be checked against the model
-    const settings = nextSettings(s.db, { codex: b }, (model) => s.codex?.efforts(model) ?? null);
+    await reviewer.models(); // so efforts can be checked against the model
+    const settings = nextSettings(s.db, { [kind]: b }, (_, model) => reviewer.efforts(model));
     // Renaming is the one step that can still fail (the name may be taken), so it goes before saving.
-    if (s.codex && b.name !== undefined && settings.codex.name !== s.codex.actor().login) s.codex.rename(settings.codex.name);
+    if (b.name !== undefined && settings[kind].name !== reviewer.actor().login) reviewer.rename(settings[kind].name);
     // The reviewer's actual name is the truth (it may have had to take another one).
-    if (s.codex) settings.codex.name = s.codex.actor().login;
+    settings[kind].name = reviewer.actor().login;
     saveSettings(s.db, settings);
     // Turning reviews on or raising the limit should not wait for the author's next `pr wait`
     // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
-    for (const id of s.waiters.keys()) s.codex?.consider(id);
+    for (const id of s.waiters.keys()) reviewer.consider(id);
     return c.json(settings);
   });
 
@@ -353,24 +363,28 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
-  // laatsux extension: ask Codex to review now, and list its runs.
-  app.post('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
+  // laatsux extension: ask a reviewer agent (`codex`, `claude`) to review now, and list its runs.
+  app.post('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     human(c);
-    if (!s.codex) throw new HttpError(501, 'this server has no Codex reviewer');
+    const reviewer = reviewerOf(c);
     const x = await ctx(c);
-    return c.json({ run_id: s.codex.request(x) }, 202);
+    return c.json({ run_id: reviewer.request(x) }, 202);
   });
-  // laatsux extension: this pull request's own Codex settings, `enabled` and `max_iterations` (null for the setting).
-  app.patch('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
+  // laatsux extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
+  app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     human(c);
-    if (!s.codex) throw new HttpError(501, 'this server has no Codex reviewer');
+    const reviewer = reviewerOf(c);
     const x = await ctx(c);
     const b = await body(c);
-    return c.json(s.codex.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
+    return c.json(reviewer.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
   });
-  app.get('/repos/:owner/:repo/pulls/:n/reviewers/codex', async (c) => {
+  app.get('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     const x = await ctx(c, { sync: false });
-    return c.json({ running: s.codex?.isRunning(x.pull.id) ?? false, runs: s.codex?.runs(x.pull) ?? [], ...s.codex?.config(x.pull) });
+    const reviewer = s.reviewerAgents().find((r) => r.engine === c.req.param('kind'));
+    if (!reviewer) return c.json({ running: false, runs: [] });
+    // `usage`, what a run cost as its tool reported it (Claude does), is JSON in the database.
+    const runs = reviewer.runs(x.pull).map((r) => ({ ...r, usage: r.usage ? JSON.parse(r.usage) : null }));
+    return c.json({ running: reviewer.isRunning(x.pull.id), runs, ...reviewer.config(x.pull) });
   });
 
   /**

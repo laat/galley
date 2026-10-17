@@ -4,9 +4,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
-import { type Actor, type CommentRow } from '../db.ts';
+import { now, type Actor, type CommentRow } from '../db.ts';
 import { splitPriorityPrefix, type Service } from '../service.ts';
-import { lastLines, outsideTheDiff, Reviewer, SCHEMA, type Answer, type Engine, type EngineJob, type ModelInfo } from './reviewer.ts';
+import { lastLines, outsideTheDiff, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo } from './reviewer.ts';
+import { REVIEWER_KINDS } from '../settings.ts';
 
 /**
  * Codex's workspace-write sandbox: it writes only to the checkout and the TMPDIR it is given
@@ -48,6 +49,9 @@ const CATALOG_TTL_MS = 10 * 60 * 1000;
 export class CodexEngine implements Engine {
   readonly id = 'codex';
   readonly label = 'Codex';
+  readonly authorLogin = CODEX_AUTHOR;
+  readonly authorTool = 'Codex';
+  readonly catalogSource = 'codex debug models';
   private bin: string;
   private catalog: { at: number; models: ModelInfo[] } | null = null;
 
@@ -55,12 +59,12 @@ export class CodexEngine implements Engine {
     this.bin = bin;
   }
 
-  install(command: string[], o: { checkout: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {
+  install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {
     const args = ['sandbox', '-c', 'sandbox_mode="workspace-write"', ...workspaceWrite(true), ...untrusted(o.checkout), '--', ...command];
     return run(this.bin, args, { cwd: o.checkout, env: o.env, allowFail: true, timeoutMs: o.timeoutMs, signal: o.signal });
   }
 
-  async review(job: EngineJob): Promise<Answer> {
+  async review(job: EngineJob): Promise<EngineResult> {
     const { checkout, settings, timeoutMs } = job;
     const schemaFile = join(job.dir, 'schema.json');
     const outFile = join(job.dir, 'review.json');
@@ -78,7 +82,7 @@ export class CodexEngine implements Engine {
       throw new Error(`codex ${why}:\n${lastLines(r.stderr || r.stdout, 15)}`);
     }
     try {
-      return JSON.parse(readFileSync(outFile, 'utf8'));
+      return { answer: JSON.parse(readFileSync(outFile, 'utf8')), usage: null };
     } catch {
       throw new Error(`codex did not write a review:\n${lastLines(r.stderr || r.stdout, 15)}`);
     }
@@ -149,18 +153,24 @@ export class CodexReviewer extends Reviewer {
   }
 
   protected migrate(): void {
-    // Earlier versions recorded the reviewer's login in review_runs; fold those identities into one.
-    for (const { reviewer } of this.s.db.all<{ reviewer: string }>('SELECT DISTINCT reviewer FROM review_runs WHERE reviewer != ?', this.engine)) {
+    // Earlier versions recorded the reviewer's login in review_runs; fold those identities into
+    // one. Runs from before laatsux knew another engine are all Codex's, also under a login that
+    // is another engine's kind now (the bot could be called "claude").
+    let since = this.s.db.getMeta('engines_since');
+    if (!since) this.s.db.setMeta('engines_since', (since = now()));
+    const kinds = REVIEWER_KINDS.map((k) => `'${k}'`).join(', ');
+    const legacy = `reviewer != '${this.engine}' AND (reviewer NOT IN (${kinds}) OR started_at < ?)`;
+    for (const { reviewer } of this.s.db.all<{ reviewer: string }>(`SELECT DISTINCT reviewer FROM review_runs WHERE ${legacy}`, since)) {
       const old = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', reviewer);
       const me = this.actor();
       this.s.db.transaction(() => {
         if (old && old.id !== me.id && this.onlyReviewedForUs(old)) this.absorb(old, me);
-        this.s.db.run('UPDATE review_runs SET reviewer = ? WHERE reviewer = ?', this.engine, reviewer);
+        this.s.db.run(`UPDATE review_runs SET reviewer = ? WHERE reviewer = ? AND ${legacy}`, this.engine, reviewer, since);
       });
     }
     // Runs from before findings were counted: count them from the review each posted, its
     // comments and the findings its body lists. Without a review the count stays unknown.
-    for (const run of this.s.db.all<{ id: number; review_id: number }>("SELECT id, review_id FROM review_runs WHERE status = 'done' AND findings IS NULL AND review_id IS NOT NULL")) {
+    for (const run of this.s.db.all<{ id: number; review_id: number }>("SELECT id, review_id FROM review_runs WHERE reviewer = ? AND status = 'done' AND findings IS NULL AND review_id IS NOT NULL", this.engine)) {
       const review = this.s.db.get<{ body: string }>('SELECT body FROM reviews WHERE id = ?', run.review_id);
       if (!review) continue;
       const inline = this.s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE review_id = ?', run.review_id)!.n;

@@ -197,6 +197,8 @@
     comment_edited: 'edited a comment',
     codex_started: 'started reviewing',
     codex_failed: 'could not finish its review',
+    claude_started: 'started reviewing',
+    claude_failed: 'could not finish its review',
   };
   // What laatsux did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
   const AUTOMATIC = {
@@ -1272,6 +1274,10 @@
       el.disabled = true;
       await api('PATCH', el.dataset.api, { [el.dataset.field]: null }).catch((err) => toast(err.message));
       refresh();
+    } else if ((el = on('.js-reviewer-switch'))) {
+      el.disabled = true;
+      await api('PATCH', el.dataset.api, { enabled: el.dataset.enabled === 'true' }).catch((err) => toast(err.message));
+      refresh();
     } else if ((el = on('.js-auto-publish-cancel'))) {
       el.disabled = true;
       await api('DELETE', el.dataset.api).catch((err) => toast(err.message));
@@ -1332,9 +1338,9 @@
     }
   });
 
-  // The Codex review limit of a pull request: each click moves the number at once, and the
-  // last value is saved shortly after the clicks stop.
-  let limitSave = null;
+  // A reviewer agent's review limit on a pull request: each click moves the number at once, and the
+  // last value is saved shortly after the clicks stop. Each reviewer's limit waits on its own.
+  const limitSaves = new Map();
   function stepCodexLimit(button) {
     const box = button.closest('.codex-limit');
     const max = Number(box.dataset.max);
@@ -1342,11 +1348,15 @@
     box.dataset.limit = String(value);
     $('.js-codex-limit', box).textContent = String(value);
     for (const b of $$('.js-codex-step', box)) b.disabled = Number(b.dataset.step) < 0 ? value <= 0 : value >= max;
-    clearTimeout(limitSave);
-    limitSave = setTimeout(async () => {
-      await api('PATCH', box.dataset.api, { max_iterations: value }).catch((err) => toast(err.message));
-      refresh();
-    }, 500);
+    clearTimeout(limitSaves.get(box.dataset.api));
+    limitSaves.set(
+      box.dataset.api,
+      setTimeout(async () => {
+        limitSaves.delete(box.dataset.api);
+        await api('PATCH', box.dataset.api, { max_iterations: value }).catch((err) => toast(err.message));
+        refresh();
+      }, 500),
+    );
   }
 
   // Settings: the effort levels on offer depend on the model.
@@ -1359,7 +1369,7 @@
     const current = effort.value;
     const fallback = option.dataset.defaultEffort;
     effort.innerHTML =
-      `<option value="">Codex default${fallback ? ` (${esc(fallback)})` : ''}</option>` + efforts.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+      `<option value="">${esc(effort.dataset.defaultLabel)}${fallback ? ` (${esc(fallback)})` : ''}</option>` + efforts.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
     effort.value = efforts.includes(current) ? current : '';
   });
 

@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { Repo, run, githubSlug, type Commit, type RawCommit, type RunResult } from './git.ts';
 import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
+import type { ClaudeReviewer } from './reviewers/claude.ts';
+import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
 import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, prependThreads, present, readGithub, PULL_FIELDS, type GithubPull, type GithubStatus } from './github-follow.ts';
@@ -78,7 +80,7 @@ export interface Thread {
 export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
 
 /** A pull request's own reviewer agent settings, as stored; left out, a column follows the setting. */
-export type ReviewColumns = Partial<Pick<PullRow, 'codex_enabled' | 'codex_max_iterations'>>;
+export type ReviewColumns = Partial<Pick<PullRow, 'codex_enabled' | 'codex_max_iterations' | 'claude_enabled' | 'claude_max_iterations'>>;
 
 const EVENT_STATE: Record<ReviewEvent, ReviewState> = {
   COMMENT: 'COMMENTED',
@@ -134,16 +136,6 @@ export interface HeadStatus {
   failedAt?: string | null;
   /** Automatic reviews of the pull request so far, and how many it gets. */
   automatic?: { used: number; limit: number };
-}
-
-/** A reviewer agent such as Codex: one actor that reviews on its own. */
-export interface ReviewerAgent {
-  /** Its kind, as in `…/pulls/{n}/reviewers/{engine}`, where a review is asked for. */
-  readonly engine: string;
-  actor(): Actor;
-  /** Its section of the Settings page. */
-  settingsUrl(): string;
-  headStatus(pull: PullRow): HeadStatus;
 }
 
 /** Whether the agents are done with a pull request, so the reviewer can take it from here. */
@@ -263,8 +255,9 @@ export class Service {
   baseUrl: string;
   ghBin: string;
   bus = new EventEmitter();
-  /** Codex as a reviewer agent, when the server runs one. */
+  /** Codex and Claude as reviewer agents, when the server runs them. */
   codex: CodexReviewer | null = null;
+  claude: ClaudeReviewer | null = null;
   /** Number of `pr wait` calls currently blocked, per pull id. */
   waiters = new Map<number, number>();
   private syncing = new Map<number, Promise<PullRow>>();
@@ -293,7 +286,7 @@ export class Service {
 
   /** The human's login belongs to the human: a reviewer bot holding it moves to another name. */
   claimViewerLogin(): void {
-    this.codex?.releaseName(this.viewerLogin);
+    for (const r of this.reviewerAgents()) r.releaseName(this.viewerLogin);
     this.viewer();
   }
 
@@ -629,7 +622,7 @@ export class Service {
   reviewRequest(reviewers: unknown, automatic: unknown): { columns: ReviewColumns; ignored: string[] } {
     if (automatic !== undefined && typeof automatic !== 'boolean') throw new HttpError(422, 'automatic_reviews must be true or false');
     if (reviewers !== undefined && !Array.isArray(reviewers)) throw new HttpError(422, 'reviewers must be an array');
-    const agents = this.codex ? [this.codex] : [];
+    const agents = this.reviewerAgents();
     const columns: ReviewColumns = {};
     if (automatic !== undefined) for (const agent of agents) Object.assign(columns, agent.columns({ enabled: automatic }));
     const ignored: string[] = [];
@@ -1409,9 +1402,17 @@ export class Service {
     if (working) this.emit(pull.id, 'waiting', author);
   }
 
-  /** The reviewer agents this server runs. */
-  reviewerAgents(): ReviewerAgent[] {
-    return this.codex ? [this.codex] : [];
+  /** The reviewer agents this server runs: each one actor that reviews on its own. */
+  reviewerAgents(): Reviewer[] {
+    return [this.codex, this.claude].filter((r) => r !== null);
+  }
+
+  /** The reviewer agents reviewing the pull request or about to, and what each is at. */
+  reviewersAtWork(pull: PullRow): { reviewer: Reviewer; work: ReviewAtWork }[] {
+    return this.reviewerAgents().flatMap((reviewer) => {
+      const work = reviewer.atWork(pull);
+      return work ? [{ reviewer, work }] : [];
+    });
   }
 
   /**
@@ -1818,10 +1819,11 @@ export class Service {
     if (pull.github_state === 'merged') throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
     // Decided here, not by the page: a page loaded before the review started does not know of it.
-    const work = this.codex?.atWork(pull);
-    if (work && !opts.duringReview) {
-      const what = work.head_sha === pull.head_sha ? 'this commit' : `an earlier commit (${work.head_sha.slice(0, 7)})`;
-      throw new HttpError(428, `${this.codex!.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what}, and its review may ask for changes.`);
+    const busy = this.reviewersAtWork(pull);
+    if (busy.length && !opts.duringReview) {
+      const what = (sha: string) => (sha === pull.head_sha ? 'this commit' : `an earlier commit (${sha.slice(0, 7)})`);
+      const doing = busy.map(({ reviewer, work }) => `${reviewer.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what(work.head_sha)}`);
+      throw new HttpError(428, `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes.`);
     }
     // Refused before anything is pushed, rather than published without the auto-merge asked for.
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
