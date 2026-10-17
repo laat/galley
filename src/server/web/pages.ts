@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, TO_REVIEW, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
@@ -42,7 +42,9 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   const listed = opts.repo ? all : all.filter((p) => !p.pinned_at);
   const shown = state === 'all' ? listed : listed.filter((p) => staging.get(p.id) === state);
   const base = opts.repo ? `/${opts.repo.owner}/${opts.repo.name}` : '/';
-  const turns = new Map(all.map((p) => [p.id, s.turn(p)]));
+  // What the reviewer agents are at, which decides whose turn it is and which the rows say.
+  const ready = new Map(all.filter((p) => staging.get(p.id) !== 'done').map((p) => [p.id, s.readiness(p)]));
+  const turns = new Map(all.map((p) => [p.id, s.turn(p, ready.get(p.id))]));
   const turn = (p: PullRow) => turns.get(p.id)!;
   const yours = all.filter((p) => turn(p).whose === 'reviewer');
   /** A tab with its count, and how many of them wait for you, also when another tab is shown. */
@@ -83,12 +85,19 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
           ? html`<span class="Label Label--closed">Closed on GitHub</span>`
           : '';
 
+  /** Who is at work on a pull request, as small avatars at the end of its row. */
+  const atWorkAvatars = (atWork: TurnLine['atWork']) =>
+    atWork.length
+      ? html`<span class="turn-avatars">${atWork.map(({ actor, doing }) => html`<span class="turn-avatar" title="${doing}">${avatar(avatarUrl(s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')}</span>`)}</span>`
+      : '';
+
   /** A pull request with what it waits for: whose turn it is and why, the decision, and what GitHub does not have yet. */
   const row = (p: PullRow) => {
     const t = turn(p);
     const author = s.db.actorById(p.author_id);
     const unpublished = t.reasons.find((r) => r.kind === 'unpublished');
     const comments = s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE pull_id = ? AND ' + "(review_id IS NULL OR review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))", p.id)!.n;
+    const { line, atWork } = turnLine(s, p, t, ready.get(p.id), apiBase(p));
     return html`<div class="Box-row pr-row">
   <span class="pr-row-icon">${pullIcon(p, !!unpublished)}</span>
   <div class="pr-row-main">
@@ -98,23 +107,25 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${t.reasons.some((r) => r.kind === 'changes_requested') ? html`<span class="Label Label--danger">${icon('file-diff')} Changes requested</span>` : ''}
     ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
     ${ended(p)}
-    ${turnReasons(t, apiBase(p))}
+    ${line}
     <div class="pr-row-meta">#${p.number} staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
-  <div class="pr-row-side">${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
+  <div class="pr-row-side">${atWorkAvatars(atWork)}${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
 </div>`;
   };
 
-  /** One line: the title, and what the agents are doing. */
+  /** The title, and under it what the agents are doing. */
   const compactRow = (p: PullRow) => {
     const t = turn(p);
     const unpublished = t.reasons.some((r) => r.kind === 'unpublished');
+    const { line, atWork } = t.whose === 'none' ? { line: html`<div class="pr-row-turn">${published(p)}</div>`, atWork: [] } : turnLine(s, p, t, ready.get(p.id), apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts']);
     return html`<div class="Box-row pr-row pr-row--compact">
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
     <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
-    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts'])}
+    ${line}
   </div>
+  <div class="pr-row-side">${atWorkAvatars(atWork)}</div>
 </div>`;
   };
 
@@ -213,38 +224,149 @@ function repoSidebar(s: Service, all: PullRow[], yours: PullRow[]): Safe | null 
 </aside>`;
 }
 
-/**
- * The reasons of a Turn as a line of the list, those of the given kinds (by default all but the
- * labels). A failed reviewer agent gets a Retry button, which asks it to review at `apiBase`.
- */
-function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github']): Safe {
-  const shown = t.reasons.filter((r) => kinds.includes(r.kind));
-  if (!shown.length) return raw('');
-  return html`<div class="pr-row-turn">${shown.map((r) => {
-    const cls = reasonClass(r);
-    const mark =
-      cls === 'failed'
-        ? icon('x-circle-fill')
-        : cls === 'running' || cls === 'waiting'
-          ? icon('dot-fill', { cls: 'turn-pulse' })
-          : cls === 'working'
-            ? icon('dot-fill')
-            : cls === 'github'
-              ? icon('mark-github')
-              : cls === 'conflicts'
-                ? icon('alert')
-                : '';
-    return html`<span class="turn-reason${cls ? ` turn-reason--${cls}` : ''}">${mark}${r.text}${r.since ? html`<span class="turn-since">, ${since(r.since)}</span>` : ''}${
-      cls === 'failed' && r.reviewer ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.reviewer}">Retry</button>` : ''
-    }</span>`;
-  })}</div>`;
+/** A row's turn as the list shows it: one line of short phrases, and who is at work on the pull request. */
+interface TurnLine {
+  line: Safe;
+  /** The reviewer agents running a review and the author working on feedback, for avatars at the row's end. */
+  atWork: { actor: Actor; doing: string }[];
 }
 
-/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, unresolved threads, conflicts with the base, or something on GitHub. */
-function reasonClass(r: TurnReason): string {
-  if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' || r.state === 'stalled' ? '' : 'working';
-  if (r.kind === 'reviewer_agent') return r.state === 'reviewing' || r.state === 'queued' ? 'running' : r.state === 'failed' ? 'failed' : '';
-  return r.kind === 'threads' || r.kind === 'conflicts' || r.kind === 'github' ? r.kind : '';
+/** A phrase of a TurnLine: one reason, or the reviewer agents in the same state, said together. */
+interface Phrase {
+  /** The reviewer agents it names, first (none for the other reasons). */
+  logins: string[];
+  /** What it says after their names. */
+  words: string;
+  /** The reasons in full, as `pr view` says them. */
+  full: string[];
+  /** Since when it has been so: the earliest of the agents'. */
+  since: string | null;
+  mark: Safe | '';
+  /** A failed reviewer agent's API name, for Retry. */
+  retry?: string;
+  /** What explains the row's group comes first. */
+  rank: number;
+}
+
+/**
+ * The reasons of a Turn of the given kinds (by default all but the labels) as one line of the list,
+ * in short phrases: reviewer agents in the same state together, with the earliest time, and the
+ * commit only when it is not the head. What explains the row's group comes first: what the
+ * reviewer has to do on their turn, who is working on the agents'. A shortened phrase has the
+ * reasons in full as its tooltip. A failed reviewer agent gets a Retry button, which asks it to
+ * review at `apiBase`.
+ */
+function turnLine(
+  s: Service,
+  pull: PullRow,
+  t: Turn,
+  ready: Readiness | undefined,
+  apiBase: string,
+  kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github'],
+): TurnLine {
+  const shown = t.reasons.filter((r) => kinds.includes(r.kind));
+  const author = s.db.actorById(pull.author_id);
+  const waiting = t.reasons.some((r) => r.kind === 'author' && r.state === 'waiting');
+  // The reviewer agents as the turn saw them, by the API's name for them.
+  const agents = new Map(ready?.reviewers.map((x) => [x.reviewer, x]));
+  const rank = (r: TurnReason): number => {
+    if (t.whose === 'reviewer') {
+      // Your turn: a stalled author to get going, feedback to pass on, a review to retry, GitHub; then what changed since your review.
+      if (r.state === 'stalled' || r.state === 'unseen' || r.state === 'failed' || r.kind === 'github') return 0;
+      if (r.kind === 'changes') return 1;
+      return r.kind === 'author' || r.kind === 'reviewer_agent' ? 3 : 2;
+    }
+    // The agents': the reviewer agents that have the head to review, or else the author, first.
+    if (t.whose === 'reviewer_agents' && r.kind === 'reviewer_agent' && TO_REVIEW.includes(r.state as HeadStatus['state'])) return 0;
+    return r.kind === 'author' ? 1 : 2;
+  };
+  const pulse = icon('dot-fill', { cls: 'turn-mark turn-pulse' });
+  const phrases = new Map<string, Phrase>();
+  const atWork: TurnLine['atWork'] = [];
+  shown.forEach((r, i) => {
+    const agent = r.kind === 'reviewer_agent' && r.reviewer ? agents.get(r.reviewer) : undefined;
+    if (!agent) {
+      if (r.state === 'working') atWork.push({ actor: author, doing: r.text });
+      const mark =
+        r.state === 'working' ? pulse : r.kind === 'conflicts' ? icon('alert', { cls: 'turn-mark turn-mark--danger' }) : r.kind === 'github' ? icon('mark-github', { cls: 'turn-mark' }) : '';
+      phrases.set(`reason ${i}`, { logins: [], words: reasonPhrase(r, author.login), full: [r.text], since: r.since ?? null, mark, rank: rank(r) });
+      return;
+    }
+    const actor = r.state === 'reviewing' && s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', agent.login);
+    if (actor) atWork.push({ actor, doing: r.text });
+    // Each failed review has its own Retry; the others share a phrase with those that say the same.
+    const words = r.state === 'failed' ? "'s review failed" : ` ${agentPhrase(r.state as HeadStatus['state'], agent.status, pull, author.login, waiting)}`;
+    const key = r.state === 'failed' ? `failed ${r.reviewer}` : `agent${words}`;
+    const same = phrases.get(key);
+    if (same) {
+      same.logins.push(agent.login);
+      same.full.push(r.text);
+      if (r.since && (!same.since || r.since < same.since)) same.since = r.since;
+    } else {
+      const mark = r.state === 'reviewing' ? pulse : r.state === 'failed' ? icon('x-circle-fill', { cls: 'turn-mark turn-mark--danger' }) : '';
+      phrases.set(key, { logins: [agent.login], words, full: [r.text], since: r.since ?? null, mark, retry: r.state === 'failed' ? r.reviewer : undefined, rank: rank(r) });
+    }
+  });
+  if (!phrases.size) return { line: raw(''), atWork };
+  const sorted = [...phrases.values()].sort((a, b) => a.rank - b.rank);
+  return {
+    line: html`<div class="pr-row-turn">${sorted.map((p) => {
+      const names = p.logins.length > 1 ? `${p.logins.slice(0, -1).join(', ')} and ${p.logins.at(-1)}` : (p.logins[0] ?? '');
+      const text = names + p.words;
+      const title = p.full.join('\n');
+      return html`<span class="turn-reason"${title !== text ? html` title="${title}"` : ''}>${p.mark}${text}${p.since ? html`<span class="turn-since">${since(p.since)}</span>` : ''}${
+        p.retry ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${p.retry}">Retry</button>` : ''
+      }</span>`;
+    })}</div>`,
+    atWork,
+  };
+}
+
+/** A reason other than a reviewer agent's, in a few words: the author's state is said shorter, the others as they are. */
+function reasonPhrase(r: TurnReason, author: string): string {
+  if (r.kind !== 'author') return r.text;
+  switch (r.state) {
+    case 'working':
+      return `${author} working on feedback`;
+    case 'unseen':
+      return `${author} hasn't seen the feedback`;
+    case 'waiting':
+      return `${author} waiting`;
+    case 'stalled':
+      return `${author} stalled`;
+    default:
+      return `${author} not waiting`;
+  }
+}
+
+/**
+ * What a reviewer agent is at with the head, after its name (reviewerAgentText in service.ts says
+ * it in full). The commit only when it is not the head, as for a review that started before a push.
+ */
+function agentPhrase(state: HeadStatus['state'], status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean): string {
+  const older = !status.description && status.commit !== pull.head_sha ? shortSha(status.commit) : '';
+  const what = status.description ? ' the description' : older ? ` ${older}` : '';
+  switch (state) {
+    case 'reviewing':
+      return older ? `reviewing an earlier commit, ${older}` : `reviewing${what}`;
+    case 'queued':
+      return `about to review${what}`;
+    case 'interrupted':
+      return `to review${what} again after a restart`;
+    case 'unreviewed':
+      return authorWaiting ? `about to review${what}` : `waiting for ${author}`;
+    case 'findings':
+      return what ? `commented on${what}` : 'commented';
+    case 'cancelled':
+      return `cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
+    case 'clean':
+      return what ? `found nothing in${what}` : 'found nothing';
+    case 'approved':
+      return `approved${what}`;
+    default:
+      // Capped: it has no automatic review left. (Turned off, it has no reason.)
+      return 'out of automatic reviews';
+  }
 }
 
 function capitalize(text: string): string {

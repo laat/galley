@@ -4035,7 +4035,10 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
       assert.deepEqual(view, { turn: { whose: 'REVIEWER_AGENTS', reasons: [`codex-review is reviewing ${sha()}, 1 min`, 'agent is waiting for review, 1 min'] } });
       assert.equal(await group(), 'staged: With agents');
-      assert.match(await page('/'), new RegExp(`<span class="turn-reason turn-reason--running">.*?codex-review is reviewing ${sha()}<span class="turn-since">, <relative-time [^>]*data-format="duration"`));
+      // The list says it shorter, with the reason in full as its tooltip, and the reviewer agent's avatar at the row's end.
+      const front = await page('/');
+      assert.match(front, new RegExp(`<span class="turn-reason" title="codex-review is reviewing ${sha()}"><svg class="octicon octicon-dot-fill turn-mark turn-pulse"[^>]*>.*?</svg>codex-review reviewing<span class="turn-since"><relative-time [^>]*data-format="duration"`));
+      assert.match(rowOf(front)!, /<span class="turn-avatar" title="codex-review is reviewing [0-9a-f]{7}"><img class="avatar avatar-bot"/);
     });
 
     await t.test("handed Codex's findings: the author's, until it acts", async () => {
@@ -4116,7 +4119,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       delete process.env.FAKE_CODEX_FAIL;
       const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
       assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex-review's review of ${sha()} failed`, engine: 'codex', reviewer: 'codex' });
-      assert.match(await page('/'), new RegExp(`codex-review&#39;s review of ${sha()} failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
+      assert.match(await page('/'), new RegExp(`codex-review&#39;s review failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
       // Also while the author waits: nothing more is coming from Codex for this commit. The author
       // was told so when Codex found nothing in it, and is not told again.
       const waited = cli(['pr', 'wait', String(number), '--timeout', '2s']);
@@ -4400,7 +4403,7 @@ test("while the reviewer agents still have the head to review, it is theirs or t
         });
         assert.equal(await group(), 'staged: Your turn');
         assert.equal(await yours(), true);
-        assert.match(await page('/'), /<span class="turn-reason">agent stopped without asking for review<span class="turn-since">/);
+        assert.match(await page('/'), /<span class="turn-reason" title="agent stopped without asking for review">agent stalled<span class="turn-since">/);
         // Waiting starts the reviewer agents: theirs.
         process.env.FAKE_CODEX_GATE = codexGate;
         process.env.FAKE_CLAUDE_GATE = claudeGate;
@@ -4767,7 +4770,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       const yours = await turn();
       assert.equal(yours.whose, 'REVIEWER');
       assert.match(yours.reasons.join(' · '), /1 check failed on GitHub · changes requested on GitHub · 1 unresolved thread on GitHub · conflicts with main on GitHub/);
-      assert.match(await (await fetch(`${server.url}/acme/widgets?state=published`)).text(), /<span class="turn-reason turn-reason--github"><svg [^>]*octicon-mark-github[^]*?<\/svg>1 check failed on GitHub<\/span>/);
+      assert.match(await (await fetch(`${server.url}/acme/widgets?state=published`)).text(), /<span class="turn-reason"><svg [^>]*octicon-mark-github[^]*?<\/svg>1 check failed on GitHub<\/span>/);
       assert.doesNotMatch((await cli(['pr', 'view', n, '--comments'])).stdout, /Export a function/);
       // The earlier page cannot be read this time (gh-pulls-earlier.json is gone): its thread stays.
       await githubSays({
@@ -5134,7 +5137,7 @@ test('the reviewer pins pull requests to the top of the front page, until they u
     assert.deepEqual(shown, { pinned: [c.number, a.number], list: [b.number] });
     assert.match(await page('/'), /<div class="Box-header turn-group">[^]*?<h2 class="turn-group-title">Pinned<\/h2> <span class="Counter">2<\/span> <span class="turn-group-note">most recently pinned first<\/span>/);
     // With their turn, as elsewhere.
-    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="turn-reason">agent is not waiting/);
+    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="turn-reason" title="agent is not waiting">agent not waiting/);
     // A repository's list has them in their place, with a pin.
     const list = await page('/acme/pins');
     assert.doesNotMatch(list, /pinned-list/);
@@ -5306,7 +5309,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.equal(turn.reasons[0].text, 'agent is working on the feedback');
     assert.equal(turn.reasons.find((r: any) => r.kind === 'conflicts').text, 'conflicts with origin/main in a.js');
     const list = await (await fetch(`${server.url}/${fullName}`)).text();
-    assert.match(list, /<span class="turn-reason turn-reason--conflicts"><svg class="octicon octicon-alert[^>]*>.*?<\/svg>conflicts with origin\/main in a\.js<\/span>/);
+    assert.match(list, /<span class="turn-reason"><svg class="octicon octicon-alert[^>]*>.*?<\/svg>conflicts with origin\/main in a\.js<\/span>/);
     const box = await pr.page();
     assert.match(box, /<strong>This branch has conflicts with <span class="branch-name branch-name-sm">origin\/main<\/span><\/strong>/);
     assert.match(box, /conflicts in 1 file\. agent was told to rebase it\./);

@@ -187,7 +187,7 @@ export interface HeadStatus {
  * none of them is in one (Service.agentsDone); until then it is their turn, or the author's to
  * start them (Service.turn).
  */
-const TO_REVIEW: HeadStatus['state'][] = ['reviewing', 'queued', 'interrupted', 'unreviewed'];
+export const TO_REVIEW: HeadStatus['state'][] = ['reviewing', 'queued', 'interrupted', 'unreviewed'];
 
 /** Whether the agents are done with a pull request, so the reviewer can take it from here. */
 export interface Readiness {
@@ -1904,11 +1904,11 @@ export class Service {
     return new Set(this.db.all<{ id: number }>('SELECT review_id AS id FROM review_runs WHERE pull_id = ? AND review_id IS NOT NULL', pull.id).map((r) => r.id));
   }
 
-  /** Whose move the pull request waits for, and why (see Turn). */
-  turn(pull: PullRow): Turn {
+  /** Whose move the pull request waits for, and why (see Turn), from its readiness when the caller has it already. */
+  turn(pull: PullRow, ready?: Readiness): Turn {
     // Closed here, or merged or closed on GitHub: nothing more is coming.
     if (stagingState(pull) === 'done') return { whose: 'none', reasons: [] };
-    const r = this.readiness(pull);
+    const r = ready ?? this.readiness(pull);
     const author = this.db.actorById(pull.author_id).login;
     const acted = this.authorActedAt(pull);
     // The author's turn: from `pr wait` or `pr view --comments` handing it feedback that asks
