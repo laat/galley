@@ -1,9 +1,10 @@
 // Custom reviewers: definition files, and reviewers of the description and of the code that
 // review only their repositories, may approve, and are one bot each.
+import { gitconfig } from './helpers/env.ts';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from '../src/server/server.ts';
@@ -91,10 +92,7 @@ let server: Awaited<ReturnType<typeof startServer>>;
 let options: Parameters<typeof startServer>[0];
 const BIN = join(import.meta.dirname, '..', 'bin', 'galley.ts');
 
-const gitconfig = join(mkdtempSync(join(tmpdir(), 'galley-gitconfig-')), 'config');
-writeFileSync(gitconfig, '[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n');
-process.env.GIT_CONFIG_GLOBAL = gitconfig;
-process.env.GIT_CONFIG_NOSYSTEM = '1';
+appendFileSync(gitconfig, '[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n');
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();

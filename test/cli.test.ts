@@ -1,3 +1,4 @@
+import './helpers/env.ts';
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingHttpHeaders } from 'node:http';

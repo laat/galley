@@ -1,5 +1,6 @@
 // The whole loop: an agent stages a pull request with the CLI, a reviewer comments
 // through the API (as the web UI does), the agent rewrites history, and the reviewer publishes.
+import './helpers/env.ts';
 import { after, before, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
@@ -269,7 +270,7 @@ console.log('Packages: +1\\nDone in 1s');
   chmodSync(sandboxExec, 0o755);
   // Tests ask GitHub and fetch base branches themselves (followGithub, page loads, publishing), so its
   // timer does not run in between; it has a test of its own.
-  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, viewerLogin: 'reviewer', pollMs: 50, followMs: 60 * 60_000 });
+  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, reviewersDir: join(dir, 'reviewers'), viewerLogin: 'reviewer', pollMs: 50, followMs: 60 * 60_000 });
 });
 
 after(async () => {
@@ -3237,7 +3238,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
   });
 });
 
-test('a review the server stops under is interrupted, runs again when it starts, and does not count', async () => {
+test('a review the server stops under is interrupted, runs again when it starts, and does not count', async (t) => {
   const checkedOut = git('rev-parse', '--abbrev-ref', 'HEAD');
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/restart-review');
@@ -3245,8 +3246,12 @@ test('a review the server stops under is interrupted, runs again when it starts,
   git('add', 'restart.js');
   git('commit', '-qm', 'Add restart.js');
   const data = mkdtempSync(join(tmpdir(), 'galley-stop-'));
-  const start = ({ port = 0, gh = 'false' } = {}) => startServer({ port, dataDir: data, ghBin: gh, codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  const start = ({ port = 0, gh = 'false' } = {}) => startServer({ port, dataDir: data, ghBin: gh, codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
   let s = await start();
+  t.after(async () => {
+    await s.close();
+    rmSync(data, { recursive: true, force: true });
+  });
   const port = s.port;
   // Later restarts take a new port: fetch would send its first request to one on the same port over a connection the old server closed.
   const json = { 'content-type': 'application/json' };
@@ -3461,14 +3466,17 @@ test('a review the server stops under is interrupted, runs again when it starts,
     delete process.env.FAKE_CODEX_GATE;
     rmSync(gate, { force: true });
     await s.close();
-    rmSync(data, { recursive: true, force: true });
     git('checkout', '-q', checkedOut);
   }
 });
 
-test('closing the server waits for a running poll before it closes the database', async () => {
+test('closing the server waits for a running poll before it closes the database', async (t) => {
   const data = mkdtempSync(join(tmpdir(), 'galley-poll-'));
-  const second = await startServer({ port: 0, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 10 });
+  const second = await startServer({ port: 0, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 10 });
+  t.after(async () => {
+    await second.close();
+    rmSync(data, { recursive: true, force: true });
+  });
   const errors = mock.method(console, 'error', () => {});
   // A slow poll: it reads the database once the server is closing.
   let started!: () => void;
@@ -3488,7 +3496,6 @@ test('closing the server waits for a running poll before it closes the database'
     assert.deepEqual(errors.mock.calls.map((c) => c.arguments.join(' ')), []);
   } finally {
     errors.mock.restore();
-    rmSync(data, { recursive: true, force: true });
   }
 });
 
@@ -3503,7 +3510,7 @@ test('an author an older CLI called "codex" moves to "codex-agent" when the revi
       const old = db.actor('codex', 'Bot');
       // When "codex-agent" exists too, both are the same kind of author and become one.
       const agent = current ? db.actor('codex-agent', 'Bot') : old;
-      const pull = await s.createPull(registered, { title: 'From an older Codex agent', head: 'feature/by-codex', base: 'main' }, old);
+      const pull = await s.createPull(registered, { title: 'From an older Codex agent', head: 'feature/mul', base: 'main' }, old);
       const reviewer = new CodexReviewer(s, join(dir, 'codex'));
       reviewer.start();
       await reviewer.stop();
@@ -3604,7 +3611,7 @@ test('Codex reviews from before findings were counted are counted from their rev
 test('a reviewer never takes the human reviewer\'s own name', async () => {
   // Known at startup: the human is set up first, and the reviewer takes another name.
   const data = mkdtempSync(join(tmpdir(), 'galley-viewer-'));
-  const named = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), viewerLogin: 'codex-review', pollMs: 60_000 });
+  const named = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'codex-review', pollMs: 60_000 });
   try {
     assert.equal(named.service.viewer().type, 'User');
     assert.notEqual(named.service.codex!.actor().id, named.service.viewer().id);
@@ -3631,9 +3638,13 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
   }
 });
 
-test('pr wait keeps waiting when the server restarts under it', async () => {
+test('pr wait keeps waiting when the server restarts under it', async (t) => {
   const data = mkdtempSync(join(tmpdir(), 'galley-restart-'));
-  const first = await startServer({ port: 0, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 60_000 });
+  const first = await startServer({ port: 0, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  t.after(async () => {
+    await first.close();
+    rmSync(data, { recursive: true, force: true });
+  });
   const port = first.port;
   const json = { 'content-type': 'application/json' };
   const registered = await (await fetch(`${first.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
@@ -3641,7 +3652,7 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
     await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
       method: 'POST',
       headers: { ...json, 'x-galley-actor': 'agent' },
-      body: JSON.stringify({ title: 'Survives restarts', head: 'feature/by-codex', base: 'main' }),
+      body: JSON.stringify({ title: 'Survives restarts', head: 'feature/mul', base: 'main' }),
     })
   ).json();
   const env = { ...process.env, GALLEY_URL: first.url, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1' };
@@ -3654,7 +3665,7 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
     await new Promise((r) => setTimeout(r, 50));
   }
   await first.close();
-  const second = await startServer({ port, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 60_000 });
+  const second = await startServer({ port, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
   try {
     await new Promise((r) => setTimeout(r, 4000)); // the wait retries every 3 seconds
     await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/comments`, { method: 'POST', headers: json, body: JSON.stringify({ body: 'Still there?' }) });
@@ -3738,16 +3749,20 @@ test('pr wait says the pull request was published before it confirms that it sai
   assert.equal((await res.json()).status, 'timeout');
 });
 
-test('auto-publish stays on when the server restarts', async () => {
+test('auto-publish stays on when the server restarts', async (t) => {
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/auto-restart');
   writeFileSync(join(repo, 'restart.js'), 'export {};\n');
   git('add', 'restart.js');
   git('commit', '-qm', 'Add restart');
   const data = mkdtempSync(join(tmpdir(), 'galley-auto-restart-'));
-  const options = { port: 0, dataDir: data, ghBin: join(dir, 'gh'), codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 };
+  const options = { port: 0, dataDir: data, ghBin: join(dir, 'gh'), codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 };
   const json = { 'content-type': 'application/json' };
   const first = await startServer(options);
+  t.after(async () => {
+    await first.close();
+    rmSync(data, { recursive: true, force: true });
+  });
   const registered = await (await fetch(`${first.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
   const pr = await (
     await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
@@ -3783,13 +3798,15 @@ test('the CLI starts a server when none is running', async () => {
   const url = `http://localhost:${port}`;
   const home = mkdtempSync(join(tmpdir(), 'galley-autostart-'));
   try {
-    const r = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent' } });
+    const r = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '' } });
     assert.match(r.stderr, new RegExp(`Started the galley server at ${url}`));
     // It keeps running after the command that started it.
     const health = await (await fetch(`${url}/api/health`)).json();
     assert.equal(health.ok, true);
-    process.kill(health.pid);
   } finally {
+    // Stopped also when an assert failed, as long as it answers.
+    const health = await fetch(`${url}/api/health`).then((res) => res.json(), () => null);
+    if (health?.pid) process.kill(health.pid);
     rmSync(home, { recursive: true, force: true });
   }
   const off = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_NO_AUTOSTART: '1' } }).catch((e) => e);
@@ -6579,7 +6596,7 @@ test('the server fetches base branches on its timer, and a waiting author hears 
   writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
   g('commit', '-qam', 'Set a');
   const head = g('rev-parse', 'HEAD');
-  const timed = await startServer({ port: 0, dataDir: join(dir, 'timer-data'), ghBin: 'false', viewerLogin: 'reviewer', pollMs: 50, followMs: 50, fetchMs: 100 });
+  const timed = await startServer({ port: 0, dataDir: join(dir, 'timer-data'), ghBin: 'false', reviewersDir: join(dir, 'timer-data', 'reviewers'), viewerLogin: 'reviewer', pollMs: 50, followMs: 50, fetchMs: 100 });
   try {
     const agent = { 'content-type': 'application/json', 'x-galley-actor': 'agent' };
     const call = async (method: string, p: string, body?: unknown) => {
