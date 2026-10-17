@@ -302,7 +302,6 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .Label--small { font-size: 11px; line-height: 16px; padding: 0 5px; }
 .Label--bot { margin-left: 4px; font-size: 11px; line-height: 15px; padding: 0 5px; }
 .Label--attention { color: var(--attention); border-color: var(--attention-muted); }
-.Label--done { color: var(--done); border-color: var(--done); }
 .Label--success { color: var(--success); border-color: var(--success); }
 .Label--success .octicon { width: 10px; }
 .Label--danger { color: var(--danger); border-color: var(--danger); }

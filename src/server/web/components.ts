@@ -1,4 +1,4 @@
-import type { Actor, CommentRow, PullRow, RepoRow } from '../db.ts';
+import type { Actor, CommentRow, Priority, PullRow, RepoRow } from '../db.ts';
 import type { Service, Thread } from '../service.ts';
 import { avatarUrl } from '../github.ts';
 import { avatar, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
@@ -117,12 +117,11 @@ export interface CommentView {
   anchor: string;
   markdownCtx?: Parameters<typeof renderMarkdown>[1];
   deletable?: boolean;
-  priority?: 'high' | 'medium' | 'low' | null;
 }
 
 const PRIORITY_TEXT = { high: 'High', medium: 'Medium', low: 'Low' } as const;
 
-export function priorityPill(priority: CommentView['priority']): Safe {
+export function priorityPill(priority: Priority | null): Safe {
   return priority ? html`<span class="Label Label--priority Label--priority-${priority}" title="Priority">${PRIORITY_TEXT[priority]}</span>` : raw('');
 }
 
@@ -180,7 +179,6 @@ export function threadComment(s: Service, c: CommentView): Safe {
     ${c.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}
     ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
     <span class="flex-auto"></span>
-    ${priorityPill(c.priority)}
     ${c.editPath ? commentMenu(c) : ''}
   </div>
   <div class="review-comment-body">${commentBodyAndEditor(c)}</div>
@@ -259,7 +257,6 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     isAuthor: c.author_id === o.pull.author_id,
     anchor: `discussion_r${c.id}`,
     markdownCtx: { suggestionLines, suggestionLang: lang, references: o.references },
-    priority: c.priority,
   });
   const range = root.start_line && root.start_line !== root.line ? `lines ${root.start_line} to ${root.line}` : root.line ? `line ${root.line}` : '';
   let title: Safe;
@@ -269,7 +266,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
   } else {
     title = html`${icon('file')} <span class="review-thread-path">${root.path}</span>${range && o.standalone ? html` <span class="color-fg-muted">${range}</span>` : ''}`;
   }
-  const badges = html`${t.placement.outdated ? html`<span class="Label Label--attention">Outdated</span>` : ''}${t.resolved ? html`<span class="Label Label--done">Resolved</span>` : ''}${t.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}`;
+  const badges = html`${t.placement.outdated ? html`<span class="Label Label--attention">Outdated</span>` : ''}${priorityPill(root.priority)}${t.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}`;
   const resolvedBy = root.resolved_by_id ? s.db.actorById(root.resolved_by_id).login : null;
   return html`<details class="review-thread${t.resolved ? ' is-resolved' : ''}${t.placement.outdated ? ' is-outdated' : ''}" id="thread-${root.id}" data-thread="${root.id}"${root.subject_type === 'line' ? html` data-suggestion="${JSON.stringify(suggestionLines)}"` : ''}${t.resolved ? '' : raw(' open')}>
   <summary class="review-thread-header">
