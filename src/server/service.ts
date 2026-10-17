@@ -32,9 +32,12 @@ import {
 
 export class HttpError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** More fields for the error's JSON, beside `message` and `status`. */
+  fields: Record<string, unknown>;
+  constructor(status: number, message: string, fields: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
+    this.fields = fields;
   }
 }
 
@@ -132,7 +135,7 @@ export interface BaseConflicts {
   branch: string;
   /** The branch it was merged into: the remote-tracking one (origin/main) when there is one, else the local one. */
   ref: string;
-  /** That branch's tip, as this repository has it (laatsux does not fetch); null when there is no such branch. */
+  /** That branch's tip, as this repository has it (laatsux fetches it: Service.fetchBases); null when there is no such branch. */
   base: string | null;
   head: string;
   /** Whether the head merges cleanly: false when it conflicts, null when git could not tell (see error). */
@@ -141,6 +144,8 @@ export interface BaseConflicts {
   files: string[];
   /** git's message for each conflict in none of those files. */
   messages: string[];
+  /** Commits the base has that the head does not; null when git could not tell. */
+  behind: number | null;
   /** Why git could not tell, when it could not. */
   error: string | null;
 }
@@ -304,6 +309,18 @@ export const AUTHOR_STALL_MS = 30 * 60 * 1000;
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
+/** How long after fetching a repository's base branches laatsux may fetch them again (Service.fetchBases). */
+export const FETCH_EVERY_MS = 60_000;
+/** How long fetching a base branch may take. */
+const FETCH_TIMEOUT_MS = 30_000;
+
+/** A repository's latest round of fetching its base branches (Service.fetchBases): when it started, which, and while it runs, the fetch. */
+interface FetchRound {
+  at: number;
+  bases: Set<string>;
+  running: Promise<void> | null;
+}
+
 /**
  * Where laatsux keeps refs in the repositories it stages from. Each server has a namespace of its
  * own under it (Db.instance), so servers staging from one repository never touch each other's.
@@ -318,6 +335,8 @@ export interface ServiceOptions {
   baseUrl: string;
   ghBin?: string;
   viewerLogin?: string;
+  /** How long after fetching a repository's base branches they may be fetched again (FETCH_EVERY_MS). */
+  fetchEveryMs?: number;
 }
 
 export class Service {
@@ -336,11 +355,14 @@ export class Service {
   stallMs = AUTHOR_STALL_MS;
   private syncing = new Map<number, Promise<PullRow>>();
   private viewerLogin: string;
+  /** How long after fetching a repository's base branches they may be fetched again, except right before publishing (fetchBases). */
+  fetchEveryMs: number;
 
   constructor(opts: ServiceOptions) {
     this.db = opts.db;
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.ghBin = opts.ghBin ?? 'gh';
+    this.fetchEveryMs = opts.fetchEveryMs ?? FETCH_EVERY_MS;
     this.viewerLogin = opts.viewerLogin ?? this.db.getMeta('viewer_login') ?? process.env.USER ?? 'you';
     this.bus.setMaxListeners(0);
   }
@@ -904,6 +926,101 @@ export class Service {
   }
   private lastPolled = new Map<number, string>();
 
+  // ---------------------------------------------------------- fetching bases
+
+  /** Per repository: when laatsux last started to fetch its base branches, which, and the fetch under way. */
+  private fetchRounds = new Map<number, FetchRound>();
+  /** git's message for each base branch whose last fetch failed, by `<repo id> <branch>`. */
+  private fetchErrors = new Map<string, string>();
+  /** Aborted when the server closes (stopFetching). */
+  private fetchAbort = new AbortController();
+
+  /**
+   * Fetch the base branches of the repository's pull requests whose head GitHub does not have
+   * (headUnpublished), so the check for conflicts sees what was merged there since. Each comes from
+   * GitHub over https with gh's credentials, whatever the remote's URL: an ssh remote's agent may
+   * ask for approval in a window, and this runs in the background. A repository not on GitHub is
+   * not fetched. Each goes into its remote-tracking branch, and only one that is there already:
+   * without one, the base is the local branch (baseCommit). The poll then sees the base move, as
+   * when the user fetches. At most once every fetchEveryMs per repository, however many pages and
+   * pull requests ask; a round that fetched nothing (each base a local branch, say) does not count.
+   * `base` (publishing) fetches that base alone, now, and leaves the throttle as it was. Each joins
+   * the fetch under way if that fetches the same bases, and comes after it otherwise. Never throws:
+   * a failure is kept for the page (fetchError) and logged once.
+   */
+  fetchBases(repo: RepoRow, opts: { base?: string } = {}): Promise<void> {
+    if (this.fetchAbort.signal.aborted || !repo.github_slug) return Promise.resolve();
+    const last = this.fetchRounds.get(repo.id);
+    const open = () => this.db.all<PullRow>("SELECT * FROM pulls WHERE repo_id = ? AND state != 'closed' AND COALESCE(github_state, 'open') = 'open'", repo.id);
+    const bases = new Set(opts.base !== undefined ? [opts.base] : open().filter((p) => this.headUnpublished(p)).map((p) => p.base_ref));
+    if (last?.running) {
+      // A fetch that set out before a pull request was staged, say, may not fetch its base: this one comes after it.
+      if ([...bases].every((b) => last.bases.has(b))) return last.running;
+      return last.running.then(() => this.fetchBases(repo, opts));
+    }
+    if (opts.base === undefined) {
+      // A second of slack, so a timer ticking every 20 seconds does not skip a round.
+      if (last && Date.now() - last.at < this.fetchEveryMs - 1000) return Promise.resolve();
+      // Nothing to fetch yet: a pull request staged next is fetched as soon as something asks.
+      if (!bases.size) return Promise.resolve();
+    }
+    const round: FetchRound = { at: opts.base === undefined ? Date.now() : (last?.at ?? 0), bases, running: null };
+    this.fetchRounds.set(repo.id, round);
+    const throttled = last?.at ?? 0;
+    round.running = this.fetchRepo(repo, round.bases)
+      .then((fetched) => {
+        // Nothing fetched (each base is a local branch, say): what is staged next is fetched as soon as something asks.
+        if (!fetched) round.at = throttled;
+      })
+      .catch((e) => console.error(`fetching the base branches into ${repo.git_dir} failed:`, e))
+      .finally(() => (round.running = null));
+    return round.running;
+  }
+
+  /** Fetch the base branches of every repository due (fetchBases). The server does so on a timer. */
+  async fetchAllBases(): Promise<void> {
+    const open = this.db.all<PullRow>("SELECT * FROM pulls WHERE state != 'closed' AND COALESCE(github_state, 'open') = 'open'");
+    for (const id of new Set(open.filter((p) => this.headUnpublished(p)).map((p) => p.repo_id))) await this.fetchBases(this.repoById(id));
+  }
+
+  /** Stop fetching: fetches under way are stopped, and no other starts. The server waits for this before it closes the database. */
+  async stopFetching(): Promise<void> {
+    this.fetchAbort.abort();
+    await Promise.all([...this.fetchRounds.values()].map((r) => r.running));
+  }
+
+  /** git's message when the last fetch of a repository's base branch failed; null when it worked, or laatsux has not fetched it. */
+  fetchError(repo: RepoRow, branch: string): string | null {
+    return this.fetchErrors.get(`${repo.id} ${branch}`) ?? null;
+  }
+
+  /** Fetch `bases` (fetchBases); whether it fetched any. */
+  private async fetchRepo(repo: RepoRow, bases: Set<string>): Promise<boolean> {
+    if (!existsSync(repo.git_dir)) return false; // Repository moved or deleted.
+    const git = this.git(repo);
+    const signal = this.fetchAbort.signal;
+    let changed = false;
+    let fetched = false;
+    for (const branch of bases) {
+      const tracking = `refs/remotes/${repo.remote}/${branch}`;
+      if (signal.aborted || !(await git.resolve(tracking))) continue;
+      fetched = true;
+      const url = `https://github.com/${repo.github_slug}.git`;
+      const error = await git.fetchBranch(url, branch, tracking, { gh: this.ghBin, cwd: repo.work_dir ?? tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
+      if (signal.aborted) continue;
+      const key = `${repo.id} ${branch}`;
+      if (error === (this.fetchErrors.get(key) ?? null)) continue;
+      changed = true;
+      if (error) {
+        console.error(`could not fetch ${repo.remote}/${branch} into ${repo.git_dir}: ${error}`);
+        this.fetchErrors.set(key, error);
+      } else this.fetchErrors.delete(key);
+    }
+    // Pages say when the base could not be fetched; the base moving is announced when the poll sees it.
+    if (changed) this.bus.emit('change', { pullId: null, type: 'base_fetch', actor: 'git' } satisfies ChangeEvent);
+    return fetched;
+  }
+
   // --------------------------------------------------------- base conflicts
 
   /** What checkConflicts last found for each pull request. */
@@ -951,6 +1068,18 @@ export class Service {
   }
 
   /**
+   * What baseConflicts finds for the base's tip as the repository has it now, once it is worked out:
+   * what publishing by hand asks about. Null for a head GitHub has.
+   */
+  private async conflictsNow(pull: PullRow): Promise<BaseConflicts | null> {
+    if (!this.headUnpublished(pull)) return null;
+    // A check reads the branches when it starts, so this one sees the base as it is now.
+    this.checkConflicts(pull.id);
+    await this.conflictChecks;
+    return this.currentConflicts(pull);
+  }
+
+  /**
    * Record the tip of the pull request's base branch as just seen. When what was found is for
    * another tip, or git could not tell, work it out again: on each poll, until it can.
    */
@@ -991,6 +1120,7 @@ export class Service {
           clean: null,
           files: [],
           messages: [],
+          behind: null,
           error: null,
         };
         if (!base) found.error = `there is no ${repo.remote}/${pull.base_ref} or ${pull.base_ref} branch in this repository`;
@@ -1000,6 +1130,7 @@ export class Service {
           } catch (e) {
             found.error = (e as Error).message;
           }
+          found.behind = await git.countCommits(pull.head_sha, base).catch(() => null);
         }
         this.conflictsFound.set(id, found);
         if (JSON.stringify(found) !== JSON.stringify(before)) this.bus.emit('change', { pullId: id, type: 'base_conflicts', actor: 'git' } satisfies ChangeEvent);
@@ -2165,15 +2296,18 @@ export class Service {
    * goes ahead while that exact approval is in force, and nobody is there to answer a prompt,
    * so each step gets UNATTENDED_TIMEOUT_MS. `autoMerge` turns on auto-merge on GitHub afterwards,
    * with that merge method: auto-publish's, fixed when it was turned on, or the one in settings
-   * when the request came in.
+   * when the request came in. Publishing while a reviewer agent is at work, or a head that conflicts
+   * with its base, needs `duringReview` or `duringConflict`.
    */
   async publish(
     ctx: Ctx,
-    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; approval?: string; autoMerge?: MergeMethod },
+    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod },
     actor: Actor,
   ): Promise<PullRow> {
     const { repo, git } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from laatsux');
+    // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
+    await this.fetchBases(repo, { base: ctx.pull.base_ref });
     const pull = await this.sync(ctx.pull);
     const auto = opts.approval !== undefined;
     // Turned off or replaced, or new feedback, since auto-publish decided to go ahead.
@@ -2184,13 +2318,22 @@ export class Service {
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before publishing it');
     if (pull.github_state === 'merged') throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
-    // Decided here, not by the page: a page loaded before the review started does not know of it.
+    // Decided here, not by the page: a page loaded before the review started, or before the base
+    // moved, does not know of it. The 428 lists what the body must acknowledge (an extension).
+    const asks: { field: string; text: string }[] = [];
     const busy = this.reviewersAtWork(pull);
     if (busy.length && !opts.duringReview) {
       const what = (sha: string) => (sha === pull.head_sha ? 'this commit' : `an earlier commit (${sha.slice(0, 7)})`);
       const doing = busy.map(({ reviewer, work }) => `${reviewer.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what(work.head_sha)}`);
-      throw new HttpError(428, `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes. Publishing now cancels ${busy.length > 1 ? 'them' : 'it'}.`);
+      asks.push({ field: 'during_review', text: `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes. Publishing now cancels ${busy.length > 1 ? 'them' : 'it'}.` });
     }
+    // Auto-publish publishes only a head known to merge cleanly into the base as it is now (stillApproved).
+    const conflicts = auto || opts.duringConflict ? null : await this.conflictsNow(pull);
+    if (conflicts?.clean === false) {
+      const where = conflicts.files.length ? ` in ${conflicts.files.join(', ')}` : '';
+      asks.push({ field: 'during_conflict', text: `This branch conflicts with ${conflicts.ref}${where}: GitHub can not merge it until the conflicts are resolved.` });
+    }
+    if (asks.length) throw new HttpError(428, asks.map((a) => a.text).join(' '), { acknowledge: asks.map((a) => a.field) });
     // Refused before anything is pushed, rather than published without the auto-merge asked for.
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
     const cwd = repo.work_dir ?? tmpdir();

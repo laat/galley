@@ -26,6 +26,7 @@
     if (!res.ok) {
       const err = new Error((json && json.message) || text || res.statusText);
       err.status = res.status;
+      err.json = json;
       throw err;
     }
     return json;
@@ -405,8 +406,11 @@
     let leaving = false;
     try {
       const body = formJson(form);
-      // The second click on a Publish button that asked first: publish while a reviewer is at work.
-      if (publishing && submitter && submitter.dataset.confirm) body.during_review = true;
+      // The second click on a Publish button that asked first: publish while a reviewer is at work,
+      // or a head that conflicts with its base, as the button says.
+      if (publishing && submitter && submitter.dataset.confirm) {
+        for (const field of (submitter.dataset.acknowledge || '').split(' ').filter(Boolean)) body[field] = true;
+      }
       const res = await api(target.dataset.method || 'POST', target.dataset.api, body);
       for (const t of $$('textarea[data-draft-key]', form)) clearDraft(t.dataset.draftKey);
       if (form.dataset.reset) form.reset();
@@ -428,9 +432,13 @@
         if (force) force.hidden = false;
       }
       if (publishing && err.status === 412) toast('The pull request changed.', { label: 'Refresh', run: refresh });
-      // A reviewer started after this page was loaded: ask now, as the page would have.
+      // A reviewer started, or the base moved, after this page was loaded: ask now, as the page
+      // would have. The server says what else the second click acknowledges.
       if (publishing && err.status === 428 && submitter) {
+        const asked = new Set((submitter.dataset.acknowledge || '').split(' ').filter(Boolean));
+        for (const field of (err.json && err.json.acknowledge) || []) asked.add(field);
         submitter.dataset.confirm = 'Click again to publish anyway';
+        submitter.dataset.acknowledge = [...asked].join(' ');
         confirmed(submitter, submitter.dataset.confirm);
       }
     } finally {

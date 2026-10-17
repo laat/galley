@@ -80,7 +80,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
 | `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Reviews from [reviewer agents](#reviewer-agents) come together, once all of them are done with the commit. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. When the head conflicts with its base branch, it returns once per commit to say so ("This branch conflicts with origin/main in src/a.ts; rebase onto origin/main"), also when the base moves while it waits. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
-| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
+| `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`, `--during-conflict`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
 | `laatsux serve` | Run the server and web UI. Stopping it lets running reviews finish first; `--now` stops at once (see [Reviewer agents](#reviewer-agents)) |
@@ -100,13 +100,15 @@ it is open on GitHub. `unpublishedChanges` lists what a published pull request h
 not yet (`COMMITS`, `TITLE`, `BODY`); `state` stays `PUBLISHED`, as gh would show it. For a head
 GitHub does not have, `mergeable` (`MERGEABLE` or `CONFLICTING`) says whether it merges cleanly into
 its base branch here, and `baseConflicts` the branch (`ref`, such as `origin/main`), its tip (`oid`),
-whether it conflicts (`conflicting`), the files that do, and git's message for each conflict in no
-file (`messages`, such as a directory renamed two ways); `mergeStateStatus` is `DIRTY` when it conflicts. `pr view` and
-`pr status` print both. `state` becomes `MERGED` or `CLOSED` once that happened on GitHub, with
-`mergedAt`, `mergedBy` and `mergeCommit` as in gh, and `CLOSED` when it is closed here. While it is
-open on GitHub, `statusCheckRollup`, `mergeable` and `mergeStateStatus` are GitHub's, and
-`githubStatus` has all laatsux saw there: checks, running workflow runs, a pending Copilot review,
-the review decision and unresolved review threads.
+whether it conflicts (`conflicting`), the files that do, git's message for each conflict in no
+file (`messages`, such as a directory renamed two ways), and how many commits the base has that the
+head does not (`behindBy`); `mergeStateStatus` is `DIRTY` when it conflicts, and `BEHIND` when it
+merges cleanly but is behind. `pr view` and `pr status` print whether it conflicts. `state` becomes
+`MERGED` or `CLOSED` once that happened on GitHub, with `mergedAt`, `mergedBy` and `mergeCommit` as
+in gh, and `CLOSED` when it is closed here. While it is open on GitHub, `statusCheckRollup`,
+`mergeable` and `mergeStateStatus` are GitHub's, and `githubStatus` has all laatsux saw there:
+checks, running workflow runs, a pending Copilot review, the review decision and unresolved review
+threads.
 
 ## The web UI
 
@@ -130,7 +132,7 @@ the review decision and unresolved review threads.
 - Comments follow their lines across pushes, or are marked outdated when the code under them changed
 - Live updates while the agent works, and a "waiting for your review" indicator while it runs `pr wait`
 - Publish, with options to open as a draft and to [enable auto-merge on GitHub](#auto-merge). Publishing again after changes force-pushes if needed and updates the GitHub pull request with `gh pr edit`
-- Whether the head merges cleanly into the base branch, before publishing: the merge box lists the files that conflict with `origin/<base>` as your repository has it, and the list says "conflicts with origin/main in src/a.ts"
+- Whether the head merges cleanly into the base branch, before publishing: the merge box lists the files that conflict with `origin/<base>`, as [fetched](#how-it-works) from the remote, and the list says "conflicts with origin/main in src/a.ts". Publishing a head that conflicts takes a second click. A head that merges cleanly but is behind says so, for information only: "3 commits behind origin/main, no conflicts"
 - How a published pull request stands on GitHub: its checks, review decision, unresolved review threads and conflicts in the merge box, and a checks icon in the list. What needs you there makes it your turn on the front page
 - A purple Merged badge and a "merged commit e468a4e into main on GitHub" timeline entry once the published pull request is merged on GitHub, and Closed on GitHub when it is closed there
 - Publish when reviews are done: [auto-publish](#auto-publish)
@@ -264,10 +266,31 @@ staged pull requests.
   and logged. Refs from before namespaces, `refs/laatsux/pull/<n>/*`, stay where they are.
 - **Conflicts** with the base: when the head or the base branch moves, the server merges the
   head into the base's tip with `git merge-tree --write-tree`, which needs no working tree or
-  index, in the background, one pull request at a time. The answer is cached per pair of commits.
-  It uses `origin/<base>` as your repository has it (laatsux does not fetch), falling back to the
-  local `<base>`. A check git could not do is shown with git's error and tried again on each poll.
-  Once GitHub has the head, GitHub's own answer is shown instead.
+  index, in the background, one pull request at a time, and counts the commits the head is behind
+  (`git rev-list --count`). The answer is cached per pair of commits. It uses `origin/<base>`,
+  falling back to the local `<base>`. A check git could not do is shown with git's error and tried
+  again on each poll. Once GitHub has the head, GitHub's own answer is shown instead.
+- **Fetching the base**: for repositories on GitHub with pull requests whose head GitHub does not
+  have, the server runs `git fetch https://github.com/<owner>/<repo>.git
+  +refs/heads/<base>:refs/remotes/<remote>/<base>` for each base branch that has a remote-tracking
+  branch: every minute (on the timer that follows GitHub), when a pull request's page opens, and
+  right before publishing. Page loads and the timer fetch a repository at most once a minute,
+  however many pull requests and pages ask; publishing fetches regardless. It fetches over https
+  with gh's credentials (`gh auth git-credential` in place of your credential helpers), also when
+  the remote's URL is an ssh one, and never over ssh: an ssh agent, such as 1Password's, can ask
+  for approval in a window, and these fetches run in the background. Git may use https and local
+  repositories only (`GIT_ALLOW_PROTOCOL=https:file`, which wins over any setting), so an
+  `insteadOf` that turns the URL into an ssh one is refused, and the agent's socket is out of
+  reach. It fetches nothing else (no tags, no `FETCH_HEAD`, no submodules), never touches local
+  branches or the working tree, never asks for credentials (`GIT_TERMINAL_PROMPT=0`, no askpass,
+  no credential manager window), and gives up after 30 seconds. Publishing fetches its own base
+  alone (after a fetch under way that set out without it). A failed fetch is logged once, does not
+  hold up publishing, and shows in the merge box ("Could not fetch origin/main: …"), which then
+  checks against what your repository has. Repositories not on GitHub are not fetched. A base that
+  moved shows once the poll sees it, and a waiting author hears of a new conflict.
+- **Publishing a conflict** takes a second click on the Publish button (or `pr publish
+  --during-conflict`): the server decides, after fetching, so a page loaded before the base moved
+  asks too. `POST …/pulls/{n}/publish` answers 428 unless the body has `"during_conflict": true`.
 - **Comments** are anchored to the commit and line they were made on. To place them on the
   current head, the server maps the line through `git diff -U0`; if the line itself
   changed, the comment is outdated. Besides the lines of the diff, a comment can sit on an
@@ -402,7 +425,8 @@ How they run:
   that nothing is left open, and publishing takes a second click on the Publish button (or
   `pr publish --during-review`). The server decides, so a page loaded before the review
   started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
-  `"during_review": true`.
+  `"during_review": true`. A 428 lists what the body must acknowledge in `acknowledge`
+  (`during_review`, `during_conflict`), an extension.
 - A running review is cancelled when the pull request is closed here, or merged or closed on
   GitHub, when the commit it reviews is published, and when the agent pushes a newer commit (if
   the agent is waiting, the new commit is reviewed then). A cancelled review does not count toward
@@ -468,8 +492,9 @@ GitHub's "Enable auto-merge". laatsux then publishes on its own once:
   (in Settings, or with `pr create --no-review`);
 - the author agent is waiting in `laatsux pr wait`, with all feedback seen;
 - none of the conversations you started is unresolved;
-- the head merges cleanly into the base branch as it is now. A conflict holds it up until the
-  agent rebases, and so does a check still under way or one git could not do.
+- the head merges cleanly into the base branch as it is now, fetched right before publishing. A
+  conflict holds it up until the agent rebases, and so does a check still under way or one git
+  could not do.
 
 The box shows what it is waiting for.
 

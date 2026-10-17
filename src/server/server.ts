@@ -98,8 +98,10 @@ export interface StartOptions {
   sandboxExec?: string;
   viewerLogin?: string;
   pollMs?: number;
-  /** How often to see which repositories are due to be asked about their published pull requests (Service.followGithub). */
+  /** How often to see which repositories are due to be asked about their published pull requests (Service.followGithub), or to have their base branches fetched (Service.fetchAllBases). */
   followMs?: number;
+  /** How long after fetching a repository's base branches they may be fetched again (Service.fetchBases). */
+  fetchMs?: number;
 }
 
 export interface CloseOptions {
@@ -131,7 +133,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     server.once('error', reject);
   });
   const url = `http://localhost:${port}`;
-  const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER });
+  const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER, fetchEveryMs: opts.fetchMs });
   // A new instance id (a copied database, or one from before namespaces) pins what it has first.
   await service.pinRevisions();
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
@@ -161,10 +163,16 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   }, opts.pollMs ?? 2000);
   timer.unref();
 
-  // Published pull requests are followed on GitHub until they are merged or closed there.
+  // Published pull requests are followed on GitHub until they are merged or closed there, and the
+  // base branches of staged ones are fetched, on the same schedule.
   let following: Promise<void> | null = null;
+  let fetching: Promise<void> | null = null;
   const followDue = () => {
     following ??= service.followGithub({ due: true }).finally(() => (following = null));
+    fetching ??= service
+      .fetchAllBases()
+      .catch((e) => console.error('fetching base branches failed:', e))
+      .finally(() => (fetching = null));
   };
   followDue();
   const follow = setInterval(followDue, opts.followMs ?? FOLLOW_BUSY_MS);
@@ -183,8 +191,10 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     await Promise.all(service.reviewerAgents().map((r) => r.stop(graceMs)));
     clearInterval(timer);
     clearInterval(follow);
+    await service.stopFetching();
     await polling;
     await following;
+    await fetching;
     // Publishes write to the database when they end, so they go first.
     await publishing;
     await new Promise<void>((resolve) => {

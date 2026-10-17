@@ -159,6 +159,16 @@ const GIT_CONFIG = [
   '-c', 'log.showSignature=false',
 ];
 
+/**
+ * For a fetch nobody is there to answer: git asks neither at the terminal nor through an askpass
+ * program (an empty GIT_ASKPASS passes over core.askPass and SSH_ASKPASS), and Git Credential
+ * Manager opens no window. It goes over https alone (and to local repositories): never ssh, whose
+ * agent, such as 1Password's, may ask for approval in a window of its own. GIT_ALLOW_PROTOCOL wins
+ * over any protocol.*.allow setting and over the one the server inherited; no ssh agent's socket
+ * is in reach either.
+ */
+const FETCH_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', GCM_INTERACTIVE: 'never', GIT_ALLOW_PROTOCOL: 'https:file', SSH_AUTH_SOCK: undefined };
+
 /** Results for commands whose inputs are all full SHAs never change, so they are safe to cache. */
 const cache = new Map<string, string>();
 const CACHE_MAX = 500;
@@ -393,6 +403,31 @@ export class Repo {
       if (type.startsWith('CONFLICT') && !paths.some((p) => files.includes(p))) messages.push(message.trim());
     }
     return { clean: text[0] === '0', files, messages };
+  }
+
+  /** How many commits `to` has that `from` does not (`git rev-list --count from..to`). Cached when both are full SHAs. */
+  async countCommits(from: string, to: string): Promise<number> {
+    const args = ['rev-list', '--count', `${from}..${to}`];
+    return Number((SHA_RE.test(from) && SHA_RE.test(to) ? await this.cached(args) : await this.out(args)).trim());
+  }
+
+  /**
+   * Fetch `branch` from the repository at `url`, an https URL, into the ref `into` (a remote-tracking
+   * branch), and nothing else: no tags, no FETCH_HEAD, no submodules, no maintenance afterwards.
+   * Local branches and the working tree are not touched. It signs in with gh's credentials
+   * (`gh auth git-credential`, with `gh` the binary) in place of the user's credential helpers, and
+   * never goes over ssh: an insteadOf that turns the URL into an ssh one is refused. Nothing asks for
+   * anything (FETCH_ENV), and with a timeout run() starts git in a session of its own, without a
+   * terminal. Returns git's message when it failed, and null when it worked or `signal` stopped it.
+   */
+  async fetchBranch(url: string, branch: string, into: string, opts: { gh: string; cwd: string; timeoutMs: number; signal?: AbortSignal }): Promise<string | null> {
+    // An empty helper drops those configured before it; the shell runs the one after it.
+    const helper = `!'${opts.gh.replace(/'/g, `'\\''`)}' auth git-credential`;
+    const args = ['-c', 'credential.helper=', '-c', `credential.helper=${helper}`, '-c', 'credential.interactive=false', '-c', 'protocol.ssh.allow=never'];
+    args.push('fetch', '--no-tags', '--no-write-fetch-head', '--no-prune', '--no-recurse-submodules', '--no-auto-maintenance', '--', url, `+refs/heads/${branch}:${into}`);
+    const r = await this.run(args, { cwd: opts.cwd, env: FETCH_ENV, timeoutMs: opts.timeoutMs, signal: opts.signal, allowFail: true });
+    if (r.code === 0 || opts.signal?.aborted) return null;
+    return r.timedOut ? `git fetch timed out after ${opts.timeoutMs / 1000} seconds` : r.stderr.trim() || `git fetch exited with ${r.code}`;
   }
 
   /** Those of `shas` (full commit SHAs) that no remote-tracking branch of `remote` contains. */

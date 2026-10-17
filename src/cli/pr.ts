@@ -476,6 +476,7 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     sign: { type: 'boolean' },
     'no-sign': { type: 'boolean' },
     'during-review': { type: 'boolean' },
+    'during-conflict': { type: 'boolean' },
     auto: { type: 'boolean' },
     'disable-auto': { type: 'boolean' },
     'auto-merge': { type: 'boolean' },
@@ -483,6 +484,7 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
   if (v.auto && v['disable-auto']) throw new CliError('specify only one of --auto or --disable-auto');
   if (v['auto-merge'] && v['disable-auto']) throw new CliError('--auto-merge goes with publishing; --disable-auto only turns auto-publish off');
   if (v.auto && v['during-review']) throw new CliError('--during-review publishes now; --auto waits for the reviews instead');
+  if (v.auto && v['during-conflict']) throw new CliError('--during-conflict publishes now; --auto waits for a head that merges cleanly instead');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const name = `${t.repo.owner}/${t.repo.name}#${t.number}`;
   const sign = v.sign ? true : v['no-sign'] ? false : undefined;
@@ -499,13 +501,21 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     return 0;
   }
   err(`Publishing ${name} to GitHub…`);
-  const pr = await client
-    .json('POST', `${pullPath(t)}/publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'], auto_merge: autoMerge })
-    .catch((e) => {
-      // A reviewer is at work: the server asks whether to publish anyway.
-      if (e instanceof ApiError && e.status === 428) throw new CliError(`${e.message}\nRun \`laatsux pr publish ${t.number} --during-review\` to publish anyway.`);
-      throw e;
-    });
+  const acknowledged = (['during-review', 'during-conflict'] as const).filter((flag) => v[flag]);
+  const body = { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'], during_conflict: !!v['during-conflict'], auto_merge: autoMerge };
+  const pr = await client.json('POST', `${pullPath(t)}/publish`, body).catch((e) => {
+    // A reviewer is at work, or the head conflicts with its base: the server asks whether to publish
+    // anyway, and lists what the request must acknowledge (during_review, during_conflict).
+    if (e instanceof ApiError && e.status === 428) {
+      let asked: string[] = ['during_review'];
+      try {
+        asked = JSON.parse(e.body).acknowledge ?? asked;
+      } catch {}
+      const flags = new Set([...acknowledged, ...asked.map((field) => field.replace('_', '-'))]);
+      throw new CliError(`${e.message}\nRun \`laatsux pr publish ${t.number} ${[...flags].map((f) => `--${f}`).join(' ')}\` to publish anyway.`);
+    }
+    throw e;
+  });
   out(pr.published_url);
   // Publishing worked either way; auto-merge comes after it.
   const merge = pr.auto_merge_result;

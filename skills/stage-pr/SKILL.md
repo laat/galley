@@ -82,8 +82,10 @@ feedback, and the loop repeats until the user publishes it.
    - A ```` ```suggestion ```` block is a replacement for the commented lines. Apply it as written unless it is wrong.
    - Comments without a thread are about the pull request as a whole, often the title or description.
    - `This branch conflicts with origin/main in <files>; rebase onto origin/main`: the base moved
-     on (often another pull request was merged). Rebase onto that branch, resolve the conflicts,
-     run the tests, and wait again. It says so once per commit.
+     on (often another pull request was merged). laatsux has fetched it already, so rebase onto
+     that branch, resolve the conflicts, run the tests, and wait again. It says so once per commit.
+     A head that is only behind its base (`mergeStateStatus` `BEHIND` in `pr view --json`) merges
+     cleanly: leave it unless the user asks for a rebase.
    - `Image: <url>` under a comment is a screenshot or other image the user pasted. Look at it:
      run `laatsux pr view --comments --download-images <dir>` (or give `pr wait` the same flag)
      and read the files it prints in place of the URLs.

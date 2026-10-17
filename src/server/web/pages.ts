@@ -268,6 +268,8 @@ interface PullPage {
 
 export async function loadPull(s: Service, owner: string, name: string, number: number): Promise<PullPage> {
   const ctx = await s.ctx(owner, name, number);
+  // The base, fetched in the background and throttled per repository (Service.fetchBases): a base that moved shows once the poll sees it.
+  void s.fetchBases(ctx.repo);
   const viewer = s.viewer();
   const files = await s.files(ctx);
   const commits = await s.commits(ctx);
@@ -599,6 +601,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const mergeOn = merge?.state === 'enabled' ? merge : null;
     const method = approved ?? mergeOption?.method;
     const checked = !!(approved || mergeOn);
+    // What publishing now asks a second click for, and what that click tells the server (Service.publish).
+    const acknowledge = [busy.length ? 'during_review' : null, conflicts?.clean === false ? 'during_conflict' : null].filter((a) => a !== null);
     publishRow = html`<form class="merge-row merge-actions js-api-form js-publish-form" data-api="${p.apiBase}/publish" data-method="POST">
       <input type="hidden" name="expected" value="${publishFingerprint(pull)}">
       ${icon('rocket', { cls: 'color-fg-open' })}
@@ -626,7 +630,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
       </div>
       <div class="merge-buttons">
         ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above, and keep publishing updates that way until the pull request is merged">${icon('clock')} Publish when reviews are done</button>`}
-        <button type="submit" class="btn btn-primary btn-publish"${busy.length ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>
+        <button type="submit" class="btn btn-primary btn-publish"${acknowledge.length ? html` data-confirm="Click again to publish anyway" data-acknowledge="${acknowledge.join(' ')}"` : ''}>${icon('mark-github')} ${verb}</button>
       </div>
     </form>`;
   }
@@ -758,20 +762,26 @@ function githubRows(p: PullPage): Safe[] {
 
 /**
  * Whether the head merges cleanly into its base's tip, as laatsux worked it out (Service.baseConflicts),
- * with the files that conflict and git's words for conflicts in none, or why it could not tell.
- * `again`: the base has moved since, and it is being worked out again.
+ * with the files that conflict and git's words for conflicts in none, or why it could not tell, and
+ * how many commits it is behind when it merges cleanly. `again`: the base has moved since, and it
+ * is being worked out again. Each says when the base could not be fetched, and why.
  */
 function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
   const ref = html`<span class="branch-name branch-name-sm">${c.ref}</span>`;
   const tip = html`<code>${shortSha(c.base ?? '')}</code>`;
   const moved = again ? html` ${c.ref} has moved since; checking again.` : '';
+  // Only a remote-tracking branch is fetched (Service.fetchBases).
+  const error = c.ref !== c.branch ? p.s.fetchError(p.repo, c.branch) : null;
+  const fetched = error ? html` Could not fetch ${c.ref}: ${error}` : '';
   if (c.clean === null) {
     return html`<div class="merge-row">${icon('alert', { cls: 'color-fg-attention' })}<div class="flex-auto"><strong>Could not check for conflicts with ${ref}</strong>
-      <div class="color-fg-muted">laatsux tries again every few seconds. Auto-publish waits until it can tell.${moved}</div>
+      <div class="color-fg-muted">laatsux tries again every few seconds. Auto-publish waits until it can tell.${moved}${fetched}</div>
       <pre class="merge-error">${c.error}</pre></div></div>`;
   }
   if (c.clean) {
-    return html`<div class="merge-row">${icon('check-circle-fill', { cls: 'color-fg-success' })}<div><strong>This branch has no conflicts with ${ref}</strong><div class="color-fg-muted">Checked against ${tip}, its tip in this repository.${moved}</div></div></div>`;
+    // For information: it merges cleanly, so nobody is asked to rebase it.
+    const title = c.behind ? html`${plural(c.behind, 'commit')} behind ${ref}, no conflicts` : html`This branch has no conflicts with ${ref}`;
+    return html`<div class="merge-row">${icon('check-circle-fill', { cls: 'color-fg-success' })}<div><strong>${title}</strong><div class="color-fg-muted">Checked against ${tip}, its tip in this repository.${moved}${fetched}</div></div></div>`;
   }
   const { pull, author } = p;
   const told = pull.conflicts_told_sha === pull.head_sha ? `${author.login} was told to rebase it.` : html`${author.login} is told to rebase it in <code>pr wait</code>.`;
@@ -784,7 +794,7 @@ function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
   ];
   const where = c.files.length ? html` in ${plural(c.files.length, 'file')}` : '';
   return html`<div class="merge-row">${icon('alert', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>This branch has conflicts with ${ref}</strong>
-    <div class="color-fg-muted">Merging it into ${tip}, its tip in this repository, conflicts${where}. ${told} Published as it is, GitHub can not merge it until the conflicts are resolved.${moved}</div>
+    <div class="color-fg-muted">Merging it into ${tip}, its tip in this repository, conflicts${where}. ${told} Published as it is, GitHub can not merge it until the conflicts are resolved, so publishing takes a second click.${moved}${fetched}</div>
     <ul class="merge-checks">${items}</ul></div></div>`;
 }
 
