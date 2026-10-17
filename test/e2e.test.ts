@@ -2046,10 +2046,11 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
   }
 });
 
-test('pr wait says the reviewer agents are done before it confirms that it said so', async () => {
-  const { stage } = await scratchRepo('handover');
-  const pr = await stage('handover');
-  const head = execFileSync('git', ['-C', join(dir, 'handover'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+/**
+ * What `pr wait` in `cwd` has printed by the time its confirmation (`PUT …/seen`) reached the
+ * server, whose answer is lost on the way back.
+ */
+async function waitLosingSeen(cwd: string, n: number): Promise<string> {
   // Between the CLI and the server: the server takes the confirmation, and its answer is lost.
   let confirmed = false;
   const proxy = createHttpServer(async (req, res) => {
@@ -2067,8 +2068,8 @@ test('pr wait says the reviewer agents are done before it confirms that it said 
     res.end(body);
   });
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
-  const child = execFile(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '20s'], {
-    cwd: join(dir, 'handover'),
+  const child = execFile(process.execPath, [BIN, 'pr', 'wait', String(n), '--timeout', '20s'], {
+    cwd,
     env: { ...process.env, LAATSUX_URL: `http://localhost:${(proxy.address() as AddressInfo).port}`, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1', NO_COLOR: '1' },
   });
   let stdout = '';
@@ -2076,15 +2077,31 @@ test('pr wait says the reviewer agents are done before it confirms that it said 
   try {
     for (let i = 0; i < 200 && !(confirmed && stdout); i++) await new Promise((r) => setTimeout(r, 25));
     assert.ok(confirmed, 'the confirmation reached the server');
-    // Stopped while it waits for the answer, the agent was told all the same.
-    assert.match(stdout, new RegExp(`^No reviewer agent reviews ${head.slice(0, 7)}; ask the reviewer to review it: `));
+    return stdout;
   } finally {
     child.kill();
     proxy.closeAllConnections();
     proxy.close();
   }
+}
+
+test('pr wait says the reviewer agents are done before it confirms that it said so', async () => {
+  const { stage } = await scratchRepo('handover');
+  const pr = await stage('handover');
+  const head = execFileSync('git', ['-C', join(dir, 'handover'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  // Stopped while it waits for the answer, the agent was told all the same.
+  assert.match(await waitLosingSeen(join(dir, 'handover'), pr.number), new RegExp(`^No reviewer agent reviews ${head.slice(0, 7)}; ask the reviewer to review it: `));
   // The server will not say it again.
   const res = await fetch(`${server.url}/api/repos/acme/handover/pulls/${pr.number}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'agent' } });
+  assert.equal((await res.json()).status, 'timeout');
+});
+
+test('pr wait says the pull request was published before it confirms that it said so', async () => {
+  const { api, stage } = await scratchRepo('published-notice');
+  const pr = await stage('published-notice');
+  await human('POST', `${api}/${pr.number}/publish`, {});
+  assert.match(await waitLosingSeen(join(dir, 'published-notice'), pr.number), /^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
+  const res = await fetch(`${server.url}${api}/${pr.number}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'agent' } });
   assert.equal((await res.json()).status, 'timeout');
 });
 
