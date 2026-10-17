@@ -1776,6 +1776,10 @@ test('a running review is cancelled when the pull request is published, closed, 
     await t.test('closed here', async () => {
       const pr = await stage('feature/cancel-close', 'cancel-close.js');
       await ask(pr, 'codex');
+      // Until Codex has finished reading math.js and runs the diff, which the close cuts short.
+      const steps = () => reviewer('codex').live(row(pr))?.progress.steps.map((s) => s.status).join() ?? '';
+      for (let i = 0; i < 200 && steps() !== 'completed,in_progress'; i++) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(steps(), 'completed,in_progress');
       const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       await untilWaiting(pr);
       await human('PATCH', pr.base, { state: 'closed' });
