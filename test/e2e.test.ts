@@ -138,11 +138,11 @@ before(async () => {
     // FAKE_GH_GATE, `gh pr create` answers once that file exists.
     // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. What GitHub
     // says about published pull requests comes from gh-pulls.json (see githubSays), an earlier page of their review threads
-    // from gh-pulls-earlier.json.
+    // from gh-pulls-earlier.json. With FAKE_GH_NO_READ_ORG, GitHub refuses to name requested teams, as for a token without read:org.
     `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
       `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
-      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
+      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) case "$4" in *combinedSlug*) if [ -n "$FAKE_GH_NO_READ_ORG" ]; then echo '{"errors":[{"type":"INSUFFICIENT_SCOPES","message":"Your token has not been granted the required scopes to execute this query."}]}'; echo 'gh: Your token has not been granted the required scopes to execute this query.' >&2; exit 1; fi ;; esac; cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -4830,6 +4830,56 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.match(await (await fetch(`${server.url}/acme/widgets?state=published`)).text(), /Add checks\.js<\/a> <span class="checks-indicator" title="All 2 checks passed on GitHub">/);
       assert.equal((await turn()).whose, 'NONE');
 
+      /** The group the repository's Published tab shows it in, and its row there. */
+      const listed = async () => {
+        const groups = (await (await fetch(`${server.url}/acme/widgets?state=published`)).text()).split('<div class="Box-row turn-group">').slice(1);
+        const group = groups.find((g) => g.includes(`href="/acme/widgets/pull/${n}"`))!;
+        const row = group.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/widgets/pull/${n}"`))!;
+        return { group: group.match(/<h2 class="turn-group-title">([^<]+)<\/h2>/)![1], row };
+      };
+      // GitHub would merge it now, and auto-merge is off: the reviewer's turn, to merge it there.
+      const passed = [run('test', 11, 'COMPLETED', 'SUCCESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')];
+      await githubSays({ [pr.id]: github(passed, { autoMergeRequest: null }) });
+      const ready = await turn();
+      assert.equal(ready.whose, 'REVIEWER');
+      assert.deepEqual(ready.reasons.filter((r: string) => /GitHub/.test(r)), ['ready to merge on GitHub']);
+      const mine = await listed();
+      assert.equal(mine.group, 'Your turn');
+      assert.match(mine.row, /<span class="turn-reason"><svg [^>]*octicon-mark-github[^]*?<\/svg>ready to merge on GitHub<\/span>/);
+      // Its title opens it on GitHub, where the reviewer merges it; its number opens it here.
+      assert.match(mine.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
+      assert.match(mine.row, new RegExp(`<a href="/acme/widgets/pull/${n}">#${n}</a> staged`));
+      // With auto-merge on, GitHub merges it by itself.
+      await githubSays({ [pr.id]: github(passed, { autoMergeRequest: { enabledAt: '2026-10-17T12:00:00Z' } }) });
+      assert.deepEqual(await turn(), { whose: 'NONE', reasons: [] });
+      assert.equal((await listed()).group, 'Waiting on GitHub');
+      // Blocked by a required review: it waits on GitHub, for those asked to review.
+      const requested = { totalCount: 3, nodes: [{ requestedReviewer: { login: 'eskilgh' } }, { requestedReviewer: { login: 'cbjerkan' } }, { requestedReviewer: { combinedSlug: 'acme/platform' } }] };
+      await githubSays({ [pr.id]: github(passed, { autoMergeRequest: null, mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', reviewRequests: requested }) });
+      assert.deepEqual(await turn(), { whose: 'NONE', reasons: ['waiting for review from eskilgh, cbjerkan, acme/platform'] });
+      const blocked = await listed();
+      assert.equal(blocked.group, 'Waiting on GitHub');
+      assert.match(blocked.row, /<\/svg> acme\/widgets#7<\/a><\/span><span class="turn-reason">waiting for review from eskilgh, cbjerkan, acme\/platform<\/span>/);
+      assert.match(blocked.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
+      assert.match(blocked.row, new RegExp(`<a class="pr-row-number" href="/acme/widgets/pull/${n}">#${n}</a>`));
+      // A token without the read:org scope: GitHub refuses the teams' names, so laatsux asks again without them, from then on.
+      const follows = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.includes('reviewRequests('));
+      const before = follows().length;
+      process.env.FAKE_GH_NO_READ_ORG = '1';
+      try {
+        const unnamed = { totalCount: 2, nodes: [{ requestedReviewer: { login: 'eskilgh' } }, { requestedReviewer: {} }] };
+        await githubSays({ [pr.id]: github(passed, { autoMergeRequest: null, mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', reviewRequests: unnamed }) });
+        assert.deepEqual(await turn(), { whose: 'NONE', reasons: ['waiting for review from eskilgh and 1 more'] });
+        await server.service.followGithub();
+        const since = follows().slice(before);
+        assert.equal(since.filter((q) => q.includes('combinedSlug')).length, 1, 'refused once');
+        assert.match(since.at(-1)!, new RegExp(`p${pr.id}:pullRequest`));
+        assert.doesNotMatch(since.at(-1)!, /combinedSlug/);
+      } finally {
+        delete process.env.FAKE_GH_NO_READ_ORG;
+        server.service.githubTeamNames = true;
+      }
+
       // More checks than one page reads, and one past it failed: GitHub's sum says so.
       const many = github([]);
       many.commits.nodes[0].commit.statusCheckRollup = { state: 'FAILURE', contexts: { totalCount: 130, nodes: [run('test', 11, 'COMPLETED', 'SUCCESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')] } } as any;
@@ -5099,7 +5149,7 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   /** The tabs and their counts. */
   const counts = (html: string) => Object.fromEntries([...html.matchAll(/<a class="list-tab[^"]*" href="\/acme\/tabs\?state=(\w+)">[^]*?<\/svg> <span data-content="[^"]*">(\d+) /g)].map((m) => [m[1], Number(m[2])]));
   /** The pull requests a page lists, by number. */
-  const listed = (html: string) => [...html.matchAll(/<a class="pr-row-title" href="\/acme\/tabs\/pull\/(\d+)">/g)].map((m) => Number(m[1])).sort();
+  const listed = (html: string) => [...html.matchAll(/href="\/acme\/tabs\/pull\/(\d+)">#\1<\/a>/g)].map((m) => Number(m[1])).sort();
   const front = await page('/acme/tabs');
   // Each pull request is in one tab; Staged is the first, and shown unless another is asked for.
   assert.deepEqual(counts(front), { staged: 1, published: 1, done: 3 });
@@ -5117,6 +5167,9 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   assert.match(row(done, closedOnGithub.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed on GitHub<\/span>/);
   assert.match(row(done, closedHere.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed<\/span>/);
   assert.match(row(publishedTab, published.number), /octicon-mark-github color-fg-open/);
+  // A published pull request's title opens it on GitHub, and a staged one's here.
+  assert.match(row(publishedTab, published.number), /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add published<\/a>/);
+  assert.match(row(front, staged.number), new RegExp(`<a class="pr-row-title" href="/acme/tabs/pull/${staged.number}">Add staged</a>`));
   // The staged one waits for the reviewer: its tab says so, whichever tab is shown. The published one waits on GitHub.
   assert.match(done, /href="\/acme\/tabs\?state=staged">[^]*?>1 Staged<\/span> <span class="list-tab-turn" title="1 pull request waiting for you">/);
   assert.match(front, /<h2 class="turn-group-title">Your turn<\/h2>[^]*?href="\/acme\/tabs\/pull\/1">/);

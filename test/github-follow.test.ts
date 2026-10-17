@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checksSummary, earlierThreads, githubAsks, githubBusy, prependThreads, readGithub, type GithubPull } from '../src/server/github-follow.ts';
+import { checksSummary, earlierThreads, githubAsks, githubBusy, githubWaits, prependThreads, readGithub, type GithubPull } from '../src/server/github-follow.ts';
 
 const run = (name: string, status: string, conclusion: string | null = null, job = name.length) => ({
   __typename: 'CheckRun' as const,
@@ -91,6 +91,25 @@ test('githubAsks: what on GitHub is for the reviewer', () => {
   assert.deepEqual(githubAsks(readGithub(pull({}, [run('build', 'COMPLETED', 'SUCCESS'), run('e2e', 'IN_PROGRESS')]), null, 'now'), 'main'), [], 'running and passing checks are nobody\'s to act on');
   const status = readGithub(pull({ mergeable: 'CONFLICTING', reviewDecision: 'CHANGES_REQUESTED', reviewThreads: { nodes: [thread('T1'), thread('T2')] } }, [run('test', 'COMPLETED', 'FAILURE')]), null, 'now');
   assert.deepEqual(githubAsks(status, 'main'), ['1 check failed on GitHub', 'changes requested on GitHub', '2 unresolved threads on GitHub', 'conflicts with main on GitHub']);
+});
+
+test('githubAsks: GitHub would merge it now, and auto-merge is off', () => {
+  assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: null }), null, 'now'), 'main'), ['ready to merge on GitHub']);
+  assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: null, mergeStateStatus: 'HAS_HOOKS' }), null, 'now'), 'main'), ['ready to merge on GitHub'], 'pre-receive hooks run on the merge');
+  assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: { enabledAt: 't' } }), null, 'now'), 'main'), [], 'GitHub merges it by itself');
+  assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: null, mergeStateStatus: 'BLOCKED' }), null, 'now'), 'main'), []);
+  const { autoMerge, ...before } = readGithub(pull({ autoMergeRequest: null }), null, 'now');
+  assert.deepEqual(githubAsks(before, 'main'), [], 'a status stored before laatsux asked about auto-merge');
+});
+
+test('githubWaits: a required review, from those asked for one', () => {
+  const requests = (...who: object[]) => ({ totalCount: who.length + 2, nodes: who.map((requestedReviewer) => ({ requestedReviewer })) });
+  const blocked = (more: Partial<GithubPull>) => readGithub(pull({ mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', ...more }), null, 'now');
+  // A team as org/team; past the first page, and reviewers it does not read (an enterprise team), counted.
+  assert.deepEqual(githubWaits(blocked({ reviewRequests: requests({ login: 'eskilgh' }, { combinedSlug: 'acme/platform' }, {}) })), ['waiting for review from eskilgh, acme/platform and 3 more']);
+  assert.deepEqual(githubWaits(blocked({ reviewRequests: { totalCount: 0, nodes: [] } })), ['waiting for a required review']);
+  assert.deepEqual(githubWaits(readGithub(pull({ reviewDecision: 'APPROVED', reviewRequests: requests({ login: 'eskilgh' }) }), null, 'now')), []);
+  assert.deepEqual(githubWaits(null), []);
 });
 
 test('threads on earlier pages are read too, all of them', () => {

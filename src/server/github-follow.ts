@@ -1,16 +1,20 @@
 // What laatsux reads about a published pull request on GitHub while it follows it, to show the
 // reviewer how it stands there: whether it is merged or closed, its checks and the workflow runs
-// on its head, a pending Copilot review, the review decision, unresolved review threads, and
-// whether it conflicts with its base. It is information for the reviewer, not feedback for the
-// author agent. One GraphQL query per repository asks for all of the repository's followed pull
-// requests (PULL_FIELDS, aliased by staged pull id); one with more review threads than that holds
-// gets earlier pages (earlierThreads).
+// on its head, a pending Copilot review, the review decision and who is asked to review,
+// unresolved review threads, whether it conflicts with its base, and whether auto-merge is on. It
+// is information for the reviewer, not feedback for the author agent. One GraphQL query per
+// repository asks for all of the repository's followed pull requests (PULL_FIELDS, aliased by
+// staged pull id); one with more review threads than that holds gets earlier pages (earlierThreads).
 
 const PAGE = 'pageInfo{hasPreviousPage startCursor}';
 const THREAD_FIELDS = 'id isResolved isOutdated path line originalLine startLine diffSide comments(last:20){nodes{databaseId author{login} body createdAt url diffHunk}}';
 
+/** A requested team's name. It needs the read:org scope: without it, GitHub refuses the whole query. */
+const TEAM = ' ...on Team{combinedSlug}';
+
 /** What is asked about each followed pull request. Costs about one rate-limit point per pull request. */
-export const PULL_FIELDS = `state headRefOid mergeable mergeStateStatus reviewDecision mergedAt closedAt mergedBy{login} mergeCommit{oid}
+export const PULL_FIELDS = `state headRefOid mergeable mergeStateStatus reviewDecision mergedAt closedAt mergedBy{login} mergeCommit{oid} autoMergeRequest{enabledAt}
+  reviewRequests(first:20){totalCount nodes{requestedReviewer{...on User{login} ...on Bot{login} ...on Mannequin{login}${TEAM}}}}
   commits(last:1){nodes{commit{
     statusCheckRollup{state contexts(first:100){totalCount nodes{__typename
       ...on CheckRun{databaseId name status conclusion detailsUrl checkSuite{workflowRun{workflow{name}}}}
@@ -21,6 +25,9 @@ export const PULL_FIELDS = `state headRefOid mergeable mergeStateStatus reviewDe
     ...on ClosedEvent{actor{login}}
     ...on ReviewRequestedEvent{requestedReviewer{...on Bot{login} ...on User{login}}}
     ...on PullRequestReview{author{login}}}}`.replace(/\s+/g, ' ');
+
+/** PULL_FIELDS for a token without the read:org scope: requested teams are counted, not named. */
+export const PULL_FIELDS_WITHOUT_TEAMS = PULL_FIELDS.replace(TEAM, '');
 
 /** The query for the page of a pull request's review threads before `$cursor`. */
 export function earlierThreadsQuery(number: number): string {
@@ -54,6 +61,10 @@ export interface GithubPull {
   closedAt?: string | null;
   mergedBy?: Login;
   mergeCommit?: { oid: string } | null;
+  /** Null while auto-merge is off. */
+  autoMergeRequest?: { enabledAt: string | null } | null;
+  /** Users, bots and teams asked to review who have not yet. */
+  reviewRequests?: Nodes<{ requestedReviewer: { login?: string; combinedSlug?: string } | null }> & { totalCount?: number };
   commits?: Nodes<{
     commit: {
       /** `state` sums up every check, also those past the first page of `contexts`. */
@@ -102,8 +113,13 @@ export interface GithubStatus {
   /** The head commit on GitHub, which the checks are about. */
   head: string | null;
   reviewDecision: string | null;
+  /** Who GitHub asks to review and has not yet, on the first page: logins, and teams as org/team (reviewRequestsTotal counts them all). */
+  reviewRequests?: string[];
+  reviewRequestsTotal?: number;
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   mergeStateStatus: string;
+  /** Auto-merge is on: GitHub merges it once it can. Null when GitHub did not say (missing in a status stored before laatsux asked). */
+  autoMerge?: boolean | null;
   /** Conflicting with its base, as last known: GitHub says UNKNOWN for a while after each push. */
   conflicting: boolean;
   /** The first page of checks: there may be more (checksTotal). */
@@ -175,12 +191,19 @@ export function readGithub(node: GithubPull, previous: GithubStatus | null, chec
       };
     });
   const mergeable = node.mergeable ?? 'UNKNOWN';
+  const requested = present(node.reviewRequests).flatMap(({ requestedReviewer: r }) => {
+    const name = r?.login ?? r?.combinedSlug;
+    return name ? [name] : [];
+  });
   return {
     checkedAt,
     head: node.headRefOid ?? null,
     reviewDecision: node.reviewDecision ?? null,
+    reviewRequests: requested,
+    reviewRequestsTotal: Math.max(node.reviewRequests?.totalCount ?? 0, requested.length),
     mergeable,
     mergeStateStatus: node.mergeStateStatus ?? 'UNKNOWN',
+    autoMerge: node.autoMergeRequest === undefined ? null : node.autoMergeRequest !== null,
     conflicting: mergeable === 'CONFLICTING' || (mergeable === 'UNKNOWN' && !!previous?.conflicting),
     checks: present(rollup?.contexts).map(check),
     checksResult: rollup?.state ? (ROLLUP[rollup.state] ?? null) : null,
@@ -229,8 +252,8 @@ export function checksSummary(status: Pick<GithubStatus, 'checks' | 'checksResul
 
 /**
  * What on GitHub waits for the reviewer, as reasons for whose turn it is: failed checks, changes
- * requested, unresolved threads, a conflict. Running checks wait for GitHub, and passing ones for
- * nobody.
+ * requested, unresolved threads, a conflict, or the merge: GitHub would merge it now (CLEAN, or
+ * HAS_HOOKS where pre-receive hooks run), and auto-merge is off. Running checks wait for GitHub, and passing ones for nobody.
  */
 export function githubAsks(status: GithubStatus | null, base: string): string[] {
   if (!status) return [];
@@ -242,5 +265,18 @@ export function githubAsks(status: GithubStatus | null, base: string): string[] 
     status.reviewDecision === 'CHANGES_REQUESTED' ? 'changes requested on GitHub' : null,
     threads ? `${threads} unresolved ${threads === 1 ? 'thread' : 'threads'} on GitHub` : null,
     status.conflicting ? `conflicts with ${base} on GitHub` : null,
+    (status.mergeStateStatus === 'CLEAN' || status.mergeStateStatus === 'HAS_HOOKS') && status.autoMerge === false ? 'ready to merge on GitHub' : null,
   ].filter((x) => x !== null);
+}
+
+/**
+ * What GitHub waits for that is nobody's move here, as reasons while it waits on GitHub: a review
+ * that branch protection requires, from those asked for one.
+ */
+export function githubWaits(status: GithubStatus | null): string[] {
+  if (status?.reviewDecision !== 'REVIEW_REQUIRED') return [];
+  const names = status.reviewRequests ?? [];
+  if (!names.length) return ['waiting for a required review'];
+  const more = (status.reviewRequestsTotal ?? 0) - names.length;
+  return [`waiting for review from ${names.join(', ')}${more > 0 ? ` and ${more} more` : ''}`];
 }

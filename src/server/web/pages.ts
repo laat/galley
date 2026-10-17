@@ -69,10 +69,15 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   // What notifications follow (notifyTurns in app.js): your turn in every repository, whatever this page lists.
   const notify = yoursEverywhere.map((p) => ({ id: p.id, title: p.title, url: href(p), reasons: turn(p).reasons.map(reasonText).join(' · ') }));
   const pinMark = html`<span class="pin-mark" title="Pinned to the top of the front page">${icon('pin-fill', { label: 'Pinned' })}</span>`;
+  // A published pull request's title opens it on GitHub, where the reviewer works with it from then on; its number (in the row) opens it here.
   const heading = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
+    const title =
+      staging.get(p.id) === 'published' && p.published_url
+        ? html`<a class="pr-row-title" href="${p.published_url}" target="_blank" rel="noopener">${p.title}</a>`
+        : html`<a class="pr-row-title" href="${href(p)}">${p.title}</a>`;
     return html`${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
-    <a class="pr-row-title" href="${href(p)}">${p.title}</a> ${checksIndicator(p)}${p.pinned_at && opts.repo ? pinMark : ''}`;
+    ${title} ${checksIndicator(p)}${p.pinned_at && opts.repo ? pinMark : ''}`;
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
@@ -109,21 +114,24 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
     ${ended(p)}
     ${line}
-    <div class="pr-row-meta">#${p.number} staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
+    <div class="pr-row-meta"><a href="${href(p)}">#${p.number}</a> staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
   <div class="pr-row-side">${atWorkAvatars(atWork)}${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
 </div>`;
   };
 
-  /** The title, and under it what the agents are doing. */
+  /** The title, and under it what the agents are doing, or on GitHub, what it waits for there. */
   const compactRow = (p: PullRow) => {
     const t = turn(p);
     const unpublished = t.reasons.some((r) => r.kind === 'unpublished');
-    const { line, atWork } = t.whose === 'none' ? { line: html`<div class="pr-row-turn">${published(p)}</div>`, atWork: [] } : turnLine(s, p, t, ready.get(p.id), apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts']);
+    const { line, atWork } =
+      t.whose === 'none'
+        ? { line: html`<div class="pr-row-turn"><span class="turn-reason">${published(p)}</span>${t.reasons.map((r) => html`<span class="turn-reason">${r.text}</span>`)}</div>`, atWork: [] }
+        : turnLine(s, p, t, ready.get(p.id), apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts']);
     return html`<div class="Box-row pr-row pr-row--compact">
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
-    <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
+    <span class="pr-row-heading">${heading(p)} <a class="pr-row-number" href="${href(p)}">#${p.number}</a></span>
     ${line}
   </div>
   <div class="pr-row-side">${atWorkAvatars(atWork)}</div>
