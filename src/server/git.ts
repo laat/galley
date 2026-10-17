@@ -350,18 +350,38 @@ export class Repo {
 
   /**
    * The entries of the directory at `path` ("" for the root) in a commit, or null when there is
-   * no directory there. Paths are only ever looked up in git's objects, never on disk.
+   * no directory there. Paths are only ever looked up in git's objects, never on disk. Every
+   * browser page lists the directories to its path, so a full SHA's listings are cached.
    */
   async tree(sha: string, path: string): Promise<TreeEntry[] | null> {
-    const r = await this.run(['ls-tree', '-z', '-l', `${sha}:${path}`], { allowFail: true });
-    if (r.code !== 0) return null;
-    return r.stdout
+    const args = ['ls-tree', '-z', '-l', `${sha}:${path}`];
+    const key = `${this.gitDir}\0${args.join('\0')}`;
+    let text = SHA_RE.test(sha) ? cache.get(key) : undefined;
+    if (text === undefined) {
+      const r = await this.run(args, { allowFail: true });
+      if (r.code !== 0) return null;
+      text = SHA_RE.test(sha) ? remember(key, r.stdout) : r.stdout;
+    }
+    return text
       .split('\0')
       .filter(Boolean)
       .map((rec) => {
         const tab = rec.indexOf('\t');
         const [mode, type, oid, size] = rec.slice(0, tab).split(/ +/);
         return { mode, type: type as TreeEntry['type'], oid, size: size === '-' ? null : Number(size), name: rec.slice(tab + 1) };
+      });
+  }
+
+  /** The path of every file in a commit (blobs: no directories or submodules), in git's order. */
+  async files(sha: string): Promise<string[]> {
+    const args = ['ls-tree', '-r', '-z', sha];
+    const text = SHA_RE.test(sha) ? await this.cached(args) : await this.out(args);
+    return text
+      .split('\0')
+      .filter(Boolean)
+      .flatMap((rec) => {
+        const tab = rec.indexOf('\t');
+        return rec.slice(0, tab).split(' ')[1] === 'blob' ? [rec.slice(tab + 1)] : [];
       });
   }
 

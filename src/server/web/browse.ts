@@ -1,5 +1,6 @@
 // The repository at a commit, read from git's objects (no checkout): directories, files and
-// their bytes, at GitHub's URLs (/tree, /blob, /raw), and the lines behind a diff's unfold arrows.
+// their bytes, at GitHub's URLs (/tree, /blob, /raw), with a file tree beside them, and the lines
+// behind a diff's unfold arrows.
 import type { Repo, TreeEntry } from '../git.ts';
 import type { RepoRow } from '../db.ts';
 import { lineInDiff, withContext, type DiffLine, type FileDiff, type Hunk, type Span } from '../diff.ts';
@@ -63,12 +64,12 @@ function size(n: number): string {
 
 // ---------------------------------------------------------------- pages
 
-function page(s: Service, loc: Location, title: string, body: Safe): string {
+async function page(s: Service, loc: Location, kind: 'tree' | 'blob', title: string, body: Safe): Promise<string> {
   return layout(s, {
     title: `${title} at ${shortSha(loc.sha)} · ${loc.repo.owner}/${loc.repo.name}`,
     crumbs: repoCrumbs(loc.repo),
     subnav: repoNav(s, loc.repo, null),
-    body: html`<div class="container container-xl browse">${body}</div>`,
+    body: html`<div class="container container-full browse-layout">${await browseTree(loc, kind)}<div class="browse">${body}</div></div>`,
   });
 }
 
@@ -78,6 +79,7 @@ async function header(loc: Location): Promise<Safe> {
   const crumbs = parts.map((p, i) => (i === parts.length - 1 ? html`<strong>${p}</strong>` : html`<a href="${browseUrl(loc.base, 'tree', loc.sha, parts.slice(0, i + 1).join('/'))}">${p}</a>`));
   const commit = await loc.git.commit(loc.sha);
   return html`<div class="browse-header">
+    <button type="button" class="btn-octicon js-tree-toggle" data-tree="browse" aria-label="Toggle file tree" title="Toggle file tree">${icon('sidebar-collapse')}</button>
     <span class="browse-ref" title="${loc.sha}">${icon('git-commit')} <code>${shortSha(loc.sha)}</code></span>${copyButton(loc.sha, 'Copy full SHA')}
     <nav class="browse-crumbs" aria-label="Path">
       ${parts.length ? html`<a href="${browseUrl(loc.base, 'tree', loc.sha, '')}">${loc.repo.name}</a>` : html`<strong>${loc.repo.name}</strong>`}${crumbs.map((c) => html`<span class="crumb-sep">/</span>${c}`)}
@@ -151,8 +153,11 @@ function entryIcon(e: TreeEntry): Safe {
   return icon('file');
 }
 
+/** Directories (and submodules) first, as GitHub lists them. */
+const sortEntries = (entries: TreeEntry[]) => [...entries].sort((a, b) => (a.type === 'blob' ? 1 : 0) - (b.type === 'blob' ? 1 : 0) || a.name.localeCompare(b.name));
+
 export async function treePage(s: Service, loc: Location, entries: TreeEntry[]): Promise<string> {
-  const sorted = [...entries].sort((a, b) => (a.type === 'blob' ? 1 : 0) - (b.type === 'blob' ? 1 : 0) || a.name.localeCompare(b.name));
+  const sorted = sortEntries(entries);
   const child = (e: TreeEntry) => (loc.path ? `${loc.path}/${e.name}` : e.name);
   const rows = sorted.map((e) =>
     e.type === 'commit'
@@ -170,6 +175,7 @@ export async function treePage(s: Service, loc: Location, entries: TreeEntry[]):
   return page(
     s,
     loc,
+    'tree',
     loc.path ? `${loc.repo.name}/${loc.path}` : `${loc.repo.owner}/${loc.repo.name}`,
     html`${await header(loc)}
     <div class="Box tree-box"><table class="tree-table"><tbody>${up}${rows}</tbody></table></div>
@@ -211,6 +217,7 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
   return page(
     s,
     loc,
+    'blob',
     `${loc.repo.name}/${loc.path}`,
     html`${await header(loc)}
     <div class="Box blob-box">
@@ -218,6 +225,50 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
       <div class="blob-body"${rendered ? html` data-plain="${here}?plain=1"` : ''}>${body}</div>
     </div>`,
   );
+}
+
+// ------------------------------------------------------------ file tree
+
+/**
+ * The items of directory `dir` in the file tree beside a page. Directories in `open` come open
+ * with their items; public/app.js loads the others' from /file-tree when they open. The entry at
+ * `current`, the page's own path, is highlighted.
+ */
+async function treeItems(loc: Location, dir: string, open: Set<string>, current: string | null): Promise<Safe[]> {
+  const entries = sortEntries((await loc.git.tree(loc.sha, dir)) ?? []);
+  return Promise.all(
+    entries.map(async (e) => {
+      const path = dir ? `${dir}/${e.name}` : e.name;
+      const here = path === current ? raw(' aria-current="page"') : '';
+      if (e.type === 'tree') {
+        const items = open.has(path) ? html`<ul>${await treeItems(loc, path, open, current)}</ul>` : '';
+        return html`<li class="tree-dir"><details data-path="${path}"${items ? raw(' open') : ''}><summary>${icon('chevron-down', { cls: 'when-open' })}${icon('chevron-right', { cls: 'when-closed' })}${entryIcon(e)}<a class="tree-name" href="${browseUrl(loc.base, 'tree', loc.sha, path)}"${here}>${e.name}</a></summary>${items}</details></li>`;
+      }
+      if (e.type === 'commit') return html`<li class="tree-file" title="Submodule at ${shortSha(e.oid)}">${entryIcon(e)}<span class="tree-name">${e.name}</span></li>`;
+      return html`<li class="tree-file"><a href="${browseUrl(loc.base, 'blob', loc.sha, path)}"${here}>${entryIcon(e)}<span class="tree-name">${e.name}</span></a></li>`;
+    }),
+  );
+}
+
+/**
+ * The file tree beside a page, like GitHub's code view: the directories down to the page open,
+ * the page highlighted, and a "Go to file" box over every path in the commit (/tree-list).
+ */
+async function browseTree(loc: Location, kind: 'tree' | 'blob'): Promise<Safe> {
+  const parts = loc.path ? loc.path.split('/') : [];
+  const dirs = kind === 'tree' ? parts : parts.slice(0, -1);
+  const open = new Set(dirs.map((_, i) => dirs.slice(0, i + 1).join('/')));
+  return html`<nav class="file-tree browse-tree js-browse-tree" aria-label="Files" data-sha="${loc.sha}" data-items="${loc.base}/file-tree/${loc.sha}" data-paths="${loc.base}/tree-list/${loc.sha}" data-blob="${browseUrl(loc.base, 'blob', loc.sha, '')}">
+    <div class="browse-tree-filter"><input type="search" class="form-control js-browse-filter" placeholder="Go to file" aria-label="Go to file" autocomplete="off" spellcheck="false"></div>
+    <ul class="browse-tree-results js-browse-results" hidden></ul>
+    <ul class="js-browse-items">${await treeItems(loc, '', open, loc.path)}</ul>
+  </nav>`;
+}
+
+/** A directory's items in the file tree, for /file-tree; null when there is no directory at the path. */
+export async function treeItemsHtml(loc: Location): Promise<string | null> {
+  if (!(await loc.git.tree(loc.sha, loc.path))) return null;
+  return html`<ul>${await treeItems(loc, loc.path, new Set(), null)}</ul>`.value;
 }
 
 // ------------------------------------------------------------------ raw
