@@ -1545,7 +1545,7 @@
   });
 
   // ---------------------------------------------------------- repositories
-  // The front page's repositories: the first few, "Show more" for the rest, and a filter over
+  // The repositories beside the list: the first few, "Show more" for the rest, and a filter over
   // all of them. Both last through live refreshes.
 
   const repoList = { filter: '', more: false };
@@ -1559,16 +1559,20 @@
     else input.value = repoList.filter;
     const filter = repoList.filter.trim().toLowerCase();
     const limit = filter || repoList.more ? Infinity : Number(list.dataset.shown);
-    let matching = 0;
-    for (const item of $$('.repo-list-item', list)) {
-      const match = item.dataset.name.toLowerCase().includes(filter);
-      item.hidden = !match || matching >= limit;
-      if (match) matching++;
+    const items = $$('.repo-list-item', list);
+    const matching = items.filter((item) => item.dataset.name.toLowerCase().includes(filter));
+    // The repository whose page this is is among the first few, in place of the last when it is further down.
+    const shown = new Set(matching.slice(0, limit));
+    const selected = matching.find((item) => item.classList.contains('selected'));
+    if (selected && !shown.has(selected)) {
+      shown.delete(matching[limit - 1]);
+      shown.add(selected);
     }
+    for (const item of items) item.hidden = !shown.has(item);
     const more = $('.js-repo-more');
-    if (more) more.hidden = matching <= limit;
+    if (more) more.hidden = matching.length <= limit;
     const none = $('.js-repo-none');
-    if (none) none.hidden = matching > 0;
+    if (none) none.hidden = matching.length > 0;
   }
 
   document.addEventListener('input', (e) => {
