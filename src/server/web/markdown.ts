@@ -4,6 +4,7 @@ import hljs from 'highlight.js';
 import { esc } from './html.ts';
 import { UPLOAD_PATH } from '../uploads.ts';
 import { REFERENCE_CLASSES, referenceExtension, type ReferenceContext } from './references.ts';
+import { tooMuchEmphasis } from './emphasis.ts';
 
 const ALLOWED_TAGS = [
   ...sanitizeHtml.defaults.allowedTags,
@@ -141,6 +142,9 @@ function suggestion(text: string, ctx: MarkdownContext): string {
 
 export function renderMarkdown(text: string, ctx: MarkdownContext = {}): string {
   if (!text.trim()) return '';
+  if (tooMuchEmphasis(text)) {
+    return `<p class="color-fg-muted"><em>Shown as plain text: too many emphasis markers (*, _ or ~) to render as Markdown.</em></p>\n<pre class="markdown-text">${esc(text)}</pre>\n`;
+  }
   const rendered = makeMarked(ctx).parse(text, { async: false }) as string;
   return sanitizeHtml(rendered, ctx.keepImageUrls ? KEEP_IMAGE_URLS : SANITIZE);
 }

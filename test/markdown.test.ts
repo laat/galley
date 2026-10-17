@@ -214,6 +214,55 @@ test('issue summaries say what GitHub would show', () => {
   assert.equal(issueSummary(null), null);
 });
 
+const PLAIN_NOTE = '<p class="color-fg-muted"><em>Shown as plain text: too many emphasis markers (*, _ or ~) to render as Markdown.</em></p>\n';
+
+test('Markdown full of emphasis markers is shown as plain text, well under a second', () => {
+  // marked scans the rest of the paragraph for each of them: before, 50,000 characters of "*a " took 16 s.
+  const n = 50_000;
+  const fill = (unit: string) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+  // marked takes "_" after a letter outside the Basic Multilingual Plane for one starting a word.
+  for (const unit of ['*a ', '_a ', '~a ', '**a ', '*a\n', `${'*'.repeat(100)}a `, '𝒜_a ']) {
+    const text = `Fixes #12 & <b>x</b>\n\n${fill(unit)}`;
+    const started = performance.now();
+    const rendered = renderMarkdown(text, { references: refs });
+    const closes = closingIssues(text, refs);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms for ${JSON.stringify(unit)}`);
+    assert.equal(rendered, `${PLAIN_NOTE}<pre class="markdown-text">Fixes #12 &amp; &lt;b&gt;x&lt;/b&gt;\n\n${fill(unit)}</pre>\n`);
+    // Without marked, references in code can't be told from the rest: none is said to close.
+    assert.deepEqual(closes, []);
+  }
+  assert.deepEqual(closingIssues(`${'*a '.repeat(1001)}\n\n\`\`\`\nFixes #12\n\`\`\``, refs), []);
+});
+
+test('the most emphasis markers still rendered as Markdown take well under a second', () => {
+  // 1,000 characters of them in one paragraph, in runs of one, two and a hundred. marked scans again for
+  // each character of a run it finds no closer for.
+  for (const text of ['*a '.repeat(1000), '_a '.repeat(1000), '~a '.repeat(1000), '**a '.repeat(500), `${'*'.repeat(100)}a `.repeat(10), '𝒜_a '.repeat(1000)]) {
+    const started = performance.now();
+    const rendered = renderMarkdown(text);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms for ${JSON.stringify(text.slice(0, 12))}…`);
+    assert.ok(!rendered.startsWith(PLAIN_NOTE), JSON.stringify(text.slice(0, 12)));
+    assert.ok(renderMarkdown(`${text}*a`).startsWith(PLAIN_NOTE), JSON.stringify(text.slice(0, 12)));
+  }
+});
+
+test('a long comment with emphasis in every paragraph and a long log still renders as Markdown', () => {
+  // Far more markers than one paragraph may have, but in many paragraphs, table cells, and a code block.
+  const section = (i: number) =>
+    `## Step ${i}\n\nRan **the tests** in _src_, ~~one~~ none skipped.\n\n- **unit**: *passed*\n- **e2e**: *passed*\n\n| **a** | ***b*** |\n|---|---|\n| _c_ | ~~d~~ |\n\n***\n\n`;
+  const log = Array(5000).fill('ok src/**/*.ts __init__ *ptr ~/x _y').join('\n');
+  const rendered = renderMarkdown(`${Array.from({ length: 500 }, (_, i) => section(i)).join('')}\`\`\`\n${log}\n\`\`\`\n`);
+  assert.equal(rendered.match(/<h2>/g)?.length, 500);
+  assert.equal(rendered.match(/<table>/g)?.length, 500);
+  assert.equal(rendered.match(/<hr \/>/g)?.length, 500);
+  assert.equal(rendered.match(/<strong>/g)?.length, 2500);
+  assert.equal(rendered.match(/<em>/g)?.length, 2500);
+  assert.equal(rendered.match(/<del>/g)?.length, 1000);
+  assert.ok(rendered.includes(`<pre><code class="hljs">${log}</code></pre>`));
+});
+
 // ------------------------------------------------------- SHAs in a repository
 
 const dir = mkdtempSync(join(tmpdir(), 'laatsux-markdown-'));
