@@ -2200,6 +2200,73 @@ test('findings the author answers without a new commit: the reviewer agents are 
   }
 });
 
+test('a reviewer agent is told what its earlier reviews found, resolved or not, and the commit it left off at', async () => {
+  // On a base of its own, which can move on without moving main under the other tests.
+  git('checkout', '-q', 'main');
+  git('branch', 'history-base');
+  git('checkout', '-qb', 'feature/history');
+  writeFileSync(join(repo, 'history.js'), 'export const value = 1;\n');
+  git('add', 'history.js');
+  git('commit', '-qm', 'Add history.js');
+  const created = await cli(['pr', 'create', '--title', 'Add history.js', '--body', 'x', '--base', 'history-base', '--reviewer', 'codex:3']);
+  assert.equal(created.code, 0, created.stderr);
+  const n = created.stdout.trim().split('/').pop()!;
+  const calls = () => (existsSync(process.env.FAKE_CODEX_LOG!) ? readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n') : []);
+  /** The prompt of the review the author's wait brings. */
+  const reviewed = async (): Promise<string> => {
+    const before = calls().length;
+    const r = await cli(['pr', 'wait', n, '--timeout', '20s']);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /codex-review reviewed: commented/);
+    assert.equal(calls().length, before + 1);
+    return JSON.parse(calls().at(-1)!).prompt;
+  };
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({
+    summary: 'Three things.',
+    comments: [
+      { path: 'history.js', line: 1, start_line: null, side: 'RIGHT', priority: 'medium', body: 'Name it.' },
+      { path: 'history.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Add a test.' },
+      { path: 'math.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Not in this diff.' },
+    ],
+  });
+  const first = await reviewed();
+  assert.doesNotMatch(first, /Your last review|earlier reviews of this pull request/);
+  const firstSha = git('rev-parse', 'HEAD');
+
+  // The author fixes one finding and resolves its thread, and answers the other without resolving it.
+  const threads = JSON.parse((await cli(['pr', 'view', n, '--json', 'reviewThreads'])).stdout).reviewThreads;
+  writeFileSync(join(repo, 'history.js'), 'export const answer = 1;\n');
+  git('commit', '-qam', 'Name the value');
+  assert.equal((await cli(['pr', 'comment', n, '--reply-to', String(threads[0].databaseId), '--resolve', '-b', 'Renamed it.'])).code, 0);
+  assert.equal((await cli(['pr', 'comment', n, '--reply-to', String(threads[1].databaseId), '-b', 'Out of scope.'])).code, 0);
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine now.', comments: [{ path: 'history.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'One more.' }] });
+  const second = await reviewed();
+  assert.match(second, /Check that each resolved comment was really fixed, and comment again only on one that was not/);
+  assert.match(
+    second,
+    new RegExp(
+      `Your last review, of ${firstSha.slice(0, 7)}, said: Three things\\.\n- history\\.js:1 \\(outdated\\) \\[resolved by agent\\]\n  codex-review: Name it\\.\n  agent: Renamed it\\.\n- history\\.js:1 \\(outdated\\) \\[open\\]\n  codex-review: Add a test\\.\n  agent: Out of scope\\.\nIts comments outside threads, which nobody resolves:\n- \`math\\.js:1\` \\(low priority\\): Not in this diff\\.\n`,
+    ),
+  );
+  assert.match(second, new RegExp(`\nYou last reviewed ${firstSha}\\. Run \`git diff ${firstSha} HEAD\` to see what changed since\\.\n`));
+  // Its own open thread is among its earlier reviews, not among the others' threads.
+  assert.doesNotMatch(second, /Open review threads/);
+
+  // Rebased onto a newer base, the commit it last reviewed is no starting point.
+  const secondSha = git('rev-parse', 'HEAD');
+  git('checkout', '-q', 'history-base');
+  writeFileSync(join(repo, 'history-base.js'), 'export {};\n');
+  git('add', 'history-base.js');
+  git('commit', '-qm', 'Add history-base.js');
+  git('checkout', '-q', 'feature/history');
+  git('rebase', '-q', 'history-base');
+  const third = await reviewed();
+  assert.match(third, new RegExp(`\nYou last reviewed ${secondSha}, but the branch has been rebased onto a newer base since, so a diff from it would show the base's changes too: review the whole change\\.\n`));
+  assert.doesNotMatch(third, new RegExp(`git diff ${secondSha}`));
+  assert.match(third, new RegExp(`Your last review, of ${secondSha.slice(0, 7)}, said: Fine now\\.\n- history\\.js:1 \\[open\\]\n  codex-review: One more\\.\n`));
+  assert.match(third, new RegExp(`Comments of your reviews before that, a line each:\n- ${firstSha.slice(0, 7)} history\\.js:1 \\(outdated\\) \\[resolved by agent\\]: Name it\\.\n- ${firstSha.slice(0, 7)} history\\.js:1 \\(outdated\\) \\[open\\]: Add a test\\.\n- ${firstSha.slice(0, 7)} \`math\\.js:1\` \\(low priority\\): Not in this diff\\.\n`));
+});
+
 test('auto-publish publishes once the agents are done', async (t) => {
   /** Stage a branch with one commit, as the agent. */
   const stage = async (branch: string, file: string, ...args: string[]) => {
