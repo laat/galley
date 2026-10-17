@@ -48,12 +48,13 @@ export function repoNav(s: Service, repo: RepoRow, selected: 'staged' | null = '
   const slug = repo.github_slug;
   const counts = slug ? s.githubRepo(slug) : null;
   const counter = (n: number | undefined) => (n === undefined ? '' : html` <span class="Counter">${n}</span>`);
-  const external = (path: string, iconName: string, label: string, n: number | undefined) =>
-    html`<a class="UnderlineNav-item" href="https://github.com/${slug}/${path}" target="_blank" rel="noopener" title="${label} on GitHub">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
+  const external = (path: string, iconName: string, label: string, title: string, n?: number) =>
+    html`<a class="UnderlineNav-item" href="https://github.com/${slug}${path}" target="_blank" rel="noopener" title="${title}">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
   return html`<nav class="UnderlineNav" aria-label="Repository">
+  ${slug ? external('', 'mark-github', 'Repo', `${slug} on GitHub`) : ''}
   <a class="UnderlineNav-item${selected === 'staged' ? ' selected' : ''}" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} Staged${counter(staged)}</a>
-  ${slug ? external('pulls', 'mark-github', 'Pull requests', counts?.pulls) : ''}
-  ${slug ? external('issues', 'issue-opened', 'Issues', counts?.issues) : ''}
+  ${slug ? external('/pulls', 'git-pull-request', 'Pull requests', 'Pull requests on GitHub', counts?.pulls) : ''}
+  ${slug ? external('/issues', 'issue-opened', 'Issues', 'Issues on GitHub', counts?.issues) : ''}
 </nav>`;
 }
 

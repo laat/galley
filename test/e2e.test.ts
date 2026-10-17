@@ -412,7 +412,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     await human('PATCH', '/api/repos/acme/widgets/pulls/1', { state: 'open' });
   });
 
-  await t.test('repo pages link to the pull requests and issues on GitHub', async () => {
+  await t.test('repo pages link to the repository, its pull requests and its issues on GitHub', async () => {
     await server.service.refreshGithubRepo('acme/widgets');
     // When counts arrive in the background, open pages are told so they can show them.
     const events: string[] = [];
@@ -428,7 +428,20 @@ test('the agent loop, from staging to publishing', async (t) => {
       assert.match(page, /<a class="UnderlineNav-item selected" href="\/acme\/widgets">[^]*?Staged <span class="Counter">\d+<\/span><\/a>/, path);
       assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/pulls" target="_blank"[^]*?Pull requests <span class="Counter">2<\/span>/, path);
       assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/issues" target="_blank"[^]*?Issues <span class="Counter">4<\/span>/, path);
+      // Repo ↗ · Staged · Pull requests ↗ · Issues ↗, and only Repo has the GitHub mark.
+      const tabs = [...page.match(/<nav class="UnderlineNav" aria-label="Repository">[^]*?<\/nav>/)![0].matchAll(/<a [^>]*href="([^"]*)"[^>]*><svg class="octicon octicon-([\w-]+)/g)].map((m) => [m[1], m[2]]);
+      const github = 'https://github.com/acme/widgets';
+      assert.deepEqual(tabs, [[github, 'mark-github'], ['/acme/widgets', 'git-pull-request'], [`${github}/pulls`, 'git-pull-request'], [`${github}/issues`, 'issue-opened']], path);
+      assert.match(page, /<a class="UnderlineNav-item" href="https:\/\/github\.com\/acme\/widgets" target="_blank" rel="noopener" title="acme\/widgets on GitHub">[^]*? Repo <svg class="octicon octicon-link-external /, path);
     }
+    // Without a GitHub remote, only the staged pull requests.
+    const elsewhere = join(dir, 'elsewhere');
+    execFileSync('git', ['init', '-q', '-b', 'main', elsewhere]);
+    execFileSync('git', ['-C', elsewhere, 'remote', 'add', 'origin', 'https://gitlab.com/acme/elsewhere.git']);
+    const local = await human('POST', '/api/repos', { path: elsewhere });
+    const nav = (await (await fetch(`${server.url}/${local.full_name}`)).text()).match(/<nav class="UnderlineNav" aria-label="Repository">[^]*?<\/nav>/)![0];
+    assert.doesNotMatch(nav, /github\.com/);
+    assert.match(nav, /Staged/);
   });
 
   await t.test('web pages render', async () => {
@@ -1464,7 +1477,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
 
   await t.test('when publishing by hand, with the merge method from settings', async () => {
     const pr = await stage('feature/merge-manual', 'manual-merge.js');
-    assert.match(await pr.page(), /<label><input type="checkbox" name="auto_merge"> Enable auto-merge on GitHub \(squash\)<\/label>/);
+    assert.match(await pr.page(), /<label><input type="checkbox" name="auto_merge"> <span>Enable auto-merge on GitHub \(squash\)<\/span><\/label>/);
     const calls = ghCalls();
     const r = await cli(['pr', 'publish', String(pr.number), '--auto-merge'], { actor: 'reviewer' });
     assert.equal(r.code, 0, r.stderr);
@@ -1496,7 +1509,11 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     git('commit', '-qam', 'Change manual-merge.js');
     await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the push is recorded');
     // The page sends the method it shows; open pages hear when the setting changes.
-    assert.match(await pr.page(), /<input type="hidden" name="merge_method" value="squash">/);
+    // Auto-merge is on for it, so the update asks for it again unless unchecked.
+    assert.match(
+      await pr.page(),
+      /<label title="Unchecked, this publish does not ask for auto-merge\. It does not turn auto-merge off on GitHub\."><input type="checkbox" name="auto_merge" checked> <span>Enable auto-merge on GitHub \(squash\)\. Auto-merge is on for <a href="https:\/\/github\.com\/acme\/widgets\/pull\/7"[^>]*>acme\/widgets#7<\/a>\.<\/span><\/label><input type="hidden" name="merge_method" value="squash">/,
+    );
     const events: string[] = [];
     const listen = (e: { type: string }) => events.push(e.type);
     server.service.bus.on('change', listen);
@@ -1540,6 +1557,29 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       await until(async () => (await pr.timeline()).some((e) => e.event === 'auto_merge_enabled'), 'auto-merge is enabled');
       assert.ok(calls().includes(`pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`));
     } finally {
+      await human('PUT', '/api/settings/publish', { mergeMethod: 'squash' });
+    }
+  });
+
+  await t.test('the publish form checks it when auto-publish includes it, with the same merge method', async () => {
+    const pr = await stage('feature/merge-form', 'form-merge.js');
+    await human('PUT', `${pr.base}/auto-publish`, { auto_merge: true, merge_method: 'squash' });
+    await human('PUT', '/api/settings/publish', { mergeMethod: 'rebase' });
+    try {
+      assert.match(
+        await pr.page(),
+        /<label title="Unchecked, this publish does not ask for auto-merge\. It does not turn auto-merge off on GitHub\."><input type="checkbox" name="auto_merge" checked> <span>Enable auto-merge on GitHub \(squash\)<\/span><\/label><input type="hidden" name="merge_method" value="squash">/,
+      );
+      // Publishing by hand from it does what auto-publish would, though the setting says rebase now.
+      const calls = ghCalls();
+      const pull = await human('POST', `${pr.base}/publish`, { auto_merge: true, merge_method: 'squash' });
+      assert.deepEqual(pull.auto_merge_result, { state: 'enabled', merge_method: 'squash', error: null });
+      assert.ok(calls().includes(`pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`), calls().join('\n'));
+      // A method that is neither auto-publish's nor the one in settings is still refused.
+      const stale = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auto_merge: true, merge_method: 'merge' }) });
+      assert.equal(stale.status, 412);
+    } finally {
+      await human('DELETE', `${pr.base}/auto-publish`);
       await human('PUT', '/api/settings/publish', { mergeMethod: 'squash' });
     }
   });

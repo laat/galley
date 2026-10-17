@@ -365,10 +365,13 @@ export function api(s: Service): Hono {
 
   /**
    * The merge method to turn on auto-merge with: the one in settings now. Extension: the page
-   * sends the one it shows with the auto-merge option, which must still be that.
+   * sends the one it shows with the auto-merge option, which must still be that, or the one
+   * auto-publish was approved with: the page offers that one while auto-publish is on.
    */
-  const mergeMethod = (shown: unknown): MergeMethod => {
+  const mergeMethod = (shown: unknown, pull: PullRow): MergeMethod => {
     const method = readSettings(s.db).publish.mergeMethod;
+    const approved = s.autoPublish(pull)?.autoMerge;
+    if (approved && shown === approved) return approved;
     if (shown !== undefined && shown !== method) {
       throw new HttpError(412, `The merge method in Settings changed to ${method} after this page was loaded. Refresh before publishing.`);
     }
@@ -381,7 +384,7 @@ export function api(s: Service): Hono {
     const b = await body(c);
     const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
     // Decided now: the setting may change while publishing awaits.
-    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method) : undefined;
+    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method, x.pull) : undefined;
     const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review, autoMerge }, actor(c));
     // Extension: what came of turning on auto-merge, which does not undo the publish when it fails.
     return c.json({ ...pullJson(s, x.repo, pull), auto_merge_result: autoMerge ? autoMergeResult(s.autoMerge(pull)) : undefined });
@@ -392,7 +395,7 @@ export function api(s: Service): Hono {
     const x = await ctx(c);
     const b = await body(c);
     const flag = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
-    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method) : undefined;
+    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method, x.pull) : undefined;
     await s.enableAutoPublish(x, { sign: flag(b.sign), draft: flag(b.draft), force: !!b.force, autoMerge }, actor(c));
     return c.json(pullJson(s, x.repo, s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id)!));
   });
