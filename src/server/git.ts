@@ -149,6 +149,15 @@ function remember(key: string, value: string): string {
 /** Line counts of files at full commit SHAs, which never change. */
 const lineCountCache = new Map<string, number>();
 
+/** What merging two commits gives (Repo.mergeTree). */
+export interface MergeTree {
+  clean: boolean;
+  /** The files with a conflict. A conflict can be in no file, such as a directory renamed two ways (see messages). */
+  files: string[];
+  /** git's message for each conflict in none of those files ("CONFLICT (directory rename split): …"). */
+  messages: string[];
+}
+
 export interface TreeEntry {
   mode: string;
   /** "commit" is a submodule. */
@@ -326,6 +335,42 @@ export class Repo {
       if (i < names.length && SHA_RE.test(line)) found.set(names[i], line);
     });
     return found;
+  }
+
+  /**
+   * Merge `head` into `base` without a working tree or index (`git merge-tree --write-tree`), for
+   * whether it conflicts and where. Throws when git could not merge the two at all. Cached when both
+   * are full SHAs, since the answer never changes.
+   */
+  async mergeTree(base: string, head: string): Promise<MergeTree> {
+    const args = ['merge-tree', '--write-tree', '--name-only', '-z', base, head];
+    const key = `${this.gitDir}\0${args.join('\0')}`;
+    const immutable = SHA_RE.test(base) && SHA_RE.test(head);
+    let text = immutable ? cache.get(key) : undefined;
+    if (text === undefined) {
+      const r = await this.run(args, { allowFail: true });
+      // 0 merges cleanly and 1 conflicts; anything else is an error, such as unrelated histories or a git without --write-tree.
+      if (r.code !== 0 && r.code !== 1) throw new GitError(`git merge-tree failed: ${r.stderr.trim() || `exit ${r.code}`}`, r.stderr, r.code);
+      // The exit status says whether it conflicts: some conflicts list no file.
+      text = `${r.code}${r.stdout}`;
+      if (immutable) remember(key, text);
+    }
+    // The merged tree, each file with a conflict, then an empty field and the messages: for each, the
+    // number of paths it is about, the paths, its type and its text.
+    const fields = text.slice(1).split('\0');
+    let i = 1;
+    const files: string[] = [];
+    while (i < fields.length && fields[i] !== '') files.push(fields[i++]);
+    const messages: string[] = [];
+    for (i++; i < fields.length && /^\d+$/.test(fields[i]); ) {
+      const n = Number(fields[i]);
+      const paths = fields.slice(i + 1, i + 1 + n);
+      const [type = '', message = ''] = fields.slice(i + 1 + n, i + 3 + n);
+      i += n + 3;
+      // Conflicts in none of the files, which the list of files can not show.
+      if (type.startsWith('CONFLICT') && !paths.some((p) => files.includes(p))) messages.push(message.trim());
+    }
+    return { clean: text[0] === '0', files, messages };
   }
 
   /** Those of `shas` (full commit SHAs) that no remote-tracking branch of `remote` contains. */

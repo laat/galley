@@ -462,20 +462,26 @@ export function api(s: Service): Hono {
       seen_at: r.seenAt,
       // With status agents_done: the head the reviewer agents are done with, and what each made of it.
       agents_done: r.agentsDone ?? null,
+      // The head, when it conflicts with its base (`pr.baseConflicts` says with what); said once per commit.
+      conflicts: r.conflicts ?? null,
     });
   });
 
-  // laatsux extension: the author confirms it has shown the feedback a wait returned, and that
-  // the reviewer agents are done with a commit (`agents_done`, the SHA), when it said so.
+  // laatsux extension: the author confirms it has shown the feedback a wait returned, that the
+  // reviewer agents are done with a commit (`agents_done`, the SHA), and that a commit conflicts
+  // with its base (`conflicts`, the SHA), when it said so.
   app.put('/repos/:owner/:repo/pulls/:n/seen', async (c) => {
     const x = await ctx(c, { sync: false });
     if (actor(c).id !== x.pull.author_id) throw new HttpError(403, 'only the author marks feedback as seen');
     const b = await body(c);
     const at = String(b.at ?? '');
     if (!/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(at)) throw new HttpError(422, 'at must be the seen_at of a wait response');
-    const done = b.agents_done === undefined ? undefined : String(b.agents_done);
-    if (done !== undefined && !/^[0-9a-f]{40}$/.test(done)) throw new HttpError(422, 'agents_done must be the SHA of a wait response');
-    s.markSeen(x.pull, at, done);
+    const sha = (key: 'agents_done' | 'conflicts') => {
+      if (b[key] === undefined) return undefined;
+      if (!/^[0-9a-f]{40}$/.test(String(b[key]))) throw new HttpError(422, `${key} must be the SHA of a wait response`);
+      return String(b[key]);
+    };
+    s.markSeen(x.pull, at, sha('agents_done'), sha('conflicts'));
     return c.body(null, 204);
   });
 

@@ -57,9 +57,9 @@ function digitCommit(parent: string): string {
   }
 }
 
-async function cli(args: string[], opts: { input?: string; actor?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
+async function cli(args: string[], opts: { input?: string; actor?: string; cwd?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   const child = execFile(process.execPath, [BIN, ...args], {
-    cwd: repo,
+    cwd: opts.cwd ?? repo,
     env: { ...process.env, LAATSUX_URL: server.url, LAATSUX_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' },
   });
   if (opts.input !== undefined) child.stdin!.end(opts.input);
@@ -4210,7 +4210,7 @@ async function scratchRepo(name: string, { github = true } = {}) {
   const path = join(dir, name);
   const bare = join(dir, `${name}.git`);
   execFileSync('git', ['init', '-q', '-b', 'main', path]);
-  const g = (...args: string[]) => execFileSync('git', ['-C', path, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
+  const g = (...args: string[]) => execFileSync('git', ['-C', path, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args], { encoding: 'utf8' }).trim();
   writeFileSync(join(path, 'a.js'), 'export {};\n');
   g('add', '.');
   g('commit', '-qm', 'Initial commit');
@@ -4237,7 +4237,7 @@ async function scratchRepo(name: string, { github = true } = {}) {
     assert.equal(res.status, 201);
     return res.json();
   };
-  return { fullName: full_name as string, api, stage };
+  return { fullName: full_name as string, api, stage, path, g };
 }
 
 test('the reviewer pins pull requests to the top of the front page, until they unpin them', async () => {
@@ -4393,4 +4393,272 @@ test('the front page lists the repositories with pull requests, latest activity 
   assert.match(aside, /<input type="search" class="form-control repo-filter js-repo-filter" placeholder="Find a repository…"/);
   assert.match(aside, /<ul class="repo-list js-repo-list" data-shown="10">/);
   assert.match(aside, /<button type="button" class="btn-link repo-list-more js-repo-more">Show more<\/button>/);
+});
+
+test('a pull request that conflicts with its base: the reviewer sees it, the author is told to rebase, and auto-publish waits', async (t) => {
+  const { fullName, api, path, g } = await scratchRepo('conflicts');
+  const agent = { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' };
+  const until = async (done: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400 && !(await done()); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(await done(), what);
+  };
+  /** Hold up the checks for conflicts, as a slow git would, until the function returned is called. */
+  const hold = () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    server.service.conflictChecks = server.service.conflictChecks.then(() => held);
+    return release;
+  };
+  /** Stage `branch`, made from `from` with `file` (a.js) changed to `text`, as the agent. */
+  const stage = async (branch: string, from: string, text: string, file = 'a.js') => {
+    g('checkout', '-q', '-b', branch, from);
+    writeFileSync(join(path, file), text);
+    g('add', file);
+    g('commit', '-qm', `Set ${file} in ${branch}`);
+    const res = await fetch(server.url + api, { method: 'POST', headers: agent, body: JSON.stringify({ title: `Set a in ${branch}`, head: branch, base: 'main', automatic_reviews: false }) });
+    assert.equal(res.status, 201);
+    const { id, number } = await res.json();
+    return {
+      n: String(number),
+      row: () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id),
+      published: async () => (await human('GET', `/api/repos/${fullName}/issues/${number}/timeline`)).filter((e: any) => e.event === 'published').map((e: any) => e.source),
+      page: async () => (await fetch(`${server.url}/${fullName}/pull/${number}`)).text(),
+      view: async () => JSON.parse((await cli(['pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus,baseConflicts'], { cwd: path })).stdout),
+      json: () => human('GET', `${api}/${number}`),
+      wait: () => cli(['pr', 'wait', String(number), '--timeout', '20s'], { cwd: path }),
+    };
+  };
+  const pr = await stage('shared', 'main', 'export const a = 1;\n');
+
+  await t.test('a head that merges cleanly says so', async () => {
+    await until(async () => (await pr.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
+    assert.deepEqual(await pr.view(), { mergeable: 'MERGEABLE', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: false, files: [], messages: [] } });
+    assert.match(await pr.page(), new RegExp(`<strong>This branch has no conflicts with <span class="branch-name branch-name-sm">origin/main</span></strong><div class="color-fg-muted">Checked against <code>${g('rev-parse', '--short=7', 'main')}</code>`));
+    const first = await pr.wait();
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(first.stdout, /^No reviewer agent reviews [0-9a-f]{7}; ask the reviewer to review it: /m);
+    assert.doesNotMatch(first.stdout, /This branch conflicts/);
+  });
+
+  await t.test('the base moves while the author waits: the wait says the head conflicts', async () => {
+    const waiting = pr.wait();
+    await until(async () => (await pr.json()).author_waiting, 'the author waits');
+    // Another pull request is merged, and fetched: main changes the same line.
+    g('checkout', '-q', 'main');
+    writeFileSync(join(path, 'a.js'), 'export const a = 2;\n');
+    g('commit', '-qam', 'Set a to 2');
+    g('update-ref', 'refs/remotes/origin/main', 'main');
+    const told = await waiting;
+    assert.equal(told.code, 0, told.stderr);
+    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `laatsux pr wait \d+` again\./);
+    assert.deepEqual(await pr.view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: ['a.js'], messages: [] } });
+    assert.match((await cli(['pr', 'view', pr.n], { cwd: path })).stdout, /^conflicts:\twith origin\/main in a\.js; rebase onto origin\/main\.$/m);
+  });
+
+  await t.test('the reviewer sees the conflict, and that the author is rebasing', async () => {
+    const { turn } = await pr.json();
+    assert.equal(turn.whose, 'author');
+    assert.equal(turn.reasons[0].text, 'agent is working on the feedback');
+    assert.equal(turn.reasons.find((r: any) => r.kind === 'conflicts').text, 'conflicts with origin/main in a.js');
+    const list = await (await fetch(`${server.url}/${fullName}`)).text();
+    assert.match(list, /<span class="turn-reason turn-reason--conflicts"><svg class="octicon octicon-alert[^>]*>.*?<\/svg>conflicts with origin\/main in a\.js<\/span>/);
+    const box = await pr.page();
+    assert.match(box, /<strong>This branch has conflicts with <span class="branch-name branch-name-sm">origin\/main<\/span><\/strong>/);
+    assert.match(box, /conflicts in 1 file\. agent was told to rebase it\./);
+    assert.match(box, new RegExp(`<a href="/${fullName}/pull/${pr.n}/files#diff-[0-9a-f]+"><code>a\\.js</code></a>`));
+    // Said once per commit: the author waiting again without a rebase is not told again.
+    const again = await fetch(`${server.url}${api}/${pr.n}/wait?timeout=1`, { headers: agent });
+    assert.equal((await again.json()).status, 'timeout');
+  });
+
+  await t.test('a head that conflicts when staged: the first wait says so, before the reviewer agents are done', async () => {
+    // Until it is known, the wait does not say the reviewer agents are done.
+    const release = hold();
+    let late: Awaited<ReturnType<typeof stage>>;
+    try {
+      late = await stage('late', 'main~1', 'export const a = 3;\n');
+      const early = await fetch(`${server.url}${api}/${late.n}/wait?timeout=1`, { headers: agent });
+      assert.equal((await early.json()).status, 'timeout');
+    } finally {
+      release();
+    }
+    const first = await late.wait();
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(first.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.doesNotMatch(first.stdout, /ask the reviewer/);
+    // The author waits again without rebasing: the reviewer is asked, and still hears of the conflict.
+    const second = await late.wait();
+    assert.match(second.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.\nNo reviewer agent reviews [0-9a-f]{7}; ask the reviewer to review it: /m);
+    await human('PATCH', `${api}/${late.n}`, { state: 'closed' });
+  });
+
+  await t.test('auto-publish waits for the rebase', async () => {
+    await human('PUT', `${api}/${pr.n}/auto-publish`, {});
+    const publishing = pr.wait();
+    await until(async () => (await pr.json()).author_waiting, 'the author waits');
+    assert.equal(server.service.autoPublishReady(pr.row()), false);
+    assert.match(await pr.page(), /Conflicts with origin\/main: nothing is published until agent rebases it/);
+    // The agent rebases onto main, resolving the conflict.
+    g('checkout', '-q', 'shared');
+    g('reset', '-q', '--hard', 'main');
+    writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+    g('commit', '-qam', 'Set a to 1');
+    const published = await publishing;
+    assert.equal(published.code, 0, published.stderr);
+    assert.match(published.stdout, /^Published to GitHub: /m);
+    assert.doesNotMatch(published.stdout, /This branch conflicts/);
+    assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr create --repo acme\/conflicts --base main --head shared /m);
+    // Only the rebased head was published.
+    assert.deepEqual(await pr.published(), [g('rev-parse', 'shared')]);
+  });
+
+  await t.test('auto-publish goes by the answer for the base as it is now, not as it was', async () => {
+    const moving = await stage('moving', 'main', 'export const a = 4;\n');
+    await until(async () => (await moving.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
+    const release = hold();
+    let waiting: ReturnType<typeof moving.wait> | undefined;
+    try {
+      // main moves on to a commit that conflicts, and laatsux sees it while it works out the merge.
+      g('checkout', '-q', 'main');
+      writeFileSync(join(path, 'a.js'), 'export const a = 5;\n');
+      g('commit', '-qam', 'Set a to 5');
+      g('update-ref', 'refs/remotes/origin/main', 'main');
+      await server.service.sync(moving.row());
+      await human('PUT', `${api}/${moving.n}/auto-publish`, {});
+      waiting = moving.wait();
+      await until(async () => (await moving.json()).author_waiting, 'the author waits');
+      // All else is ready, but the answer for the old base does not count.
+      assert.equal(server.service.readiness(moving.row()).agentsDone, true);
+      assert.equal(server.service.autoPublishReady(moving.row()), false);
+      const box = await moving.page();
+      assert.match(box, /This branch has no conflicts with .*origin\/main has moved since; checking again\./);
+      assert.match(box, /Checking for conflicts with main/);
+    } finally {
+      release();
+    }
+    const told = await waiting!;
+    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.deepEqual(await moving.published(), []);
+    await human('PATCH', `${api}/${moving.n}`, { state: 'closed' });
+  });
+
+  await t.test('a check git could not do holds up auto-publish, says why, and is tried again', async () => {
+    const retried = await stage('retried', 'main', 'export const a = 5;\nexport const b = 1;\n');
+    await until(async () => (await retried.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
+    // A setting git merge-tree can not use makes it fail; nothing else reads it.
+    g('config', 'merge.conflictStyle', 'bogus');
+    try {
+      await human('PUT', `${api}/${retried.n}/auto-publish`, {});
+      writeFileSync(join(path, 'b.js'), 'export const b = 2;\n');
+      g('add', 'b.js');
+      g('commit', '-qm', 'Add b');
+      const publishing = retried.wait();
+      await until(async () => /Could not check for conflicts with/.test(await retried.page()), 'the failed check is shown');
+      await until(async () => (await retried.json()).author_waiting, 'the author waits');
+      assert.equal(server.service.readiness(retried.row()).agentsDone, true);
+      assert.equal(server.service.autoPublishReady(retried.row()), false);
+      const box = await retried.page();
+      assert.match(box, /<pre class="merge-error">git merge-tree failed: error: unknown style /);
+      assert.match(box, /Could not check for conflicts with origin\/main: git merge-tree failed: error: unknown style /);
+      assert.deepEqual(await retried.published(), []);
+      // Fixed, the next poll tries again, finds nothing in the way, and auto-publish publishes.
+      g('config', '--unset', 'merge.conflictStyle');
+      const published = await publishing;
+      assert.match(published.stdout, /^Published to GitHub: /m);
+      assert.deepEqual(await retried.published(), [g('rev-parse', 'retried')]);
+    } finally {
+      // Unset already, unless an assertion failed first.
+      try {
+        g('config', '--unset', 'merge.conflictStyle');
+      } catch {}
+    }
+  });
+
+  await t.test('a push that conflicts wakes the waiting author, with nothing else asking about the new head', async () => {
+    // From before main set a to 5, with a file of its own: it merges cleanly.
+    const pushed = await stage('pushed', 'main~1', 'export const c = 1;\n', 'c.js');
+    const first = await pushed.wait();
+    assert.match(first.stdout, /^No reviewer agent reviews [0-9a-f]{7}; ask the reviewer to review it: /m);
+    // No reviewer agent and no auto-publish: only the push can bring news of the new head, and
+    // the author does not wake for its own push.
+    const waiting = cli(['pr', 'wait', pushed.n, '--timeout', '10s'], { cwd: path });
+    await until(async () => (await pushed.json()).author_waiting, 'the author waits');
+    writeFileSync(join(path, 'a.js'), 'export const a = 7;\n');
+    g('commit', '-qam', 'Set a to 7');
+    const told = await waiting;
+    assert.equal(told.code, 0, told.stderr);
+    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    await human('PATCH', `${api}/${pushed.n}`, { state: 'closed' });
+  });
+
+  await t.test('a conflict told along with an approval is the author\'s to rebase, and its turn', async () => {
+    const approved = await stage('approved', 'main', 'export const d = 1;\n', 'd.js');
+    const first = await approved.wait();
+    assert.match(first.stdout, /^No reviewer agent reviews [0-9a-f]{7}; ask the reviewer to review it: /m);
+    // The reviewer approves, and main adds a d.js of its own before the author waits again.
+    await human('POST', `${api}/${approved.n}/reviews`, { event: 'APPROVE' });
+    g('checkout', '-q', 'main');
+    writeFileSync(join(path, 'd.js'), 'export const d = 2;\n');
+    g('add', 'd.js');
+    g('commit', '-qm', 'Add d');
+    g('update-ref', 'refs/remotes/origin/main', 'main');
+    await until(async () => (await approved.view()).mergeable === 'CONFLICTING', 'it conflicts with main');
+    const waited = approved.row().author_waited_at;
+    const told = await approved.wait();
+    assert.equal(told.code, 0, told.stderr);
+    assert.match(told.stdout, /^reviewer reviewed: approved /m);
+    assert.match(told.stdout, /^This branch conflicts with origin\/main in d\.js; rebase onto origin\/main\.$/m);
+    assert.match(told.stdout, /^Rebase onto origin\/main, resolve the conflicts and run the tests, then run `laatsux pr wait \d+` again\.$/m);
+    assert.doesNotMatch(told.stdout, /nothing left open/);
+    // The wait that hands it the conflict is not an action on it: it is the author's turn until it acts.
+    assert.equal(approved.row().author_waited_at, waited);
+    const { turn } = await approved.json();
+    assert.equal(turn.whose, 'author');
+    assert.equal(turn.reasons[0].text, 'agent is working on the feedback');
+    await human('PATCH', `${api}/${approved.n}`, { state: 'closed' });
+  });
+
+  await t.test('a conflict in no file, such as a directory renamed two ways, is a conflict all the same', async () => {
+    g('checkout', '-q', 'main');
+    mkdirSync(join(path, 'old'));
+    writeFileSync(join(path, 'old', 'a.js'), 'export {};\n');
+    writeFileSync(join(path, 'old', 'b.js'), 'export {};\n');
+    g('add', 'old');
+    g('commit', '-qm', 'Add old');
+    g('update-ref', 'refs/remotes/origin/main', 'main');
+    // The branch moves old/a.js to left/ and old/b.js to right/: no one place old/ went.
+    g('checkout', '-q', '-b', 'split');
+    mkdirSync(join(path, 'left'));
+    mkdirSync(join(path, 'right'));
+    g('mv', 'old/a.js', 'left/a.js');
+    g('mv', 'old/b.js', 'right/b.js');
+    g('commit', '-qm', 'Split old');
+    const res = await fetch(server.url + api, { method: 'POST', headers: agent, body: JSON.stringify({ title: 'Split old', head: 'split', base: 'main', automatic_reviews: false }) });
+    const { number } = await res.json();
+    const n = String(number);
+    const view = async () => JSON.parse((await cli(['pr', 'view', n, '--json', 'mergeable,mergeStateStatus,baseConflicts'], { cwd: path })).stdout);
+    await until(async () => (await view()).mergeable === 'MERGEABLE', 'the split merges cleanly at first');
+    // main adds a file to old/, which git can not tell where to put.
+    g('checkout', '-q', 'main');
+    writeFileSync(join(path, 'old', 'new.js'), 'export {};\n');
+    g('add', 'old');
+    g('commit', '-qm', 'Add old/new.js');
+    g('update-ref', 'refs/remotes/origin/main', 'main');
+    await until(async () => (await view()).mergeable === 'CONFLICTING', 'the split conflicts with main');
+    const said = 'CONFLICT (directory rename split): Unclear where to rename old to; it was renamed to multiple other directories, with no destination getting a majority of the files.';
+    assert.deepEqual(await view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: [], messages: [said] } });
+    const told = await cli(['pr', 'wait', n, '--timeout', '10s'], { cwd: path });
+    assert.equal(told.code, 0, told.stderr);
+    assert.ok(told.stdout.includes(`This branch conflicts with origin/main; rebase onto origin/main. git says: ${said}\n`), told.stdout);
+    const box = await (await fetch(`${server.url}/${fullName}/pull/${n}`)).text();
+    assert.match(box, /<strong>This branch has conflicts with <span class="branch-name branch-name-sm">origin\/main<\/span><\/strong>\s*<div class="color-fg-muted">Merging it into <code>[0-9a-f]{7}<\/code>, its tip in this repository, conflicts\. /);
+    assert.ok(box.includes(`<span>${said}</span>`), 'git says why in the merge box');
+    const { turn } = await human('GET', `${api}/${n}`);
+    assert.equal(turn.reasons.find((r: any) => r.kind === 'conflicts').text, 'conflicts with origin/main');
+    // Auto-publish does not take it for clean.
+    await human('PUT', `${api}/${n}/auto-publish`, {});
+    assert.equal(server.service.autoPublishReady(server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', (await human('GET', `${api}/${n}`)).id)), false);
+    await human('PATCH', `${api}/${n}`, { state: 'closed' });
+  });
 });

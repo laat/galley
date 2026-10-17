@@ -67,6 +67,8 @@ export interface PullRow {
   author_handed_at: string | null;
   /** The head commit `pr wait` last told the author the reviewer agents are done with, so it says so once per commit. */
   agents_done_sha: string | null;
+  /** The head commit `pr wait` last told the author conflicts with its base, so it says so once per commit. */
+  conflicts_told_sha: string | null;
   /** The published pull request on GitHub, as last seen there; null until laatsux has asked. */
   github_state: GithubState | null;
   /** When it was merged or closed on GitHub, and by whom (a GitHub login). */
@@ -313,6 +315,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'claude_enabled', 'INTEGER'],
   ['review_runs', 'usage', 'TEXT'],
   ['pulls', 'iterations_stopped', 'TEXT'],
+  ['pulls', 'conflicts_told_sha', 'TEXT'],
 ];
 
 export class Db {

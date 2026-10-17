@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { afterRound, githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { Reviewer, RunUsage } from '../reviewers/reviewer.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
@@ -111,7 +111,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
     <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
-    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
+    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts'])}
   </div>
 </div>`;
   };
@@ -210,7 +210,7 @@ function repoSidebar(s: Service, all: PullRow[], yours: PullRow[]): Safe | null 
  * The reasons of a Turn as a line of the list, those of the given kinds (by default all but the
  * labels). A failed reviewer agent gets a Retry button, which asks it to review at `apiBase`.
  */
-function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'github']): Safe {
+function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github']): Safe {
   const shown = t.reasons.filter((r) => kinds.includes(r.kind));
   if (!shown.length) return raw('');
   return html`<div class="pr-row-turn">${shown.map((r) => {
@@ -224,18 +224,20 @@ function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['a
             ? icon('dot-fill')
             : cls === 'github'
               ? icon('mark-github')
-              : '';
+              : cls === 'conflicts'
+                ? icon('alert')
+                : '';
     return html`<span class="turn-reason${cls ? ` turn-reason--${cls}` : ''}">${mark}${r.text}${r.since ? html`<span class="turn-since">, ${since(r.since)}</span>` : ''}${
       cls === 'failed' && r.engine ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.engine}">Retry</button>` : ''
     }</span>`;
   })}</div>`;
 }
 
-/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, unresolved threads, or something on GitHub. */
+/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, unresolved threads, conflicts with the base, or something on GitHub. */
 function reasonClass(r: TurnReason): string {
   if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' ? '' : 'working';
   if (r.kind === 'reviewer_agent') return r.state === 'reviewing' || r.state === 'queued' ? 'running' : r.state === 'failed' ? 'failed' : '';
-  return r.kind === 'threads' ? 'threads' : r.kind === 'github' ? 'github' : '';
+  return r.kind === 'threads' || r.kind === 'conflicts' || r.kind === 'github' ? r.kind : '';
 }
 
 function capitalize(text: string): string {
@@ -548,6 +550,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   }
 
   rows.push(...githubRows(p));
+  const conflicts = s.baseConflicts(pull);
+  if (conflicts) rows.push(conflictsRow(p, conflicts, !s.currentConflicts(pull)));
   if (pull.github_state === 'closed') {
     rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and laatsux follows it again in case it was reopened.</div></div></div>`);
   }
@@ -748,6 +752,38 @@ function githubRows(p: PullPage): Safe[] {
   return rows;
 }
 
+/**
+ * Whether the head merges cleanly into its base's tip, as laatsux worked it out (Service.baseConflicts),
+ * with the files that conflict and git's words for conflicts in none, or why it could not tell.
+ * `again`: the base has moved since, and it is being worked out again.
+ */
+function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
+  const ref = html`<span class="branch-name branch-name-sm">${c.ref}</span>`;
+  const tip = html`<code>${shortSha(c.base ?? '')}</code>`;
+  const moved = again ? html` ${c.ref} has moved since; checking again.` : '';
+  if (c.clean === null) {
+    return html`<div class="merge-row">${icon('alert', { cls: 'color-fg-attention' })}<div class="flex-auto"><strong>Could not check for conflicts with ${ref}</strong>
+      <div class="color-fg-muted">laatsux tries again every few seconds. Auto-publish waits until it can tell.${moved}</div>
+      <pre class="merge-error">${c.error}</pre></div></div>`;
+  }
+  if (c.clean) {
+    return html`<div class="merge-row">${icon('check-circle-fill', { cls: 'color-fg-success' })}<div><strong>This branch has no conflicts with ${ref}</strong><div class="color-fg-muted">Checked against ${tip}, its tip in this repository.${moved}</div></div></div>`;
+  }
+  const { pull, author } = p;
+  const told = pull.conflicts_told_sha === pull.head_sha ? `${author.login} was told to rebase it.` : html`${author.login} is told to rebase it in <code>pr wait</code>.`;
+  const items = [
+    ...c.files.map((f) => {
+      const name = p.files.some((d) => d.path === f) ? html`<a href="${p.htmlBase}/files#${fileAnchor(f)}"><code>${f}</code></a>` : html`<code>${f}</code>`;
+      return html`<li>${icon('file', { cls: 'color-fg-muted' })} ${name}</li>`;
+    }),
+    ...c.messages.map((m) => html`<li>${icon('alert', { cls: 'color-fg-muted' })} <span>${m}</span></li>`),
+  ];
+  const where = c.files.length ? html` in ${plural(c.files.length, 'file')}` : '';
+  return html`<div class="merge-row">${icon('alert', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>This branch has conflicts with ${ref}</strong>
+    <div class="color-fg-muted">Merging it into ${tip}, its tip in this repository, conflicts${where}. ${told} Published as it is, GitHub can not merge it until the conflicts are resolved.${moved}</div>
+    <ul class="merge-checks">${items}</ul></div></div>`;
+}
+
 /** Auto-publish while it is on: what it is waiting for, and a way to turn it off. */
 function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const { s, pull, author } = p;
@@ -765,6 +801,14 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
       : item('waiting', r.authorWaiting ? `${author.login} has feedback it has not seen yet` : `${author.login} is working (not waiting for review)`),
   );
   if (r.openThreads) items.push(item('waiting', `${plural(r.openThreads, 'conversation')} you started ${r.openThreads === 1 ? 'is' : 'are'} unresolved`));
+  // For the base as it is now; GitHub answers for the head it has.
+  if (s.headUnpublished(pull)) {
+    const conflicts = s.currentConflicts(pull);
+    if (!conflicts) items.push(item('waiting', `Checking for conflicts with ${pull.base_ref}`));
+    else if (conflicts.clean === null) items.push(item('failed', `Could not check for conflicts with ${conflicts.ref}: ${conflicts.error}`));
+    else if (!conflicts.clean) items.push(item('failed', `Conflicts with ${conflicts.ref}: nothing is published until ${author.login} rebases it`));
+    else items.push(item('done', `No conflicts with ${conflicts.ref}`));
+  }
   // GitHub's settings may have changed since it was turned on; publishing refuses then.
   const method = auto.autoMerge;
   const merging = method && p.repo.github_slug ? s.githubRepo(p.repo.github_slug)?.merging : null;

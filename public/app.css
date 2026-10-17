@@ -491,6 +491,7 @@ kbd {
 .turn-reason--failed { color: var(--danger); font-weight: 600; }
 .turn-reason--threads { color: var(--attention); }
 .turn-reason--github { color: var(--danger); }
+.turn-reason--conflicts { color: var(--danger); }
 .turn-since { color: var(--fg-muted); font-weight: 400; white-space: nowrap; }
 .turn-pulse { animation: pulse 1.6s ease-in-out infinite; }
 .blankslate { padding: 48px 32px; text-align: center; color: var(--fg-muted); }
