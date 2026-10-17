@@ -79,7 +79,7 @@ export function api(s: Service): Hono {
   /** Settings and reviewer controls belong to the person reviewing, not to agents. */
   const human = (c: Context): Actor => {
     const a = actor(c);
-    if (a.type === 'Bot') throw new HttpError(403, 'only the reviewer can do this');
+    if (a.type === 'Bot') throw new HttpError(403, 'only the user can do this');
     return a;
   };
 
@@ -491,12 +491,13 @@ export function api(s: Service): Hono {
   app.get('/repos/:owner/:repo/pulls/:n/wait', async (c) => {
     const x = await ctx(c);
     if (x.pull.author_id === s.viewer().id) {
-      throw new HttpError(422, `${s.viewer().login} staged this pull request and is also the reviewer, so no feedback from anyone else will arrive. Agents should set GALLEY_ACTOR.`);
+      throw new HttpError(422, `${s.viewer().login} staged this pull request as the user, who reviews it, so no feedback from anyone else will arrive. Agents should set GALLEY_ACTOR.`);
     }
     const seconds = Number(c.req.query('timeout') ?? 240);
     const timeout = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 240, 3600) * 1000;
     const r = await s.wait(x, actor(c), timeout, c.req.raw.signal);
     const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
+    const left = r.status === 'merged' && pull ? await s.leftOut(pull) : null;
     return c.json({
       status: r.status,
       published_url: pull?.published_url ?? null,
@@ -513,6 +514,8 @@ export function api(s: Service): Hono {
       conflicts: r.conflicts ?? null,
       // With status pushed or push_failed: the push of the head the author waited with, published.
       push: r.push ?? null,
+      // With status merged: what the branch has that GitHub did not merge, which the author must not delete.
+      left_out: left && { head: left.head, deleted: left.deleted, commits: left.commits.map((cm) => ({ sha: cm.sha, parents: cm.parents, message: cm.message })) },
     });
   });
 

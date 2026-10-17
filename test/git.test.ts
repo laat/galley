@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { run } from '../src/server/git.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Repo, run } from '../src/server/git.ts';
 
 test('run survives a command that exits without reading its input', async () => {
   // Writing to a closed pipe raises EPIPE on stdin; it must not escape and crash the server.
@@ -58,4 +62,45 @@ test('run hears stdout line by line, also lines split inside a character', async
   const r = await run(process.execPath, ['-e', script], { onLine: (l) => lines.push(l) });
   assert.deepEqual(lines, ['aæ', 'b', 'c']);
   assert.equal(r.stdout, '', 'kept nowhere else');
+});
+
+test('notPushed: commits the remote was never given, copies a rebase made included', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'galley-git-'));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' };
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env }).trim();
+  const commit = (file: string, text: string | null, message: string) => {
+    if (text === null) git('rm', '-q', file);
+    else {
+      writeFileSync(join(dir, file), text);
+      git('add', file);
+    }
+    git('commit', '-qm', message);
+  };
+  try {
+    git('init', '-q', '-b', 'main');
+    commit('a.txt', 'a\n', 'Start');
+    git('checkout', '-qb', 'feature');
+    // Pushed: an addition and its revert.
+    commit('x.txt', 'x\n', 'Add x');
+    commit('x.txt', null, 'Revert "Add x"');
+    const pushed = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/feature', pushed);
+    // The base moves on the remote, and the branch is rebased onto it: copies of both, which count.
+    git('checkout', '-q', 'main');
+    commit('b.txt', 'b\n', 'Move the base');
+    git('update-ref', 'refs/remotes/origin/main', 'main');
+    git('checkout', '-q', 'feature');
+    git('rebase', '-q', 'main');
+    const copies = git('rev-parse', 'HEAD');
+    // The addition once more, though its patch is the pushed one's.
+    commit('x.txt', 'x\n', 'Add x again');
+    const repo = new Repo(join(dir, '.git'));
+    const notPushed = async () => (await repo.notPushed(pushed, git('rev-parse', 'HEAD'), 'origin')).map((c) => c.message);
+    assert.deepEqual(await notPushed(), ['Add x', 'Revert "Add x"', 'Add x again']);
+    // The copies on another branch of the remote: only the addition is left.
+    git('update-ref', 'refs/remotes/origin/other', copies);
+    assert.deepEqual(await notPushed(), ['Add x again']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
