@@ -275,14 +275,20 @@ CREATE TABLE IF NOT EXISTS signed_commits (
 );
 `;
 
+/** What happened to a pull request while a reviewer agent reviewed it, which cancelled the review: closed here, merged or closed on GitHub, published, or a new head pushed. */
+export type CancelReason = 'closed' | 'merged' | 'closed_on_github' | 'published' | 'pushed';
+
 export interface ReviewRunRow {
   id: number;
   pull_id: number;
   reviewer: string;
   head_sha: string;
   trigger: 'auto' | 'manual';
-  /** `interrupted`: cut off by the server stopping; it runs again (Reviewer.resume), and does not count as an attempt. */
-  status: 'running' | 'done' | 'failed' | 'interrupted';
+  /**
+   * `interrupted`: cut off by the server stopping; it runs again (Reviewer.resume), and does not
+   * count as an attempt. `cancelled`: stopped for `reason`; it does not run again.
+   */
+  status: 'running' | 'done' | 'failed' | 'interrupted' | 'cancelled';
   model: string | null;
   effort: string | null;
   error: string | null;
@@ -291,6 +297,8 @@ export interface ReviewRunRow {
   findings: number | null;
   /** What the run cost, as its tool reported it: a RunUsage as JSON; null when the tool reports nothing (Codex). */
   usage: string | null;
+  /** Why a cancelled run was cancelled. */
+  reason: CancelReason | null;
   started_at: string;
   finished_at: string | null;
 }
@@ -317,6 +325,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['review_runs', 'usage', 'TEXT'],
   ['pulls', 'iterations_stopped', 'TEXT'],
   ['pulls', 'conflicts_told_sha', 'TEXT'],
+  ['review_runs', 'reason', 'TEXT'],
 ];
 
 export class Db {

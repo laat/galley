@@ -386,6 +386,11 @@ How they run:
   `pr publish --during-review`). The server decides, so a page loaded before the review
   started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
   `"during_review": true`.
+- A running review is cancelled when the pull request is closed here, or merged or closed on
+  GitHub, when the commit it reviews is published, and when the agent pushes a newer commit (if
+  the agent is waiting, the new commit is reviewed then). A cancelled review does not count toward
+  the cap and does not run again; the sidebar and the timeline say why. "Ask Codex to review"
+  still works on a published pull request, until it is merged.
 - The tools must be installed and logged in where the server runs. They use your own login.
 
 ### Codex

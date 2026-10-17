@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
-import { now, type Actor, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
+import { now, type Actor, type CancelReason, type CommentRow, type Priority, type PullRow, type ReviewRunRow, type Side } from '../db.ts';
 import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
 import { cacheEnv, installCommand } from './install.ts';
@@ -393,7 +393,7 @@ export class Reviewer {
         ended.then(end);
       });
     }
-    for (const job of this.jobs.values()) this.interruptJob(job);
+    for (const job of this.jobs.values()) this.halt(job, 'interrupted');
     await ended;
   }
 
@@ -402,10 +402,31 @@ export class Reviewer {
     this.hurry.abort();
   }
 
-  /** Kill a running review, recorded as interrupted: it runs again when the server starts. */
-  private interruptJob(job: Job): void {
-    this.s.db.run("UPDATE review_runs SET status = 'interrupted', finished_at = ? WHERE id = ? AND status = 'running'", now(), job.runId);
-    job.abort.abort();
+  /**
+   * Cancel the review running on the pull request, for what just happened to it: closed here,
+   * merged or closed on GitHub, published (which cancels only a review of the commit published),
+   * or pushed to (only a review of an earlier commit). It does not count and does not run again;
+   * the timeline says why. If the author is waiting, a review of its head is about to start before
+   * anyone hears of the cancellation, so the author's wait goes on for it.
+   */
+  cancel(pull: PullRow, reason: CancelReason): void {
+    const job = this.jobs.get(pull.id);
+    const run = job && this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', job.runId);
+    if (!job || run?.status !== 'running') return;
+    if (reason === 'pushed' && run.head_sha === pull.head_sha) return;
+    if (reason === 'published' && run.head_sha !== pull.published_source_sha) return;
+    this.halt(job, 'cancelled', reason);
+    this.s.addEvent(pull, this.actor(), 'review_cancelled', { head: run.head_sha, reason });
+    if ((this.s.waiters.get(pull.id) ?? 0) > 0) this.consider(pull.id);
+  }
+
+  /**
+   * Kill a running review, recorded as interrupted (it runs again when the server starts) or
+   * cancelled. Recorded at once, so it is no longer at work for whatever is said next.
+   */
+  private halt(job: Job, status: 'interrupted' | 'cancelled', reason: CancelReason | null = null): void {
+    this.s.db.run("UPDATE review_runs SET status = ?, reason = ?, finished_at = ? WHERE id = ? AND status = 'running'", status, reason, now(), job.runId);
+    job.abort.abort(status);
   }
 
   settings(): ReviewerSettings {
@@ -441,10 +462,10 @@ export class Reviewer {
 
   /**
    * Whether the reviewer is done with the pull request's head: its latest review of the commit
-   * found nothing, it has used up its automatic reviews (or the reviewer stopped them), or it is
-   * off for the pull request. A failed review of the commit holds things up until someone asks
-   * for another one, unless automatic reviews are stopped: then only a running review does, or
-   * one asked for by hand that a stop interrupted, until it has run again.
+   * found nothing or was cancelled, it has used up its automatic reviews (or the reviewer stopped
+   * them), or it is off for the pull request. A failed review of the commit holds things up until
+   * someone asks for another one, unless automatic reviews are stopped: then only a running review
+   * does, or one asked for by hand that a stop interrupted, until it has run again.
    */
   headStatus(pull: PullRow): HeadStatus {
     const work = this.atWork(pull);
@@ -455,6 +476,7 @@ export class Reviewer {
     if (latest?.status === 'interrupted' && latest.trigger === 'manual' && latest.head_sha === commit) return { state: 'interrupted', done: false, commit };
     const last = this.attempt(pull);
     if (last?.status === 'failed' && !pull.iterations_stopped) return { state: 'failed', done: false, commit, failedAt: last.finished_at };
+    if (last?.status === 'cancelled') return { state: 'cancelled', done: true, commit, cancelled: last.reason };
     if (last?.status === 'done' && last.findings === 0) return { state: 'clean', done: true, commit };
     if (!this.enabled(pull)) return { state: 'off', done: true, commit };
     const automatic = { used: this.automaticReviews(pull), limit: this.limit(pull) };
@@ -565,9 +587,14 @@ export class Reviewer {
 
   /** Review automatically if the reviewer is on for this pull request, this head has not been tried, and the cap is not reached. */
   async maybeReview(pullId: number): Promise<void> {
+    if (this.stopped) return;
+    // One at work is left to finish; one being cancelled ends first.
+    const ending = this.jobs.get(pullId);
+    if (ending && !ending.abort.signal.aborted) return;
+    await ending?.done;
     if (this.stopped || this.jobs.has(pullId)) return;
     const stale = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
-    if (!stale || stale.state === 'closed' || !this.enabled(stale)) return;
+    if (!stale || stagingState(stale) === 'done' || !this.enabled(stale)) return;
     if (stale.author_id === this.actor().id) return;
     const repo = this.s.repoById(stale.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, stale.number);
@@ -575,19 +602,19 @@ export class Reviewer {
     this.launch(ctx, 'auto');
   }
 
-  /** Whether an automatic review of the pull request's head would start now. */
+  /** Whether an automatic review of the pull request's head would start now: not once it is closed, here or on GitHub, or merged. */
   private wouldReview(pull: PullRow): boolean {
-    if (this.stopped || !this.enabled(pull) || pull.state === 'closed' || pull.author_id === this.actor().id) return false;
+    if (this.stopped || !this.enabled(pull) || stagingState(pull) === 'done' || pull.author_id === this.actor().id) return false;
     // The reviewer stopped automatic reviews (Service.stopIterating); asking by hand still works.
     if (pull.iterations_stopped) return false;
-    // One attempt per head, failed or not: a failure is retried by asking from the page. An interrupted one runs again.
+    // One attempt per head, failed and cancelled ones too: a failure is retried by asking from the page. An interrupted one runs again.
     if (this.attempt(pull)) return false;
     return this.automaticReviews(pull) < this.limit(pull);
   }
 
   /**
-   * The latest review of the pull request's head, running, done or failed. One the server
-   * stopped under does not count, nor does a review whose findings were never counted (one
+   * The latest review of the pull request's head, running, done, failed or cancelled. One the
+   * server stopped under does not count, nor does a review whose findings were never counted (one
    * from an older version that could not be counted later), so the reviewer reviews the commit again.
    */
   private attempt(pull: PullRow): ReviewRunRow | undefined {
@@ -604,6 +631,8 @@ export class Reviewer {
     if (this.stopped) throw new HttpError(503, 'the server is shutting down');
     if (this.jobs.has(ctx.pull.id)) throw new HttpError(409, `${this.label} is already reviewing this pull request`);
     if (ctx.pull.state === 'closed') throw new HttpError(422, 'reopen the pull request first');
+    // Published, it can be reviewed again to check an update, until it is merged.
+    if (ctx.pull.github_state === 'merged') throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
     return this.launch(ctx, 'manual');
   }
 
@@ -625,10 +654,10 @@ export class Reviewer {
     const done = this.review(ctx, runId, settings, trigger, abort.signal)
       .then(() => this.s.emit(ctx.pull.id, `${this.engine}_finished`, actor))
       .catch((e: Error) => {
-        // Interrupted, it was recorded as such when it was stopped.
-        const stopped = abort.signal.aborted;
+        // Interrupted or cancelled, it was recorded as such when it was stopped (halt).
+        const stopped: string | null = abort.signal.aborted ? abort.signal.reason : null;
         if (!stopped) this.s.db.update('review_runs', runId, { status: 'failed', error: e.message.slice(0, 4000), finished_at: now() });
-        this.s.emit(ctx.pull.id, `${this.engine}_${stopped ? 'interrupted' : 'failed'}`, actor);
+        this.s.emit(ctx.pull.id, `${this.engine}_${stopped ?? 'failed'}`, actor);
       })
       .finally(() => this.jobs.delete(ctx.pull.id));
     this.jobs.set(ctx.pull.id, { runId, done, abort });
@@ -668,7 +697,7 @@ export class Reviewer {
       });
       signal.throwIfAborted();
       if (result.usage) this.s.db.update('review_runs', runId, { usage: JSON.stringify(result.usage) });
-      await this.post(ctx, runId, result.answer, settings, trigger);
+      await this.post(ctx, runId, result.answer, settings, trigger, signal);
     } finally {
       if (settings.runTests) await makeWritable(dir);
       await git.run(['worktree', 'remove', '--force', checkout], { allowFail: true });
@@ -694,8 +723,11 @@ export class Reviewer {
     }
   }
 
-  /** Post the findings as one review. Lines outside the diff cannot carry a comment, so they go in the body. */
-  private async post(ctx: Ctx, runId: number, result: Answer, settings: ReviewerSettings, trigger: 'auto' | 'manual'): Promise<void> {
+  /**
+   * Post the findings as one review, unless the review was stopped before it is stored. Lines
+   * outside the diff cannot carry a comment, so they go in the body.
+   */
+  private async post(ctx: Ctx, runId: number, result: Answer, settings: ReviewerSettings, trigger: 'auto' | 'manual', signal: AbortSignal): Promise<void> {
     const { pull, git } = ctx;
     const rev = this.s.db.get<{ base_sha: string }>('SELECT base_sha FROM revisions WHERE pull_id = ? AND head_sha = ? ORDER BY seq DESC', pull.id, pull.head_sha);
     const files = await git.diff(rev?.base_sha ?? pull.base_sha, pull.head_sha);
@@ -724,7 +756,7 @@ export class Reviewer {
     }
     const model = [settings.model || 'default model', settings.effort ? `${settings.effort} effort` : null].filter(Boolean).join(', ');
     parts.push(`<sub>${this.label} (${model}) reviewed \`${pull.head_sha.slice(0, 7)}\`${n ? `, automatic review ${n} of ${this.limit(pull)}` : ', on request'}.</sub>`);
-    const review = await this.s.createReview(
+    await this.s.createReview(
       ctx,
       {
         event: 'COMMENT',
@@ -733,9 +765,13 @@ export class Reviewer {
         comments: inline.map((c) => ({ path: c.path, line: c.line, side: c.side, start_line: c.start_line, start_side: c.start_line ? c.side : null, body: c.body, priority: c.priority })),
       },
       this.actor(),
+      // Cancelled or interrupted while the review was being prepared: it is not posted. Done
+      // together with storing it, so nobody is told the reviewer is still at it while its checkout is removed.
+      (reviewId) => {
+        signal.throwIfAborted();
+        this.s.db.update('review_runs', runId, { status: 'done', review_id: reviewId, findings: inline.length + loose.length, finished_at: now() });
+      },
     );
-    // Done as soon as the review is in, so nobody is told the reviewer is still at it while its checkout is removed.
-    this.s.db.update('review_runs', runId, { status: 'done', review_id: review.id, findings: inline.length + loose.length, finished_at: now() });
   }
 
   private async prompt(ctx: Ctx, trigger: 'auto' | 'manual', settings: ReviewerSettings, installed: Installed | null): Promise<string> {

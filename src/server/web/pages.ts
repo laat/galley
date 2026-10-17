@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
-import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { afterRound, githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
+import { afterRound, CANCELLED, githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { Reviewer, RunUsage } from '../reviewers/reviewer.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
@@ -475,6 +475,8 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     }
     case 'closed_on_github':
       return timelineBadge('git-pull-request-closed', html`${githubUser(data.by, true)} closed this pull request on GitHub ${relTime(data.at)}`, { cls: 'timeline-badge--closed' });
+    case 'review_cancelled':
+      return timelineBadge('circle-slash', html`${who} stopped reviewing <code>${shortSha(data.head)}</code> ${when}: ${CANCELLED[data.reason as CancelReason] ?? data.reason}`);
     case 'convert_to_draft':
       return timelineBadge('git-pull-request-draft', html`${who} marked this pull request as draft ${when}`);
     case 'ready_for_review':
@@ -633,7 +635,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         : work.head_sha === pull.head_sha
           ? `${reviewer.label} is still reviewing this commit`
           : html`${reviewer.label} is still reviewing an earlier commit, <code>${shortSha(work.head_sha)}</code>`;
-    const note = html`${work.started_at ? html`Started ${relTime(work.started_at)}. ` : ''}Its review will show up here.${publishable ? ' Publishing before it arrives takes a second click.' : ''}`;
+    const note = html`${work.started_at ? html`Started ${relTime(work.started_at)}. ` : ''}Its review will show up here.${publishable ? ' Publishing before it arrives takes a second click, and cancels it.' : ''}`;
     rows.push(html`<div class="merge-row">${icon('dot-fill', { cls: 'color-fg-attention' })}<div><strong>${what}</strong><div class="color-fg-muted">${note}</div></div></div>`);
   }
   rows.push(...iterationsRows(p));
@@ -838,6 +840,8 @@ function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: 
       return html`${login} found problems in ${sha}, and reviews the commit that addresses them`;
     case 'failed':
       return html`${login}'s review of ${sha} failed. Ask it to review again, or publish by hand.`;
+    case 'cancelled':
+      return html`${login}'s review of ${sha} was cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
     case 'clean':
       return html`${login} found nothing in ${sha}`;
     case 'capped':
@@ -915,6 +919,8 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   } else if (last?.status === 'failed') {
     status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}
       <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${last.error ?? ''}</pre></details></div>`;
+  } else if (last?.status === 'cancelled') {
+    status = html`<p class="codex-status">${icon('circle-slash', { cls: 'color-fg-muted' })} Review of <code>${shortSha(last.head_sha)}</code> cancelled ${relTime(last.finished_at)}${last.reason ? `: ${CANCELLED[last.reason]}` : ''}</p>`;
   } else if (last?.status === 'interrupted') {
     // An interrupted automatic review of the head runs when the author waits, one asked for by hand when the server starts.
     const state = reviewer.headStatus(p.pull).state;
@@ -950,7 +956,7 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
     ${runUsage(runs)}
     <p class="sidebar-text color-fg-muted">${auto} · ${toggle} · <a href="${reviewer.settingsUrl()}">Settings</a></p>
     ${scope}
-    <button type="button" class="btn btn-sm js-run-codex" data-api="${api}"${running || p.pull.state === 'closed' ? raw(' disabled') : ''}>${icon('sync')} Ask ${reviewer.label} to review</button>
+    <button type="button" class="btn btn-sm js-run-codex" data-api="${api}"${running || p.pull.state === 'closed' || p.pull.github_state === 'merged' ? raw(' disabled') : ''}>${icon('sync')} Ask ${reviewer.label} to review</button>
   </div>`;
 }
 
