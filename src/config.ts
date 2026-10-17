@@ -25,7 +25,7 @@ export function cliActor(): { login: string; type: 'User' | 'Bot' } | null {
   // An agent started from another inherits the other's variables too, so the agents that run
   // inside Claude Code are checked before it.
   // Codex sets CODEX_THREAD_ID for every command it runs, CODEX_SANDBOX only with its own sandbox on.
-  // Not "codex": that is the Codex reviewer's default name, and an author must not share it.
+  // Not "codex": that is how `--reviewer codex` asks for the Codex reviewer, and was its name.
   if (env.CODEX_THREAD_ID || env.CODEX_SANDBOX || env.CODEX_MANAGED_BY_NPM) return { login: 'codex-agent', type: 'Bot' };
   if (env.OPENCODE) return { login: 'opencode', type: 'Bot' };
   if (env.CLAUDECODE) return { login: 'claude', type: 'Bot' };

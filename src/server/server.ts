@@ -10,6 +10,7 @@ import { api } from './api.ts';
 import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
+import { ClaudeReviewer } from './reviewers/claude.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
 
@@ -84,6 +85,9 @@ export interface StartOptions {
   dataDir: string;
   ghBin?: string;
   codexBin?: string;
+  claudeBin?: string;
+  /** Stands in for sandbox-exec, which installs dependencies for the Claude reviewer (in tests). */
+  sandboxExec?: string;
   viewerLogin?: string;
   pollMs?: number;
   /** How often to see which repositories are due to be asked about their published pull requests (Service.followGithub). */
@@ -117,7 +121,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER });
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
   service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
-  service.codex.start();
+  service.claude = new ClaudeReviewer(service, opts.claudeBin ?? process.env.LAATSUX_CLAUDE ?? 'claude', opts.sandboxExec);
+  for (const reviewer of service.reviewerAgents()) reviewer.start();
   const autoPublisher = new AutoPublisher(service);
   autoPublisher.start();
   app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
@@ -160,7 +165,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
       await following;
       // Running reviews and publishes write to the database when they end, so they go first.
       await autoPublisher.stop();
-      await service.codex?.stop();
+      await Promise.all(service.reviewerAgents().map((r) => r.stop()));
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
         (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();

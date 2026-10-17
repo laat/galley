@@ -67,11 +67,11 @@ blocks any of them, start the server yourself outside it.
 ## The CLI
 
 `laatsux` takes the same subcommands and flags as `gh`, so an agent that knows gh needs no
-new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other than Codex) are accepted and ignored.
+new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other than the reviewer agents) are accepted and ignored.
 
 | Command | |
 |---|---|
-| `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` turns automatic Codex reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns them off. Without either, the settings decide |
+| `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` (or `claude`) turns that [reviewer agent](#reviewer-agents)'s automatic reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns all of them off. Without either, the settings decide |
 | `laatsux pr list` | `--state staged\|published\|done\|merged\|closed\|open\|all`, `--json`, `--jq`. As in gh, `open` (the default) is the staged and the published ones, and `closed` takes in merged |
 | `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web`. `--download-images <dir>` saves the images in them as files |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
@@ -79,7 +79,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
+| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Reviews from [reviewer agents](#reviewer-agents) come together, once all of them are done with the commit. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
@@ -201,10 +201,11 @@ both take the `merge_method` the page shows, and answer 412 when the setting has
 agents are done with the head, and `agents_done` has the commit's `sha` and what each found; the
 author confirms what it showed with `PUT …/pulls/{n}/seen`), `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
 `PUT|DELETE …/pulls/{n}/pinned` (pin to the top of the front page, for the reviewer only),
-`POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review; list its runs and this pull
-request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's own `enabled` and
+`POST|GET …/pulls/{n}/reviewers/{codex|claude}` (ask a reviewer agent to review; list its runs,
+with what each cost as `usage` when the tool says, and this pull request's settings),
+`PATCH …/pulls/{n}/reviewers/{codex|claude}` (this pull request's own `enabled` and
 `max_iterations`; null follows the settings, and fields left out stay as they are),
-`GET /api/settings`, `PUT /api/settings/codex` and `PUT /api/settings/publish` (`mergeMethod`), `POST /api/uploads` (an image's bytes; answers
+`GET /api/settings`, `PUT /api/settings/codex`, `PUT /api/settings/claude` and `PUT /api/settings/publish` (`mergeMethod`), `POST /api/uploads` (an image's bytes; answers
 with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, and `GET /events`
 (server-sent events). A pull request's `state` is `open` or `closed`, as on GitHub: closed once it
 is done (merged included), and `?state=` on the list takes laatsux's states too, as `pr list
@@ -218,7 +219,7 @@ published `github_state` (`open`, `merged` or `closed` on GitHub; null until laa
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
 `{"login": "codex", "max_iterations": 3}` for a limit of its own. A login matches a reviewer
-agent by its kind (`codex`) or its name in settings; others are ignored and listed in the
+agent by its kind (`codex`, `claude`) or its name in settings (`codex-review`); others are ignored and listed in the
 response's `ignored_reviewers`. `"automatic_reviews": false` turns all of them off (`true`
 turns all of them on), and is refused together with a reviewer agent in `reviewers`. Left
 out, the settings decide.
@@ -299,27 +300,66 @@ staged pull requests.
 | `LAATSUX_USER` | your `gh` login | The reviewer's name in the UI |
 | `LAATSUX_GH` | `gh` | gh binary used for publishing |
 | `LAATSUX_CODEX` | `codex` | Codex binary used for reviews |
+| `LAATSUX_CLAUDE` | `claude` | Claude Code binary used for reviews |
 | `LAATSUX_NO_AUTOSTART` | unset | Do not start a server when none is running |
 
-## Codex reviews
+## Reviewer agents
 
-Codex can review staged pull requests before you do. Turn it on under **Settings** (the gear
-in the header):
+Codex and Claude can review staged pull requests before you do, each on its own or both. Turn
+them on under **Settings** (the gear in the header), where each has a section:
 
 | Setting | |
 |---|---|
-| Review automatically | Codex reviews when the author agent runs `laatsux pr wait`, before you look |
-| Model | Any model from `codex debug models`, or Codex's own default |
-| Reasoning effort | The levels the chosen model supports, or Codex's default |
-| Max iterations | Automatic reviews per pull request, so Codex and the author agent do not go back and forth forever |
-| Let Codex install dependencies and run tests | On by default. laatsux installs the pull request's dependencies, and Codex may run its typecheck, tests or build; off, it only reads the code |
+| Review automatically | It reviews when the author agent runs `laatsux pr wait`, before you look |
+| Name | Who its reviews are from: `codex-review` and `claude-review` by default. An install that had Codex's former default, `codex`, moves to `codex-review` with its earlier reviews |
+| Model | Codex: any model from `codex debug models`. Claude: Fable, Opus, Sonnet or Haiku (the latest of each). Or the tool's own default |
+| Reasoning effort | The levels the chosen model supports, or the tool's default |
+| Max iterations | Automatic reviews per pull request, so the reviewer and the author agent do not go back and forth forever |
+| Let it install dependencies and run tests | On by default. laatsux installs the pull request's dependencies, and the reviewer may run its typecheck, tests or build; off, it only reads the code |
+| Skip pull requests by agents in Codex (Claude Code) | Off by default. On, it leaves pull requests by its own kind of author agent (`codex-agent`, `claude`) to the other reviewer, so authors get a second opinion |
 
-How it runs:
+How they run:
 
-- Each head commit gets one automatic review. Codex runs `codex exec --ephemeral` in a
-  temporary checkout of that commit, answers in a JSON schema, and laatsux posts the result
-  as a review from the reviewer bot, named `codex` unless you rename it in settings. Renaming
-  keeps its earlier reviews. Findings on lines outside the diff go in the review's body.
+- Each head commit gets one automatic review from each reviewer. It runs in a temporary
+  checkout of that commit, answers in a JSON schema, and laatsux posts the result as a review
+  from its bot, under the name in settings. Renaming keeps its earlier reviews. A reviewer can
+  not take an author agent's name (`claude`, `codex-agent`, `opencode`), nor a name `--reviewer`
+  would take for the other reviewer (its kind or name, in any case), and the API refuses
+  CLI callers that use a reviewer's. Findings on lines outside the diff go in the review's body.
+- With two reviewers, the author's `pr wait` returns once every reviewer that reviews the head
+  has reviewed it, so the agent answers both in one round. Feedback from anyone else comes back
+  at once, with what the reviewers posted so far, and says who is still reviewing. A reviewer at
+  work shows with a dot under Reviewers in the sidebar, and in its own section.
+- The review wakes the author's `pr wait`, so the agent addresses the comments and waits
+  again; the reviewers then review the new commit, until their caps are reached. When the
+  reviewer agents are done with the latest commit (each found nothing, used up its automatic
+  reviews or is off, or the agent answered without a new commit), `pr wait` tells the agent to
+  ask you to review it.
+- Reviewer agents only comment. They never approve or request changes, so the review decision
+  stays yours.
+- Each reviewer has its own section in a pull request's sidebar: what it is doing or did, what
+  its last run cost when the tool reports it (Claude does), "Turn off" or "Turn on" for this
+  pull request whatever the settings say, and its limit, set with the − and + after the number
+  ("Automatic reviews: 3 of 3 − +"). "reset" goes back to the setting. If the author is
+  waiting when a reviewer is turned on or its limit goes up, it starts right away.
+- Staging can decide for one pull request, whatever the setting says:
+  `laatsux pr create --reviewer codex:3` turns Codex's automatic reviews on with a limit of 3,
+  `--reviewer claude` turns Claude's on with the limit from settings (a reviewer's name works
+  too), and `--no-review` turns all of them off. The sidebar then says "Turned on for this pull
+  request (off in Settings)", or off, and its "reset" goes back to the setting. Asked for this
+  way, a reviewer reviews pull requests by its own kind of agent too.
+- "Ask Codex to review" (or Claude) in a pull request's sidebar runs a review at any time,
+  regardless of the cap. The sidebar also shows a running review and the error of a failed one.
+- While a reviewer works, `pr view` and `pr wait` say so, an approval no longer tells the agent
+  that nothing is left open, and publishing takes a second click on the Publish button (or
+  `pr publish --during-review`). The server decides, so a page loaded before the review
+  started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
+  `"during_review": true`.
+- The tools must be installed and logged in where the server runs. They use your own login.
+
+### Codex
+
+- Codex runs `codex exec --ephemeral` in the checkout.
 - When Codex may run the tests, laatsux first installs the dependencies from the lockfile
   (pnpm, npm, Yarn or Bun) in Codex's sandbox, with network but without the repository's
   install scripts, pnpmfile or yarnPath. Codex then runs in its `workspace-write` sandbox
@@ -329,58 +369,63 @@ How it runs:
   stays read-only: Codex protects the checkout's `.git` and the worktree's git directory, and
   the rest is outside what it can write. With the setting off Codex runs with
   `--sandbox read-only`.
-- The risk that remains is in the install step only: code from the repository that gets past
-  those switches has network access there, and could reach laatsux's API on localhost, which
-  takes any local caller for you. Once
-  [#52](https://github.com/laat/stage-pr/issues/52) lands, a call without the token can not
-  publish. Turn the setting off for repositories whose install you do not trust.
 - Either way the checkout counts as an untrusted project, so a `.codex/config.toml` in the
   pull request (which could start MCP servers outside the sandbox) is ignored, and Codex does
   not mark your repository as trusted.
-- The review wakes the author's `pr wait`, so the agent addresses Codex's comments and waits
-  again; Codex then reviews the new commit, until the cap is reached. When Codex is done with the
-  latest commit (it found nothing, the cap is reached, or the agent answered without a new
-  commit), `pr wait` tells the agent to ask you to review it.
-- Codex reviews only comment. They never approve or request changes, so the review decision
-  stays yours.
-- A pull request's own limit is set with the − and + after the number in its sidebar
-  ("Automatic reviews: 3 of 3 − +"); "reset" goes back to the setting. If the author is
-  waiting when the limit goes up, Codex starts right away.
-- Staging can decide for one pull request, whatever the setting says:
-  `laatsux pr create --reviewer codex:3` turns automatic reviews on with a limit of 3,
-  `--reviewer codex` turns them on with the limit from settings, and `--no-review` turns them
-  off. The sidebar then says "Turned on for this pull request (off in Settings)", or off, and
-  its "reset" goes back to the setting.
-- "Ask Codex to review" in a pull request's sidebar runs a review at any time, regardless of
-  the cap. The sidebar also shows a running review and the error of a failed one.
-- While Codex reviews, `pr view` and `pr wait` say so, an approval no longer tells the agent
-  that nothing is left open, and publishing takes a second click on the Publish button (or
-  `pr publish --during-review`). The server decides, so a page loaded before the review
-  started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
-  `"during_review": true`.
-- Codex must be installed and logged in where the server runs.
+
+### Claude
+
+- Claude runs Claude Code headless, `claude -p`, in the checkout, with the review prompt on
+  stdin and its answer in the schema (`--json-schema`). The checkout is untrusted, and Claude
+  Code would otherwise run the hooks in its `.claude/settings.json` and start the servers in its
+  `.mcp.json`. With `--restricted` and `--safe-mode`, neither the pull request's settings,
+  `.mcp.json`, CLAUDE.md, skills and agents nor your user settings and plugins are loaded, and
+  Read, Grep and Glob stay in the checkout. Its tools are Read, Grep, Glob and Bash; nobody
+  answers permission prompts, so whatever is not allowed is denied (`--permission-mode dontAsk`).
+- Every command it runs runs in Claude Code's sandbox, which it may not leave: no network, so
+  the code under review can not reach laatsux's API on localhost, and writes only to the
+  checkout, the review's temporary directory and a short temporary directory of Claude Code's
+  own, all removed after the review. Your repository stays read-only: laatsux denies writes to
+  the checkout's `.git` and to your repository's git directory, which Claude Code's sandbox
+  would otherwise open for a worktree, and to `/tmp/claude-<uid>`, where your own Claude Code
+  sessions keep their files and worktrees.
+- When Claude may run the tests, laatsux first installs the dependencies as for Codex, but in a
+  sandbox of its own (macOS's `sandbox-exec`, closed by default as Codex's is): with network,
+  writing only to the checkout and the review's temporary directory. Claude Code has no way to
+  run a command in its sandbox by itself. On other systems laatsux has no such sandbox yet, and
+  Claude is told that nothing was installed. With the setting off, Bash runs only read-only git
+  commands (and what Claude Code counts as reading, such as `ls` and `cat`), and the sandbox
+  keeps the checkout read-only too.
+- Each run's cost, tokens and turns, as Claude Code reports them, show in the sidebar and in
+  the runs' `usage` from `GET …/pulls/{n}/reviewers/claude`.
+
+The risk that remains is in the install step only: code from the repository that gets past
+those switches has network access there, and could reach laatsux's API on localhost, which
+takes any local caller for you. Once [#52](https://github.com/laat/stage-pr/issues/52) lands, a
+call without the token can not publish. Turn the setting off for repositories whose install
+you do not trust.
 
 ## Auto-publish
 
 **Publish when reviews are done**, next to Publish, approves publishing in advance, like
 GitHub's "Enable auto-merge". laatsux then publishes on its own once:
 
-- every reviewer agent is done with the head commit: Codex's latest review of it found
-  nothing, Codex has used up its automatic reviews, or it is off for the pull request
-  (in Settings, or with `pr create --no-review`);
+- every reviewer agent is done with the head commit: its latest review of it found nothing,
+  it has used up its automatic reviews, or it is off for the pull request (in Settings, or
+  with `pr create --no-review`);
 - the author agent is waiting in `laatsux pr wait`, with all feedback seen;
 - none of the conversations you started is unresolved.
 
 The box shows what it is waiting for.
 
-- It publishes what the agent pushed after you pressed the button (its answers to Codex),
+- It publishes what the agent pushed after you pressed the button (its answers to the reviewer agents),
   but only the commit it checked: a push in between waits for the next check. Its last
   check comes right before the push, after signing (which can wait for a prompt), so a
   Cancel, new feedback, or turning it on again with other options stops that attempt.
 - The options are those in the publish box when you press the button: signing and draft as
   checked, and force-pushing if it was checked and turns out to be needed.
-- Nothing is published while Codex reviews. A failed Codex review holds it up until you ask
-  Codex again, or publish by hand.
+- Nothing is published while a reviewer agent reviews. A failed review holds it up until you
+  ask that reviewer again, or publish by hand.
 - Signing, the push and each `gh` call get two minutes, since nobody is there to answer a
   prompt. A failure is shown on the pull request and turns auto-publish off.
 - With "Enable auto-merge on GitHub" checked, it enables [auto-merge](#auto-merge) after each publish,

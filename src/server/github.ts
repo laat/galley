@@ -23,7 +23,10 @@ const AUTHOR_LOGOS = new Map([
   ['opencode', LOGOS.opencode],
 ]);
 /** Reviewer agents, by the meta key holding their actor's id: their logins are settings. */
-const REVIEWER_LOGOS = new Map([['codex_actor_id', LOGOS.codex]]);
+const REVIEWER_LOGOS = new Map([
+  ['codex_actor_id', LOGOS.codex],
+  ['claude_actor_id', LOGOS.claude],
+]);
 
 function agentLogo(s: Service, a: Actor): string | undefined {
   if (a.type !== 'Bot') return undefined;
@@ -258,7 +261,7 @@ function ghTurn(t: Turn) {
   return { whose: t.whose.toUpperCase(), reasons: t.reasons.map(reasonText) };
 }
 
-/** A reason in words, with how long it has been so: "codex is reviewing 8c64534, 3 min". */
+/** A reason in words, with how long it has been so: "codex-review is reviewing 8c64534, 3 min". */
 export function reasonText(r: TurnReason): string {
   return r.since ? `${r.text}, ${duration(r.since)}` : r.text;
 }
@@ -440,13 +443,13 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('turn', () => ghTurn(s.turn(pull)));
   set('unpublishedChanges', () => s.unpublishedChanges(pull).map((c) => (c === 'description' ? 'BODY' : c.toUpperCase())));
   // Reviewers still to be heard from: one that is reviewing now, or about to start.
-  set('reviewRequests', () => {
-    const work = s.codex?.atWork(pull);
-    if (!work) return [];
-    const a = s.codex!.actor();
-    // laatsux extensions: status (as in GitHub's check runs), the commit, and when it started.
-    return [{ __typename: a.type, login: a.login, status: work.status, commit: { oid: work.head_sha }, startedAt: work.started_at }];
-  });
+  set('reviewRequests', () =>
+    s.reviewersAtWork(pull).map(({ reviewer, work }) => {
+      const a = reviewer.actor();
+      // laatsux extensions: status (as in GitHub's check runs), the commit, and when it started.
+      return { __typename: a.type, login: a.login, status: work.status, commit: { oid: work.head_sha }, startedAt: work.started_at };
+    }),
+  );
   if (want.has('reviewThreads')) {
     const threads = await s.threads(ctx, viewer, files, commits);
     out.reviewThreads = threads

@@ -43,7 +43,7 @@ feedback, and the loop repeats until the user publishes it.
    It prints the review URL. Tell the user you staged it, with the URL, and that the reviewer
    agents review it first. Do not ask for the user's review yet. `--fill`, `--base`, `--head` and
    `--draft` work as in gh. If the user said how the pull request should be reviewed, add the
-   flag from [Codex reviews](#codex-reviews). If the server is not running, the CLI starts it
+   flag from [Reviewer agents](#reviewer-agents). If the server is not running, the CLI starts it
    and says so; mention that to the user along with the URL.
 
 2. Wait for the review. This blocks until a reviewer agent or the user submits a review or
@@ -118,7 +118,7 @@ feedback, and the loop repeats until the user publishes it.
    they are done with your latest commit:
 
    ```
-   The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it: <url>
+   The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the reviewer to review it: <url>
    ```
 
    It says so once per commit, when none of them reviews it or is about to: their review was
@@ -171,18 +171,20 @@ An agent that looks after several pull requests can wait on all of them:
 of the others for the next wait. A merged or closed pull request is reported on every wait, so
 leave it out of the next one, as the output says.
 
-## Codex reviews
+## Reviewer agents
 
-Codex can review the pull request before the user does. It reviews when you run
-`laatsux pr wait`, and its review wakes you like the user's: address it the same way and wait
-again. One loop is one Codex review and your answer to it. Whether Codex reviews is the user's
-setting, unless they say otherwise when they ask you to stage:
+Codex and Claude can review the pull request before the user does. They review when you run
+`laatsux pr wait`, and their reviews wake you like the user's: address them the same way and
+wait again. One loop is one review from each reviewer agent and your answer to them. Whether
+they review is the user's setting, unless they say otherwise when they ask you to stage:
 
 | The user says | Add to `laatsux pr create` |
 |---|---|
 | "stage PR with codex 3 loops" | `--reviewer codex:3` |
 | "stage PR with codex 1 loop" | `--reviewer codex:1` |
 | "stage PR with codex" | `--reviewer codex` (as many loops as the settings allow) |
+| "stage PR with claude" | `--reviewer claude` (`claude:2` for two loops) |
+| "stage PR with codex and claude" | `--reviewer codex --reviewer claude` |
 | "stage PR no review" | `--no-review` |
 | nothing about review | nothing; the settings decide |
 
@@ -190,7 +192,7 @@ setting, unless they say otherwise when they ask you to stage:
 
 | gh | laatsux | notes |
 |---|---|---|
-| `gh pr create` | `laatsux pr create` | stages; never pushes. `--reviewer codex[:N]`, `--no-review` |
+| `gh pr create` | `laatsux pr create` | stages; never pushes. `--reviewer codex[:N]`, `--reviewer claude[:N]`, `--no-review` |
 | `gh pr view [--comments] [--json f] [--jq q]` | same | `--comments` includes review threads; `--json reviewThreads` exists; `--download-images <dir>` saves pasted images as files |
 | `gh pr list`, `diff`, `edit`, `comment`, `checkout`, `status`, `ready`, `close`, `reopen` | same | |
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |
@@ -202,6 +204,6 @@ setting, unless they say otherwise when they ask you to stage:
 `laatsux api` speaks the GitHub REST shapes for pulls, review comments, reviews and issue
 comments, with `-f`, `-F`, `-X`, `--input` and `--jq`. GraphQL is not supported.
 
-Comments you make are attributed to your agent name: `claude` in Claude Code, `codex-agent`
-in Codex (`codex` is the Codex reviewer), `opencode` in opencode. Set `LAATSUX_ACTOR` to use
-another name, for example when acting as a reviewer agent.
+Comments you make are attributed to your agent name: `claude` in Claude Code (`claude-review`
+is the Claude reviewer), `codex-agent` in Codex (`codex-review` is the Codex reviewer), `opencode` in
+opencode. Set `LAATSUX_ACTOR` to use another name, for example when acting as a reviewer agent.

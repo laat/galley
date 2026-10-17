@@ -48,6 +48,9 @@ export interface PullRow {
   codex_max_iterations: number | null;
   /** Whether Codex reviews this pull request automatically (1 or 0); null uses the setting. */
   codex_enabled: number | null;
+  /** The same two for Claude. */
+  claude_max_iterations: number | null;
+  claude_enabled: number | null;
   /** Auto-publish, when it is on: an AutoPublish as JSON (see Service.autoPublish). */
   auto_publish: string | null;
   published_title: string | null;
@@ -241,7 +244,7 @@ CREATE TABLE IF NOT EXISTS viewed (
   blob TEXT NOT NULL,
   PRIMARY KEY (pull_id, path)
 );
--- Each time a reviewer agent (Codex) reviewed, or tried to review, a pull request.
+-- Each time a reviewer agent (Codex, Claude) reviewed, or tried to review, a pull request.
 CREATE TABLE IF NOT EXISTS review_runs (
   id INTEGER PRIMARY KEY,
   pull_id INTEGER NOT NULL REFERENCES pulls(id) ON DELETE CASCADE,
@@ -278,6 +281,8 @@ export interface ReviewRunRow {
   review_id: number | null;
   /** How many findings the review had, inline and in its body; null for runs without a review (and older ones). */
   findings: number | null;
+  /** What the run cost, as its tool reported it: a RunUsage as JSON; null when the tool reports nothing (Codex). */
+  usage: string | null;
   started_at: string;
   finished_at: string | null;
 }
@@ -299,6 +304,9 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'github_status', 'TEXT'],
   ['pulls', 'pinned_at', 'TEXT'],
   ['pulls', 'agents_done_sha', 'TEXT'],
+  ['pulls', 'claude_max_iterations', 'INTEGER'],
+  ['pulls', 'claude_enabled', 'INTEGER'],
+  ['review_runs', 'usage', 'TEXT'],
 ];
 
 export class Db {

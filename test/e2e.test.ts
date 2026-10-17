@@ -12,8 +12,10 @@ import { createServer, type AddressInfo } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../src/server/server.ts';
 import { Db, now } from '../src/server/db.ts';
+import { readSettings, saveSettings } from '../src/server/settings.ts';
 import { Service } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
+import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { Repo } from '../src/server/git.ts';
 
 const BIN = join(import.meta.dirname, '..', 'bin', 'laatsux.ts');
@@ -168,7 +170,56 @@ if (gate) {
 `,
   );
   chmodSync(codex, 0o755);
-  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, viewerLogin: 'reviewer', pollMs: 50 });
+
+  // A stand-in for Claude Code: `claude -p` answering with FAKE_CLAUDE_REVIEW and what the run
+  // cost, after FAKE_CLAUDE_SLEEP milliseconds or once the file FAKE_CLAUDE_GATE exists; with
+  // FAKE_CLAUDE_FAIL, the error result Claude Code gives. Every server in this file uses it.
+  const claude = join(dir, 'claude');
+  process.env.LAATSUX_CLAUDE = claude;
+  process.env.FAKE_CLAUDE_LOG = join(dir, 'claude.log');
+  writeFileSync(
+    claude,
+    `#!${process.execPath}
+const fs = require('fs');
+const args = process.argv.slice(2);
+if (args[0] !== '-p') process.exit(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const env = process.env;
+fs.appendFileSync(env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt, cwd: process.cwd(), sawFile: fs.existsSync('claude.js'), tmpdir: env.TMPDIR, claudeTmpdir: env.CLAUDE_CODE_TMPDIR, claudeTmpdirExists: fs.existsSync(env.CLAUDE_CODE_TMPDIR), session: env.CLAUDECODE ?? env.CLAUDE_CODE_SESSION_ID ?? null }) + '\\n');
+// As a test run can (Go's module cache): a read-only directory with a file in it.
+fs.mkdirSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', { recursive: true });
+fs.writeFileSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache/file', 'x');
+fs.chmodSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', 0o555);
+fs.chmodSync(env.CLAUDE_CODE_TMPDIR + '/mod', 0o555);
+if (env.FAKE_CLAUDE_FAIL) {
+  console.log(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded', num_turns: 2, total_cost_usd: 0.004, usage: { input_tokens: 5, output_tokens: 300 } }));
+  process.exit(1);
+}
+const answer = () => console.log(JSON.stringify({
+  type: 'result', subtype: 'success', is_error: false, result: 'Done.', num_turns: 7, duration_ms: 4200, total_cost_usd: 0.0123,
+  usage: { input_tokens: 12, cache_creation_input_tokens: 15000, cache_read_input_tokens: 30000, output_tokens: 2100 },
+  modelUsage: { 'claude-haiku-5-5': { costUSD: 0.0123 } },
+  structured_output: JSON.parse(env.FAKE_CLAUDE_REVIEW),
+}));
+const gate = env.FAKE_CLAUDE_GATE;
+if (gate) {
+  const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t), answer()), 20);
+} else setTimeout(answer, Number(env.FAKE_CLAUDE_SLEEP || 0));
+`,
+  );
+  chmodSync(claude, 0o755);
+  // A stand-in for sandbox-exec, which installs dependencies for Claude: it logs and runs nothing.
+  const sandboxExec = join(dir, 'sandbox-exec');
+  process.env.FAKE_SANDBOX_LOG = join(dir, 'sandbox-exec.log');
+  writeFileSync(
+    sandboxExec,
+    `#!${process.execPath}
+require('fs').appendFileSync(process.env.FAKE_SANDBOX_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), store: process.env.npm_config_store_dir }) + '\\n');
+console.log('Packages: +1\\nDone in 1s');
+`,
+  );
+  chmodSync(sandboxExec, 0o755);
+  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, viewerLogin: 'reviewer', pollMs: 50 });
 });
 
 after(async () => {
@@ -554,7 +605,7 @@ test('Markdown links issues, mentions and commits the way GitHub does', async ()
   assert.doesNotMatch(readFileSync(join(dir, 'gh.log'), 'utf8'), /issueOrPullRequest\(number:77\)/);
 });
 
-test('codex reviews when the author waits, within the limits in settings', async () => {
+test('codex-review reviews when the author waits, within the limits in settings', async () => {
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/codex');
   writeFileSync(join(repo, 'codex.js'), 'export const answer = 41;\n');
@@ -589,7 +640,7 @@ test('codex reviews when the author waits, within the limits in settings', async
   // The agent waits; Codex reviews first and its review wakes the agent.
   const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /codex reviewed: commented/);
+  assert.match(r.stdout, /codex-review reviewed: commented/);
   assert.match(r.stdout, /Off by one\./);
   assert.match(r.stdout, /thread \d+ on codex\.js:1 \[unresolved\] \(high priority\)/);
   assert.match(r.stdout, /`math\.js:1` \(medium priority\): Not in this diff\./);
@@ -655,7 +706,7 @@ test('codex reviews when the author waits, within the limits in settings', async
   git('commit', '-qam', 'Fix the answer');
   const capped = await cli(['pr', 'wait', String(number), '--timeout', '2s']);
   assert.equal(capped.code, 0, capped.stderr);
-  assert.match(capped.stdout, new RegExp(`^The reviewer agents are done with ${git('rev-parse', '--short=7', 'HEAD')} \\(codex used 1 of 1 automatic reviews\\); ask the reviewer to review it: `));
+  assert.match(capped.stdout, new RegExp(`^The reviewer agents are done with ${git('rev-parse', '--short=7', 'HEAD')} \\(codex-review used 1 of 1 automatic reviews\\); ask the reviewer to review it: `));
 
   // Raising this pull request's limit lets Codex go on, at once when the author is waiting.
   assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /data-limit="1"[^]*js-codex-step[^]*js-codex-step/);
@@ -677,7 +728,8 @@ test('codex reviews when the author waits, within the limits in settings', async
   // tests turned off, Codex gets today's read-only sandbox and is told not to modify files.
   process.env.FAKE_CODEX_FAIL = '1';
   await human('PUT', '/api/settings/codex', { runTests: false });
-  assert.doesNotMatch(await (await fetch(`${server.url}/settings`)).text(), /name="runTests" checked/);
+  // In the Codex section, which comes before Claude's.
+  assert.doesNotMatch((await (await fetch(`${server.url}/settings`)).text()).split('id="claude"')[0], /name="runTests" checked/);
   const pull = await human('GET', base);
   await human('POST', `${base}/reviewers/codex`);
   await server.service.codex!.settle(pull.id);
@@ -721,7 +773,7 @@ test('codex reviews when the author waits, within the limits in settings', async
   const impostor = await cli(['pr', 'comment', String(number), '-b', 'hi'], { actor: 'codex-bot' });
   assert.equal(impostor.code, 1);
   assert.match(impostor.stderr, /is the name of the Codex reviewer/);
-  await human('PUT', '/api/settings/codex', { name: 'codex' });
+  await human('PUT', '/api/settings/codex', { name: 'codex-review' });
 
   // A pull request written by an agent running in Codex (the CLI calls it "codex-agent") is
   // reviewed too, and the review reaches that agent's wait.
@@ -734,12 +786,361 @@ test('codex reviews when the author waits, within the limits in settings', async
   assert.equal(byCodex.code, 0, byCodex.stderr);
   const waited = await cli(['pr', 'wait', byCodex.stdout.trim().split('/').pop()!, '--timeout', '20s'], { actor: 'codex-agent' });
   assert.equal(waited.code, 0, waited.stderr);
-  assert.match(waited.stdout, /codex reviewed: commented/);
+  assert.match(waited.stdout, /codex-review reviewed: commented/);
   // Without a lockfile nothing is installed, and Codex is told so.
   const noLockfile = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
   assert.match(noLockfile.prompt, /No dependencies are installed: the repository root has no lockfile/);
   assert.equal(installs().length, 2);
   await human('PUT', '/api/settings/codex', { enabled: false });
+});
+
+test('claude reviews when the author waits, in its own sandbox, and says what it cost', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/claude');
+  writeFileSync(join(repo, 'claude.js'), 'export const answer = 41;\n');
+  writeFileSync(join(repo, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+  git('add', 'claude.js', 'pnpm-lock.yaml');
+  git('commit', '-qm', 'Add the answer for Claude');
+  const created = await cli(['pr', 'create', '--title', 'Add the answer', '--body', 'It is 42.']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  const lastCall = () => JSON.parse(readFileSync(process.env.FAKE_CLAUDE_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({
+    summary: 'Off by one.',
+    comments: [{ path: 'claude.js', line: 1, start_line: null, side: 'RIGHT', priority: 'high', body: 'It should be 42.' }],
+  });
+
+  // Its section of the settings is next to Codex's, with the same settings.
+  await assert.rejects(human('PUT', '/api/settings/claude', { model: 'haiku', effort: 'extreme' }), /does not support effort \\?"extreme"?/);
+  await human('PUT', '/api/settings/claude', { enabled: true, model: 'haiku', effort: 'low', maxIterations: 2 });
+  const settingsPage = await (await fetch(`${server.url}/settings`)).text();
+  assert.match(settingsPage, /<div class="Subhead" id="claude">/);
+  assert.match(settingsPage, /posts its findings as a review from <strong>claude-review<\/strong>/);
+  assert.match(settingsPage, /<option value="haiku"[^>]* selected>Haiku/);
+  assert.match(settingsPage, /<input type="checkbox" name="skipOwnKind"> Skip pull requests by agents in Claude Code/);
+  assert.match(settingsPage, /<input type="checkbox" name="skipOwnKind"> Skip pull requests by agents in Codex/);
+
+  const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /claude-review reviewed: commented/);
+  assert.match(r.stdout, /Off by one\./);
+  assert.match(r.stdout, /thread \d+ on claude\.js:1 \[unresolved\] \(high priority\)/);
+
+  // Claude Code headless in a checkout of the head, with the user's own login (no --bare), the
+  // prompt on stdin and the answer in the schema, as the reviewer bot asked for.
+  const call = lastCall();
+  const flag = (name: string) => call.args[call.args.indexOf(name) + 1];
+  assert.equal(call.sawFile, true, 'claude runs in a checkout of the head commit');
+  assert.match(call.prompt, /Title: Add the answer/);
+  assert.equal(flag('--model'), 'haiku');
+  assert.equal(flag('--effort'), 'low');
+  assert.equal(flag('--output-format'), 'json');
+  assert.deepEqual(JSON.parse(flag('--json-schema')).required, ['summary', 'comments']);
+  // The checkout is untrusted: none of its settings (hooks), MCP servers, CLAUDE.md, skills or agents.
+  for (const f of ['--restricted', '--safe-mode', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) assert.ok(call.args.includes(f), f);
+  assert.equal(flag('--disallowedTools'), 'mcp__*');
+  assert.ok(!call.args.includes('--bare'));
+  // Tools for reading and for running commands, with nobody to ask: what is not allowed is denied.
+  assert.equal(flag('--tools'), 'Read,Grep,Glob,Bash');
+  assert.deepEqual(call.args.slice(call.args.indexOf('--allowedTools') + 1, call.args.indexOf('--disallowedTools')), ['Read', 'Grep', 'Glob']);
+  assert.equal(flag('--permission-mode'), 'dontAsk');
+  assert.equal(flag('--permission-prompts'), 'none');
+  // Commands run in Claude Code's sandbox, never outside it: no network, writes to the checkout,
+  // Claude Code's own temporary directory and the review's, and not to the user's repository (nor
+  // to /tmp/claude-<uid>, where the user's own Claude Code sessions keep theirs).
+  const checkout = call.cwd;
+  const tmp = join(dirname(checkout), 'tmp');
+  const uid = process.getuid!();
+  const { git_dir } = await human('GET', '/api/repos/acme/widgets');
+  assert.deepEqual(JSON.parse(flag('--settings')), {
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      excludedCommands: [],
+      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true },
+      filesystem: { allowWrite: [tmp], denyWrite: [join(checkout, '.git'), git_dir, `/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`] },
+    },
+  });
+  assert.equal(call.tmpdir, tmp);
+  // Short, or Claude Code falls back to /tmp/claude-<uid>.
+  assert.ok(Buffer.byteLength(`${call.claudeTmpdir}/claude-${uid}`) <= 30, call.claudeTmpdir);
+  assert.equal(call.claudeTmpdirExists, true);
+  assert.equal(existsSync(call.claudeTmpdir), false, 'removed after the review');
+  assert.equal(call.session, null, 'not taken for part of a Claude Code session the server was started from');
+  // The dependencies were installed first, in laatsux's own sandbox: network, and writes only to the checkout and the review's TMPDIR.
+  const install = JSON.parse(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+  assert.match(install.args[1], /^\(version 1\)\n\(deny default\)/);
+  assert.deepEqual(install.args.slice(2), [
+    `-DWRITABLE_0=${checkout}`,
+    `-DWRITABLE_1=${tmp}`,
+    `-DREAD_ONLY_0=${join(checkout, '.git')}`,
+    'pnpm',
+    'install',
+    '--frozen-lockfile',
+    '--ignore-scripts',
+    '--ignore-pnpmfile',
+    '--config.manage-package-manager-versions=false',
+  ]);
+  assert.equal(install.cwd, checkout);
+  assert.equal(install.store, join(tmp, 'pnpm-store'));
+  assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install [^`]*`[^]*\n    Packages: \+1\n/);
+
+  // The review is Claude's, and the run says what it cost, in the API and in the sidebar.
+  const { runs } = await human('GET', `${base}/reviewers/claude`);
+  assert.deepEqual(
+    runs.map((x: any) => [x.trigger, x.status, x.findings, x.model, x.effort]),
+    [['auto', 'done', 1, 'haiku', 'low']],
+  );
+  assert.deepEqual(runs[0].usage, {
+    cost_usd: 0.0123,
+    input_tokens: 12,
+    cache_creation_input_tokens: 15000,
+    cache_read_input_tokens: 30000,
+    output_tokens: 2100,
+    turns: 7,
+    duration_ms: 4200,
+    models: ['claude-haiku-5-5'],
+  });
+  assert.match((await human('GET', `${base}/reviews`)).at(-1).body, /<sub>Claude \(haiku, low effort\) reviewed `[0-9a-f]{7}`, automatic review 1 of 2\.<\/sub>$/);
+  let html = await page();
+  assert.match(html, /<h3 class="sidebar-heading">Claude<\/h3>\s*<a class="sidebar-person" href="\/settings#claude" title="Settings for claude-review">/);
+  assert.match(html, /Last run: \$0\.01 · 45k tokens in, 2k out · 7 turns/);
+  assert.match(html, /Ask Claude to review/);
+
+  // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
+  // read-only too, and nothing installed. A failed run keeps Claude Code's error.
+  const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
+  await human('PUT', '/api/settings/claude', { runTests: false });
+  process.env.FAKE_CLAUDE_FAIL = '1';
+  const pull = await human('GET', base);
+  await human('POST', `${base}/reviewers/claude`);
+  await server.service.claude!.settle(pull.id);
+  delete process.env.FAKE_CLAUDE_FAIL;
+  const readOnly = lastCall();
+  const readOnlyFlag = (name: string) => readOnly.args[readOnly.args.indexOf(name) + 1];
+  const allowed = readOnly.args.slice(readOnly.args.indexOf('--allowedTools') + 1, readOnly.args.indexOf('--disallowedTools'));
+  assert.deepEqual(allowed.slice(0, 5), ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)']);
+  assert.ok(allowed.every((t: string) => !t.startsWith('Bash') || t.startsWith('Bash(git ')));
+  const { sandbox } = JSON.parse(readOnlyFlag('--settings'));
+  assert.equal(sandbox.autoAllowBashIfSandboxed, false);
+  assert.deepEqual(sandbox.filesystem.allowWrite, []);
+  assert.ok(sandbox.filesystem.denyWrite.includes(readOnly.cwd));
+  assert.match(readOnly.prompt, /Do not modify any files\./);
+  assert.equal(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length, installs, 'nothing is installed for a read-only review');
+  await human('PUT', '/api/settings/claude', { runTests: true });
+  const failed = (await human('GET', `${base}/reviewers/claude`)).runs.at(-1);
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error, /^claude stopped \(error_during_execution\):\nAPI Error: 529 overloaded$/);
+  // What it cost before it failed counts too.
+  assert.equal(failed.usage.cost_usd, 0.004);
+  assert.equal(failed.usage.output_tokens, 300);
+  assert.match(await page(), /Last run: \$0\.0040 · 5 tokens in, 300 out · 2 turns\. 2 runs: \$0\.02/);
+
+  // One identity whose name is a setting. It can not take an author agent's name, nor another
+  // reviewer's, and nobody can post under it.
+  await assert.rejects(human('PUT', '/api/settings/claude', { name: 'claude' }), /is what the CLI calls author agents/);
+  await assert.rejects(human('PUT', '/api/settings/claude', { name: 'codex-review' }), /already used by someone else/);
+  await assert.rejects(human('PUT', '/api/settings/codex', { name: 'claude-review' }), /already used by someone else/);
+  await human('PUT', '/api/settings/claude', { name: 'claude-bot' });
+  assert.deepEqual([...new Set((await human('GET', `${base}/reviews`)).map((rv: any) => rv.user.login))], ['claude-bot']);
+  for (const actor of ['claude-bot', 'codex-review']) {
+    const impostor = await cli(['pr', 'comment', String(number), '-b', 'hi'], { actor });
+    assert.equal(impostor.code, 1);
+    assert.match(impostor.stderr, new RegExp(`"${actor}" is the name of the ${actor === 'codex-review' ? 'Codex' : 'Claude'} reviewer`));
+  }
+  await human('PUT', '/api/settings/claude', { name: 'claude-review' });
+
+  // Its own switch and limit on each pull request, in the sidebar as for Codex.
+  html = await page();
+  assert.match(html, new RegExp(`data-api="${base}/reviewers/claude" data-limit="2"`));
+  assert.match(html, new RegExp(`class="btn-link js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="false"[^>]*>Turn off</button>`));
+  assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: false }), { enabled: false, max_iterations: 2, overrides: { enabled: false, max_iterations: null } });
+  html = await page();
+  assert.match(html, /Turned off for this pull request \(on in Settings\)/);
+  assert.match(html, new RegExp(`js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="true"[^>]*>Turn on</button>`));
+  assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: null }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: null } });
+  await human('PUT', '/api/settings/claude', { enabled: false, model: '', effort: '', maxIterations: 3 });
+});
+
+test('a reviewer can not take a name that --reviewer would take for the other one', async () => {
+  // The other's kind or name, in any case: staging with it would turn on the other reviewer.
+  const codex = server.service.codex!.actor().login;
+  for (const name of ['CODEX', 'Codex', codex.toUpperCase()]) {
+    await assert.rejects(human('PUT', '/api/settings/claude', { name }), new RegExp(`${name}\\\\?" would ask for the Codex reviewer \\(--reviewer ${name}\\)`));
+  }
+  await assert.rejects(human('PUT', '/api/settings/codex', { name: 'Claude-Review' }), /Claude-Review\\?" would ask for the Claude reviewer/);
+  const { codex: codexSettings, claude: claudeSettings } = await human('GET', '/api/settings');
+  assert.deepEqual([codexSettings.name, claudeSettings.name], [codex, 'claude-review']);
+  assert.deepEqual([server.service.codex!.actor().login, server.service.claude!.actor().login], [codex, 'claude-review']);
+});
+
+test('runs of a Codex bot called "claude", from before there was a Claude reviewer, stay Codex\'s', async () => {
+  const db = new Db(':memory:');
+  try {
+    const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
+    const registered = await s.registerRepo(repo);
+    const pull = await s.createPull(registered, { title: 'Reviewed by a bot called claude', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
+    // An older version recorded the bot's login in its runs, and "claude" was a name it could have.
+    const review = await s.createReview(await s.ctx(registered.owner, registered.name, pull.number), { event: 'COMMENT', body: 'Fine.' }, db.actor('claude', 'Bot'));
+    const run = { pull_id: pull.id, head_sha: pull.head_sha, trigger: 'auto', status: 'done', review_id: review.id, findings: 0 };
+    db.insert('review_runs', { ...run, reviewer: 'claude', started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z' });
+    const start = () => {
+      s.codex = new CodexReviewer(s, join(dir, 'codex'));
+      s.claude = new ClaudeReviewer(s, join(dir, 'claude'));
+      for (const r of s.reviewerAgents()) r.start();
+    };
+    const reviewers = () => db.all<{ reviewer: string }>('SELECT reviewer FROM review_runs ORDER BY id').map((r) => r.reviewer);
+    start();
+    // Codex's run, counted as Codex's automatic review; Claude has not reviewed the head.
+    const row = db.get<any>('SELECT * FROM pulls WHERE id = ?', pull.id);
+    assert.deepEqual(reviewers(), ['codex']);
+    assert.equal(s.codex!.automaticReviews(row), 1);
+    assert.equal(s.claude!.headStatus(row).state, 'off');
+    // A run of the Claude reviewer stays Claude's, also when the server starts again.
+    db.insert('review_runs', { ...run, reviewer: 'claude', started_at: now(), finished_at: now() });
+    for (const r of s.reviewerAgents()) await r.stop();
+    start();
+    assert.deepEqual(reviewers(), ['codex', 'claude']);
+    for (const r of s.reviewerAgents()) await r.stop();
+  } finally {
+    db.sql.close();
+  }
+});
+
+test('a reviewer can leave pull requests by its own kind of agent to the other', async (t) => {
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine by Codex.', comments: [] });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine by Claude.', comments: [] });
+  const stage = async (branch: string, file: string, actor: string, flags: string[] = []) => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', branch);
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+    const r = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', ...flags], { actor });
+    assert.equal(r.code, 0, r.stderr);
+    return Number(r.stdout.trim().split('/').pop());
+  };
+  const config = async (n: number, kind: string) => {
+    const { enabled, runs } = await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/${kind}`);
+    return { enabled, runs: runs.length };
+  };
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1, skipOwnKind: true });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 1, skipOwnKind: true });
+  try {
+    await t.test('Codex reviews what an agent in Claude Code wrote, and Claude does not', async () => {
+      const n = await stage('feature/by-claude', 'by-claude.js', 'claude');
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, /codex-review reviewed: commented/);
+      assert.doesNotMatch(w.stdout, /claude-review/);
+      assert.deepEqual(await config(n, 'claude'), { enabled: false, runs: 0 });
+      assert.deepEqual(await config(n, 'codex'), { enabled: true, runs: 1 });
+      const html = await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text();
+      assert.match(html, /Settings leave pull requests by agents in Claude Code to other reviewers/);
+    });
+    await t.test('and the other way round', async () => {
+      const n = await stage('feature/by-codex-agent', 'by-codex-agent.js', 'codex-agent');
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'codex-agent' });
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, /claude-review reviewed: commented/);
+      assert.deepEqual(await config(n, 'codex'), { enabled: false, runs: 0 });
+    });
+    await t.test('asked for when staging, it reviews all the same', async () => {
+      const n = await stage('feature/by-claude-asked', 'by-claude-asked.js', 'claude', ['--reviewer', 'claude:1']);
+      assert.deepEqual((await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/claude`)).overrides, { enabled: true, max_iterations: 1 });
+      await human('PATCH', `/api/repos/acme/widgets/pulls/${n}/reviewers/codex`, { enabled: false });
+      const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
+      assert.equal(w.code, 0, w.stderr);
+      assert.match(w.stdout, /claude-review reviewed: commented/);
+    });
+  } finally {
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3, skipOwnKind: false });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3, skipOwnKind: false });
+  }
+});
+
+test('with two reviewer agents, pr wait hands the author both reviews of a commit together', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/two-reviewers');
+  writeFileSync(join(repo, 'two-reviewers.js'), 'export const two = 1;\n');
+  git('add', 'two-reviewers.js');
+  git('commit', '-qm', 'Add two-reviewers.js');
+  const created = await cli(['pr', 'create', '--title', 'Two reviewers', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  const until = async (ok: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400; i++) {
+      if (await ok()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(`timed out waiting until ${what}`);
+  };
+  const finished = async (kind: string, n: number) => (await human('GET', `${base}/reviewers/${kind}`)).runs.filter((r: any) => r.status === 'done').length === n;
+  const comment = (body: string) => ({ path: 'two-reviewers.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body });
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Codex has one thing.', comments: [comment('From Codex.')] });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Claude has another.', comments: [comment('From Claude.')] });
+  const gate = join(dir, 'claude-gate');
+  process.env.FAKE_CLAUDE_GATE = gate;
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 2 });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 2 });
+  try {
+    // Codex is done with the commit and Claude is still at it: the author keeps waiting.
+    let returned = false;
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '30s']).finally(() => (returned = true));
+    await until(() => finished('codex', 1), 'Codex has reviewed');
+    await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(returned, false, 'pr wait returned before Claude reviewed');
+    // Who is still reviewing: in pr view, its turn, and the sidebar.
+    const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewRequests,turn'])).stdout);
+    assert.deepEqual(view.reviewRequests.map((r: any) => [r.login, r.status]), [['claude-review', 'IN_PROGRESS']]);
+    assert.equal(view.turn.whose, 'REVIEWER_AGENTS');
+    const html = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+    assert.match(html, /<span class="flex-auto">claude-review<\/span> <span title="Reviewing [0-9a-f]{7}">/);
+    assert.match(html, /<span class="flex-auto">codex-review<\/span> <svg[^>]*octicon-comment/);
+    assert.match(html, /<strong>Claude is still reviewing this commit<\/strong>/);
+
+    // Then both reviews come back together.
+    writeFileSync(gate, '');
+    const both = await waiting;
+    assert.equal(both.code, 0, both.stderr);
+    assert.match(both.stdout, /codex-review reviewed: commented/);
+    assert.match(both.stdout, /claude-review reviewed: commented/);
+    assert.match(both.stdout, /From Codex\.[^]*From Claude\.|From Claude\.[^]*From Codex\./);
+    await server.service.claude!.settle(id);
+
+    // Feedback from anyone else comes back at once, with what the reviewer agents posted so far
+    // and who is still reviewing.
+    rmSync(gate);
+    writeFileSync(join(repo, 'two-reviewers.js'), 'export const two = 2;\n');
+    git('commit', '-qam', 'Answer both');
+    const second = cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    await until(() => finished('codex', 2), 'Codex has reviewed the new commit');
+    await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews the new commit');
+    await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Looks better.' });
+    const early = await second;
+    assert.equal(early.code, 0, early.stderr);
+    assert.match(early.stdout, /reviewer commented/);
+    assert.match(early.stdout, /codex-review reviewed: commented/);
+    assert.doesNotMatch(early.stdout, /claude-review reviewed/);
+    assert.match(early.stdout, /^claude-review is reviewing [0-9a-f]{7} \(started [^)]*\)\.$/m);
+    writeFileSync(gate, '');
+    const last = await cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    assert.match(last.stdout, /claude-review reviewed: commented/);
+    await server.service.claude!.settle(id);
+  } finally {
+    delete process.env.FAKE_CLAUDE_GATE;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
+  }
 });
 
 test('symlinks in a pull request lead the reviewer nowhere: not to /dev/zero, not outside the checkout', async () => {
@@ -811,10 +1212,10 @@ test('a review still running shows in pr view and pr wait, and publishing before
     const { reviewRequests } = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewRequests'])).stdout);
     assert.equal(reviewRequests.length, 1);
     const { startedAt, ...request } = reviewRequests[0];
-    assert.deepEqual(request, { __typename: 'Bot', login: 'codex', status: 'IN_PROGRESS', commit: { oid: head } });
+    assert.deepEqual(request, { __typename: 'Bot', login: 'codex-review', status: 'IN_PROGRESS', commit: { oid: head } });
     assert.ok(Date.now() - Date.parse(startedAt) < 20_000);
     const view = await cli(['pr', 'view', String(number)]);
-    assert.match(view.stdout, new RegExp(`^reviewers:\tcodex \\(reviewing ${sha}, started just now\\)$`, 'm'));
+    assert.match(view.stdout, new RegExp(`^reviewers:\tcodex-review \\(reviewing ${sha}, started just now\\)$`, 'm'));
     const box = await page();
     assert.match(box, /<strong>Codex is still reviewing this commit<\/strong>/);
     assert.match(box, /class="btn btn-primary btn-publish" data-confirm="Click again to publish anyway"/);
@@ -825,17 +1226,17 @@ test('a review still running shows in pr view and pr wait, and publishing before
     const approved = await waiting;
     assert.equal(approved.code, 0, approved.stderr);
     assert.match(approved.stdout, /reviewer reviewed: approved/);
-    assert.match(approved.stdout, new RegExp(`^codex is reviewing ${sha} \\(started just now\\)\\.$`, 'm'));
-    assert.match(approved.stdout, new RegExp(`codex is still reviewing; run \`laatsux pr wait ${number}\` to get its review\\.`));
+    assert.match(approved.stdout, new RegExp(`^codex-review is reviewing ${sha} \\(started just now\\)\\.$`, 'm'));
+    assert.match(approved.stdout, new RegExp(`codex-review is still reviewing; run \`laatsux pr wait ${number}\` to get its review\\.`));
     assert.doesNotMatch(approved.stdout, /nothing left open/);
 
     // Its review wakes the next wait, which says the approval came before it.
     writeFileSync(gate, '');
     const reviewed = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
     assert.equal(reviewed.code, 0, reviewed.stderr);
-    assert.match(reviewed.stdout, /codex reviewed: commented/);
-    assert.match(reviewed.stdout, /^The approval from reviewer came before this review from codex\.$/m);
-    assert.doesNotMatch(reviewed.stdout, /codex is (still )?reviewing/);
+    assert.match(reviewed.stdout, /codex-review reviewed: commented/);
+    assert.match(reviewed.stdout, /^The approval from reviewer came before this review from codex-review\.$/m);
+    assert.doesNotMatch(reviewed.stdout, /codex-review is (still )?reviewing/);
     await codex.settle(pull.id);
     assert.deepEqual(JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewRequests'])).stdout), { reviewRequests: [] });
     const stale = await page();
@@ -849,7 +1250,7 @@ test('a review still running shows in pr view and pr wait, and publishing before
     await human('POST', `${base}/reviewers/codex`);
     const refused = await fetch(`${server.url}${base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected }) });
     assert.equal(refused.status, 428);
-    assert.match((await refused.json()).message, /^codex is still reviewing this commit, and its review may ask for changes\.$/);
+    assert.match((await refused.json()).message, /^codex-review is still reviewing this commit, and its review may ask for changes\.$/);
     const fromTerminal = await cli(['pr', 'publish', String(number)], { actor: 'reviewer' });
     assert.equal(fromTerminal.code, 1);
     assert.match(fromTerminal.stderr, new RegExp(`Run \`laatsux pr publish ${number} --during-review\` to publish anyway\\.`));
@@ -915,7 +1316,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     }
     const capped = await cli(['pr', 'wait', String(n), '--timeout', '2s']);
     assert.equal(capped.code, 0, capped.stderr);
-    assert.match(capped.stdout, /\(codex used 2 of 2 automatic reviews\); ask the reviewer to review it/);
+    assert.match(capped.stdout, /\(codex-review used 2 of 2 automatic reviews\); ask the reviewer to review it/);
     assert.equal((await human('GET', `${api(n)}/reviewers/codex`)).runs.length, 2);
   });
 
@@ -931,7 +1332,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     writeFileSync(join(repo, 'limit.js'), 'export const n = 1;\n');
     git('commit', '-qam', 'Change limit.js');
     // Codex finds the cap reached, so the reviewer agents are done with the new commit.
-    assert.match(await handedOver(n), /codex used 1 of 1 automatic reviews/);
+    assert.match(await handedOver(n), /codex-review used 1 of 1 automatic reviews/);
     const waiting = cli(['pr', 'wait', String(n), '--timeout', '20s']);
     await authorWaiting(n);
     assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).runs.length, 1);
@@ -965,7 +1366,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     assert.deepEqual(reset, { enabled: true, max_iterations: 3, overrides: { enabled: null, max_iterations: null } });
     const second = await resumed;
     assert.equal(second.code, 0, second.stderr);
-    assert.match(second.stdout, /codex reviewed: commented/);
+    assert.match(second.stdout, /codex-review reviewed: commented/);
   });
 
   await t.test('without either flag, the setting decides', async () => {
@@ -984,7 +1385,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     await human('PUT', '/api/settings/codex', { enabled: true });
     const w = await waiting;
     assert.equal(w.code, 0, w.stderr);
-    assert.match(w.stdout, /codex reviewed: commented/);
+    assert.match(w.stdout, /codex-review reviewed: commented/);
     await human('PUT', '/api/settings/codex', { enabled: false });
   });
 
@@ -1107,14 +1508,14 @@ test('auto-publish publishes once the agents are done', async (t) => {
       // Codex's review wakes the agent, and nothing is published until the agent has answered it.
       const first = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       assert.equal(first.code, 0, first.stderr);
-      assert.match(first.stdout, /codex reviewed: commented/);
+      assert.match(first.stdout, /codex-review reviewed: commented/);
       // Findings on lines outside the diff, which only the review's body carries, count too.
       assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs.map((r: any) => r.findings), [2]);
       assert.match(first.stdout, /Auto-publish is on \(reviewer turned it on\): laatsux publishes this pull request once the reviewer agents are done/);
       assert.equal(pr.created(), false);
       const box = await pr.page();
       assert.match(box, /<strong>Auto-publish is on until the pull request is merged<\/strong>/);
-      assert.match(box, /codex has used up its automatic reviews/);
+      assert.match(box, /codex-review has used up its automatic reviews/);
       assert.match(box, /agent is working \(not waiting for review\)/);
       assert.match(box, /js-auto-publish-cancel/);
       assert.doesNotMatch(box, /Publish when reviews are done/);
@@ -1158,7 +1559,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       // The agent waits and nothing else is open, but Codex is at work.
       await new Promise((r) => setTimeout(r, 500));
       assert.equal(pr.created(), false);
-      assert.match(await pr.page(), new RegExp(`codex is reviewing <code>${git('rev-parse', '--short=7', 'HEAD')}</code>`));
+      assert.match(await pr.page(), new RegExp(`codex-review is reviewing <code>${git('rev-parse', '--short=7', 'HEAD')}</code>`));
       writeFileSync(gate, '');
       assert.match((await reviewed).stdout, /Looks right\./);
       // Codex found nothing in the head; once the agent has seen that and waits, it is published.
@@ -1178,7 +1579,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     try {
       const pr = await stage('feature/auto-no-review', 'no-review.js', '--no-review');
       await human('PUT', `${pr.base}/auto-publish`, {});
-      assert.match(await pr.page(), /codex does not review this pull request automatically/);
+      assert.match(await pr.page(), /codex-review does not review this pull request automatically/);
       // Codex reviews automatically in settings, but not this pull request: the author waiting is enough.
       const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       assert.equal(r.code, 0, r.stderr);
@@ -1203,7 +1604,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       // A failed review is no feedback for the agent, and it stops auto-publish from going ahead.
       assert.equal((await waiting).code, 124);
       assert.equal(pr.created(), false);
-      assert.match(await pr.page(), new RegExp(`codex's review of <code>${git('rev-parse', '--short=7', 'HEAD')}</code> failed\\. Ask it to review again, or publish by hand\\.`));
+      assert.match(await pr.page(), new RegExp(`codex-review's review of <code>${git('rev-parse', '--short=7', 'HEAD')}</code> failed\\. Ask it to review again, or publish by hand\\.`));
       const agent = await cli(['pr', 'publish', String(pr.number), '--disable-auto']);
       assert.equal(agent.code, 1);
       const off = await cli(['pr', 'publish', String(pr.number), '--disable-auto'], { actor: 'reviewer' });
@@ -1879,42 +2280,62 @@ test('closing the server waits for a running poll before it closes the database'
   }
 });
 
-test('the reviewer does not take over an author an older CLI called "codex"', async () => {
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-upgrade-'));
-  const db = new Db(join(data, 'laatsux.db'));
-  try {
-    const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
-    const registered = await s.registerRepo(repo);
-    const oldAuthor = db.actor('codex', 'Bot');
-    await s.createPull(registered, { title: 'From an older Codex agent', head: 'feature/by-codex', base: 'main' }, oldAuthor);
-    const reviewer = new CodexReviewer(s, join(dir, 'codex'));
-    assert.equal(reviewer.actor().login, 'codex');
-    assert.notEqual(reviewer.actor().id, oldAuthor.id);
-    assert.equal(db.actorById(oldAuthor.id).login, 'codex-agent', 'the author keeps its pull request under the new name');
-  } finally {
-    db.sql.close();
-    rmSync(data, { recursive: true, force: true });
-  }
-
-  // Both names already exist: the old author becomes the new one, pull requests included,
-  // so the agent (now "codex-agent") can still confirm feedback on them.
-  const data2 = mkdtempSync(join(tmpdir(), 'laatsux-upgrade-'));
-  const db2 = new Db(join(data2, 'laatsux.db'));
-  try {
-    const s = new Service({ db: db2, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
-    const registered = await s.registerRepo(repo);
-    const old = db2.actor('codex', 'Bot');
-    const current = db2.actor('codex-agent', 'Bot');
-    const pull = await s.createPull(registered, { title: 'From an older Codex agent', head: 'feature/by-codex', base: 'main' }, old);
-    const reviewer = new CodexReviewer(s, join(dir, 'codex'));
-    assert.equal(reviewer.actor().login, 'codex');
-    assert.equal(db2.get<{ author_id: number }>('SELECT author_id FROM pulls WHERE id = ?', pull.id)!.author_id, current.id);
-    assert.equal(db2.get('SELECT 1 FROM actors WHERE id = ?', old.id), undefined);
-  } finally {
-    db2.sql.close();
-    rmSync(data2, { recursive: true, force: true });
+test('an author an older CLI called "codex" moves to "codex-agent" when the reviewer starts', async () => {
+  // As the reviewer took the name "codex", it moved such an author; on its new default it does so when it starts.
+  for (const current of [false, true]) {
+    const data = mkdtempSync(join(tmpdir(), 'laatsux-upgrade-'));
+    const db = new Db(join(data, 'laatsux.db'));
+    try {
+      const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
+      const registered = await s.registerRepo(repo);
+      const old = db.actor('codex', 'Bot');
+      // When "codex-agent" exists too, both are the same kind of author and become one.
+      const agent = current ? db.actor('codex-agent', 'Bot') : old;
+      const pull = await s.createPull(registered, { title: 'From an older Codex agent', head: 'feature/by-codex', base: 'main' }, old);
+      const reviewer = new CodexReviewer(s, join(dir, 'codex'));
+      reviewer.start();
+      await reviewer.stop();
+      assert.equal(reviewer.actor().login, 'codex-review');
+      const author = db.get<{ author_id: number }>('SELECT author_id FROM pulls WHERE id = ?', pull.id)!.author_id;
+      assert.equal(author, agent.id);
+      assert.equal(db.actorById(author).login, 'codex-agent', 'the agent the CLI now calls codex-agent keeps its pull request');
+      assert.equal(db.get('SELECT 1 FROM actors WHERE login = ?', 'codex'), undefined);
+      // So it can wait for feedback on it.
+      const waited = await s.wait(await s.ctx(registered.owner, registered.name, pull.number), db.actorById(author), 0);
+      assert.equal(waited.status === 'timeout' || waited.status === 'agents_done', true, waited.status);
+    } finally {
+      db.sql.close();
+      rmSync(data, { recursive: true, force: true });
+    }
   }
 });
+
+test('a Codex reviewer on the former default name "codex" becomes "codex-review", one with a name of its own stays', async () => {
+  /** An install from before, its reviewer named `login` (by default "codex"), with a review; `stored` is the setting. */
+  const upgrade = async (login: string, stored?: string) => {
+    const db = new Db(':memory:');
+    if (stored) saveSettings(db, { ...readSettings(db), codex: { ...readSettings(db).codex, name: stored } });
+    const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
+    const registered = await s.registerRepo(repo);
+    const pull = await s.createPull(registered, { title: 'Reviewed before', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
+    const bot = db.actor(login, 'Bot');
+    db.setMeta('codex_actor_id', String(bot.id));
+    const review = await s.createReview(await s.ctx(registered.owner, registered.name, pull.number), { event: 'COMMENT', body: 'Fine.' }, bot);
+    db.insert('review_runs', { pull_id: pull.id, reviewer: 'codex', head_sha: pull.head_sha, trigger: 'auto', status: 'done', review_id: review.id, findings: 0, started_at: now(), finished_at: now() });
+    const reviewer = new CodexReviewer(s, join(dir, 'codex'));
+    reviewer.start();
+    await reviewer.stop();
+    const result = { login: reviewer.actor().login, reviewedBy: db.actorById(review.author_id).login, setting: readSettings(db).codex.name };
+    db.sql.close();
+    return result;
+  };
+  // On the default, set or not: the one actor is renamed, so its earlier reviews show the new name.
+  assert.deepEqual(await upgrade('codex'), { login: 'codex-review', reviewedBy: 'codex-review', setting: 'codex-review' });
+  assert.deepEqual(await upgrade('codex', 'codex'), { login: 'codex-review', reviewedBy: 'codex-review', setting: 'codex-review' });
+  // A name of its own stays.
+  assert.deepEqual(await upgrade('robo', 'robo'), { login: 'robo', reviewedBy: 'robo', setting: 'robo' });
+});
+
 test('Codex reviews from before findings were counted are counted from their review', async () => {
   const data = mkdtempSync(join(tmpdir(), 'laatsux-findings-'));
   const db = new Db(join(data, 'laatsux.db'));
@@ -1971,7 +2392,7 @@ test('Codex reviews from before findings were counted are counted from their rev
 test('a reviewer never takes the human reviewer\'s own name', async () => {
   // Known at startup: the human is set up first, and the reviewer takes another name.
   const data = mkdtempSync(join(tmpdir(), 'laatsux-viewer-'));
-  const named = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), viewerLogin: 'codex', pollMs: 60_000 });
+  const named = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), viewerLogin: 'codex-review', pollMs: 60_000 });
   try {
     assert.equal(named.service.viewer().type, 'User');
     assert.notEqual(named.service.codex!.actor().id, named.service.viewer().id);
@@ -1988,10 +2409,10 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
   try {
     const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'someone' });
     s.codex = new CodexReviewer(s, join(dir, 'codex'));
-    assert.equal(s.codex.actor().login, 'codex');
-    s.setViewerLogin('codex');
+    assert.equal(s.codex.actor().login, 'codex-review');
+    s.setViewerLogin('codex-review');
     assert.equal(s.viewer().type, 'User');
-    assert.equal(s.codex.actor().login, 'codex-reviewer');
+    assert.equal(s.codex.actor().login, 'codex-review-reviewer');
   } finally {
     db.sql.close();
     rmSync(data2, { recursive: true, force: true });
@@ -2670,7 +3091,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
   await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 2 });
   try {
     await t.test("staged and not waiting: the reviewer's, with Codex still to come", async () => {
-      assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'no review from reviewer yet', `codex reviews ${sha()} when agent waits for review`] });
+      assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'no review from reviewer yet', `codex-review reviews ${sha()} when agent waits for review`] });
     });
 
     let waiting: ReturnType<typeof cli>;
@@ -2682,24 +3103,24 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const { turn } = await human('GET', base);
       assert.equal(turn.whose, 'reviewer_agents');
       const { since, ...reviewing } = turn.reasons[0];
-      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', text: `codex is reviewing ${sha()}`, engine: 'codex' });
+      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', text: `codex-review is reviewing ${sha()}`, engine: 'codex' });
       assert.ok(Date.now() - Date.parse(since) < 20_000);
       assert.equal(turn.reasons[1].text, 'agent is waiting for review');
       // gh JSON says it in words, with how long it has been so.
       const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
-      assert.deepEqual(view, { turn: { whose: 'REVIEWER_AGENTS', reasons: [`codex is reviewing ${sha()}, 1 min`, 'agent is waiting for review, 1 min'] } });
+      assert.deepEqual(view, { turn: { whose: 'REVIEWER_AGENTS', reasons: [`codex-review is reviewing ${sha()}, 1 min`, 'agent is waiting for review, 1 min'] } });
       assert.equal(await group(), 'staged: With agents');
-      assert.match(await page('/'), new RegExp(`<span class="turn-reason turn-reason--running">.*?codex is reviewing ${sha()}<span class="turn-since">, <relative-time [^>]*data-format="duration"`));
+      assert.match(await page('/'), new RegExp(`<span class="turn-reason turn-reason--running">.*?codex-review is reviewing ${sha()}<span class="turn-since">, <relative-time [^>]*data-format="duration"`));
     });
 
     await t.test("handed Codex's findings: the author's, until it acts", async () => {
       writeFileSync(gate, '');
       const r = await waiting;
-      assert.match(r.stdout, /codex reviewed: commented/);
+      assert.match(r.stdout, /codex-review reviewed: commented/);
       delete process.env.FAKE_CODEX_GATE;
       rmSync(gate);
       await server.service.codex!.settle(id);
-      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex commented on ${sha()}`, '1 unresolved thread'] });
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex-review commented on ${sha()}`, '1 unresolved thread'] });
       assert.equal(await group(), 'staged: With agents');
     });
 
@@ -2709,7 +3130,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       assert.equal(reply.code, 0, reply.stderr);
       assert.deepEqual(await turn(), {
         whose: 'reviewer',
-        reasons: ['agent is not waiting', 'no review from reviewer yet', 'agent answered 1 thread', `codex commented on ${sha()}`, '1 unresolved thread'],
+        reasons: ['agent is not waiting', 'no review from reviewer yet', 'agent answered 1 thread', `codex-review commented on ${sha()}`, '1 unresolved thread'],
       });
       const front = await page('/');
       assert.equal(await group(), 'staged: Your turn');
@@ -2717,7 +3138,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         id,
         title: 'Take turns',
         url: `/acme/widgets/pull/${number}`,
-        reasons: `agent is not waiting, 1 min · no review from reviewer yet · agent answered 1 thread · codex commented on ${sha()} · 1 unresolved thread`,
+        reasons: `agent is not waiting, 1 min · no review from reviewer yet · agent answered 1 thread · codex-review commented on ${sha()} · 1 unresolved thread`,
       });
       // The tab's title counts the pull requests waiting for the reviewer.
       assert.match(front, new RegExp(`<title>\\(${yourTurn(front).length}\\) Staged pull requests · laatsux</title>`));
@@ -2728,7 +3149,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await human('POST', `${base}/reviews`, { event: 'REQUEST_CHANGES', body: 'Count something else.' });
       assert.deepEqual(await turn(), {
         whose: 'reviewer',
-        reasons: ['agent has not seen the latest feedback', 'agent is not waiting', `codex commented on ${sha()}`, 'changes requested', '1 unresolved thread'],
+        reasons: ['agent has not seen the latest feedback', 'agent is not waiting', `codex-review commented on ${sha()}`, 'changes requested', '1 unresolved thread'],
       });
       // While a wait hands it over, it is the author's.
       server.service.waiters.set(id, 1);
@@ -2739,7 +3160,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       }
       // Reading it is being handed it.
       await cli(['pr', 'view', String(number), '--comments']);
-      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex commented on ${sha()}`, 'changes requested', '1 unresolved thread'] });
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex-review commented on ${sha()}`, 'changes requested', '1 unresolved thread'] });
     });
 
     await t.test("a push, and a review from Codex that finds nothing: the reviewer's", async () => {
@@ -2751,12 +3172,12 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       assert.match(r.stdout, /Fine now\./);
       await server.service.codex!.settle(id);
       // Nothing more is coming from Codex for this commit, so the next wait says to ask the reviewer.
-      assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(codex found nothing in ${sha()}\\); ask the reviewer to review it: ${server.url}/acme/widgets/pull/${number}\n`));
+      assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(codex-review found nothing in ${sha()}\\); ask the reviewer to review it: ${server.url}/acme/widgets/pull/${number}\n`));
       await waitEnded();
       // The clean review asks nothing of the author, so its turn does not come back.
       assert.deepEqual(await turn(), {
         whose: 'reviewer',
-        reasons: ['agent is not waiting', "1 push since reviewer's review", 'agent answered 1 thread', `codex found nothing in ${sha()}`, 'changes requested'],
+        reasons: ['agent is not waiting', "1 push since reviewer's review", 'agent answered 1 thread', `codex-review found nothing in ${sha()}`, 'changes requested'],
       });
     });
 
@@ -2766,8 +3187,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await server.service.codex!.settle(id);
       delete process.env.FAKE_CODEX_FAIL;
       const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
-      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex's review of ${sha()} failed`, engine: 'codex' });
-      assert.match(await page('/'), new RegExp(`codex&#39;s review of ${sha()} failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
+      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex-review's review of ${sha()} failed`, engine: 'codex' });
+      assert.match(await page('/'), new RegExp(`codex-review&#39;s review of ${sha()} failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
       // Also while the author waits: nothing more is coming from Codex for this commit. The author
       // was told so when Codex found nothing in it, and is not told again.
       const waited = cli(['pr', 'wait', String(number), '--timeout', '2s']);
@@ -2799,7 +3220,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       delete process.env.FAKE_CODEX_FAIL;
       const failed = await turn();
       assert.equal(failed.whose, 'reviewer');
-      assert.ok(failed.reasons.includes(`codex's review of ${sha()} failed`));
+      assert.ok(failed.reasons.includes(`codex-review's review of ${sha()} failed`));
       assert.equal(await group(), 'published: Your turn');
       assert.match(await page('/?state=published'), new RegExp(`data-api="${base}/reviewers/codex">Retry</button>`));
       await human('POST', `${base}/reviewers/codex`);
@@ -2823,7 +3244,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await waitEnded();
       assert.deepEqual(await turn(), {
         whose: 'reviewer',
-        reasons: ['agent is not waiting', "1 push since reviewer's review", 'codex used 2 of 2 automatic reviews', 'approved', 'update not published: commits, title'],
+        reasons: ['agent is not waiting', "1 push since reviewer's review", 'codex-review used 2 of 2 automatic reviews', 'approved', 'update not published: commits, title'],
       });
       // gh's state stays as gh would show it; the update is an extension field.
       const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'state,unpublishedChanges'])).stdout);
@@ -2841,14 +3262,14 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
 
     await t.test("an update Codex reviews: the reviewer agents', not the reviewer's", async () => {
       process.env.FAKE_CODEX_GATE = gate;
-      assert.match(await handedOver(number), /codex used 2 of 2 automatic reviews/);
+      assert.match(await handedOver(number), /codex-review used 2 of 2 automatic reviews/);
       const waited = cli(['pr', 'wait', String(number), '--timeout', '20s']);
       await until(async () => (await human('GET', base)).author_waiting, 'the author waits');
       await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 3 });
       await until(() => server.service.codex!.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
       const { whose, reasons } = await turn();
       assert.equal(whose, 'reviewer_agents');
-      assert.deepEqual([reasons[0], reasons.at(-1)], [`codex is reviewing ${sha()}`, 'update not published: commits, title']);
+      assert.deepEqual([reasons[0], reasons.at(-1)], [`codex-review is reviewing ${sha()}`, 'update not published: commits, title']);
       writeFileSync(gate, '');
       assert.equal((await waited).code, 0);
       await server.service.codex!.settle(id);
