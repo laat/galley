@@ -76,17 +76,16 @@ function took(ms: number): string {
 }
 
 /**
- * What a running review is doing, for the sidebar: how long it has run and the tokens so far,
- * its latest steps with the current one last, and what it last said. The page fetches it again
- * when the run makes progress.
+ * What a running review is doing, for the sidebar under the reviewer's row (which says how long
+ * it has run): its latest steps with the current one last, what it last said, and the tokens so
+ * far. The page fetches it again when the run makes progress.
  */
 export function runProgress(b: RunBase, run: ReviewRunRow, progress: Progress): Safe {
   const used = progress.usage ? tokens(progress.usage.input_tokens + progress.usage.cache_creation_input_tokens + progress.usage.cache_read_input_tokens + progress.usage.output_tokens) : null;
   return html`<div class="run-progress js-run-progress" data-run="${run.id}" data-src="${runUrl(b, run)}/progress">
-    <p class="codex-status codex-status--running">${icon('dot-fill')} Reviewing <code>${shortSha(run.head_sha)}</code> for ${since(run.started_at)}${used ? ` · ${used} tokens` : ''}</p>
     ${progress.steps.length ? html`<ol class="run-steps">${progress.steps.map((step) => html`<li class="run-step run-step--${step.status}">${statusIcon(step.status)}<span class="run-step-label">${stepLabel(b, run, step)}</span></li>`)}</ol>` : ''}
     ${progress.said ? html`<p class="run-said" title="What it last said">${progress.said}</p>` : ''}
-    <a class="run-link" href="${runUrl(b, run)}">${icon('list-unordered')} Transcript${progress.total ? ` (${plural(progress.total, 'step')})` : ''}</a>
+    <p class="run-foot"><a class="run-link" href="${runUrl(b, run)}">${icon('list-unordered')} Transcript${progress.total ? ` (${plural(progress.total, 'step')})` : ''}</a>${used ? html`<span class="color-fg-muted"> · ${used} tokens</span>` : ''}</p>
   </div>`;
 }
 

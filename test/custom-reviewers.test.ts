@@ -302,11 +302,10 @@ test('a reviewer of the description reads no code, and approves what follows its
   assert.ok(turn.reasons.some((r) => r.text === 'house-rules approved the description' && r.reviewer === 'house-rules'));
   assert.ok(!turn.reasons.some((r) => r.kind === 'approved'));
 
-  // The page: its section in the sidebar, and its approval in the timeline as its own.
+  // The page: its row in the sidebar, and its approval in the timeline as its own.
   const html = await page(`/acme/widgets/pull/${number}`);
-  assert.match(html, /<h3 class="sidebar-heading">house-rules<\/h3>\s*<a class="sidebar-person" href="\/settings\/reviewers\/house-rules"/);
-  assert.match(html, /Claude · reviews the title, description and commit messages, and approves when it finds nothing/);
-  assert.match(html, /Approved the description at <code>[0-9a-f]{7}<\/code>/);
+  assert.match(html, /<a class="agent-name" href="\/settings\/reviewers\/house-rules" title="Claude · reviews the title, description and commit messages, and approves when it finds nothing">house-rules<\/a>/);
+  assert.match(html, /title="Approved the description at [0-9a-f]{7}"/);
   assert.match(html, /house-rules<\/a><span class="Label Label--bot">bot<\/span> approved the description/);
   assert.match(html, /Ask house-rules to review/);
   // In the merge box's last round too, its approval reads as one.
@@ -382,7 +381,7 @@ test('a review of the description is cancelled when the title or description is 
     await reviewer('house-rules').settle(row('acme', number).id);
     delete process.env.FAKE_CLAUDE_GATE;
   }
-  assert.match(await page(`/acme/widgets/pull/${number}`), /cancelled .{0,300}?: title or description edited/s);
+  assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Title or description edited<\/span>/);
 });
 
 test('a review goes by the definition it started with, also when the definition changes before it is done', async () => {
@@ -486,7 +485,7 @@ test('a review of the description is cancelled when the base moves and changes t
     await reviewer('house-rules').settle(row('acme', number).id);
     delete process.env.FAKE_CLAUDE_GATE;
   }
-  assert.match(await page(`/acme/widgets/pull/${number}`), /cancelled .{0,300}?: the base moved/s);
+  assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">The base moved<\/span>/);
   await human('PATCH', base, { state: 'closed' });
 });
 
@@ -536,7 +535,7 @@ test('a reviewer of the code with its own instructions, run by Codex, staged for
   assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 }, 'house-rules': { enabled: null, max_iterations: 5 } });
   await human('PATCH', `${base}/reviewers/house-rules`, { max_iterations: null });
   assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 } });
-  assert.match(await page(`/acme/widgets/pull/${number}`), /Turned off for this pull request/);
+  assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Off for this pull request<\/span>/);
 });
 
 test('a running review is cancelled for a change to what it reads as it started, whatever its definition says now', async () => {
@@ -627,7 +626,7 @@ test('a reviewer keeps its name, which nobody else may have, and comes back with
   const claim = await cli(acme, ['pr', 'list'], { actor: 'house-rules' });
   assert.notEqual(claim.code, 0);
   assert.match(claim.stderr, /"house-rules" is the name of a custom reviewer/);
-  assert.doesNotMatch(await page('/acme/widgets/pull/1'), /<h3 class="sidebar-heading">house-rules<\/h3>/);
+  assert.doesNotMatch(await page('/acme/widgets/pull/1'), /id="agent-house-rules"/);
   assert.match(await page('/acme/widgets/pull/1'), /house-rules<\/a><span class="Label Label--bot">bot<\/span> approved the description/, 'its reviews stay');
   const reviews = server.service.db.all<ReviewRow>("SELECT * FROM reviews WHERE pull_id = ? AND state != 'PENDING'", row('acme', 1).id);
   assert.ok(reviews.some((r) => r.state === 'APPROVED'));
@@ -648,7 +647,7 @@ test('a reviewer keeps its name, which nobody else may have, and comes back with
   assert.equal(again.length, runs + 1);
   assert.deepEqual(again.slice(-2).map((r: any) => [r.trigger, r.status]), [['manual', 'interrupted'], ['manual', 'done']]);
   assert.equal(server.service.db.all("SELECT * FROM actors WHERE login = 'house-rules'").length, 1);
-  assert.match(await page('/acme/widgets/pull/1'), /<h3 class="sidebar-heading">house-rules<\/h3>/);
+  assert.match(await page('/acme/widgets/pull/1'), /id="agent-house-rules"/);
 });
 
 test('the reviewer agents\' approvals are their own for `pr wait` too: it says which approvals came before a new review', async () => {

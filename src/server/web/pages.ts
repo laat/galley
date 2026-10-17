@@ -2,7 +2,7 @@ import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
 import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
-import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
+import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText } from '../github.ts';
@@ -27,7 +27,7 @@ import {
 } from './components.ts';
 import { browseUrl, diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
 import { withThreadContext } from './browse.ts';
-import { dollars, runProgress, runUrl, transcriptContent, usageParts } from './runs.ts';
+import { dollars, runProgress, runUrl, tokens, transcriptContent, usageParts } from './runs.ts';
 import type { Span } from '../diff.ts';
 
 // ------------------------------------------------------------------ lists
@@ -939,7 +939,7 @@ function sidebar(p: PullPage): Safe {
   const revisions = s.revisions(pull);
   return html`<aside class="layout-sidebar">
   <div class="sidebar-item"><h3 class="sidebar-heading">Reviewers</h3><ul class="sidebar-list">${reviewers}</ul></div>
-  ${s.reviewersFor(pull).map((r) => reviewerSidebar(p, r))}
+  ${reviewerAgents(p)}
   <div class="sidebar-item"><h3 class="sidebar-heading">Author</h3>
     <ul class="sidebar-list"><li class="sidebar-person">${avatar(avatarUrl(s, p.author), p.author.login, 20, p.author.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${p.author.login}</span></li></ul>
     <p class="agent-status ${waiting ? 'agent-status--waiting' : ''}">${icon('dot-fill')} ${waiting ? 'Waiting for your review' : 'Not waiting (working, or done)'}</p>
@@ -960,89 +960,158 @@ function sidebar(p: PullPage): Safe {
 </aside>`;
 }
 
-/** A reviewer agent's state on this pull request: reviewing, last result or error, its own settings, and a button to ask for a review. */
-function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
-  const settings = reviewer.settings();
-  const runs = reviewer.runs(p.pull);
-  const last = runs[runs.length - 1];
-  const running = reviewer.isRunning(p.pull.id);
-  const work = reviewer.atWork(p.pull);
-  const live = reviewer.live(p.pull);
-  const actor = reviewer.actor();
-  const transcriptLink = (run: ReviewRunRow) => (hasTranscript(p.s.db, run.id) ? html` · <a href="${runUrl(runBase(p), run)}">Transcript</a>` : '');
-  let status: Safe;
-  if (live) {
-    status = runProgress(runBase(p), live.run, live.progress);
-  } else if (work?.status === 'IN_PROGRESS') {
-    status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} Reviewing <code>${shortSha(work.head_sha)}</code>, started ${relTime(work.started_at)}</p>`;
-  } else if (work) {
-    status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} About to review <code>${shortSha(work.head_sha)}</code></p>`;
-  } else if (last?.status === 'done') {
-    const approved = p.reviews.find((r) => r.id === last.review_id)?.state === 'APPROVED';
-    const what = reviewer.reviews === 'description' ? html`the description at <code>${shortSha(last.head_sha)}</code>` : html`<code>${shortSha(last.head_sha)}</code>`;
-    status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">${approved ? 'Approved' : 'Reviewed'} ${what}</a> ${relTime(last.finished_at)}${transcriptLink(last)}</p>`;
-  } else if (last?.status === 'failed') {
-    status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}${transcriptLink(last)}
-      <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${last.error ?? ''}</pre></details></div>`;
-  } else if (last?.status === 'cancelled') {
-    status = html`<p class="codex-status">${icon('circle-slash', { cls: 'color-fg-muted' })} Review of <code>${shortSha(last.head_sha)}</code> cancelled ${relTime(last.finished_at)}${last.reason ? `: ${CANCELLED[last.reason]}` : ''}${transcriptLink(last)}</p>`;
-  } else if (last?.status === 'interrupted') {
-    // An interrupted automatic review of the head runs when the author waits, one asked for by hand when the server starts.
-    const state = reviewer.headStatus(p.pull).state;
-    const again = stagingState(p.pull) !== 'done' && runSubject(last) === reviewer.subject(p.pull) && (state === 'unreviewed' || state === 'interrupted');
-    status = html`<p class="codex-status">${icon('sync', { cls: 'color-fg-attention' })} Review of <code>${shortSha(last.head_sha)}</code> interrupted by a restart${again ? '; it will run again' : ''}${transcriptLink(last)}</p>`;
-  } else {
-    status = html`<p class="codex-status color-fg-muted">Has not reviewed this pull request.</p>`;
-  }
-  const used = reviewer.automaticReviews(p.pull);
-  const limit = reviewer.limit(p.pull);
-  const enabled = reviewer.enabled(p.pull);
-  const own = reviewer.own(p.pull);
-  const api = `${p.apiBase}/reviewers/${reviewer.key}`;
-  // The limit is changed in place: −/+ after the number, saved shortly after the last click.
-  const auto = enabled
-    ? html`Automatic reviews: ${used} of <span class="codex-limit" data-api="${api}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><strong class="js-codex-limit">${limit}</strong><button type="button" class="codex-step js-codex-step" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><button type="button" class="codex-step js-codex-step" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>${
-        own.maxIterations !== null ? html` <button type="button" class="btn-link js-codex-reset" data-api="${api}" data-field="max_iterations" title="Use the default from Settings (${settings.maxIterations})">reset</button>` : ''
-      }`
-    : html`Automatic reviews are off`;
-  // Turning automatic reviews on or off here (or when staging) holds whatever Settings say.
-  const onOff = (on: boolean) => (on ? 'on' : 'off');
-  const toggle = html`<button type="button" class="btn-link js-reviewer-switch" data-api="${api}" data-enabled="${String(!enabled)}" title="Automatic reviews of this pull request ${onOff(!enabled)}, whatever Settings say">Turn ${onOff(!enabled)}</button>`;
-  const bySettings = reviewer.bySettings(p.pull);
-  const scope =
-    own.enabled === null
-      ? reviewer.skips(p.pull)
-        ? html`<p class="sidebar-text codex-scope">${icon('skip')} Settings leave pull requests by agents in ${reviewer.authorTool} to other reviewers</p>`
-        : ''
-      : html`<p class="sidebar-text codex-scope">${icon('pin')} Turned ${onOff(enabled)} for this pull request${bySettings !== enabled ? ` (${onOff(bySettings)} in Settings)` : ''} <button type="button" class="btn-link js-codex-reset" data-api="${api}" data-field="enabled" title="Follow Settings (automatic reviews ${onOff(bySettings)})">reset</button></p>`;
-  const about = reviewer.describe();
-  return html`<div class="sidebar-item"><h3 class="sidebar-heading">${reviewer.label}</h3>
-    <a class="sidebar-person" href="${reviewer.settingsUrl()}" title="Settings for ${actor.login}">${avatar(avatarUrl(p.s, actor), actor.login, 20, 'avatar-bot')} <span class="flex-auto">${actor.login}</span></a>
-    ${about ? html`<p class="sidebar-text color-fg-muted">${about}</p>` : ''}
-    ${status}
-    ${runUsage(runs)}
-    <p class="sidebar-text color-fg-muted">${auto} · ${toggle} · <a href="${reviewer.settingsUrl()}">Settings</a></p>
-    ${scope}
-    <button type="button" class="btn btn-sm js-run-codex" data-api="${api}"${running || p.pull.state === 'closed' || p.pull.github_state === 'merged' ? raw(' disabled') : ''}>${icon('sync')} Ask ${reviewer.label} to review</button>
+/** The reviewer agents that review this pull request, built-in and custom alike, a row each. */
+function reviewerAgents(p: PullPage): Safe {
+  const reviewers = p.s.reviewersFor(p.pull);
+  if (!reviewers.length) return raw('');
+  return html`<div class="sidebar-item"><h3 class="sidebar-heading">Reviewer agents</h3>
+    <ul class="sidebar-list agent-list">${reviewers.map((r) => reviewerRow(p, r))}</ul>
   </div>`;
 }
 
-/** What the latest run cost, and all of them together, when the tool reports it (Claude the cost, Codex the tokens). */
-function runUsage(runs: ReviewRunRow[]): Safe {
+/** What a reviewer agent's row says it is doing, or did last. */
+interface AgentState {
+  mark: Safe;
+  text: Safe;
+  /** The words the row leaves out: the commit, and why. */
+  title: string;
+  /** The run's transcript, or the review it posted. */
+  href: string | null;
+  running?: boolean;
+}
+
+/**
+ * A reviewer agent on this pull request, in one row: what it is doing or did last, and a menu of
+ * its controls. A second line says what the row has no room for, only when there is something:
+ * why its last review stopped, its automatic reviews, and what its runs cost. While it reviews,
+ * its progress shows under the row.
+ */
+function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
+  const { s, pull } = p;
+  const runs = reviewer.runs(pull);
+  const last = runs.at(-1);
+  const work = reviewer.atWork(pull);
+  const live = reviewer.live(pull);
+  const actor = reviewer.actor();
+  const enabled = reviewer.enabled(pull);
+  const own = reviewer.own(pull);
+  // Why it reviews nothing on its own, when it does not; in full where there is room.
+  const skips = reviewer.settings().enabled && reviewer.skips(pull);
+  const off = enabled ? null : own.enabled === false ? 'Off for this pull request' : skips ? `Off for agents in ${reviewer.authorTool}` : 'Off in Settings';
+  const skipping = `Settings leave pull requests by agents in ${reviewer.authorTool} to other reviewers`;
+  const meta: Safe[] = [];
+  const transcript = (run: ReviewRunRow) => (hasTranscript(s.db, run.id) ? runUrl(runBase(p), run) : null);
+  let state: AgentState;
+  if (live || work?.status === 'IN_PROGRESS') {
+    const started = live?.run.started_at ?? work!.started_at;
+    state = { mark: icon('dot-fill'), text: html`Reviewing · ${since(started)}`, title: `Reviewing ${shortSha(live?.run.head_sha ?? work!.head_sha)}`, href: live ? runUrl(runBase(p), live.run) : null, running: true };
+  } else if (work) {
+    state = { mark: icon('dot-fill'), text: html`Queued`, title: `About to review ${shortSha(work.head_sha)}`, href: null, running: true };
+  } else if (last?.status === 'done') {
+    const approved = p.reviews.find((r) => r.id === last.review_id)?.state === 'APPROVED';
+    const what = reviewer.reviews === 'description' ? `the description at ${shortSha(last.head_sha)}` : shortSha(last.head_sha);
+    const verb = approved ? 'Approved' : 'Reviewed';
+    state = { mark: icon('check', { cls: 'color-fg-success', label: verb }), text: html`<code>${shortSha(last.head_sha)}</code> · ${since(last.finished_at)}`, title: `${verb} ${what}`, href: transcript(last) ?? `#pullrequestreview-${last.review_id}` };
+  } else if (last?.status === 'failed') {
+    // The run's page has the whole error, also without a transcript.
+    state = { mark: icon('x-circle-fill', { cls: 'color-fg-danger' }), text: html`Failed · ${since(last.finished_at)}`, title: `Review of ${shortSha(last.head_sha)} failed`, href: runUrl(runBase(p), last) };
+    const error = (last.error ?? '').trim();
+    if (error) meta.push(html`<span class="agent-error" title="${error}">${error.replace(/\s+/g, ' ')}</span>`);
+  } else if (last?.status === 'cancelled') {
+    state = { mark: icon('circle-slash', { cls: 'color-fg-muted' }), text: html`Cancelled · ${since(last.finished_at)}`, title: `Review of ${shortSha(last.head_sha)} cancelled`, href: transcript(last) };
+    if (last.reason) meta.push(html`${capitalize(CANCELLED[last.reason])}`);
+  } else if (last?.status === 'interrupted') {
+    // An interrupted automatic review of the head runs when the author waits, one asked for by hand when the server starts.
+    const headState = reviewer.headStatus(pull).state;
+    const again = stagingState(pull) !== 'done' && runSubject(last) === reviewer.subject(pull) && (headState === 'unreviewed' || headState === 'interrupted');
+    state = { mark: icon('sync', { cls: 'color-fg-attention' }), text: html`Interrupted · ${since(last.finished_at)}`, title: `Review of ${shortSha(last.head_sha)} interrupted by a restart`, href: transcript(last) };
+    if (again) meta.push(html`Runs again`);
+  } else {
+    state = { mark: raw(''), text: html`${off ? 'Off' : 'Not yet'}`, title: (off && own.enabled !== false && skips ? skipping : off) ?? 'Has not reviewed this pull request', href: null };
+  }
+  const used = reviewer.automaticReviews(pull);
+  const limit = reviewer.limit(pull);
+  if (enabled) meta.push(html`Automatic: ${pull.iterations_stopped ? 'stopped at ' : ''}${used} of ${limit}`);
+  else if (runs.length || work) meta.push(html`${off}`);
+  const usage = runUsage(runs);
+  if (usage) meta.push(usage);
+  const status = html`${state.mark}<span>${state.text}</span>`;
+  const cls = `agent-state${state.running ? ' agent-state--running' : ''}`;
+  return html`<li class="agent" id="agent-${reviewer.key}">
+    <div class="agent-row">
+      ${avatar(avatarUrl(s, actor), actor.login, 20, 'avatar-bot')}
+      <a class="agent-name" href="${reviewer.settingsUrl()}" title="${reviewer.describe() ?? `Settings for ${actor.login}`}">${actor.login}</a>
+      ${state.href ? html`<a class="${cls}" href="${state.href}" title="${state.title}">${status}</a>` : html`<span class="${cls}" title="${state.title}">${status}</span>`}
+      ${reviewerMenu(p, reviewer, { enabled, limit, own, why: skips ? skipping : null })}
+    </div>
+    ${meta.length ? html`<p class="agent-meta">${meta.map((m, i) => html`${i ? ' · ' : ''}<span class="agent-chunk">${m}</span>`)}</p>` : ''}
+    ${live ? runProgress(runBase(p), live.run, live.progress) : ''}
+  </li>`;
+}
+
+/**
+ * A reviewer agent's controls on this pull request, in its row's menu: ask it to review, its limit
+ * on automatic reviews, turning them on or off here, and its settings. The menu stays open while
+ * the page refreshes after a change, so the limit can be stepped again; asking for a review closes it.
+ */
+function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; limit: number; own: OwnSettings; why: string | null }): Safe {
+  const { pull } = p;
+  const { enabled, limit, own } = o;
+  const api = `${p.apiBase}/reviewers/${reviewer.key}`;
+  // ":" is in no reviewer's name, so these ids are apart from every row's (agent-<name>) and from each other's.
+  const id = (part: string) => `agent-${reviewer.key}:${part}`;
+  const onOff = (on: boolean) => (on ? 'on' : 'off');
+  const bySettings = reviewer.bySettings(pull);
+  const busy = reviewer.isRunning(pull.id) || pull.state === 'closed' || pull.github_state === 'merged';
+  // The limit is changed in place, and saved shortly after the last click.
+  const limitRow = enabled
+    ? html`<div class="agent-menu-limit">
+        <span class="flex-auto">Limit</span>
+        <span class="codex-limit" data-api="${api}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><button type="button" class="codex-step js-codex-step" id="${id('fewer')}" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><strong class="js-codex-limit">${limit}</strong><button type="button" class="codex-step js-codex-step" id="${id('more')}" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>
+        ${own.maxIterations !== null ? html`<button type="button" class="btn-link js-codex-reset" id="${id('limit-reset')}" data-api="${api}" data-field="max_iterations" title="Use the default from Settings (${reviewer.settings().maxIterations})">reset</button>` : ''}
+      </div>`
+    : '';
+  // Turning automatic reviews on or off here (or when staging) holds whatever Settings say.
+  const why = o.why ?? `${capitalize(onOff(bySettings))} in Settings`;
+  const about = reviewer.describe();
+  return html`<details class="dropdown details-reset agent-menu js-keep-open" id="${id('menu')}">
+    <summary class="btn-octicon" id="${id('options')}" aria-label="Options for ${reviewer.actor().login}" title="Options">${icon('gear')}</summary>
+    <div class="dropdown-menu dropdown-menu-sw">
+      <button type="button" class="dropdown-item js-run-codex" id="${id('ask')}" data-api="${api}"${busy ? raw(' disabled') : ''}>Ask ${reviewer.label} to review</button>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-header">Automatic reviews of this pull request</div>
+      ${limitRow}
+      <button type="button" class="dropdown-item js-reviewer-switch" id="${id('switch')}" data-api="${api}" data-enabled="${String(!enabled)}">Turn ${onOff(!enabled)}<span class="dropdown-item-desc">${own.enabled === null ? why : `Turned ${onOff(enabled)} here`}</span></button>
+      ${own.enabled !== null ? html`<button type="button" class="dropdown-item js-codex-reset" id="${id('follow')}" data-api="${api}" data-field="enabled">Follow Settings<span class="dropdown-item-desc">${why}</span></button>` : ''}
+      <div class="dropdown-divider"></div>
+      <a class="dropdown-item" id="${id('settings')}" href="${reviewer.settingsUrl()}">Settings${about ? html`<span class="dropdown-item-desc">${about}</span>` : ''}</a>
+    </div>
+  </details>`;
+}
+
+/** What its runs on this pull request cost together, in a word: dollars when the tool says (Claude), tokens otherwise (Codex). The latest run in detail on hover. */
+function runUsage(runs: ReviewRunRow[]): Safe | null {
   const reported = runs.flatMap((r) => (r.usage ? [JSON.parse(r.usage) as RunUsage] : []));
-  if (!reported.length) return raw('');
-  const last = runs.at(-1)?.usage ? reported.at(-1)! : null;
+  if (!reported.length) return null;
   const costs = reported.flatMap((u) => (u.cost_usd === null ? [] : [u.cost_usd]));
-  const total = costs.length > 1 ? `${costs.length} runs: ${dollars(costs.reduce((sum, n) => sum + n, 0))}` : null;
-  if (!last) return total ? html`<p class="sidebar-text color-fg-muted">${total}</p>` : raw('');
-  const parts = usageParts(last);
+  const used = reported.reduce((sum, u) => sum + u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens + u.output_tokens, 0);
+  const total = costs.length ? dollars(costs.reduce((sum, n) => sum + n, 0)) : `${tokens(used)} tokens`;
+  // The runs the total adds up: those that reported a cost, when it is in dollars.
+  const counted = costs.length || reported.length;
+  const last = runs.at(-1)?.usage ? reported.at(-1)! : null;
   const detail = [
-    last.models.length ? `Model: ${last.models.join(', ')}` : null,
-    `Input: ${last.input_tokens} tokens, ${last.cache_creation_input_tokens} written to the cache, ${last.cache_read_input_tokens} read from it`,
-    `Output: ${last.output_tokens} tokens`,
-    last.duration_ms !== null ? `Took ${Math.round(last.duration_ms / 1000)} s` : null,
+    counted > 1 ? `${counted} runs: ${total}` : null,
+    ...(last
+      ? [
+          `Last run: ${usageParts(last).join(' · ')}`,
+          last.models.length ? `Model: ${last.models.join(', ')}` : null,
+          `Input: ${last.input_tokens} tokens, ${last.cache_creation_input_tokens} written to the cache, ${last.cache_read_input_tokens} read from it`,
+          `Output: ${last.output_tokens} tokens`,
+          last.duration_ms !== null ? `Took ${Math.round(last.duration_ms / 1000)} s` : null,
+        ]
+      : []),
   ];
-  return html`<p class="sidebar-text color-fg-muted" title="${detail.filter(Boolean).join('\n')}">Last run: ${parts.join(' · ')}${total ? `. ${total}` : ''}</p>`;
+  return html`<span title="${detail.filter(Boolean).join('\n')}">${total}</span>`;
 }
 
 const runBase = (p: PullPage) => ({ htmlBase: p.htmlBase, repoBase: `/${p.repo.owner}/${p.repo.name}` });
