@@ -79,7 +79,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
+| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
@@ -197,7 +197,9 @@ GET             /api/repos/{owner}/{repo}/contents/{path}?ref=       (ref defaul
 Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n}/publish`,
 `PUT|DELETE …/pulls/{n}/auto-publish` (body `{sign, draft, force, auto_merge}`; with `auto_merge`,
 both take the `merge_method` the page shows, and answer 412 when the setting has changed since),
-`GET …/pulls/{n}/wait?timeout=s`, `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
+`GET …/pulls/{n}/wait?timeout=s` (its `status` is `agents_done`, not `feedback`, when the reviewer
+agents are done with the head, and `agents_done` has the commit's `sha` and what each found; the
+author confirms what it showed with `PUT …/pulls/{n}/seen`), `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
 `PUT|DELETE …/pulls/{n}/pinned` (pin to the top of the front page, for the reviewer only),
 `POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review; list its runs and this pull
 request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's own `enabled` and
@@ -336,7 +338,9 @@ How it runs:
   pull request (which could start MCP servers outside the sandbox) is ignored, and Codex does
   not mark your repository as trusted.
 - The review wakes the author's `pr wait`, so the agent addresses Codex's comments and waits
-  again; Codex then reviews the new commit, until the cap is reached.
+  again; Codex then reviews the new commit, until the cap is reached. When Codex is done with the
+  latest commit (it found nothing, the cap is reached, or the agent answered without a new
+  commit), `pr wait` tells the agent to ask you to review it.
 - Codex reviews only comment. They never approve or request changes, so the review decision
   stays yours.
 - A pull request's own limit is set with the − and + after the number in its sidebar

@@ -589,6 +589,13 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`laatsux pr view ${t.number} --comments --download-images <dir>\`.`));
     for (const line of approvedBefore(pr, new Set(r.reviews))) out(line);
+    // Said once per commit: the agents' part of the review is over, so the reviewer's starts.
+    if (r.status === 'agents_done') {
+      const { sha, reviewers } = r.agents_done;
+      const done = reviewers.length ? `The reviewer agents are done with ${sha.slice(0, 7)} (${reviewers.join('; ')})` : `No reviewer agent reviews ${sha.slice(0, 7)}`;
+      out(`${done}; ask the reviewer to review it: ${url}`);
+      out(c.gray(`Then run \`laatsux pr wait ${all}\` to wait for the review.`));
+    }
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
@@ -596,7 +603,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
-        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at });
+        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at, agents_done: r.agents_done?.sha });
         break;
       } catch (e) {
         if (!transient(e) || attempt === 10) {
@@ -637,6 +644,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       if (rest) out(c.gray(rest.trim()));
       return 0;
     }
+    if (r.status === 'agents_done') return 0;
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
     for (const line of atWork) out(`${line}.`);
     if (pr.reviewDecision === 'APPROVED' && !unresolved.length && atWork.length) {
@@ -712,7 +720,8 @@ COMMANDS (same flags as gh)
   status:      Show the pull request for the current branch
 
 LAATSUX COMMANDS
-  wait:        Block until the reviewer responds, then print the feedback. After publishing,
+  wait:        Block until the reviewer responds, then print the feedback, or until the
+               reviewer agents are done with the latest commit. After publishing,
                until it is merged or closed on GitHub. Several numbers: whichever is first
   publish:     Push the branch and open the pull request on GitHub (--auto: once the
                reviews are done; --auto-merge: and turn on auto-merge there)
