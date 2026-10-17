@@ -1,20 +1,26 @@
 import type { Db } from './db.ts';
 import { HttpError } from './service.ts';
 
-export interface CodexSettings {
+/** The tools that review pull requests, as review_runs.reviewer and the settings name them. */
+export type ReviewerKind = 'codex';
+
+/** A reviewer agent's settings. */
+export interface ReviewerSettings {
   /** Review staged pull requests automatically when the author waits for review. */
   enabled: boolean;
   /** The reviewer's name on its reviews. Renaming keeps its earlier reviews: it is one reviewer. */
   name: string;
-  /** A model slug from `codex debug models`; empty uses Codex's own default. */
+  /** A model slug from the tool's catalog (`codex debug models`); empty uses the tool's own default. */
   model: string;
   /** A reasoning effort the model supports; empty uses the model's default. */
   effort: string;
   /** Automatic reviews per pull request. Asking from the pull request page is not capped. */
   maxIterations: number;
-  /** Install the dependencies before Codex reviews, and let it run the tests in its checkout without network; off keeps it read-only. */
+  /** Install the dependencies before the reviewer starts, and let it run the tests in its checkout without network; off keeps it read-only. */
   runTests: boolean;
 }
+
+export type CodexSettings = ReviewerSettings;
 
 export const MERGE_METHODS = ['squash', 'merge', 'rebase'] as const;
 export type MergeMethod = (typeof MERGE_METHODS)[number];
