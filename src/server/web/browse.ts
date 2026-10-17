@@ -8,7 +8,7 @@ import { HttpError, type Service } from '../service.ts';
 import { rendersByDefault } from '../../rendered.ts';
 import { avatar, esc, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
-import { copyButton, layout, repoCrumbs, repoNav } from './components.ts';
+import { copyButton, layout, repoCrumbs } from './components.ts';
 import { browseUrl, lineRows, type DiffMode } from './diffview.ts';
 
 /** A commit and a path in it, from a URL. */
@@ -68,7 +68,6 @@ async function page(s: Service, loc: Location, kind: 'tree' | 'blob', title: str
   return layout(s, {
     title: `${title} at ${shortSha(loc.sha)} · ${loc.repo.owner}/${loc.repo.name}`,
     crumbs: repoCrumbs(loc.repo),
-    subnav: repoNav(s, loc.repo, null),
     body: html`<div class="container container-full browse-layout">${await browseTree(loc, kind)}<div class="browse">${body}</div></div>`,
   });
 }

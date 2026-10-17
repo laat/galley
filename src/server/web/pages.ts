@@ -20,7 +20,6 @@ import {
   priorityCounts,
   pullIcon,
   repoCrumbs,
-  repoNav,
   reviewThread,
   stateBadge,
   timelineBadge,
@@ -144,7 +143,12 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <h3>${other ? nothing[state].replace(/^No /, 'No other ') : nothing[state]}${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
   <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
 </div>`;
-  const list = html`<div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>
+  // The repository on GitHub, by its name there, which can differ from the one here.
+  const slug = opts.repo?.github_slug;
+  const onGithub = slug
+    ? html`<a class="page-title-github" href="https://github.com/${slug}" target="_blank" rel="noopener" title="${slug} on GitHub">${icon('mark-github')} ${slug} ${icon('link-external')}</a>`
+    : '';
+  const list = html`<div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>${onGithub}
     <button type="button" class="btn btn-sm notify-toggle js-notify" hidden title="A desktop notification when a pull request becomes your turn, while a page like this is open">${icon('bell')} <span class="js-notify-label">Notify me</span></button></div>
   ${
     pinned.length
@@ -172,7 +176,6 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   return layout(s, {
     title: yours.length ? `(${yours.length}) ${title}` : title,
     crumbs: opts.repo ? repoCrumbs(opts.repo) : undefined,
-    subnav: opts.repo ? repoNav(s, opts.repo) : undefined,
     body,
     live: 'all',
   });
@@ -343,7 +346,6 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files' | nul
   return layout(s, {
     title: `${pull.title} by ${author.login} · Pull Request #${pull.number} · ${repo.owner}/${repo.name}`,
     crumbs: repoCrumbs(repo, html`<span class="crumb-sep">/</span><a href="${p.htmlBase}">#${pull.number}</a>`),
-    subnav: repoNav(s, repo),
     body: html`${header}${content}`,
     live: pull.id,
     data: { 'api-base': p.apiBase, 'pull-id': pull.id, ...extraData },

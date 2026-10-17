@@ -6,7 +6,7 @@ import { avatar, html, icon, plural, raw, relTime, shortSha, type Safe } from '.
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 import type { ReferenceContext } from './references.ts';
 
-export function layout(s: Service, opts: { title: string; crumbs?: Safe; subnav?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
+export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
   const data = Object.entries(opts.data ?? {}).map(([k, v]) => html` data-${raw(k)}="${v}"`);
   // The server was asked to stop, and lets the running reviews post first. In #main, which live updates refresh.
@@ -32,32 +32,12 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; subnav?
     ${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}
   </div>
 </div>
-${opts.subnav ?? ''}
 </header>
 <div id="main"${data}>${running ? html`<div class="container container-xl"><div class="flash flash-warn">${icon('alert')}<span>Waiting for ${plural(running, 'running review')} to finish before the server stops.</span></div></div>` : ''}${opts.body}</div>
 <div id="toast" class="toast" hidden></div>
 </body>
 </html>`.value
   );
-}
-
-/**
- * The repository's tabs, as on GitHub: the staged pull requests here, and the pull requests
- * and issues of the repository on GitHub (opening there).
- */
-export function repoNav(s: Service, repo: RepoRow, selected: 'staged' | null = 'staged'): Safe {
-  const staged = s.pulls(repo, { state: 'staged' }).length;
-  const slug = repo.github_slug;
-  const counts = slug ? s.githubRepo(slug) : null;
-  const counter = (n: number | undefined) => (n === undefined ? '' : html` <span class="Counter">${n}</span>`);
-  const external = (path: string, iconName: string, label: string, title: string, n?: number) =>
-    html`<a class="UnderlineNav-item" href="https://github.com/${slug}${path}" target="_blank" rel="noopener" title="${title}">${icon(iconName)} ${label}${counter(n)} ${icon('link-external', { cls: 'UnderlineNav-external' })}</a>`;
-  return html`<nav class="UnderlineNav" aria-label="Repository">
-  ${slug ? external('', 'mark-github', 'Repo', `${slug} on GitHub`) : ''}
-  <a class="UnderlineNav-item${selected === 'staged' ? ' selected' : ''}" href="/${repo.owner}/${repo.name}">${icon('git-pull-request')} <span data-content="Staged">Staged</span>${counter(staged)}</a>
-  ${slug ? external('/pulls', 'git-pull-request', 'Pull requests', 'Pull requests on GitHub', counts?.pulls) : ''}
-  ${slug ? external('/issues', 'issue-opened', 'Issues', 'Issues on GitHub', counts?.issues) : ''}
-</nav>`;
 }
 
 export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {
