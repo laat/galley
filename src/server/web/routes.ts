@@ -25,6 +25,15 @@ export function web(s: Service): Hono {
     return c.redirect(['', moved.owner, moved.name, ...url.pathname.split('/').slice(3)].join('/') + url.search, 301);
   });
 
+  // /pull/s4, as people write a staged pull request (s#4), is /pull/4.
+  app.use('/:owner/:repo/pull/*', async (c, next) => {
+    const url = new URL(c.req.url);
+    const parts = url.pathname.split('/');
+    if (!/^[sS]\d+$/.test(parts[4] ?? '')) return next();
+    parts[4] = parts[4].slice(1);
+    return c.redirect(parts.join('/') + url.search, 301);
+  });
+
   const load = (c: Context) => {
     const n = Number(c.req.param('n'));
     if (!Number.isInteger(n)) throw new HttpError(404, 'Not found');

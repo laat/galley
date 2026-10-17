@@ -2,16 +2,16 @@ import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
 import { isAbsolute, posix, relative } from 'node:path';
 import { ApiError, CliError, git, repoPath, type Client, type RepoRef } from './client.ts';
-import { isTTY, out } from './output.ts';
+import { isTTY, out, stagedRef, stagedNumber } from './output.ts';
 import { rendersByDefault } from '../rendered.ts';
 
 export const BROWSE_USAGE = `Print the web UI's URL for a staged pull request, a file or a directory, and open it
 in the browser when run at a terminal. Like \`gh browse\`, but the URLs name a commit, so
-they keep pointing at the code you mean. A number is a pull request; when no pull request
-has it, a commit SHA.
+they keep pointing at the code you mean. s4 (or 4, as in gh) is staged pull request s#4;
+when there is none, 4 can be a commit SHA.
 
 USAGE
-  galley browse [<number> | <path>[:<line>[-<line>]] | <commit-SHA>] [flags]
+  galley browse [<s-number> | <path>[:<line>[-<line>]] | <commit-SHA>] [flags]
 
 FLAGS
   -c, --commit <sha>   The commit to show the path at (default: HEAD, also for a bare --commit)
@@ -23,7 +23,7 @@ FLAGS
 
 EXAMPLES
   galley browse                          # this repository's staged pull requests
-  galley browse 12                       # pull request 12
+  galley browse s12                      # staged pull request s#12
   galley browse src/x.ts:12 --commit 3f2a1c9
   galley browse src/x.ts:12-20           # lines 12 to 20, at HEAD
   galley browse src/                     # a directory
@@ -139,9 +139,10 @@ async function target(client: Client, cwd: string, arg: string | undefined, v: {
   };
   const rev = v.commit ?? v.branch;
   if (arg === undefined) return rev ? `${base}/tree/${await commitOf(rev)}` : base;
-  // A number is a pull request when there is one, as in gh. Otherwise all digits can be a commit SHA.
-  const number = arg.match(/^#?(\d+)$/)?.[1];
-  if (number) {
+  // A number (s4, or 4 as in gh) is a pull request when there is one. Otherwise all digits can be a
+  // commit SHA. A file named so is ./s4.
+  const number = stagedNumber(arg);
+  if (number !== null) {
     try {
       await client.get(`${repoPath(repo)}/gh/pulls/${number}?fields=number`);
       return `${base}/pull/${number}`;
@@ -155,7 +156,7 @@ async function target(client: Client, cwd: string, arg: string | undefined, v: {
     const sha = await look.commit(arg);
     if (sha) return `${base}/tree/${sha}`;
   }
-  if (number) throw new CliError(`no pull request ${shaLike ? `or commit "${arg}"` : `#${number}`} in ${repo.owner}/${repo.name}`);
+  if (number !== null) throw new CliError(`no pull request ${shaLike ? `or commit "${arg}"` : stagedRef(number)} in ${repo.owner}/${repo.name}`);
 
   const m = arg.match(/^(.*?)(?::(\d+)(?:-(\d+))?)?$/)!;
   const sha = await commitOf(rev ?? 'HEAD');

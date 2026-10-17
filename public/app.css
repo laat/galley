@@ -493,6 +493,7 @@ kbd {
 .gh-header-title-row { display: flex; align-items: flex-start; gap: 16px; }
 .gh-header-title { flex: 1; margin: 0 0 8px; font-size: 32px; font-weight: 400; line-height: 1.25; word-wrap: break-word; }
 .gh-header-number { color: var(--fg-muted); font-weight: 300; }
+.gh-header-number a { color: inherit; }
 .gh-header-actions { display: flex; gap: 8px; padding-top: 6px; }
 .btn-pin { color: var(--fg-muted); }
 .btn-pin.selected { color: var(--accent); }

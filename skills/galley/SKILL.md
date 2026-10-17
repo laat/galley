@@ -14,6 +14,9 @@ description: Stage a pull request in galley, the user's local review server, ins
 - Do not run `galley pr publish`, `pr close` or `pr review` unless the user asks.
 - Commit on a branch, with at least one commit over the base.
 - Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
+- Write a staged pull request as `s#4` ("s" for staged), to the user and in galley's comments,
+  where it links to it. `#4` is GitHub's issue or pull request 4. In commands, `s4` (`galley pr
+  wait s4`).
 - Never write a staged pull request's number where GitHub shows it: commit messages, the title
   and description, issues and GitHub comments. Refer to a published pull request by its GitHub
   number, an unpublished one by what it does or its branch.
@@ -124,13 +127,13 @@ Unless the user wants to keep something:
 2. Remove your worktree and delete the branch with `git branch -D` (`-d` refuses: GitHub
    merged copies of your commits).
 3. Rebase your other pull requests that touch the merged files onto `origin/<base>` (compare
-   `galley pr diff <n> --name-only`).
+   `galley pr diff s4 --name-only`).
 
 Leave the `refs/galley/...` and `refs/laatsux/...` refs alone.
 
 ## Several pull requests
 
-`galley pr wait 5 6` returns when one has news and says which. Leave a merged or closed one out
+`galley pr wait s5 s6` returns when one has news and says which. Leave a merged or closed one out
 of the next wait.
 
 ## Reviewer agents

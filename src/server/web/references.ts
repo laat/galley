@@ -1,5 +1,5 @@
 // Links for what GitHub autolinks in Markdown: `#N`, `GH-N` and `owner/repo#N` (issues and pull
-// requests on GitHub), `@user`, and commit SHAs. Marked lexes the Markdown exactly as it would without
+// requests on GitHub), `@user`, and commit SHAs; and `s#N`, a staged pull request here (#22). Marked lexes the Markdown exactly as it would without
 // them; afterwards `linkReferences` cuts its plain text tokens where a reference sits. So references
 // never change how the rest is read: emphasis, autolinked URLs and email addresses, and everything else
 // stay marked's. Text inside links, code and inline HTML anchors, <code>, <pre>, <kbd> and <script> is
@@ -7,6 +7,7 @@
 import { Marked, type MarkedExtension, type Token, type Tokens } from 'marked';
 import type { Commit } from '../git.ts';
 import type { Ctx, IssueSummary, Service } from '../service.ts';
+import type { PullRow } from '../db.ts';
 import { esc, shortSha } from './html.ts';
 import { tooMuchEmphasis } from './emphasis.ts';
 
@@ -21,18 +22,20 @@ export interface ReferenceContext {
   commits: Map<string, { href: string; title?: string }>;
   /** The title and state of an issue or pull request on GitHub, if known. Must not wait for GitHub. */
   issue?: (slug: string, number: number) => IssueSummary | null;
+  /** Where staged pull request s#N of the repository is, and its title; null when there is none. */
+  staged?: (number: number) => { href: string; title: string } | null;
 }
 
 interface ReferenceToken extends Tokens.Generic {
   type: 'reference';
-  kind: 'issue' | 'mention' | 'commit';
+  kind: 'issue' | 'staged' | 'mention' | 'commit';
   text: string;
   href: string;
   title?: string;
 }
 
 /** Classes on the links, for the sanitizer's allowlist and the stylesheet (GitHub's names). */
-const CLASS = { issue: 'issue-link', mention: 'user-mention', commit: 'commit-link' } as const;
+const CLASS = { issue: 'issue-link', staged: 'issue-link', mention: 'user-mention', commit: 'commit-link' } as const;
 export const REFERENCE_CLASSES = Object.values(CLASS);
 
 // A reference starts at a word boundary, and not inside a path, an entity or a color ("a/b#1", "x@y",
@@ -45,8 +48,8 @@ const END = String.raw`(?![\w@]|[.\-/]\w)`;
 const LOGIN = String.raw`[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}`;
 const REPO = String.raw`[\w.-]{1,100}`;
 const NUMBER = String.raw`[1-9]\d{0,9}`;
-/** Each reference in a text, as far as the text tells: owner/repo#N, #N or GH-N, @login, or a hex word. */
-const REFERENCE = new RegExp(String.raw`(?<!${BEFORE})(?:(${LOGIN})/(${REPO})#(${NUMBER})|(?:#|GH-)(${NUMBER})|@(${LOGIN})|([0-9a-f]{7,40}))${END}`, 'g');
+/** Each reference in a text, as far as the text tells: owner/repo#N, #N or GH-N, @login, a hex word, or s#N. */
+const REFERENCE = new RegExp(String.raw`(?<!${BEFORE})(?:(${LOGIN})/(${REPO})#(${NUMBER})|(?:#|GH-)(${NUMBER})|@(${LOGIN})|([0-9a-f]{7,40})|s#(${NUMBER}))${END}`, 'g');
 /** Hex words in raw Markdown that may be SHAs: a superset of what `linkReferences` looks up. */
 const HEX_WORDS = /(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])/g;
 // Inline HTML whose text gets no links: anchors (also written "<a\nhref=…>" or closed with "</a >"),
@@ -57,7 +60,12 @@ const RAW_START = /^<(?:pre|code|kbd|script)[\s>]/i;
 const RAW_END = /^<\/(?:pre|code|kbd|script)[\s>]/i;
 
 function reference(m: RegExpExecArray, refs: ReferenceContext): ReferenceToken | undefined {
-  const [raw, owner, repo, repoNumber, number, login, hex] = m;
+  const [raw, owner, repo, repoNumber, number, login, hex, staged] = m;
+  // A staged pull request here. GitHub's #4 never starts inside s#4: a word character before "#" rules it out (BEFORE).
+  if (staged) {
+    const found = refs.staged?.(Number(staged));
+    return found ? { type: 'reference', raw, kind: 'staged', text: raw, ...found } : undefined;
+  }
   if (refs.slug && owner) return issue(raw, `${owner}/${repo}`, Number(repoNumber), refs);
   if (refs.slug && number) return issue(raw, refs.slug, Number(number), refs);
   if (refs.slug && login) return { type: 'reference', raw, kind: 'mention', text: raw, href: `https://github.com/${login}` };
@@ -174,6 +182,11 @@ export async function pullReferences(s: Service, ctx: Ctx, commits: Commit[], te
     slug: ctx.repo.github_slug,
     commits: await commitLinks(ctx, commits, texts),
     issue: (slug, number) => s.githubIssue(slug, number, opts),
+    staged: (number) => {
+      const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE repo_id = ? AND number = ?', ctx.repo.id, number);
+      const state = pull?.github_state === 'merged' ? 'merged' : pull?.github_state === 'closed' ? 'closed on GitHub' : pull?.state;
+      return pull ? { href: `/${ctx.repo.owner}/${ctx.repo.name}/pull/${number}`, title: `${pull.title} · ${state}` } : null;
+    },
   };
 }
 

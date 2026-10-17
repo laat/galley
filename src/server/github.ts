@@ -331,6 +331,7 @@ export const GH_FIELDS = [
   'mergedBy',
   'number',
   'publishedUrl',
+  'ref',
   'reviewDecision',
   'reviewRequests',
   'reviewThreads',
@@ -361,6 +362,8 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   };
   set('id', () => `PR_${pull.id}`);
   set('number', () => pull.number);
+  // galley extension: the number as people and agents write it, and as the CLI takes it (#22): s4 for s#4.
+  set('ref', () => `s${pull.number}`);
   set('title', () => pull.title);
   set('body', () => pull.body);
   set('state', () => ghState(pull));
