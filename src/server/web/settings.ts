@@ -96,6 +96,14 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
         <label><input type="checkbox" name="runTests"${settings.runTests ? raw(' checked') : ''}> Let ${label} install dependencies and run tests</label>
         <p class="note">Before ${label} starts, laatsux installs the pull request's dependencies from its lockfile, without running its install scripts. ${label} may then run the typecheck, tests or build to check what it finds, without network access. It writes only to its checkout and a temporary directory, both removed after the review; your repository stays read-only. Off, ${label} only reads the code.</p>
       </div>
+      ${
+        reviewer.localServers
+          ? html`<div class="form-checkbox">
+        <label><input type="checkbox" name="localhost"${settings.localhost ? raw(' checked') : ''}> Let ${label}'s tests listen on localhost</label>
+        <p class="note">With the setting above, ${label} may also run tests that start servers: its commands may listen and connect on localhost, but not connect to other hosts. Code in the pull request can then reach anything on localhost, including laatsux, which takes any local caller for you and could publish as you (<a href="https://github.com/laat/stage-pr/issues/52" target="_blank" rel="noopener">#52</a>). Claude Code also lets them listen on every interface, so while they run, other machines on your network can reach a server that does not listen on 127.0.0.1 only. Turn it on only for repositories whose code you trust.</p>
+      </div>`
+          : ''
+      }
       <div class="form-checkbox">
         <label><input type="checkbox" name="skipOwnKind"${settings.skipOwnKind ? raw(' checked') : ''}> Skip pull requests by agents in ${reviewer.authorTool}</label>
         <p class="note">Leave pull requests that an agent running in ${reviewer.authorTool} wrote to the other reviewers, so authors get a second opinion. Staging with <code>--reviewer ${kind}</code>, or turning it on in a pull request's sidebar, still has ${label} review it.</p>

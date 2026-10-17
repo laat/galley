@@ -55,6 +55,12 @@ export class CodexEngine implements Engine {
   readonly label = 'Codex';
   readonly authorLogin = CODEX_AUTHOR;
   readonly authorTool = 'Codex';
+  /**
+   * Codex's sandbox lets commands serve on localhost only through its network proxy
+   * (features.network_proxy.allow_local_binding), which needs network_access and then also lets
+   * them reach port 53 on any host: a way out.
+   */
+  readonly localServers = false;
   readonly catalogSource = 'codex debug models';
   private bin: string;
   private catalog: { at: number; models: ModelInfo[] } | null = null;

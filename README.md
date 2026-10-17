@@ -335,6 +335,7 @@ them on under **Settings** (the gear in the header), where each has a section:
 | Reasoning effort | The levels the chosen model supports, or the tool's default |
 | Max iterations | Automatic reviews per pull request, so the reviewer and the author agent do not go back and forth forever |
 | Let it install dependencies and run tests | On by default. laatsux installs the pull request's dependencies, and the reviewer may run its typecheck, tests or build; off, it only reads the code |
+| Let Claude's tests listen on localhost | Claude only, off by default. With the setting above, its tests may start servers. Code in the pull request can then reach anything on localhost, laatsux's API too, which takes any local caller for you ([#52](https://github.com/laat/stage-pr/issues/52)) |
 | Skip pull requests by agents in Codex (Claude Code) | Off by default. On, it leaves pull requests by its own kind of author agent (`codex-agent`, `claude`) to the other reviewer, so authors get a second opinion |
 
 How they run:
@@ -412,6 +413,9 @@ How they run:
   stays read-only: Codex protects the checkout's `.git` and the worktree's git directory, and
   the rest is outside what it can write. With the setting off Codex runs with
   `--sandbox read-only`.
+- Codex can not run tests that start a server (`listen EPERM`). Codex 0.162 allows listening on
+  localhost only through its network proxy (`allow_local_binding`), which also lets commands
+  reach port 53 on any host, so laatsux leaves it off.
 - Either way the checkout counts as an untrusted project, so a `.codex/config.toml` in the
   pull request (which could start MCP servers outside the sandbox) is ignored, and Codex does
   not mark your repository as trusted.
@@ -426,12 +430,13 @@ How they run:
   Read, Grep and Glob stay in the checkout. Its tools are Read, Grep, Glob and Bash; nobody
   answers permission prompts, so whatever is not allowed is denied (`--permission-mode dontAsk`).
 - Every command it runs runs in Claude Code's sandbox, which it may not leave: no network, so
-  the code under review can not reach laatsux's API on localhost, and writes only to the
-  checkout, the review's temporary directory and a short temporary directory of Claude Code's
-  own, all removed after the review. Your repository stays read-only: laatsux denies writes to
-  the checkout's `.git` and to your repository's git directory, which Claude Code's sandbox
-  would otherwise open for a worktree, and to `/tmp/claude-<uid>`, where your own Claude Code
-  sessions keep their files and worktrees.
+  the code under review can not reach laatsux's API on localhost (unless you let its tests
+  listen on localhost, below), and writes only to the checkout, the review's temporary
+  directory and a short temporary directory of Claude Code's own, all removed after the
+  review. Your repository stays read-only: laatsux denies writes to the checkout's `.git` and
+  to your repository's git directory, which Claude Code's sandbox would otherwise open for a
+  worktree, and to `/tmp/claude-<uid>`, where your own Claude Code sessions keep their files
+  and worktrees.
 - When Claude may run the tests, laatsux first installs the dependencies as for Codex, but in a
   sandbox of its own (macOS's `sandbox-exec`, closed by default as Codex's is): with network,
   writing only to the checkout and the review's temporary directory. Claude Code has no way to
@@ -439,14 +444,20 @@ How they run:
   Claude is told that nothing was installed. With the setting off, Bash runs only read-only git
   commands (and what Claude Code counts as reading, such as `ls` and `cat`), and the sandbox
   keeps the checkout read-only too.
+- Tests that start a server fail (`listen EPERM`) unless you turn on **Let Claude's tests
+  listen on localhost** (`sandbox.network.allowLocalBinding`). They still can not connect to
+  other hosts, but they can reach every port on localhost, laatsux's API too (see below), and
+  Claude Code lets them listen on every interface, so other machines on your network can reach
+  a server that does not listen on 127.0.0.1 only.
 - Each run's cost, tokens and turns, as Claude Code reports them, show in the sidebar and in
   the runs' `usage` from `GET …/pulls/{n}/reviewers/claude`.
 
-The risk that remains is in the install step only: code from the repository that gets past
-those switches has network access there, and could reach laatsux's API on localhost, which
+The risk that remains comes with running the tests: code from the repository that gets past
+those switches has network access while the dependencies install, and with localhost on,
+Claude's tests can connect to anything on localhost. Either could reach laatsux's API, which
 takes any local caller for you. Once [#52](https://github.com/laat/stage-pr/issues/52) lands, a
-call without the token can not publish. Turn the setting off for repositories whose install
-you do not trust.
+call without the token can not publish. Turn these settings off for repositories whose code you
+do not trust.
 
 ## Auto-publish
 
@@ -540,3 +551,6 @@ pnpm dev          # server with --watch on :7171
 pnpm test         # unit tests and an end-to-end run of the agent loop
 pnpm typecheck
 ```
+
+In a reviewer agent's sandbox the end-to-end tests need **Let Claude's tests listen on
+localhost**, and the `sandbox-exec` tests skip themselves, since macOS does not nest sandboxes.

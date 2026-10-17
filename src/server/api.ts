@@ -98,6 +98,9 @@ export function api(s: Service): Hono {
     const reviewer = reviewerOf(c);
     const kind = reviewer.engine;
     const b = await body(c);
+    if ((b.localhost === true || b.localhost === 'true') && !reviewer.localServers) {
+      throw new HttpError(422, `${reviewer.label}'s sandbox can not let its tests listen on localhost without letting them connect to other hosts`);
+    }
     await reviewer.models(); // so efforts can be checked against the model
     const settings = nextSettings(s.db, { [kind]: b }, (_, model) => reviewer.efforts(model));
     // Renaming is the one step that can still fail (the name may be taken), so it goes before saving.

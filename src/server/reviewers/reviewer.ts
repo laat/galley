@@ -152,6 +152,8 @@ export interface Engine {
   readonly authorLogin: string;
   /** The tool such an author runs in, in prose. */
   readonly authorTool: string;
+  /** Whether its sandbox can let the tests listen on localhost without letting them connect to other hosts (the localhost setting). */
+  readonly localServers: boolean;
   /**
    * Run an install command in the checkout, in a sandbox with network that writes only to the
    * checkout and `tmp`, the TMPDIR in `env`.
@@ -531,6 +533,11 @@ export class Reviewer {
     return this.tool.authorTool;
   }
 
+  /** Whether its sandbox can let the tests listen on localhost, so the localhost setting applies to it. */
+  get localServers(): boolean {
+    return this.tool.localServers;
+  }
+
   /** Where its models come from, when they are read from the tool. */
   get catalogSource(): string | undefined {
     return this.tool.catalogSource;
@@ -824,7 +831,7 @@ export class Reviewer {
       '',
       `Run \`git diff ${pull.base_sha} HEAD\` to see the changes and read the surrounding code as needed.${settings.runTests ? '' : ' Do not modify any files.'}`,
       '',
-      ...(settings.runTests ? [...testInstructions(installed), ''] : []),
+      ...(settings.runTests ? [...testInstructions(installed, settings.localhost && this.tool.localServers), ''] : []),
       'Look for bugs, regressions, security problems, missing error handling, and changes that do not do what the description says. Mention missing tests only where they matter. Skip style preferences and anything a formatter or linter would catch. If the pull request is fine, say so in the summary and leave no comments.',
       '',
       'Focus on problems this change introduces or makes reachable. An issue that was there before it, or one outside what the pull request sets out to do, is not a defect of this change: say in the comment that it is pre-existing or out of scope, and give it low priority.',
@@ -873,16 +880,19 @@ export function outsideTheDiff(body: string): number {
 }
 
 /** What the reviewer is told about the installed dependencies and running the tests. */
-function testInstructions(installed: Installed | null): string[] {
+function testInstructions(installed: Installed | null, localServers: boolean): string[] {
   const indent = (text: string) => text.replace(/^/gm, '    ');
   const out = !installed
     ? ['No dependencies are installed: the repository root has no lockfile laatsux installs from (pnpm-lock.yaml, package-lock.json, yarn.lock or bun.lock).']
     : installed.failure
       ? [`laatsux could not install the dependencies: \`${installed.command}\` ${installed.failure}. Its output ended with:`, '', indent(installed.output)]
       : [`laatsux installed the dependencies with \`${installed.command}\`, which runs no install scripts, so a package that needs a build step may not work. Its output ended with:`, '', indent(installed.output)];
+  const checks = localServers
+    ? "To check your findings, you may run the typecheck, the whole test suite (tests that start servers on localhost included) or the build with the repository's own tooling (its package scripts). There is no network beyond localhost, so you can not install anything"
+    : "To check your findings, you may run the typecheck, tests or build with the repository's own tooling (its package scripts). There is no network, so you can not install anything";
   out.push(
     '',
-    "To check your findings, you may run the typecheck, tests or build with the repository's own tooling (its package scripts). There is no network, so you can not install anything: a check that fails for lack of network, a missing dependency or tool, or the sandbox is not a finding. You can write only to this checkout and $TMPDIR (point caches there). The checkout is thrown away after the review, so changes you make to it are lost: report findings only in your answer.",
+    `${checks}: a check that fails for lack of network, a missing dependency or tool, or the sandbox is not a finding. You can write only to this checkout and $TMPDIR (point caches there). The checkout is thrown away after the review, so changes you make to it are lost: report findings only in your answer.`,
   );
   return out;
 }

@@ -19,6 +19,13 @@ export interface ReviewerSettings {
   maxIterations: number;
   /** Install the dependencies before the reviewer starts, and let it run the tests in its checkout without network; off keeps it read-only. */
   runTests: boolean;
+  /**
+   * With runTests, let the tests it runs listen and connect on localhost, so tests that start
+   * servers work. Code in the pull request can then reach anything on localhost, laatsux's API
+   * too, and Claude Code lets them listen on every interface, not just loopback. Only for a tool
+   * whose sandbox can do that without letting them connect to other hosts (Claude).
+   */
+  localhost: boolean;
   /** Leave pull requests by an author agent running in the same tool to the other reviewers, so authors get a second opinion. */
   skipOwnKind: boolean;
 }
@@ -41,9 +48,9 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   // "codex" until it became "codex-review", beside "claude-review" (see CodexReviewer.leaveFormerDefault).
-  codex: { enabled: false, name: 'codex-review', model: '', effort: '', maxIterations: 3, runTests: true, skipOwnKind: false },
+  codex: { enabled: false, name: 'codex-review', model: '', effort: '', maxIterations: 3, runTests: true, localhost: false, skipOwnKind: false },
   // Not "claude": that is what the CLI calls an author agent running in Claude Code.
-  claude: { enabled: false, name: 'claude-review', model: '', effort: '', maxIterations: 3, runTests: true, skipOwnKind: false },
+  claude: { enabled: false, name: 'claude-review', model: '', effort: '', maxIterations: 3, runTests: true, localhost: false, skipOwnKind: false },
   publish: { mergeMethod: 'squash' },
 };
 
@@ -116,6 +123,7 @@ function nextReviewer(next: ReviewerSettings, c: Record<string, unknown>, effort
     next.maxIterations = n;
   }
   if (c.runTests !== undefined) next.runTests = flag(c.runTests);
+  if (c.localhost !== undefined) next.localhost = flag(c.localhost);
   if (c.skipOwnKind !== undefined) next.skipOwnKind = flag(c.skipOwnKind);
   // A model's catalog entry lists the efforts it accepts; an effort it does not know would fail every run.
   const allowed = next.effort && efforts ? efforts(next.model) : null;
