@@ -719,7 +719,12 @@ export class Reviewer {
 
   /** Whether the settings leave this pull request to the other reviewers: it is by the reviewer's own kind of agent. */
   skips(pull: PullRow): boolean {
-    return this.settings().skipOwnKind && this.s.db.actorById(pull.author_id).login === this.tool.authorLogin;
+    return this.skipsAuthor(this.s.db.actorById(pull.author_id));
+  }
+
+  /** Whether the settings leave the author's pull requests to the other reviewers: it is the reviewer's own kind of agent. */
+  skipsAuthor(author: Actor): boolean {
+    return this.settings().skipOwnKind && author.login === this.tool.authorLogin;
   }
 
   /** The tool its own kind of agent runs in ("Claude Code"), for saying what it skips. */

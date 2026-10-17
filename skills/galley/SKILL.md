@@ -149,6 +149,7 @@ unless the user says otherwise when asking you to stage. Add to `galley pr creat
   (`--reviewer house-rules:2`).
 - "with codex and claude": `--reviewer codex --reviewer claude`.
 - "no review": `--no-review`.
+- "all of them", or a name you do not know: `galley reviewers` lists those that review this repository.
 
 ## Reference
 

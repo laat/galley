@@ -12,6 +12,7 @@ import {
   pullJson,
   repoJson,
   reviewCommentJson,
+  reviewerAgentJson,
   reviewJson,
   threadCommentsJson,
   userJson,
@@ -182,6 +183,13 @@ export function api(s: Service): Hono {
   });
   app.get('/repos', (c) => c.json(s.repos().map((r) => repoJson(s, r))));
   app.get('/repos/:owner/:repo', (c) => c.json(repoJson(s, s.repo(c.req.param('owner'), c.req.param('repo')))));
+  // galley extension: the reviewer agents that review the repository, and whether each reviews the caller's pull requests on its own.
+  app.get('/repos/:owner/:repo/reviewers', (c) => {
+    const repo = s.repo(c.req.param('owner'), c.req.param('repo'));
+    const author = actor(c);
+    const reviewers = s.reviewerAgents().filter((r) => r.appliesTo(repo));
+    return c.json(reviewers.map((r) => reviewerAgentJson(r, r.settings().enabled && !r.skipsAuthor(author), r.settings().maxIterations)));
+  });
 
   // GitHub's "get a commit" and "get repository content", used by `galley browse --repo`. A ref
   // is anything git resolves (a SHA, a branch, HEAD); contents default to HEAD, where GitHub
@@ -249,7 +257,9 @@ export function api(s: Service): Hono {
     // galley extension: `reviewers` and `automatic_reviews` decide the reviewer agents for this pull request.
     const review = s.reviewRequest(repo, b.reviewers, b.automatic_reviews);
     const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns }, actor(c));
-    return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}) }, 201);
+    // And the reviewer agents that review it, so the author can say who does.
+    const agents = s.reviewersFor(pull).map((r) => reviewerAgentJson(r, r.enabled(pull), r.limit(pull)));
+    return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}), reviewer_agents: agents }, 201);
   });
 
   // Registered before /pulls/:n/... so "comments" is not taken for a number.

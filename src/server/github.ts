@@ -3,6 +3,7 @@
 import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
+import type { Reviewer } from './reviewers/reviewer.ts';
 import { githubStatus, stagingState, type AutoMerge, type Ctx, type Placement, type Service, type Thread, type Turn, type TurnReason } from './service.ts';
 import { duration } from './web/html.ts';
 
@@ -263,6 +264,15 @@ export function reviewJson(s: Service, repo: RepoRow, pull: PullRow, r: ReviewRo
     html_url: `${s.pullUrl(repo, pull)}#pullrequestreview-${r.id}`,
     pull_request_url: `${apiBase(s, repo)}/pulls/${pull.number}`,
   };
+}
+
+/**
+ * galley extension: a reviewer agent, as GET …/reviewers and POST …/pulls give it: its name,
+ * what it reads, and whether it reviews on its own (on, with a limit above 0) and how many
+ * times. Never its instructions.
+ */
+export function reviewerAgentJson(r: Reviewer, enabled: boolean, maxIterations: number) {
+  return { login: r.actor().login, reviewer: r.key, engine: r.engine, reviews: r.reviews, automatic: enabled && maxIterations > 0, max_iterations: maxIterations };
 }
 
 // ------------------------------------------------------------------ gh --json

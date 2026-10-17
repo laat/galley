@@ -93,7 +93,7 @@ done with a commit once the author has seen its review and replied to or resolve
 the review opened. They only comment; the review decision is yours. A pull request's sidebar
 shows what each is doing and its transcript, and lets you turn it on or off, change its limit,
 or ask for a review now. **Stop iterating** in the merge box ends the automatic reviews. You can
-also name reviewers when you ask an agent to stage.
+also name reviewers when you ask an agent to stage; `galley reviewers` lists those that review a repository.
 
 You can add reviewer agents of your own, each with its own instructions, in
 `~/.config/galley/reviewers/<name>.md` or under **Settings** → Custom reviewers (saving there

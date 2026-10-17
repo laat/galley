@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { parseReviewers } from '../src/cli/pr.ts';
+import { whoReviews } from '../src/cli/reviewers.ts';
 import { checkPriority, fillFromCommits, splitPriorityPrefix } from '../src/server/service.ts';
 import { Client } from '../src/cli/client.ts';
 import { cliActor, META } from '../src/config.ts';
@@ -188,6 +189,15 @@ test('pr create --reviewer takes repeats and commas like gh, and a number of rev
   ]);
   assert.deepEqual(parseReviewers(['a,,b,']), [{ login: 'a' }, { login: 'b' }]);
   for (const bad of ['codex:two', 'codex:', ':3', 'codex:-1']) assert.throws(() => parseReviewers([bad]), /invalid reviewer/, bad);
+});
+
+test('whoReviews names the reviewer agents that review a pull request on their own, by what they read', () => {
+  const agent = (login: string, reviews: 'code' | 'description', automatic = true) => ({ login, reviewer: login, engine: 'claude', reviews, automatic, max_iterations: 3 });
+  assert.equal(
+    whoReviews([agent('codex-review', 'code'), agent('claude-review', 'code'), agent('house-rules', 'description')]),
+    'When you wait, codex-review and claude-review review the code, and house-rules the title, description and commit messages.',
+  );
+  assert.equal(whoReviews([agent('codex-review', 'code', false)]), 'No reviewer agent reviews it.');
 });
 
 test('priorities: validated, and moved out of "[P1]"-style prefixes', () => {

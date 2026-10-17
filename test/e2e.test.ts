@@ -1264,6 +1264,11 @@ test('a reviewer can leave pull requests by its own kind of agent to the other',
       const html = await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text();
       assert.match(html, /Settings leave pull requests by agents in Claude Code to other reviewers/);
     });
+    await t.test('galley reviewers says which review the caller\'s pull requests on their own', async () => {
+      const list = async (actor: string) => JSON.parse((await cli(['reviewers', '--json', 'name,automatic'], { actor })).stdout);
+      assert.deepEqual(await list('claude'), [{ name: 'codex-review', automatic: true }, { name: 'claude-review', automatic: false }]);
+      assert.deepEqual(await list('codex-agent'), [{ name: 'codex-review', automatic: false }, { name: 'claude-review', automatic: true }]);
+    });
     await t.test('and the other way round', async () => {
       const n = await stage('feature/by-codex-agent', 'by-codex-agent.js', 'codex-agent');
       const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'codex-agent' });
@@ -2048,6 +2053,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stderr, /Ignored reviewer octocat: galley has no reviewer agent by that name/);
     assert.match(r.stderr, /Ignored reviewer alice/);
+    assert.match(r.stderr, /^When you wait, codex-review reviews the code\.$/m);
     const n = numberOf(r);
     const { enabled, max_iterations, overrides } = await human('GET', `${api(n)}/reviewers/codex`);
     assert.deepEqual({ enabled, max_iterations, overrides }, { enabled: true, max_iterations: 2, overrides: { enabled: true, max_iterations: 2 } });
@@ -2075,6 +2081,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     branch('feature/settings-limit', 'limit.js');
     const r = await create(['--reviewer', 'codex']);
     assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /^When you wait, codex-review reviews the code\.$/m);
     const n = numberOf(r);
     const first = await cli(['pr', 'wait', String(n), '--timeout', '20s']);
     assert.equal(first.code, 0, first.stderr);
@@ -2098,6 +2105,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     branch('feature/no-review', 'none.js');
     const r = await create(['--no-review']);
     assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /^No reviewer agent reviews it\.$/m);
     const n = numberOf(r);
     assert.match(await handedOver(n), /^No reviewer agent reviews /);
     assert.equal(await considered(n), null, 'nothing queued, although automatic reviews are on in settings');
@@ -2124,6 +2132,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     branch('feature/default-review', 'default.js');
     const r = await create([]);
     assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /^No reviewer agent reviews it\.$/m);
     const n = numberOf(r);
     assert.deepEqual((await human('GET', `${api(n)}/reviewers/codex`)).overrides, { enabled: null, max_iterations: null });
     assert.match(await handedOver(n), /^No reviewer agent reviews /);
@@ -2137,6 +2146,20 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     assert.equal(w.code, 0, w.stderr);
     assert.match(w.stdout, /codex-review reviewed: commented/);
     await human('PUT', '/api/settings/codex', { enabled: false });
+  });
+
+  await t.test('on with a limit of 0, it reviews nothing on its own, and galley reviewers and pr create say so', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 0 });
+    try {
+      const list = await cli(['reviewers', '--json', 'name,automatic,limit']);
+      assert.deepEqual(JSON.parse(list.stdout)[0], { name: 'codex-review', automatic: false, limit: 0 });
+      branch('feature/limit-zero', 'zero.js');
+      const r = await create([]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /^No reviewer agent reviews it\.$/m);
+    } finally {
+      await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    }
   });
 
   await t.test('flags that cannot work stage nothing', async () => {
