@@ -833,7 +833,7 @@ code.wrap { word-break: break-all; }
 .review-thread-resolved-note { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; height: 20px; overflow: hidden; line-height: 20px; }
 .review-thread-resolved-note::before { content: ''; flex: 1 0 0; height: 20px; }
 /* The conversation the file tree went to; a tall one starts under the sticky headers. */
-.files .review-thread { scroll-margin-top: 104px; }
+.files .review-thread { scroll-margin-top: calc(var(--files-toolbar-height) + 59px); }
 .review-thread.is-flash { animation: thread-flash 2s ease-out; }
 @keyframes thread-flash { from { box-shadow: 0 0 0 2px var(--accent-emphasis); } to { box-shadow: 0 0 0 2px transparent; } }
 .review-thread .diff-snippet { border-bottom: 1px solid var(--border); }
@@ -879,6 +879,9 @@ code.wrap { word-break: break-all; }
 
 /* ---------------------------------------------------------------- files */
 
+/* The toolbar's height, which app.js measures: it wraps on narrow screens, and zoom makes it fractional.
+   The file headers stick right under it. Without script, its height on one line. */
+:root { --files-toolbar-height: 45px; }
 .files-toolbar { position: sticky; top: 0; z-index: 20; background: var(--bg); border-bottom: 1px solid var(--border); }
 .files-toolbar-inner { display: flex; align-items: center; gap: 8px; padding-top: 8px; padding-bottom: 8px; flex-wrap: wrap; }
 .files-note { font-size: 12px; color: var(--fg-muted); }
@@ -897,7 +900,7 @@ code.wrap { word-break: break-all; }
 
 .files-layout { display: flex; gap: 16px; padding-top: 16px; padding-bottom: 32px; align-items: flex-start; }
 .files { flex: 1; min-width: 0; }
-.file-tree { position: sticky; top: 56px; width: 280px; max-height: calc(100vh - 72px); overflow: auto; flex-shrink: 0; font-size: 14px; }
+.file-tree { position: sticky; top: calc(var(--files-toolbar-height) + 11px); width: 280px; max-height: calc(100vh - var(--files-toolbar-height) - 27px); overflow: auto; flex-shrink: 0; font-size: 14px; }
 body.tree-hidden .files-layout > .file-tree { display: none; }
 .file-tree ul { list-style: none; margin: 0; padding: 0 0 0 12px; }
 .file-tree > ul { padding-left: 0; }
@@ -925,10 +928,10 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
 .file-tree .tree-threads:hover .octicon { color: var(--accent); }
 @media (max-width: 1011px) { .files-layout > .file-tree { display: none; } }
 
-.file { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; scroll-margin-top: 64px; }
+.file { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; scroll-margin-top: calc(var(--files-toolbar-height) + 19px); }
 .file-header {
   position: sticky;
-  top: 49px;
+  top: var(--files-toolbar-height);
   z-index: 10;
   display: flex;
   align-items: center;
