@@ -804,15 +804,31 @@ code.wrap { word-break: break-all; }
 
 .review-thread { margin: 0; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-family: var(--font); font-size: 14px; }
 .review-thread + .review-thread { margin-top: 8px; }
-.review-thread-header { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; color: var(--fg-muted); font-size: 12px; min-height: 37px; }
+/* One line: the path (or the commit's headline) is what gives way, the badges never do. Its full
+   length doesn't widen the page around it (the container's inline-size containment). */
+.review-thread-header { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; color: var(--fg-muted); font-size: 12px; min-height: 37px; white-space: nowrap; container-type: inline-size; }
 .review-thread:not([open]) > .review-thread-header { border-bottom: 0; border-radius: 6px; }
-.review-thread-path { font-family: var(--mono); font-size: 12px; color: var(--fg); word-break: break-all; }
+.review-thread-header > * { flex: none; }
+/* The icon carries the path's tooltip too, for when the path has no room left. */
+.review-thread-title { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+.review-thread-path { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12px; color: var(--fg); }
+.review-thread-range { flex: none; }
+/* In a narrow header the line range makes way for the file name. */
+@container (max-width: 360px) { .review-thread-range { display: none; } }
+.review-thread-path.is-file { display: flex; }
+/* The directory loses its start first (right to left, as the isolated path still reads left to right), then the file name its end. */
+.review-thread-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+.review-thread-file { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .review-thread-path code { font-size: 12px; }
+.review-thread-header > .flex-auto { flex: 1 1 auto; }
 .review-thread-toggle { display: inline-flex; color: var(--fg-muted); }
-.review-thread-participants { display: inline-flex; align-items: center; gap: 6px; }
+.review-thread-participants { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto; }
 .review-thread-participants .avatar { margin-right: -4px; box-shadow: 0 0 0 2px var(--bg-subtle); }
+.review-thread-participants-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .review-thread[open] .when-closed, .review-thread:not([open]) .when-open { display: none; }
-.review-thread-resolved-note { font-size: 12px; }
+/* Takes only the room the rest leaves, and drops out whole when that is too little: it wraps to a second line, cut off. */
+.review-thread-resolved-note { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; height: 20px; overflow: hidden; line-height: 20px; }
+.review-thread-resolved-note::before { content: ''; flex: 1 0 0; height: 20px; }
 /* The conversation the file tree went to; a tall one starts under the sticky headers. */
 .files .review-thread { scroll-margin-top: 104px; }
 .review-thread.is-flash { animation: thread-flash 2s ease-out; }
