@@ -10,6 +10,7 @@ import type { ClaudeReviewer } from './reviewers/claude.ts';
 import type { CustomReviewers } from './reviewers/custom.ts';
 import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { busy, doneForAutoPublish, doneForHandover, toReview, type HeadState, type HeadStatus } from './reviewers/head-status.ts';
+import { agentReviews, askedAt, unansweredThreads, unseenFeedback, type Feedback } from './feedback.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
 import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
@@ -130,6 +131,15 @@ export interface WaitResult {
   conflicts?: string;
   /** With `pushed` and `push_failed`: the push. */
   push?: GithubPush;
+  /**
+   * Whether the author has anything to address once it has read this: feedback in it that asks
+   * something of it (feedback.ts), a thread waiting for its answer, or a reviewer agent's findings
+   * in the head it has not answered (Reviewer.answered). Worked out before the feedback counts as
+   * seen: once seen, findings with no thread to reply in count as answered.
+   */
+  asksAuthor?: boolean;
+  /** What the reviewer agents that still have the head to review are at ("claude-review is about to review 8c64534"). */
+  stillToReview?: string[];
 }
 
 /**
@@ -1788,24 +1798,6 @@ export class Service {
 
   // ------------------------------------------------------------ the agent loop
 
-  /** Feedback from anyone but the author that the author has not been shown yet. */
-  unseenFeedback(pull: PullRow): { reviews: ReviewRow[]; comments: CommentRow[] } {
-    const since = pull.author_seen_at;
-    const reviews = this.db.all<ReviewRow>(
-      "SELECT * FROM reviews WHERE pull_id = ? AND author_id != ? AND state != 'PENDING' AND submitted_at > ? ORDER BY submitted_at",
-      pull.id,
-      pull.author_id,
-      since,
-    );
-    const comments = this.db.all<CommentRow>(
-      'SELECT * FROM comments WHERE pull_id = ? AND author_id != ? AND created_at > ? AND (review_id IS NULL) ORDER BY id',
-      pull.id,
-      pull.author_id,
-      since,
-    );
-    return { reviews, comments };
-  }
-
   /**
    * Record that the author has been shown everything up to `at` (taken before reading the
    * feedback), that the reviewer agents are done with `agentsDone`, and that `conflicts`
@@ -1819,7 +1811,7 @@ export class Service {
       if (before >= at) return false;
       // Among it, feedback that asks something of the author, or a conflict it was told of for
       // the first time: from now, its turn (see turn).
-      const asked = this.askedAt(pull, at);
+      const asked = askedAt(this.db, pull, at);
       const handed = (asked !== null && asked > before) || (!!conflicts && conflicts !== told);
       this.db.update('pulls', pull.id, {
         author_seen_at: at,
@@ -1878,7 +1870,7 @@ export class Service {
     const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
     if (!pull) return { status: 'closed', reviews: [], comments: [] };
     // Feedback always comes back, also when it arrives together with a close, a publish or a merge.
-    const fb = this.unseenFeedback(pull);
+    const fb = unseenFeedback(this.db, pull);
     const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
     // What came of pushing the head it waited with, the latest push it has not been told of. A
     // failure that is tried again is the reviewer's to see; the author waits on.
@@ -1894,9 +1886,20 @@ export class Service {
     const fresh = conflicts !== undefined && conflicts !== pull.conflicts_told_sha;
     const pushed = push && (push.result === 'pushed' ? 'pushed' : push.retry ? null : 'push_failed');
     const status = ended ?? (published ? 'published' : held ? null : (pushed ?? (unseen ? 'feedback' : fresh ? 'conflicts' : null)));
+    if (!status) return null;
     // Not marked as seen here: the author confirms once it has shown the feedback, so a
     // response lost on the way (a restart) delivers it again instead of losing it.
-    return status && { status, ...fb, seenAt: checkedAt, conflicts, push: push ?? undefined };
+    return { status, reviews: fb.reviews, comments: fb.comments, seenAt: checkedAt, conflicts, push: push ?? undefined, ...this.leftToAddress(pull, fb) };
+  }
+
+  /** What is left for the author once it has read the feedback, and for the reviewer agents (WaitResult.asksAuthor, stillToReview). */
+  private leftToAddress(pull: PullRow, fb: Feedback): Pick<WaitResult, 'asksAuthor' | 'stillToReview'> {
+    const author = this.db.actorById(pull.author_id).login;
+    const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
+    return {
+      asksAuthor: fb.asks || unansweredThreads(this.db, pull) > 0 || reviewers.some((r) => r.status.state === 'findings'),
+      stillToReview: reviewers.flatMap((r) => (toReview(r.status.state) ? (reviewerAgentText(r.login, r.status, pull, author, true, false) ?? []) : [])),
+    };
   }
 
   async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
@@ -1921,7 +1924,7 @@ export class Service {
           // conflict it has not been told of does, whatever comes with it: recorded, the wait would
           // count as acting on it (markSeen hands it over at about the same moment).
           const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
-          const asked = pull ? this.askedAt(pull) : null;
+          const asked = pull ? askedAt(this.db, pull) : null;
           const conflict = result.conflicts !== undefined && result.conflicts !== pull?.conflicts_told_sha;
           if (pull && !conflict && (asked === null || asked <= pull.author_seen_at)) this.recordWait(pull, checkedAt, author);
           return result;
@@ -1994,15 +1997,14 @@ export class Service {
   }
 
   /**
-   * Whether the feedback waits for more of its kind: it is all reviews from reviewer agents, and
-   * another reviewer agent is still at work on the pull request. The author then gets the
-   * reviews of a commit together and answers them in one round. Anything from anyone else comes
-   * back at once, with what the reviewer agents posted so far.
+   * Whether the feedback waits for more of its kind: it is all reviews from reviewer agents (also
+   * one whose file is gone), and another reviewer agent is still at work on the pull request. The
+   * author then gets the reviews of a commit together and answers them in one round. Anything from
+   * anyone else comes back at once, with what the reviewer agents posted so far.
    */
-  private agentsStillReviewing(pull: PullRow, fb: { reviews: ReviewRow[]; comments: CommentRow[] }): boolean {
+  private agentsStillReviewing(pull: PullRow, fb: Feedback): boolean {
     if (fb.comments.length || !this.reviewersAtWork(pull).length) return false;
-    const agents = new Set(this.reviewerAgents().map((r) => r.actor().id));
-    return fb.reviews.every((r) => agents.has(r.author_id));
+    return fb.reviews.every((r) => fb.byAgent.has(r.id));
   }
 
   /** The reviewer agents reviewing the pull request or about to, and what each is at. */
@@ -2044,7 +2046,7 @@ export class Service {
   readiness(pull: PullRow): Readiness {
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engine, reviewer: r.key, status: r.headStatus(pull) }));
     const authorWaiting = (this.waiters.get(pull.id) ?? 0) > 0;
-    const fb = this.unseenFeedback(pull);
+    const fb = unseenFeedback(this.db, pull);
     const unseen = fb.reviews.length + fb.comments.length;
     const openThreads = this.db.get<{ n: number }>(
       `SELECT COUNT(*) AS n FROM comments c JOIN actors a ON a.id = c.author_id
@@ -2062,13 +2064,8 @@ export class Service {
    * file is gone).
    */
   reviewDecision(pull: PullRow, reviews: ReviewRow[]): string {
-    const agents = this.agentReviews(pull);
+    const agents = agentReviews(this.db, pull);
     return reviewDecision(reviews.filter((r) => !agents.has(r.id)));
-  }
-
-  /** The reviews the reviewer agents posted on the pull request (by their runs), which stand in for nobody's decision. */
-  agentReviews(pull: PullRow): Set<number> {
-    return new Set(this.db.all<{ id: number }>('SELECT review_id AS id FROM review_runs WHERE pull_id = ? AND review_id IS NOT NULL', pull.id).map((r) => r.id));
   }
 
   /** Whose move the pull request waits for, and why (see Turn), from its readiness when the caller has it already. */
@@ -2082,7 +2079,7 @@ export class Service {
     // something of it (markSeen) to its next action.
     const working = pull.author_handed_at !== null && pull.author_handed_at > acted;
     // Such feedback it has not been handed yet. Not waiting, it hears of it only when the reviewer says so.
-    const asked = this.askedAt(pull);
+    const asked = askedAt(this.db, pull);
     const unseen = asked !== null && asked > pull.author_seen_at;
     // A wait that just ended counts for a few seconds more (see setWaiting), long enough for the
     // author to confirm the feedback it was handed.
@@ -2234,26 +2231,6 @@ export class Service {
       pull.author_id,
     )!.at;
     return at;
-  }
-
-  /**
-   * When someone last asked something of the author (up to `until`): a review or comment from
-   * anyone else. An approval without comments asks nothing, nor does a reviewer agent's review
-   * that found nothing.
-   */
-  private askedAt(pull: PullRow, until = '9999'): string | null {
-    return this.db.get<{ at: string | null }>(
-      `SELECT MAX(at) AS at FROM (
-         SELECT r.submitted_at AS at FROM reviews r
-          WHERE r.pull_id = ?1 AND r.author_id != ?2 AND r.state != 'PENDING'
-            AND (r.state != 'APPROVED' OR EXISTS (SELECT 1 FROM comments c WHERE c.review_id = r.id))
-            AND NOT EXISTS (SELECT 1 FROM review_runs x WHERE x.review_id = r.id AND x.findings = 0)
-         UNION ALL SELECT created_at FROM comments WHERE pull_id = ?1 AND author_id != ?2 AND review_id IS NULL)
-       WHERE at <= ?3`,
-      pull.id,
-      pull.author_id,
-      until,
-    )!.at;
   }
 
   /** What a published pull request has that GitHub does not yet: commits, title, description. Empty before the first publish. */
@@ -2850,7 +2827,7 @@ export class Service {
    */
   private mayPush(pull: PullRow): boolean {
     if (stagingState(pull) !== 'published' || !this.headUnpublished(pull) || !this.waiters.get(pull.id)) return false;
-    const fb = this.unseenFeedback(pull);
+    const fb = unseenFeedback(this.db, pull);
     if (fb.reviews.length || fb.comments.length) return false;
     const failed = this.pushFailed(pull);
     return !failed || !!failed.retry;

@@ -5,6 +5,7 @@ import type { FileDiff } from './diff.ts';
 import type { Actor, CommentRow, PullRow, RepoRow, ReviewRow } from './db.ts';
 import type { Reviewer } from './reviewers/reviewer.ts';
 import { githubStatus, stagingState, type AutoMerge, type Ctx, type Placement, type Service, type Thread, type Turn, type TurnReason } from './service.ts';
+import { agentReviews } from './feedback.ts';
 import { duration } from './web/html.ts';
 
 /**
@@ -460,7 +461,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
       url: `${s.pullUrl(repo, pull)}#issuecomment-${c.id}`,
     })),
   );
-  let agentReviews: Set<number> | undefined;
+  let agents: Set<number> | undefined;
   const review = (r: ReviewRow) => ({
     id: `PRR_${r.id}`,
     databaseId: r.id,
@@ -470,7 +471,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     submittedAt: r.submitted_at,
     commit: { oid: r.commit_id },
     // galley extension: posted by a reviewer agent, whose approval is its own and not in reviewDecision.
-    byReviewerAgent: (agentReviews ??= s.agentReviews(pull)).has(r.id),
+    byReviewerAgent: (agents ??= agentReviews(s.db, pull)).has(r.id),
   });
   set('reviews', () => reviews.map(review));
   set('latestReviews', () => {

@@ -510,6 +510,10 @@ export function api(s: Service): Hono {
       conflicts: r.conflicts ?? null,
       // With status pushed or push_failed: the push of the head the author waited with, published.
       push: r.push ?? null,
+      // Whether the author has anything to address once it has read this, and what the reviewer
+      // agents still to review the head are at (WaitResult.asksAuthor), so the CLI need not work it out.
+      asks_author: r.asksAuthor ?? null,
+      still_to_review: r.stillToReview ?? null,
       // With status merged: what the branch has that GitHub did not merge, which the author must not delete.
       left_out: left && { head: left.head, deleted: left.deleted, commits: left.commits.map((cm) => ({ sha: cm.sha, parents: cm.parents, message: cm.message })) },
     });

@@ -14,6 +14,7 @@ import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CancelReason, type Db, type CommentRow, type Priority, type PullRow, type RepoRow, type ReviewRow, type ReviewRunRow, type Side } from '../db.ts';
 import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type ChangeEvent, type Ctx, type ReviewColumns, type Service, type Thread } from '../service.ts';
 import type { HeadStatus } from './head-status.ts';
+import { unansweredThreads } from '../feedback.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
 import type { Reviews, Verdict } from './definition.ts';
 import { cacheEnv, installCommand } from './install.ts';
@@ -674,20 +675,15 @@ export class Reviewer {
   }
 
   /**
-   * Whether the author answered a review's findings: it has seen the review, and each thread the
-   * review opened is resolved or has a reply from the author. Findings in the review's body (on
-   * lines outside the diff) have no thread to reply in, so seeing them is enough.
+   * Whether the author answered a review's findings: it has seen the review, and none of the
+   * threads the review opened waits for its answer (unansweredThreads). Findings in the review's
+   * body (on lines outside the diff) have no thread to reply in, so seeing them is enough.
    */
   answered(pull: PullRow, run: ReviewRunRow): boolean {
-    const review = run.review_id === null ? undefined : this.s.db.get<{ submitted_at: string }>('SELECT submitted_at FROM reviews WHERE id = ?', run.review_id);
+    if (run.review_id === null) return false;
+    const review = this.s.db.get<{ submitted_at: string }>('SELECT submitted_at FROM reviews WHERE id = ?', run.review_id);
     if (!review || review.submitted_at > pull.author_seen_at) return false;
-    const open = this.s.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM comments c WHERE c.review_id = ? AND c.in_reply_to_id IS NULL AND c.resolved_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM comments r WHERE r.in_reply_to_id = c.id AND r.author_id = ?)`,
-      run.review_id,
-      pull.author_id,
-    )!.n;
-    return open === 0;
+    return unansweredThreads(this.s.db, pull, run.review_id) === 0;
   }
 
   /** This pull request's own values, from its columns for this reviewer; null follows the setting. */
