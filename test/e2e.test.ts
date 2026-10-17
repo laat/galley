@@ -1464,7 +1464,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
 
   await t.test('when publishing by hand, with the merge method from settings', async () => {
     const pr = await stage('feature/merge-manual', 'manual-merge.js');
-    assert.match(await pr.page(), /<label><input type="checkbox" name="auto_merge"> Enable auto-merge on GitHub \(squash\)<\/label>/);
+    assert.match(await pr.page(), /<label><input type="checkbox" name="auto_merge"> <span>Enable auto-merge on GitHub \(squash\)<\/span><\/label>/);
     const calls = ghCalls();
     const r = await cli(['pr', 'publish', String(pr.number), '--auto-merge'], { actor: 'reviewer' });
     assert.equal(r.code, 0, r.stderr);
@@ -1496,7 +1496,11 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     git('commit', '-qam', 'Change manual-merge.js');
     await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the push is recorded');
     // The page sends the method it shows; open pages hear when the setting changes.
-    assert.match(await pr.page(), /<input type="hidden" name="merge_method" value="squash">/);
+    // Auto-merge is on for it, so the update asks for it again unless unchecked.
+    assert.match(
+      await pr.page(),
+      /<label title="Unchecked, this publish does not ask for auto-merge\. It does not turn auto-merge off on GitHub\."><input type="checkbox" name="auto_merge" checked> <span>Enable auto-merge on GitHub \(squash\)\. Auto-merge is on for <a href="https:\/\/github\.com\/acme\/widgets\/pull\/7"[^>]*>acme\/widgets#7<\/a>\.<\/span><\/label><input type="hidden" name="merge_method" value="squash">/,
+    );
     const events: string[] = [];
     const listen = (e: { type: string }) => events.push(e.type);
     server.service.bus.on('change', listen);
@@ -1540,6 +1544,29 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       await until(async () => (await pr.timeline()).some((e) => e.event === 'auto_merge_enabled'), 'auto-merge is enabled');
       assert.ok(calls().includes(`pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`));
     } finally {
+      await human('PUT', '/api/settings/publish', { mergeMethod: 'squash' });
+    }
+  });
+
+  await t.test('the publish form checks it when auto-publish includes it, with the same merge method', async () => {
+    const pr = await stage('feature/merge-form', 'form-merge.js');
+    await human('PUT', `${pr.base}/auto-publish`, { auto_merge: true, merge_method: 'squash' });
+    await human('PUT', '/api/settings/publish', { mergeMethod: 'rebase' });
+    try {
+      assert.match(
+        await pr.page(),
+        /<label title="Unchecked, this publish does not ask for auto-merge\. It does not turn auto-merge off on GitHub\."><input type="checkbox" name="auto_merge" checked> <span>Enable auto-merge on GitHub \(squash\)<\/span><\/label><input type="hidden" name="merge_method" value="squash">/,
+      );
+      // Publishing by hand from it does what auto-publish would, though the setting says rebase now.
+      const calls = ghCalls();
+      const pull = await human('POST', `${pr.base}/publish`, { auto_merge: true, merge_method: 'squash' });
+      assert.deepEqual(pull.auto_merge_result, { state: 'enabled', merge_method: 'squash', error: null });
+      assert.ok(calls().includes(`pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`), calls().join('\n'));
+      // A method that is neither auto-publish's nor the one in settings is still refused.
+      const stale = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auto_merge: true, merge_method: 'merge' }) });
+      assert.equal(stale.status, 412);
+    } finally {
+      await human('DELETE', `${pr.base}/auto-publish`);
       await human('PUT', '/api/settings/publish', { mergeMethod: 'squash' });
     }
   });

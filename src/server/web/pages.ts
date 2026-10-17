@@ -507,6 +507,12 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     // Images pasted into the description live on this machine; GitHub has no API to upload them to.
     const images = uploadsIn(pull.body).length;
     const them = images === 1 ? 'it' : 'them';
+    // Checked when auto-merge is decided already: auto-publish includes it (with its method while
+    // GitHub allows it, so publishing by hand does what auto-publish would), or it is on on GitHub.
+    const approved = auto?.autoMerge && mergeOption?.methods.includes(auto.autoMerge) ? auto.autoMerge : null;
+    const mergeOn = merge?.state === 'enabled' ? merge : null;
+    const method = approved ?? mergeOption?.method;
+    const checked = !!(approved || mergeOn);
     publishRow = html`<form class="merge-row merge-actions js-api-form js-publish-form" data-api="${p.apiBase}/publish" data-method="POST">
       <input type="hidden" name="expected" value="${publishFingerprint(pull)}">
       ${icon('rocket', { cls: 'color-fg-done' })}
@@ -524,8 +530,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
           ${
             !mergeOption
               ? ''
-              : mergeOption.methodAllowed
-                ? html`<label><input type="checkbox" name="auto_merge"> Enable auto-merge on GitHub (${mergeOption.method})</label><input type="hidden" name="merge_method" value="${mergeOption.method}">`
+              : approved || mergeOption.methodAllowed
+                ? html`<label${checked ? html` title="Unchecked, this publish does not ask for auto-merge. It does not turn auto-merge off on GitHub."` : ''}><input type="checkbox" name="auto_merge"${checked ? raw(' checked') : ''}> <span>Enable auto-merge on GitHub (${method})${mergeOn ? html`. Auto-merge is on for ${githubPull(mergeOn.url)}.` : ''}</span></label><input type="hidden" name="merge_method" value="${method}">`
                 : html`<label class="color-fg-muted"><input type="checkbox" name="auto_merge" disabled> Enable auto-merge on GitHub: ${target} does not allow ${mergeOption.method} merges. <a href="/settings/publishing">Change the merge method</a></label>`
           }
         </div>
