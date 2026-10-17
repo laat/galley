@@ -1188,7 +1188,8 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
   const own = reviewer.own(pull);
   // Why it reviews nothing on its own, when it does not; in full where there is room.
   const skips = reviewer.settings().enabled && reviewer.skips(pull);
-  const off = enabled ? null : own.enabled === false ? 'Off for this pull request' : skips ? `Off for agents in ${reviewer.authorTool}` : 'Off in Settings';
+  const offWhere = enabled ? null : own.enabled === false ? 'for this pull request' : skips ? `for agents in ${reviewer.authorTool}` : 'in Settings';
+  const off = offWhere && `Off ${offWhere}`;
   const skipping = `Settings leave pull requests by agents in ${reviewer.authorTool} to other reviewers`;
   const meta: Safe[] = [];
   const transcript = (run: ReviewRunRow) => (hasTranscript(s.db, run.id) ? runUrl(runBase(p), run) : null);
@@ -1221,7 +1222,8 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
   const limit = reviewer.limit(pull);
   // Automatic reviews end at the first publish.
   if (enabled) meta.push(pull.published_url ? html`Automatic: ${used} before publishing` : html`Automatic: ${pull.iterations_stopped ? 'stopped at ' : ''}${used} of ${limit}`);
-  else if (runs.length || work) meta.push(html`${off}`);
+  // Only automatic ones: a review asked for by hand runs all the same.
+  else if (runs.length || work) meta.push(html`Automatic: off ${offWhere}`);
   const usage = runUsage(runs);
   if (usage) meta.push(usage);
   const status = html`${state.mark}<span>${state.text}</span>`;
@@ -1269,6 +1271,8 @@ function doneState(p: PullPage, reviewer: Reviewer, run: ReviewRunRow): Omit<Age
  * A reviewer agent's controls on this pull request, in its row's menu: ask it to review, its limit
  * on automatic reviews, turning them on or off here, and its settings. The menu stays open while
  * the page refreshes after a change, so the limit can be stepped again; asking for a review closes it.
+ * Automatic reviews end at the first publish (Reviewer.wouldReview), so only a staged pull request
+ * has their controls.
  */
 function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; limit: number; own: OwnSettings; why: string | null }): Safe {
   const { pull } = p;
@@ -1289,17 +1293,21 @@ function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; li
     : '';
   // Turning automatic reviews on or off here (or when staging) holds whatever Settings say.
   const why = o.why ?? `${capitalize(onOff(bySettings))} in Settings`;
+  const automatic =
+    stagingState(pull) === 'staged'
+      ? html`<div class="dropdown-header">Automatic reviews of this pull request</div>
+      ${limitRow}
+      <button type="button" class="dropdown-item js-reviewer-switch" id="${id('switch')}" data-api="${api}" data-enabled="${String(!enabled)}">Turn ${onOff(!enabled)}<span class="dropdown-item-desc">${own.enabled === null ? why : `Turned ${onOff(enabled)} here`}</span></button>
+      ${own.enabled !== null ? html`<button type="button" class="dropdown-item js-codex-reset" id="${id('follow')}" data-api="${api}" data-field="enabled">Follow Settings<span class="dropdown-item-desc">${why}</span></button>` : ''}
+      <div class="dropdown-divider"></div>`
+      : '';
   const about = reviewer.describe();
   return html`<details class="dropdown details-reset agent-menu js-keep-open" id="${id('menu')}">
     <summary class="btn-octicon" id="${id('options')}" aria-label="Options for ${reviewer.actor().login}" title="Options">${icon('gear')}</summary>
     <div class="dropdown-menu dropdown-menu-sw">
       <button type="button" class="dropdown-item js-run-codex" id="${id('ask')}" data-api="${api}"${busy ? raw(' disabled') : ''}>Ask ${reviewer.label} to review</button>
       <div class="dropdown-divider"></div>
-      <div class="dropdown-header">Automatic reviews of this pull request</div>
-      ${limitRow}
-      <button type="button" class="dropdown-item js-reviewer-switch" id="${id('switch')}" data-api="${api}" data-enabled="${String(!enabled)}">Turn ${onOff(!enabled)}<span class="dropdown-item-desc">${own.enabled === null ? why : `Turned ${onOff(enabled)} here`}</span></button>
-      ${own.enabled !== null ? html`<button type="button" class="dropdown-item js-codex-reset" id="${id('follow')}" data-api="${api}" data-field="enabled">Follow Settings<span class="dropdown-item-desc">${why}</span></button>` : ''}
-      <div class="dropdown-divider"></div>
+      ${automatic}
       <a class="dropdown-item" id="${id('settings')}" href="${reviewer.settingsUrl()}">Settings${about ? html`<span class="dropdown-item-desc">${about}</span>` : ''}</a>
     </div>
   </details>`;
@@ -1490,7 +1498,7 @@ export function commitsPage(p: PullPage): string {
   const groups = Map.groupBy(p.commits, (c) => new Date(c.committerDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
   const opts = threadOpts(p, false);
   const commitThreads = (sha: string) => p.threads.filter((t) => t.root.subject_type === 'commit' && t.root.commit_id === sha);
-  const content = html`<div class="container container-xl commits-page" data-commit-id="${p.pull.head_sha}" data-pending-review="${p.pending?.id ?? ''}">
+  const content = html`<div class="container container-xl commits-page">
   ${[...groups].map(
     ([date, commits]) => html`<div class="commit-group">
     <h2 class="commit-group-title">${icon('git-commit')} Commits on ${date}</h2>
@@ -1519,7 +1527,8 @@ export function commitsPage(p: PullPage): string {
   )}
   <p class="color-fg-muted commits-hint">${icon('info')} Comments on a commit are about its message. The agent sees them as review threads and can reword the commit.</p>
 </div>`;
-  return pullLayout(p, 'commits', content);
+  // A comment on a commit's message joins the reviewer's pending review, as on Files changed.
+  return pullLayout(p, 'commits', content, { 'pending-review': p.pending?.id ?? '' });
 }
 
 // ------------------------------------------------------------------ files
@@ -1621,7 +1630,7 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
   const reviewMenu = html`<details class="dropdown details-reset review-menu">
     <summary class="btn btn-sm btn-primary">${p.pending ? 'Finish your review' : 'Review changes'}${pendingCount ? html` <span class="Counter Counter--primary">${pendingCount}</span>` : ''} ${icon('triangle-down')}</summary>
     <div class="dropdown-menu dropdown-menu-sw review-dialog">
-      <form class="js-api-form js-review-form" data-api="${reviewApi}" data-method="POST">
+      <form class="js-api-form" data-api="${reviewApi}" data-method="POST">
         <div class="review-dialog-header"><strong>Finish your review</strong></div>
         ${markdownEditor({ placeholder: 'Leave a comment', draftKey: 'review-body', rows: 4 })}
         <div class="review-dialog-options">

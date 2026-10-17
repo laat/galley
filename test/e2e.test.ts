@@ -420,7 +420,12 @@ test('the agent loop, from staging to publishing', async (t) => {
     const reply = await cli(['pr', 'comment', '--reply-to', String(pending.id), '-b', 'Sneaky.']);
     assert.equal(reply.code, 1);
     const reviews = await human('GET', '/api/repos/acme/widgets/pulls/1/reviews');
-    await human('DELETE', `/api/repos/acme/widgets/pulls/1/reviews/${reviews.find((r: any) => r.state === 'PENDING').id}`);
+    const review = reviews.find((r: any) => r.state === 'PENDING').id;
+    // The Commits tab tells its comment forms (public/app.js, from #main) to add to the pending review.
+    const commits = async () => (await (await fetch(`${server.url}/acme/widgets/pull/1/commits`)).text()).match(/<div id="main"[^>]*>/)![0];
+    assert.match(await commits(), new RegExp(` data-pending-review="${review}"`));
+    await human('DELETE', `/api/repos/acme/widgets/pulls/1/reviews/${review}`);
+    assert.match(await commits(), / data-pending-review=""/);
   });
 
   await t.test('the agent replies to a thread and edits the pull request', async () => {
@@ -1085,7 +1090,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(html, new RegExp(`class="dropdown-item js-reviewer-switch"[^>]* data-api="${base}/reviewers/claude" data-enabled="false">Turn off<`));
   assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: false }), { enabled: false, max_iterations: 2, overrides: { enabled: false, max_iterations: null } });
   html = await page();
-  assert.match(html, /<span class="agent-chunk">Off for this pull request<\/span>/);
+  // Only the automatic ones are off: the row may say Reviewing above, for a review asked for by hand.
+  assert.match(html, /<span class="agent-chunk">Automatic: off for this pull request<\/span>/);
   assert.match(html, /data-field="enabled">Follow Settings<span class="dropdown-item-desc">On in Settings<\/span>/);
   assert.match(html, new RegExp(`js-reviewer-switch"[^>]* data-api="${base}/reviewers/claude" data-enabled="true">Turn on<`));
   assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: null }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: null } });
@@ -5353,6 +5359,14 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
       const page = await pr.page();
       assert.doesNotMatch(page, /Stop iterating/);
       assert.match(page, /<span class="agent-chunk">Automatic: 0 before publishing<\/span>/);
+      // Nor controls for them in the reviewer agents' menus: asking for a review and the settings stay.
+      const menus = [...page.matchAll(/<details class="dropdown details-reset agent-menu[^]*?<\/details>/g)].map((m) => m[0]);
+      assert.ok(menus.length);
+      for (const menu of menus) {
+        assert.match(menu, /class="dropdown-item js-run-codex"[^>]*>Ask .+ to review</);
+        assert.match(menu, />Settings</);
+        assert.doesNotMatch(menu, /Automatic reviews of this pull request|codex-limit|js-reviewer-switch|Follow Settings/);
+      }
     } finally {
       await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
     }
