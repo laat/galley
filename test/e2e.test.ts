@@ -1161,7 +1161,8 @@ test("a reviewer agent's progress shows while it runs, and its transcript stays"
   assert.equal((await fetch(`${server.url}${pullPath}/runs/${runId}/progress`)).status, 204);
   const html = await page();
   assert.doesNotMatch(html, /js-run-progress/);
-  assert.match(html, new RegExp(`<a class="agent-state" href="${pullPath}/runs/${runId}" title="Reviewed [0-9a-f]{7}">`));
+  // Its row says what it found, with a comment in the attention colour: agent has not answered it.
+  assert.match(html, new RegExp(`<a class="agent-state" href="${pullPath}/runs/${runId}" title="Found 1 problem in ${pull.head.sha.slice(0, 7)}; agent has not answered it"><svg class="octicon octicon-comment color-fg-attention"[^>]*>[^]*?</svg><span>1 finding · <code>${pull.head.sha.slice(0, 7)}</code></span></a>`));
   assert.match(html, new RegExp(`<a class="review-run-link" href="${pullPath}/runs/${runId}">`));
   // Codex says how many tokens it used.
   assert.match(html, /<span title="Last run: 12k tokens in, 300 out[^"]*">12k tokens<\/span>/);
@@ -2197,6 +2198,9 @@ test('findings the author answers without a new commit: the reviewer agents are 
     const held = await cli(['pr', 'wait', String(number), '--timeout', '2s']);
     assert.equal(held.code, 124);
     assert.match(held.stderr, new RegExp(`^codex-review commented on ${sha()}: reply to or resolve each of its threads, or push a commit\\. The reviewer agents are not done with it until then\\.$`, 'm'));
+    // Its row in the sidebar: what it found, and whether it is answered (as GitHub marks a reviewer, a check is for an approval).
+    const agentState = async () => (await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text()).match(/<li class="agent" id="agent-codex">[^]*?(<a class="agent-state"[^>]*>[^]*?<\/a>)/)![1];
+    assert.match(await agentState(), new RegExp(`title="Found 1 problem in ${sha()}; agent has not answered it"><svg class="octicon octicon-comment color-fg-attention"[^>]*>[^]*?</svg><span>1 finding · <code>${sha()}</code></span>`));
 
     // Answered without a new commit: Codex reviews each commit once, so it has nothing more to say.
     const [thread] = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewThreads'])).stdout).reviewThreads;
@@ -2206,6 +2210,7 @@ test('findings the author answers without a new commit: the reviewer agents are 
     const { turn } = await human('GET', base);
     assert.equal(turn.whose, 'reviewer');
     assert.ok(turn.reasons.some((r: any) => r.kind === 'reviewer_agent' && r.state === 'answered' && r.text === answered), JSON.stringify(turn.reasons));
+    assert.match(await agentState(), new RegExp(`title="Found 1 problem in ${sha()}; agent answered it"><svg class="octicon octicon-comment color-fg-muted"[^>]*>[^]*?</svg><span>Answered · <code>${sha()}</code></span>`));
     // The list says it shorter, in full as its tooltip.
     assert.match(await (await fetch(`${server.url}/`)).text(), new RegExp(`<span class="turn-reason" title="${answered.replace("'", '&#39;')}">codex-review&#39;s findings answered</span>`));
 
@@ -2215,6 +2220,7 @@ test('findings the author answers without a new commit: the reviewer agents are 
     git('commit', '-qam', 'Rename the value');
     assert.match((await cli(['pr', 'wait', String(number), '--timeout', '20s'])).stdout, /Fine now\./);
     assert.equal((await human('GET', `${base}/reviewers/codex`)).runs.length, 2);
+    assert.match(await agentState(), new RegExp(`title="Found nothing in ${sha()}"><svg class="octicon octicon-check color-fg-muted"[^>]*>[^]*?</svg><span>No findings · <code>${sha()}</code></span>`));
   } finally {
     await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
   }

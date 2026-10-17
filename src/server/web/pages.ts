@@ -1,6 +1,6 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
-import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
+import type { Actor, CancelReason, CommentRow, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
 import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, TO_REVIEW, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type HeadStatus, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
@@ -860,10 +860,20 @@ function iterationsRows(p: PullPage): Safe[] {
 }
 
 /**
+ * What a reviewer agent's review found, by priority: the threads it opened, resolved since or not,
+ * and the findings its body lists outside the diff or on the title and description.
+ */
+function reviewFindings(p: PullPage, run: ReviewRunRow, review: ReviewRow | undefined): (Priority | null)[] {
+  const found = review ? [...p.threads.filter((t) => t.root.review_id === review.id).map((t) => t.root.priority), ...outsideTheDiff(review.body), ...onTheDescription(review.body)] : [];
+  // A custom reviewer that did not approve, with nothing to point at, has its summary for a finding (Reviewer.post).
+  while (run.findings !== null && found.length < run.findings) found.push(null);
+  return found;
+}
+
+/**
  * What each reviewer agent's latest review found, by priority and linked to the review, and the
  * automatic round under way: "Round 3 running · last round: codex-review 1 High · claude-review
- * nothing · house-rules approved". A review found the threads it opened, resolved since or not,
- * and the findings its body lists outside the diff or on the title and description.
+ * nothing · house-rules approved".
  */
 function lastRound(p: PullPage): Safe {
   const { s, pull } = p;
@@ -876,10 +886,7 @@ function lastRound(p: PullPage): Safe {
     const last = runs.findLast((r) => r.status === 'done' && r.review_id !== null);
     const review = last && p.reviews.find((r) => r.id === last.review_id);
     if (!review) continue;
-    const found = [...p.threads.filter((t) => t.root.review_id === review.id).map((t) => t.root.priority), ...outsideTheDiff(review.body), ...onTheDescription(review.body)];
-    // A custom reviewer that did not approve, with nothing to point at, has its summary for a finding (Reviewer.post).
-    while (last.findings !== null && found.length < last.findings) found.push(null);
-    const pills = priorityCounts(found);
+    const pills = priorityCounts(reviewFindings(p, last, review));
     const login = reviewer.actor().login;
     parts.push(
       html`${parts.length ? ' · ' : ''}<a class="iterations-review" href="#pullrequestreview-${review.id}" title="${login}'s latest review, of ${shortSha(last.head_sha)}">${login} ${
@@ -1192,10 +1199,7 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
   } else if (work) {
     state = { mark: icon('dot-fill'), text: html`Queued`, title: `About to review ${shortSha(work.head_sha)}`, href: null, running: true };
   } else if (last?.status === 'done') {
-    const approved = p.reviews.find((r) => r.id === last.review_id)?.state === 'APPROVED';
-    const what = reviewer.reviews === 'description' ? `the description at ${shortSha(last.head_sha)}` : shortSha(last.head_sha);
-    const verb = approved ? 'Approved' : 'Reviewed';
-    state = { mark: icon('check', { cls: 'color-fg-success', label: verb }), text: html`<code>${shortSha(last.head_sha)}</code> · ${since(last.finished_at)}`, title: `${verb} ${what}`, href: transcript(last) ?? `#pullrequestreview-${last.review_id}` };
+    state = { ...doneState(p, reviewer, last), href: transcript(last) ?? `#pullrequestreview-${last.review_id}` };
   } else if (last?.status === 'failed') {
     // The run's page has the whole error, also without a transcript.
     state = { mark: icon('x-circle-fill', { cls: 'color-fg-danger' }), text: html`Failed · ${since(last.finished_at)}`, title: `Review of ${shortSha(last.head_sha)} failed`, href: runUrl(runBase(p), last) };
@@ -1232,6 +1236,33 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
     ${meta.length ? html`<p class="agent-meta">${meta.map((m, i) => html`${i ? ' · ' : ''}<span class="agent-chunk">${m}</span>`)}</p>` : ''}
     ${live ? runProgress(runBase(p), live.run, live.progress) : ''}
   </li>`;
+}
+
+/**
+ * What a reviewer agent's finished review found, marked as GitHub marks a reviewer: a green check
+ * only for an approval, a muted one for no findings, and a comment for findings, in the attention
+ * colour while they stand on the head (or the description it has) and the author has not answered
+ * them (Reviewer.answered). Findings in an earlier commit are for the next one to address. The row
+ * names the commit and leaves out when, so that the reviewer's name fits beside it.
+ */
+function doneState(p: PullPage, reviewer: Reviewer, run: ReviewRunRow): Omit<AgentState, 'href'> {
+  const review = p.reviews.find((r) => r.id === run.review_id);
+  const found = reviewFindings(p, run, review).length;
+  const sha = shortSha(run.head_sha);
+  // What the run reviewed, which a custom reviewer's definition may have changed since.
+  const description = runSubject(run).startsWith('description:');
+  const what = description ? `the description at ${sha}` : sha;
+  const problems = `Found ${plural(found, 'problem')} in ${what}`;
+  const them = found === 1 ? 'it' : 'them';
+  const comment = (cls: string) => icon('comment', { cls });
+  const state = (mark: Safe, words: string, title: string) => ({ mark, text: html`${words} · <code>${sha}</code>`, title });
+  if (review?.state === 'APPROVED') return state(icon('check', { cls: 'color-fg-success' }), 'Approved', `Approved ${what}`);
+  if (!found) return state(icon('check', { cls: 'color-fg-muted' }), 'No findings', `Found nothing in ${what}`);
+  if (runSubject(run) !== reviewer.subject(p.pull, description ? 'description' : 'code')) return state(comment('color-fg-muted'), plural(found, 'finding'), `${problems}, ${description ? 'since changed' : 'an earlier commit'}`);
+  // Only a new version answers a reviewer of the description.
+  if (description) return state(comment('color-fg-attention'), plural(found, 'finding'), `${problems}; it reviews the description again once it changes`);
+  if (reviewer.answered(p.pull, run)) return state(comment('color-fg-muted'), 'Answered', `${problems}; ${p.author.login} answered ${them}`);
+  return state(comment('color-fg-attention'), plural(found, 'finding'), `${problems}; ${p.author.login} has not answered ${them}`);
 }
 
 /**
