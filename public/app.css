@@ -903,9 +903,19 @@ code.wrap { word-break: break-all; }
 .files { flex: 1; min-width: 0; }
 .file-tree { position: sticky; top: calc(var(--files-toolbar-height) + 11px); width: 280px; max-height: calc(100vh - var(--files-toolbar-height) - 27px); overflow: auto; flex-shrink: 0; font-size: 14px; }
 body.tree-hidden .files-layout > .file-tree { display: none; }
-.file-tree ul { list-style: none; margin: 0; padding: 0 0 0 12px; }
+/* Like GitHub's tree: each level is indented half a chevron, with a guide line down from its
+   directory's chevron while the pointer is over the tree, and a file keeps a chevron's room so
+   its icon lines up with the directories' beside it. */
+.file-tree ul { list-style: none; margin: 0; padding: 0 0 0 8px; }
 .file-tree > ul { padding-left: 0; }
+.file-tree ul ul { position: relative; }
+.file-tree ul ul::before { content: ''; position: absolute; z-index: 1; top: 0; bottom: 0; left: 15px; border-left: 1px solid var(--border-muted); pointer-events: none; }
+@media (hover: hover) {
+  .file-tree ul ul::before { border-color: transparent; }
+  .file-tree > ul:is(:hover, :focus-within) ul::before { border-color: var(--border-muted); }
+}
 .file-tree summary, .tree-file { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; color: var(--fg); white-space: nowrap; }
+.tree-file::before { content: ''; width: 16px; flex-shrink: 0; }
 .file-tree summary { list-style: none; color: var(--fg); }
 .file-tree summary::-webkit-details-marker { display: none; }
 .tree-file:hover, .file-tree summary:hover { background: var(--neutral-muted); }
@@ -1101,12 +1111,13 @@ body.selecting { user-select: none; cursor: ns-resize; }
 /* The file tree beside it looks like the Files changed tree. Shown on wide screens and hidden on
    narrow ones, where it goes above the page, until the viewer says otherwise (public/app.js). */
 .browse-tree { top: 16px; max-height: calc(100vh - 32px); }
-.browse-tree-filter { position: sticky; top: 0; z-index: 1; padding-bottom: 8px; background: var(--bg); }
+.browse-tree-filter { position: sticky; top: 0; z-index: 2; padding-bottom: 8px; background: var(--bg); }
 .browse-tree summary { cursor: pointer; }
 .browse-tree summary > a.tree-name { flex: 0 1 auto; color: var(--fg); }
 .browse-tree summary:has(> a[aria-current]), .browse-tree .tree-file:has(> a[aria-current]) { background: var(--accent-subtle); }
 .browse-tree .tree-file:has(> a:focus-visible) { background: var(--neutral-muted); }
 .browse-tree-results .tree-file { white-space: normal; }
+.browse-tree-results .tree-file::before { content: none; }
 .browse-tree-results .tree-name { word-break: break-all; }
 .browse-tree-results mark { background: none; color: inherit; font-weight: 600; }
 .browse-tree-note { padding: 3px 8px; color: var(--fg-muted); }
