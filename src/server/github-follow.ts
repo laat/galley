@@ -1,4 +1,4 @@
-// What laatsux reads about a published pull request on GitHub while it follows it, to show the
+// What galley reads about a published pull request on GitHub while it follows it, to show the
 // reviewer how it stands there: whether it is merged or closed, its checks and the workflow runs
 // on its head, a pending Copilot review, the review decision and who is asked to review,
 // unresolved review threads, whether it conflicts with its base, and whether auto-merge is on. It
@@ -107,7 +107,7 @@ export interface GithubThread {
   comments: { id: number; author: string; body: string; at: string; url: string }[];
 }
 
-/** What laatsux last saw of an open published pull request on GitHub (pulls.github_status). */
+/** What galley last saw of an open published pull request on GitHub (pulls.github_status). */
 export interface GithubStatus {
   checkedAt: string;
   /** The head commit on GitHub, which the checks are about. */
@@ -118,7 +118,7 @@ export interface GithubStatus {
   reviewRequestsTotal?: number;
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   mergeStateStatus: string;
-  /** Auto-merge is on: GitHub merges it once it can. Null when GitHub did not say (missing in a status stored before laatsux asked). */
+  /** Auto-merge is on: GitHub merges it once it can. Null when GitHub did not say (missing in a status stored before galley asked). */
   autoMerge?: boolean | null;
   /** Conflicting with its base, as last known: GitHub says UNKNOWN for a while after each push. */
   conflicting: boolean;
@@ -158,7 +158,7 @@ export function checkName(c: GithubCheck): string {
 const ROLLUP: Record<string, GithubStatus['checksResult']> = { SUCCESS: 'passed', FAILURE: 'failed', ERROR: 'failed', PENDING: 'pending', EXPECTED: 'pending' };
 
 /**
- * Read GitHub's answer about an open pull request, given what laatsux saw before. Without
+ * Read GitHub's answer about an open pull request, given what galley saw before. Without
  * `complete`, some earlier pages of review threads could not be read: the threads on them stay as
  * they were last seen.
  */
@@ -225,7 +225,7 @@ export function prependThreads(node: GithubPull, page: { pageInfo?: PageInfo; no
   node.reviewThreads = { pageInfo: page.pageInfo, nodes: [...(page.nodes ?? []), ...(node.reviewThreads?.nodes ?? [])] };
 }
 
-/** Something on GitHub is still under way (checks, workflow runs, Copilot, the merge check), so laatsux asks more often. */
+/** Something on GitHub is still under way (checks, workflow runs, Copilot, the merge check), so galley asks more often. */
 export function githubBusy(status: GithubStatus | null): boolean {
   return !status || checksSummary(status).result === 'pending' || status.runs.length > 0 || status.copilotPending || status.mergeable === 'UNKNOWN';
 }

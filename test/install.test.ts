@@ -9,7 +9,7 @@ import { installCommand } from '../src/server/reviewers/install.ts';
 
 /** The install command for a commit holding these files; `{ symlink }` commits a symlink. */
 async function install(files: Record<string, string | { symlink: string }>) {
-  const dir = mkdtempSync(join(tmpdir(), 'laatsux-install-'));
+  const dir = mkdtempSync(join(tmpdir(), 'galley-install-'));
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' }).trim();
   try {
     git('init', '-q');
@@ -54,7 +54,7 @@ test('package.json picks among several lockfiles; without one nothing is install
 });
 
 test('symlinks count as no file, so the server never reads through them', async () => {
-  const outside = join(mkdtempSync(join(tmpdir(), 'laatsux-outside-')), 'package.json');
+  const outside = join(mkdtempSync(join(tmpdir(), 'galley-outside-')), 'package.json');
   writeFileSync(outside, '{"packageManager":"yarn@4.0.0"}');
   try {
     // A package.json pointing at /dev/zero, or outside the checkout, does not choose; a symlinked lockfile is no lockfile.

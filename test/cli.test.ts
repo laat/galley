@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createServer, type IncomingHttpHeaders } from 'node:http';
+import { join } from 'node:path';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { parseReviewers } from '../src/cli/pr.ts';
 import { checkPriority, fillFromCommits, splitPriorityPrefix } from '../src/server/service.ts';
+import { Client } from '../src/cli/client.ts';
 import { cliActor } from '../src/config.ts';
 import type { Commit } from '../src/server/git.ts';
 
@@ -62,7 +66,7 @@ test('fillFromCommits mirrors gh pr create --fill', () => {
 function actorWith(env: Record<string, string>) {
   const saved = { ...process.env };
   try {
-    for (const k of ['LAATSUX_ACTOR', 'CLAUDECODE', 'AI_AGENT', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_MANAGED_BY_NPM', 'OPENCODE']) {
+    for (const k of ['GALLEY_ACTOR', 'GALLEY_ACTOR_TYPE', 'LAATSUX_ACTOR', 'LAATSUX_ACTOR_TYPE', 'CLAUDECODE', 'AI_AGENT', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_MANAGED_BY_NPM', 'OPENCODE']) {
       delete process.env[k];
     }
     Object.assign(process.env, env);
@@ -84,7 +88,32 @@ test('the CLI detects the agent running it, also when Claude Code started that a
   assert.deepEqual(actorWith({ OPENCODE: '1', CLAUDECODE: '1', AI_AGENT: 'claude-code_2-1-301_agent' }), { login: 'opencode', type: 'Bot' });
   assert.deepEqual(actorWith({ CODEX_THREAD_ID: 'x', CLAUDECODE: '1', AI_AGENT: 'claude-code_2-1-301_agent' }), { login: 'codex-agent', type: 'Bot' });
   assert.deepEqual(actorWith({ AI_AGENT: 'gemini_1_agent' }), { login: 'gemini', type: 'Bot' });
-  assert.deepEqual(actorWith({ OPENCODE: '1', LAATSUX_ACTOR: 'reviewer' }), { login: 'reviewer', type: 'Bot' });
+  assert.deepEqual(actorWith({ OPENCODE: '1', GALLEY_ACTOR: 'reviewer' }), { login: 'reviewer', type: 'Bot' });
+});
+
+test('the names from before the rename still work: the laatsux command, LAATSUX_ variables and X-Laatsux- headers', async () => {
+  assert.equal(execFileSync(process.execPath, [join(import.meta.dirname, '..', 'bin', 'laatsux.ts'), '--version'], { encoding: 'utf8' }), 'galley version 0.1.0\n');
+  assert.deepEqual(actorWith({ LAATSUX_ACTOR: 'reviewer', LAATSUX_ACTOR_TYPE: 'User' }), { login: 'reviewer', type: 'User' });
+  assert.deepEqual(actorWith({ LAATSUX_ACTOR: 'before', GALLEY_ACTOR: 'after' }), { login: 'after', type: 'Bot' });
+  // The CLI names its caller with both headers, so a server that has not restarted since knows it too.
+  let heard: IncomingHttpHeaders = {};
+  const server = createServer((req, res) => {
+    heard = req.headers;
+    res.end('{}');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const saved = { ...process.env };
+  try {
+    process.env.GALLEY_ACTOR = 'agent';
+    await new Client(`http://127.0.0.1:${(server.address() as { port: number }).port}`).get('/api/health');
+  } finally {
+    process.env = saved;
+    server.close();
+  }
+  for (const name of ['galley', 'laatsux']) {
+    assert.equal(heard[`x-${name}-actor`], 'agent');
+    assert.equal(heard[`x-${name}-actor-type`], 'Bot');
+  }
 });
 
 test('pr create --reviewer takes repeats and commas like gh, and a number of reviews', () => {

@@ -12,7 +12,7 @@ import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
 import { ClaudeReviewer } from './reviewers/claude.ts';
 import { CustomReviewers } from './reviewers/custom.ts';
-import { configDir } from '../config.ts';
+import { configDir, fromEnv } from '../config.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
@@ -27,10 +27,10 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
   // and refuse cross-site writes from other pages open in the browser.
   app.use('*', async (c, next) => {
     const host = c.req.header('host') ?? '';
-    if (!opts.allowedHosts.includes(host)) return c.text(`laatsux: unexpected Host header "${host}"`, 403);
+    if (!opts.allowedHosts.includes(host)) return c.text(`galley: unexpected Host header "${host}"`, 403);
     const origin = c.req.header('origin');
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && origin && !opts.allowedHosts.some((h) => origin === `http://${h}`)) {
-      return c.text('laatsux: cross-origin request refused', 403);
+      return c.text('galley: cross-origin request refused', 403);
     }
     await next();
   });
@@ -137,14 +137,14 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     server.once('error', reject);
   });
   const url = `http://localhost:${port}`;
-  const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER, fetchEveryMs: opts.fetchMs });
+  const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? fromEnv('GH'), viewerLogin: opts.viewerLogin ?? fromEnv('USER'), fetchEveryMs: opts.fetchMs });
   // A new instance id (a copied database, or one from before namespaces) pins what it has first.
   await service.pinRevisions();
   // A repository whose remote names another GitHub repository now (renamed there) takes its name before the first page.
   await service.followRemotes();
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
-  service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
-  service.claude = new ClaudeReviewer(service, opts.claudeBin ?? process.env.LAATSUX_CLAUDE ?? 'claude', opts.sandboxExec);
+  service.codex = new CodexReviewer(service, opts.codexBin ?? fromEnv('CODEX') ?? 'codex');
+  service.claude = new ClaudeReviewer(service, opts.claudeBin ?? fromEnv('CLAUDE') ?? 'claude', opts.sandboxExec);
   // Custom reviewers run with Codex's and Claude's tools.
   service.custom = new CustomReviewers(service, opts.reviewersDir ?? join(configDir(), 'reviewers'), { codex: service.codex.tool, claude: service.claude.tool });
   service.custom.load();
@@ -153,7 +153,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const autoPublisher = new AutoPublisher(service);
   autoPublisher.start();
   app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
-  if (!opts.viewerLogin && !process.env.LAATSUX_USER) service.detectViewer();
+  if (!opts.viewerLogin && !fromEnv('USER')) service.detectViewer();
   // Warm what the pages show about the repositories on GitHub, so the first page already has it.
   for (const repo of service.repos()) if (repo.github_slug) service.refreshGithubRepo(repo.github_slug);
 
@@ -196,7 +196,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     // waits for, pushes and merges are still noticed, and the author's `pr wait` gets the review.
     if (graceMs > 0 && service.reviewsRunning()) {
       service.stopping = true;
-      service.bus.emit('change', { pullId: null, type: 'stopping', actor: 'laatsux' } satisfies ChangeEvent);
+      service.bus.emit('change', { pullId: null, type: 'stopping', actor: 'galley' } satisfies ChangeEvent);
     }
     // Changes to the definitions start and stop no more reviewers.
     service.custom?.stop();

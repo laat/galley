@@ -1,4 +1,4 @@
-// laatsux web UI. Server-rendered pages; this file adds the interactive parts.
+// galley web UI. Server-rendered pages; this file adds the interactive parts.
 (() => {
   'use strict';
 
@@ -236,7 +236,7 @@
     reviewer_failed: 'could not finish its review',
     reviewer_cancelled: 'stopped reviewing',
   };
-  // What laatsux did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
+  // What galley did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
   const AUTOMATIC = {
     auto_published: 'Published to GitHub with auto-publish',
     auto_publish_failed: 'Auto-publish failed',

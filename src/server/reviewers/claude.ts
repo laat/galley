@@ -53,7 +53,7 @@ const SESSION_VARIABLES = [
  * Claude Code's own temporary directory, which its sandbox lets commands write to ($TMPDIR in
  * there). Short, since it keeps sockets there: past about 30 bytes Claude Code falls back to
  * /tmp/claude-<uid>, where the user's own Claude Code sessions keep their files. Where /tmp is
- * not writable, as for laatsux's own tests run by a reviewer agent in its sandbox, it goes in
+ * not writable, as for galley's own tests run by a reviewer agent in its sandbox, it goes in
  * $TMPDIR.
  */
 function ownTmp(): string {
@@ -80,10 +80,10 @@ export class ClaudeEngine implements Engine {
     this.sandboxExec = sandboxExec;
   }
 
-  /** Claude Code can not run a command in its sandbox without the model, so the install gets laatsux's own (sandbox.ts). */
+  /** Claude Code can not run a command in its sandbox without the model, so the install gets galley's own (sandbox.ts). */
   install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {
     const wrapped = sandboxed(command, { writable: [o.checkout, o.tmp], readOnly: [join(o.checkout, '.git')] }, this.sandboxExec);
-    if (!wrapped) return Promise.reject(new Error(`laatsux has no sandbox to install in on ${process.platform}`));
+    if (!wrapped) return Promise.reject(new Error(`galley has no sandbox to install in on ${process.platform}`));
     return run(wrapped.bin, wrapped.args, { cwd: o.checkout, env: o.env, allowFail: true, timeoutMs: o.timeoutMs, signal: o.signal });
   }
 
@@ -152,9 +152,9 @@ export class ClaudeEngine implements Engine {
 
   /**
    * Claude Code's sandbox for the commands Claude runs. Its network is off, so code from the
-   * pull request can not reach laatsux's API on localhost, which takes any local caller for the
+   * pull request can not reach galley's API on localhost, which takes any local caller for the
    * user, unless the user lets the tests listen and connect on localhost (the localhost setting),
-   * which opens every port there, laatsux's too, and lets them listen on every interface. It
+   * which opens every port there, galley's too, and lets them listen on every interface. It
    * writes to the checkout (when it runs the tests), its own temporary directory and the
    * review's, and nowhere else: not to the git directory the checkout points into, which Claude
    * Code would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude Code
@@ -185,7 +185,7 @@ export class ClaudeEngine implements Engine {
     return MODELS;
   }
 
-  /** Every model takes every effort; one laatsux does not list (a full model name) is not checked. */
+  /** Every model takes every effort; one galley does not list (a full model name) is not checked. */
   efforts(model: string): string[] | null {
     return model ? (MODELS.find((m) => m.slug === model)?.efforts ?? null) : EFFORTS;
   }

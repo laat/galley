@@ -49,7 +49,7 @@ export interface ToolCallUpdate extends Partial<Omit<ToolCall, 'sessionUpdate' |
 export interface Chunk {
   sessionUpdate: 'user_message_chunk' | 'agent_message_chunk' | 'agent_thought_chunk';
   content: TextContent;
-  /** laatsux extension: the message a chunk belongs to. Chunks in a row with the same id (or none) are one message. */
+  /** galley extension: the message a chunk belongs to. Chunks in a row with the same id (or none) are one message. */
   messageId?: string;
 }
 
@@ -58,9 +58,9 @@ export type SessionUpdate =
   | { sessionUpdate: 'plan'; entries: PlanEntry[] }
   | ToolCall
   | ToolCallUpdate
-  /** laatsux extension: the tokens used so far, and the cost once the tool says. Shown live, not stored. */
+  /** galley extension: the tokens used so far, and the cost once the tool says. Shown live, not stored. */
   | { sessionUpdate: 'usage'; usage: RunUsage }
-  /** laatsux extension: an error the tool reported, whether it carried on or stopped. */
+  /** galley extension: an error the tool reported, whether it carried on or stopped. */
   | { sessionUpdate: 'error'; message: string };
 
 /** What the store adds: where it stopped keeping a run's updates, and how many it left out. */

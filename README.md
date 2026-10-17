@@ -1,4 +1,6 @@
-# laatsux
+# galley
+
+![The loop: an agent stages a pull request, reviewer agents comment, you review it in a GitHub-like UI, and you publish it to GitHub.](https://github.com/user-attachments/assets/9f2bd780-8f65-4857-ba22-9b3934e6208b)
 
 A local staging area for pull requests. Agents stage a pull request with a CLI that mirrors
 `gh`, reviewer agents review it, and you review it in a web UI that looks like GitHub. When the
@@ -15,37 +17,37 @@ title, description and commits are right, you publish it to GitHub.
 ## Install
 
 ```sh
-git clone https://github.com/laat/laatsux && cd laatsux
+git clone https://github.com/laat/galley && cd galley
 pnpm install
-ln -s "$PWD/bin/laatsux.ts" ~/.local/bin/laatsux   # or: npm link
+ln -s "$PWD/bin/galley.ts" ~/.local/bin/galley   # or: npm link
 ```
 
-Give your agents the `stage-pr` skill, which tells them how to stage, wait and answer feedback.
+Give your agents the `galley` skill, which tells them how to stage, wait and answer feedback.
 Codex and opencode read skills from `~/.agents/skills`, Claude Code from `~/.claude/skills`:
 
 ```sh
 mkdir -p ~/.agents/skills ~/.claude/skills
-ln -s "$PWD/skills/stage-pr" ~/.agents/skills/stage-pr       # Codex, opencode
-ln -s ~/.agents/skills/stage-pr ~/.claude/skills/stage-pr    # Claude Code
+ln -s "$PWD/skills/galley" ~/.agents/skills/galley       # Codex, opencode
+ln -s ~/.agents/skills/galley ~/.claude/skills/galley    # Claude Code
 ```
 
-Then ask an agent to "stage a PR", or run `/stage-pr` in Claude Code.
+Then ask an agent to "stage a PR", or run `/galley` in Claude Code.
 
-To use it as a gh extension too (`gh laatsux pr create …`):
+To use it as a gh extension too (`gh galley pr create …`):
 
 ```sh
-dir="${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-laatsux"
-mkdir -p "$dir" && ln -s "$PWD/bin/laatsux.ts" "$dir/gh-laatsux"
+dir="${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-galley"
+mkdir -p "$dir" && ln -s "$PWD/bin/galley.ts" "$dir/gh-galley"
 ```
 
 ## Run
 
 ```sh
-laatsux serve            # http://localhost:7171
+galley serve            # http://localhost:7171
 ```
 
 You rarely need to: when no server is running, the CLI starts one in the background (log in
-`~/.local/share/laatsux/server.log`). `LAATSUX_NO_AUTOSTART=1` turns that off.
+`~/.local/share/laatsux/server.log`). `GALLEY_NO_AUTOSTART=1` turns that off.
 
 The server publishes with your `git push`, `gh` and signing key, so they must work where it
 runs. If an agent's sandbox blocks them, start the server yourself. Stopping the server lets
@@ -53,7 +55,7 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 
 ## The review loop
 
-1. **The agent stages its branch** with `laatsux pr create` and waits with `laatsux pr wait`.
+1. **The agent stages its branch** with `galley pr create` and waits with `galley pr wait`.
    Nothing is pushed.
 2. **Reviewer agents review it.** The agent answers them, commits and waits again, until they
    find nothing or reach their limit. Then it asks you to review.
@@ -62,16 +64,16 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 4. **The agent addresses your feedback** and waits again. Comments follow their lines when it
    rewrites history, and reviewer agents review its new commits before you.
 5. **You publish.** Publish pushes the commit you reviewed and opens the pull request on GitHub,
-   or updates it. It can sign the agent's commits as you and turn on auto-merge. laatsux then
+   or updates it. It can sign the agent's commits as you and turn on auto-merge. galley then
    shows the pull request's checks and reviews on GitHub, and tells the agent when it is merged.
 6. **After that, GitHub's reviews and checks take over.** The agent commits and waits, and
-   laatsux pushes each commit it waits with, without reviews here: signed as you published,
-   force-pushed only over what laatsux pushed last, and with auto-merge asked for again if it
+   galley pushes each commit it waits with, without reviews here: signed as you published,
+   force-pushed only over what galley pushed last, and with auto-merge asked for again if it
    was on. A push GitHub refuses is not tried again, and you and the agent hear why; one that
    fails otherwise (GitHub out of reach, a signing prompt nobody answered) is tried again when
    the agent next waits.
 
-The conversation stays in laatsux; GitHub gets the branch, title and description.
+The conversation stays in galley; GitHub gets the branch, title and description.
 
 The front page lists the pull requests waiting for you first, each with the reason, then those
 the agents are working on. A published pull request is your turn once GitHub can merge it and
@@ -111,7 +113,7 @@ A custom reviewer's approval is its own; it never counts as yours.
 ## Auto-publish
 
 **Publish when reviews are done**, next to Publish, approves publishing in advance, like
-GitHub's auto-merge. laatsux publishes once the reviewer agents are done with the latest commit,
+GitHub's auto-merge. galley publishes once the reviewer agents are done with the latest commit,
 the agent is waiting with all feedback seen, your conversations are resolved, and the branch
 merges cleanly into its base. It is for the first publish only. Cancel, closing it, your own
 Request changes, a new base or a failed publish turns it off. With **Enable auto-merge on
@@ -126,23 +128,26 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 
 | Variable | Default | |
 |---|---|---|
-| `LAATSUX_URL` | `http://localhost:7171` | Where the CLI finds the server |
-| `LAATSUX_PORT` | `7171` | Port for `serve` and the default URL |
-| `LAATSUX_HOME` | `~/.local/share/laatsux` | Server data directory |
-| `LAATSUX_CONFIG_DIR` | `~/.config/laatsux` | Custom reviewers, in `reviewers/` |
-| `LAATSUX_ACTOR` | the detected agent | Who CLI calls act as |
-| `LAATSUX_USER` | your `gh` login | Your name in the UI |
-| `LAATSUX_GH` | `gh` | gh binary used for publishing |
-| `LAATSUX_CODEX` | `codex` | Codex binary used for reviews |
-| `LAATSUX_CLAUDE` | `claude` | Claude Code binary used for reviews |
-| `LAATSUX_NO_AUTOSTART` | unset | Do not start a server when none is running |
+| `GALLEY_URL` | `http://localhost:7171` | Where the CLI finds the server |
+| `GALLEY_PORT` | `7171` | Port for `serve` and the default URL |
+| `GALLEY_HOME` | `~/.local/share/laatsux` | Server data directory |
+| `GALLEY_CONFIG_DIR` | `~/.config/laatsux` | Custom reviewers, in `reviewers/` |
+| `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
+| `GALLEY_USER` | your `gh` login | Your name in the UI |
+| `GALLEY_GH` | `gh` | gh binary used for publishing |
+| `GALLEY_CODEX` | `codex` | Codex binary used for reviews |
+| `GALLEY_CLAUDE` | `claude` | Claude Code binary used for reviews |
+| `GALLEY_NO_AUTOSTART` | unset | Do not start a server when none is running |
+
+galley was called laatsux before. For a while, the `laatsux` command and the `LAATSUX_*` variables
+still work.
 
 ## Security
 
 - The server listens on 127.0.0.1 and refuses requests from web pages on other sites. Any
   process running as you can still call its API as you, publishing included: agents are kept
-  from publishing only by the name the CLI gives them, which `LAATSUX_ACTOR` overrides
-  ([#52](https://github.com/laat/stage-pr/issues/52)).
+  from publishing only by the name the CLI gives them, which `GALLEY_ACTOR` overrides
+  ([#52](https://github.com/laat/galley/issues/52)).
 - Secrets in a push are left to GitHub's push protection.
 - Reviewer agents run code from the pull request in a sandbox with no network, except while the
   dependencies install. Code that gets past the install's precautions could reach the API.
@@ -153,6 +158,6 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 
 ## More
 
-- [`skills/stage-pr/SKILL.md`](skills/stage-pr/SKILL.md): the CLI and the loop, for agents.
-- [`docs/api.md`](docs/api.md): the REST API under `/api`, GitHub's with laatsux's extensions.
-- `laatsux --help`: the CLI, which takes the same subcommands and flags as `gh`.
+- [`skills/galley/SKILL.md`](skills/galley/SKILL.md): the CLI and the loop, for agents.
+- [`docs/api.md`](docs/api.md): the REST API under `/api`, GitHub's with galley's extensions.
+- `galley --help`: the CLI, which takes the same subcommands and flags as `gh`.

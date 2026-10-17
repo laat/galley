@@ -99,7 +99,7 @@ test('githubAsks: GitHub would merge it now, and auto-merge is off', () => {
   assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: { enabledAt: 't' } }), null, 'now'), 'main'), [], 'GitHub merges it by itself');
   assert.deepEqual(githubAsks(readGithub(pull({ autoMergeRequest: null, mergeStateStatus: 'BLOCKED' }), null, 'now'), 'main'), []);
   const { autoMerge, ...before } = readGithub(pull({ autoMergeRequest: null }), null, 'now');
-  assert.deepEqual(githubAsks(before, 'main'), [], 'a status stored before laatsux asked about auto-merge');
+  assert.deepEqual(githubAsks(before, 'main'), [], 'a status stored before galley asked about auto-merge');
 });
 
 test('githubWaits: a required review, from those asked for one', () => {

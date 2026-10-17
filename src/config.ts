@@ -4,20 +4,28 @@ import { join } from 'node:path';
 export const VERSION = '0.1.0';
 export const DEFAULT_PORT = 7171;
 
+/** A setting from the environment: GALLEY_<name>, or LAATSUX_<name> as it was called before the rename (#9). */
+export function fromEnv(name: string): string | undefined {
+  return process.env[`GALLEY_${name}`] || process.env[`LAATSUX_${name}`];
+}
+
 export function serverUrl(): string {
-  if (process.env.LAATSUX_URL) return process.env.LAATSUX_URL.replace(/\/$/, '');
-  return `http://localhost:${process.env.LAATSUX_PORT ?? DEFAULT_PORT}`;
+  const url = fromEnv('URL');
+  if (url) return url.replace(/\/$/, '');
+  return `http://localhost:${fromEnv('PORT') ?? DEFAULT_PORT}`;
 }
 
 export function dataDir(): string {
-  if (process.env.LAATSUX_HOME) return process.env.LAATSUX_HOME;
+  const home = fromEnv('HOME');
+  if (home) return home;
   const xdg = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
   return join(xdg, 'laatsux');
 }
 
 /** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
 export function configDir(): string {
-  if (process.env.LAATSUX_CONFIG_DIR) return process.env.LAATSUX_CONFIG_DIR;
+  const dir = fromEnv('CONFIG_DIR');
+  if (dir) return dir;
   const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
   return join(xdg, 'laatsux');
 }
@@ -27,8 +35,9 @@ export function configDir(): string {
  * from yours, and so their own comments do not count as feedback in `pr wait`.
  */
 export function cliActor(): { login: string; type: 'User' | 'Bot' } | null {
+  const login = fromEnv('ACTOR');
+  if (login) return { login, type: fromEnv('ACTOR_TYPE') === 'User' ? 'User' : 'Bot' };
   const env = process.env;
-  if (env.LAATSUX_ACTOR) return { login: env.LAATSUX_ACTOR, type: env.LAATSUX_ACTOR_TYPE === 'User' ? 'User' : 'Bot' };
   // An agent started from another inherits the other's variables too, so the agents that run
   // inside Claude Code are checked before it.
   // Codex sets CODEX_THREAD_ID for every command it runs, CODEX_SANDBOX only with its own sandbox on.

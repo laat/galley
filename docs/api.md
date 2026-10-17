@@ -1,14 +1,14 @@
 # API
 
 The server speaks a subset of GitHub's REST API under `/api` (pulls, review comments, reviews,
-issue comments, the timeline, commits and contents), in GitHub's shapes, so `laatsux api` calls
-look like `gh api` calls. This page lists only what laatsux adds. Paths starting with `…` are
+issue comments, the timeline, commits and contents), in GitHub's shapes, so `galley api` calls
+look like `gh api` calls. This page lists only what galley adds. Paths starting with `…` are
 under `/api/repos/{owner}/{repo}`.
 
 ## Identity
 
-- `X-Laatsux-Actor: <login>`: who the caller is; without it, the user. `X-Laatsux-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409.
-- Another agent can review as a GitHub review bot does, under its own name: `LAATSUX_ACTOR=reviewer laatsux pr review <n> --comment -b "…"`, or `POST …/pulls/{n}/reviews`. Its reviews wake the author's `pr wait` like the user's.
+- `X-Galley-Actor: <login>`: who the caller is; without it, the user. `X-Galley-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409. `X-Laatsux-Actor` and `X-Laatsux-Actor-Type`, their names before the rename, still work.
+- Another agent can review as a GitHub review bot does, under its own name: `GALLEY_ACTOR=reviewer galley pr review <n> --comment -b "…"`, or `POST …/pulls/{n}/reviews`. Its reviews wake the author's `pr wait` like the user's.
 - Callers of type `Bot` get 403 from what is the user's to do: publishing, auto-publish, deleting, pinning, stop-iterating, settings, and asking for or configuring a reviewer agent.
 
 ## Pull requests
@@ -18,7 +18,7 @@ under `/api/repos/{owner}/{repo}`.
 - `DELETE …/pulls/{n}`: delete a staged pull request.
 - `POST …/pulls/{n}/publish`: push and open or update the pull request on GitHub. Body `{sign, draft, force, expected, during_review, during_conflict, auto_merge, merge_method}`. 428 lists what the body must acknowledge in `acknowledge`; 412 when the pull request (`expected`, the page's fingerprint) or the merge method changed. The response adds `auto_merge_result`.
 - `PUT|DELETE …/pulls/{n}/auto-publish`: turn auto-publish on (body `{sign, draft, force, auto_merge, merge_method}`) or off. It approves the first publish only: 422 once published.
-- `GET …/pulls/{n}/wait?timeout=<s>`: long-poll for the author. `status` is `feedback`, `agents_done`, `conflicts`, `published`, `pushed`, `push_failed`, `closed`, `merged`, `closed_on_github` or `timeout`, with `pr` (the gh shape), `agents_done`, `conflicts`, `push` and `seen_at`. Once published, a wait with a head GitHub does not have pushes it, signed as the last publish was and force-pushed only with a lease on what laatsux pushed last; `push` says how (`source`, `head`, `before`, `force`, `signed`, `result`, `error`, `retry`), and is in the timeline as a `github_push` event. A push GitHub refused is `push_failed`, and is not tried again for that commit; one that failed otherwise (`retry`) is tried again at the author's next wait, which hears nothing of it.
+- `GET …/pulls/{n}/wait?timeout=<s>`: long-poll for the author. `status` is `feedback`, `agents_done`, `conflicts`, `published`, `pushed`, `push_failed`, `closed`, `merged`, `closed_on_github` or `timeout`, with `pr` (the gh shape), `agents_done`, `conflicts`, `push` and `seen_at`. Once published, a wait with a head GitHub does not have pushes it, signed as the last publish was and force-pushed only with a lease on what galley pushed last; `push` says how (`source`, `head`, `before`, `force`, `signed`, `result`, `error`, `retry`), and is in the timeline as a `github_push` event. A push GitHub refused is `push_failed`, and is not tried again for that commit; one that failed otherwise (`retry`) is tried again at the author's next wait, which hears nothing of it.
 - `PUT …/pulls/{n}/seen`: the author confirms it showed a wait's result: `{at, agents_done?, conflicts?}`.
 - `PUT|DELETE …/pulls/{n}/pinned`: pin to the top of the front page.
 - `PUT|DELETE …/pulls/{n}/stop-iterating`: stop the reviewer agents' automatic reviews, or resume them.

@@ -1,4 +1,4 @@
-// The sandbox laatsux installs dependencies in for the Claude reviewer: macOS's sandbox-exec.
+// The sandbox galley installs dependencies in for the Claude reviewer: macOS's sandbox-exec.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -26,7 +26,7 @@ test('there is none to install in outside macOS, unless one stands in', () => {
 });
 
 test('it writes only to the checkout and its TMPDIR, and never to the checkout\'s .git', { skip }, () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'laatsux-sandbox-')));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'galley-sandbox-')));
   try {
     const checkout = join(dir, 'checkout');
     const tmp = join(dir, 'tmp');

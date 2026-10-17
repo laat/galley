@@ -18,7 +18,7 @@ import { CodexReviewer } from '../src/server/reviewers/codex.ts';
 import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { Repo } from '../src/server/git.ts';
 
-const BIN = join(import.meta.dirname, '..', 'bin', 'laatsux.ts');
+const BIN = join(import.meta.dirname, '..', 'bin', 'galley.ts');
 
 /** Whether /tmp is writable here: not in a reviewer agent's sandbox. */
 function slashTmpWritable(): boolean {
@@ -43,7 +43,7 @@ let server: Awaited<ReturnType<typeof startServer>>;
 // Nothing reaches GitHub: the server's fetches from the github.com remotes fail at once on a proxy
 // that is not there, as from a remote it can not reach (pushes go to local bare repositories). The
 // server allows https whatever the config says, so it can not be turned off that way.
-const configDir = mkdtempSync(join(tmpdir(), 'laatsux-gitconfig-'));
+const configDir = mkdtempSync(join(tmpdir(), 'galley-gitconfig-'));
 const gitconfig = join(configDir, 'config');
 const signingKey = join(configDir, 'id_ed25519');
 execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'reviewer', '-f', signingKey]);
@@ -77,7 +77,7 @@ function digitCommit(parent: string): string {
 async function cli(args: string[], opts: { input?: string; actor?: string; cwd?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   const child = execFile(process.execPath, [BIN, ...args], {
     cwd: opts.cwd ?? repo,
-    env: { ...process.env, LAATSUX_URL: server.url, LAATSUX_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' },
+    env: { ...process.env, GALLEY_URL: server.url, GALLEY_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' },
   });
   if (opts.input !== undefined) child.stdin!.end(opts.input);
   else child.stdin!.end();
@@ -113,7 +113,7 @@ async function human(method: string, path: string, body?: unknown): Promise<any>
 }
 
 before(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'laatsux-test-'));
+  dir = mkdtempSync(join(tmpdir(), 'galley-test-'));
   remote = join(dir, 'remote.git');
   repo = join(dir, 'repo');
   execFileSync('git', ['init', '-q', '--bare', remote]);
@@ -214,7 +214,7 @@ if (gate) {
   // `--output-format stream-json` does, it prints its messages first: it reads math.js (by its
   // full path) and says something before it waits, and gives its answer with StructuredOutput.
   const claude = join(dir, 'claude');
-  process.env.LAATSUX_CLAUDE = claude;
+  process.env.GALLEY_CLAUDE = claude;
   process.env.FAKE_CLAUDE_LOG = join(dir, 'claude.log');
   writeFileSync(
     claude,
@@ -309,7 +309,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     // API tells it apart from feedback, and says it again until the author confirms it.
     const earlier: string[] = [];
     for (let i = 0; i < 2; i++) {
-      const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/wait?timeout=5`, { headers: { 'x-laatsux-actor': 'agent' } });
+      const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/wait?timeout=5`, { headers: { 'x-galley-actor': 'agent' } });
       const body = await res.json();
       assert.deepEqual([body.status, body.reviews, body.comments, body.agents_done], ['agents_done', [], [], { sha: git('rev-parse', 'HEAD'), reviewers: [] }]);
       earlier.push(body.seen_at);
@@ -317,12 +317,12 @@ test('the agent loop, from staging to publishing', async (t) => {
     const r = await cli(['pr', 'wait', '--timeout', '20s']);
     assert.equal(r.code, 0, r.stderr);
     const sha = git('rev-parse', '--short=7', 'HEAD');
-    assert.equal(r.stdout, `No reviewer agent reviews ${sha}; ask the reviewer to review it: ${server.url}/acme/widgets/pull/1\nThen run \`laatsux pr wait 1\` to wait for the review.\n`);
+    assert.equal(r.stdout, `No reviewer agent reviews ${sha}; ask the reviewer to review it: ${server.url}/acme/widgets/pull/1\nThen run \`galley pr wait 1\` to wait for the review.\n`);
     // A confirmation that arrives late, from an earlier wait about an earlier commit (overlapping
     // waits, a retry), does not take back the newer one.
     const late = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/seen`, {
       method: 'PUT',
-      headers: { 'x-laatsux-actor': 'agent', 'content-type': 'application/json' },
+      headers: { 'x-galley-actor': 'agent', 'content-type': 'application/json' },
       body: JSON.stringify({ at: earlier[0], agents_done: git('rev-parse', 'main') }),
     });
     assert.equal(late.status, 204);
@@ -523,7 +523,7 @@ test('the agent loop, from staging to publishing', async (t) => {
   await t.test('a rewritten branch needs force to publish again', async () => {
     git('commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Reworded.');
     await assert.rejects(human('POST', '/api/repos/acme/widgets/pulls/1/publish', {}), /409|rejected|git push failed/);
-    // A published ref at a commit laatsux did not sign is not its to move.
+    // A published ref at a commit galley did not sign is not its to move.
     const published = `refs/laatsux/${server.service.db.instance}/pull/1/published`;
     const unsigned = git('rev-parse', 'main');
     git('update-ref', published, unsigned);
@@ -536,7 +536,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr edit https:\/\/github\.com\/acme\/widgets\/pull\/7 --title/m);
     assert.equal(git('rev-parse', published), unsigned);
     const logged = errors.mock.calls.map((c) => c.arguments.join(' '));
-    assert.ok(logged.some((line) => line.startsWith(`left ${published} alone in `) && line.endsWith(`it points at ${unsigned}, which laatsux did not sign`)), logged.join('\n'));
+    assert.ok(logged.some((line) => line.startsWith(`left ${published} alone in `) && line.endsWith(`it points at ${unsigned}, which galley did not sign`)), logged.join('\n'));
     git('update-ref', published, execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim());
   });
 
@@ -711,7 +711,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
   assert.ok(call.args.includes('model_reasoning_effort="high"'));
   assert.match(call.prompt, /Title: Add the answer/);
   assert.equal(call.sawFile, true, 'codex runs in a checkout of the head commit');
-  // By default laatsux installs the dependencies from the lockfile first, in Codex's sandbox with
+  // By default galley installs the dependencies from the lockfile first, in Codex's sandbox with
   // network and without the repository's scripts. Then Codex may run the tests, without network,
   // writing only to the checkout and a temporary directory beside it, whatever the user's
   // config.toml says, and ignoring the checkout's own .codex/config.toml.
@@ -751,7 +751,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
   assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-C')), ['-s', 'workspace-write', ...workspaceWrite(false), ...untrusted]);
   assert.equal(call.tmpdir, join(dirname(checkout), 'tmp'));
   assert.equal(call.npmCache, join(call.tmpdir, 'npm'));
-  assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile [^`]*`, which runs no install scripts/);
+  assert.match(call.prompt, /galley installed the dependencies with `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile [^`]*`, which runs no install scripts/);
   assert.match(call.prompt, /\n    Packages: \+3\n    Done in 1s\n/);
   // Its sandbox can not let the tests serve on localhost without opening more (README).
   assert.match(call.prompt, /you may run the typecheck, tests or build/);
@@ -761,7 +761,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
   // Removed afterwards, read-only directories and all. The review is posted before the cleanup finishes.
   await server.service.codex!.settle((await human('GET', base)).id);
   assert.equal(existsSync(dirname(checkout)), false);
-  assert.doesNotMatch(git('worktree', 'list'), /laatsux-review-/);
+  assert.doesNotMatch(git('worktree', 'list'), /galley-review-/);
 
   // The cap: after one automatic review, a new commit and another wait start nothing. The
   // reviewer agents are done with it, and the wait says so.
@@ -785,7 +785,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
   assert.equal(second.code, 0, second.stderr);
   assert.match(second.stdout, /automatic review 2 of 2/);
   const failedInstall = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
-  assert.match(failedInstall.prompt, /laatsux could not install the dependencies: `pnpm install [^`]*` exited with 1\. Its output ended with:\n\n    ERR_PNPM_OUTDATED_LOCKFILE\n/);
+  assert.match(failedInstall.prompt, /galley could not install the dependencies: `pnpm install [^`]*` exited with 1\. Its output ended with:\n\n    ERR_PNPM_OUTDATED_LOCKFILE\n/);
 
   // Asking from the page ignores the cap, and a failed run keeps its error. With running the
   // tests turned off, Codex gets today's read-only sandbox and is told not to modify files.
@@ -889,7 +889,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   // what it opens. Codex's sandbox can not do it without letting the tests connect to other hosts.
   assert.equal((await human('GET', '/api/settings')).claude.localhost, false);
   assert.match(settingsPage, /<input type="checkbox" name="localhost"> Let Claude's tests listen on localhost/);
-  assert.match(settingsPage, /Code in the pull request can then reach anything on localhost, including laatsux, which takes any local caller for you and could publish as you/);
+  assert.match(settingsPage, /Code in the pull request can then reach anything on localhost, including galley, which takes any local caller for you and could publish as you/);
   assert.match(settingsPage, /other machines on your network can reach a server that does not listen on 127\.0\.0\.1 only/);
   assert.doesNotMatch(settingsPage.split('id="claude"')[0], /name="localhost"/);
   await assert.rejects(human('PUT', '/api/settings/codex', { localhost: true }), /Codex's sandbox can not let its tests listen on localhost/);
@@ -947,7 +947,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.equal(call.claudeTmpdirExists, true);
   assert.equal(existsSync(call.claudeTmpdir), false, 'removed after the review');
   assert.equal(call.session, null, 'not taken for part of a Claude Code session the server was started from');
-  // The dependencies were installed first, in laatsux's own sandbox: network, and writes only to the checkout and the review's TMPDIR.
+  // The dependencies were installed first, in galley's own sandbox: network, and writes only to the checkout and the review's TMPDIR.
   const install = JSON.parse(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').at(-1)!);
   assert.match(install.args[1], /^\(version 1\)\n\(deny default\)/);
   assert.deepEqual(install.args.slice(2), [
@@ -963,7 +963,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   ]);
   assert.equal(install.cwd, checkout);
   assert.equal(install.store, join(tmp, 'pnpm-store'));
-  assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install [^`]*`[^]*\n    Packages: \+1\n/);
+  assert.match(call.prompt, /galley installed the dependencies with `pnpm install [^`]*`[^]*\n    Packages: \+1\n/);
   assert.match(call.prompt, /There is no network, so you can not install anything/);
   assert.doesNotMatch(call.prompt, /localhost/);
 
@@ -996,7 +996,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(transcript, /The answer is off by one\./);
   assert.match(transcript, /&quot;summary&quot;: &quot;Off by one\.&quot;/);
   assert.match(transcript, /2 steps · \$0\.01 · 45k tokens in, 2k out · 7 turns/);
-  // The first step was laatsux's: installing the dependencies.
+  // The first step was galley's: installing the dependencies.
   assert.match(transcript, /<code class="run-command">pnpm install --frozen-lockfile [^<]*<\/code><\/span> <svg[^>]*octicon-check[^]*?Packages: \+1/);
 
   // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
@@ -1151,7 +1151,7 @@ test("a reviewer agent's progress shows while it runs, and its transcript stays"
   assert.match(transcript, /codex-review's review on request of <code>[0-9a-f]{7}<\/code>/);
   assert.match(transcript, new RegExp(`<a href="${pullPath}#pullrequestreview-\\d+">Posted its review</a>`));
   assert.match(transcript, /2 steps · 12k tokens in, 300 out/);
-  assert.match(transcript, /The prompt laatsux gave it<\/summary><pre class="run-output">[^<]*Title: Show the progress/);
+  assert.match(transcript, /The prompt galley gave it<\/summary><pre class="run-output">[^<]*Title: Show the progress/);
   assert.match(transcript, /run-thought[^]*<strong>Reading the change<\/strong>/);
   assert.match(transcript, /I will read math\.js and the diff\./);
   // The read links to the file at the reviewed commit, with the command that read it and its
@@ -1380,7 +1380,7 @@ test('stop iterating: a running review finishes, no new one starts, the author h
     await until(async () => (await runs('codex'))[0] === 'done', 'Codex has reviewed');
     await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews');
     assert.match(await page(), /<strong>1 automatic review round so far<\/strong>[^]*>Stop iterating<\/button>/);
-    const agent = await fetch(`${server.url}${base}/stop-iterating`, { method: 'PUT', headers: { 'x-laatsux-actor': 'agent' } });
+    const agent = await fetch(`${server.url}${base}/stop-iterating`, { method: 'PUT', headers: { 'x-galley-actor': 'agent' } });
     assert.equal(agent.status, 403);
     const stopped = await human('PUT', `${base}/stop-iterating`);
     assert.equal(stopped.iterations_stopped.stopped_by.login, 'reviewer');
@@ -1663,7 +1663,7 @@ test('beside Stop iterating and Resume, what each reviewer agent last found, by 
 });
 
 test('symlinks in a pull request lead the reviewer nowhere: not to /dev/zero, not outside the checkout', async () => {
-  const outside = mkdtempSync(join(tmpdir(), 'laatsux-outside-'));
+  const outside = mkdtempSync(join(tmpdir(), 'galley-outside-'));
   writeFileSync(join(outside, 'secret'), 'keep\n');
   chmodSync(join(outside, 'secret'), 0o444);
   chmodSync(outside, 0o555);
@@ -1746,7 +1746,7 @@ test('a review still running shows in pr view and pr wait, and publishing before
     assert.equal(approved.code, 0, approved.stderr);
     assert.match(approved.stdout, /reviewer reviewed: approved/);
     assert.match(approved.stdout, new RegExp(`^codex-review is reviewing ${sha} \\(started just now\\)\\.$`, 'm'));
-    assert.match(approved.stdout, new RegExp(`codex-review is still reviewing; run \`laatsux pr wait ${number}\` to get its review\\.`));
+    assert.match(approved.stdout, new RegExp(`codex-review is still reviewing; run \`galley pr wait ${number}\` to get its review\\.`));
     assert.doesNotMatch(approved.stdout, /nothing left open/);
 
     // Its review wakes the next wait, which says the approval came before it.
@@ -1772,7 +1772,7 @@ test('a review still running shows in pr view and pr wait, and publishing before
     assert.match((await refused.json()).message, /^codex-review is still reviewing this commit, and its review may ask for changes\. Publishing now cancels it\.$/);
     const fromTerminal = await cli(['pr', 'publish', String(number)], { actor: 'reviewer' });
     assert.equal(fromTerminal.code, 1);
-    assert.match(fromTerminal.stderr, new RegExp(`Run \`laatsux pr publish ${number} --during-review\` to publish anyway\\.`));
+    assert.match(fromTerminal.stderr, new RegExp(`Run \`galley pr publish ${number} --during-review\` to publish anyway\\.`));
     const agent = await cli(['pr', 'publish', String(number), '--during-review']);
     assert.match(agent.stderr, /publishing is for the reviewer/);
     const published = await human('POST', `${base}/publish`, { expected, during_review: true });
@@ -1973,7 +1973,7 @@ test('a running review is cancelled when the pull request is published, closed, 
       rmSync(gates.codex, { force: true });
       const pr = await stage('feature/cancel-posting', 'cancel-posting.js');
       await ask(pr, 'codex');
-      // Codex has answered, and laatsux is placing its comments when the pull request is closed.
+      // Codex has answered, and galley is placing its comments when the pull request is closed.
       const createReview = server.service.createReview;
       server.service.createReview = async (...args: Parameters<Service['createReview']>) => {
         await human('PATCH', pr.base, { state: 'closed' });
@@ -2026,7 +2026,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     // Repeated and comma-separated, as in gh; logins without a reviewer agent are ignored.
     const r = await create(['-r', 'octocat,codex:2', '--reviewer', 'alice']);
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stderr, /Ignored reviewer octocat: laatsux has no reviewer agent by that name/);
+    assert.match(r.stderr, /Ignored reviewer octocat: galley has no reviewer agent by that name/);
     assert.match(r.stderr, /Ignored reviewer alice/);
     const n = numberOf(r);
     const { enabled, max_iterations, overrides } = await human('GET', `${api(n)}/reviewers/codex`);
@@ -2137,7 +2137,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
     const post = async (body: object) => {
       const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+        headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
         body: JSON.stringify({ title: 'Through the API', head: 'feature/refused', base: 'main', ...body }),
       });
       assert.equal(res.status, 201);
@@ -2352,7 +2352,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.match(first.stdout, /codex-review reviewed: commented/);
       // Findings on lines outside the diff, which only the review's body carries, count too.
       assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs.map((r: any) => r.findings), [2]);
-      assert.match(first.stdout, /Auto-publish is on \(reviewer turned it on\): laatsux publishes this pull request once the reviewer agents are done/);
+      assert.match(first.stdout, /Auto-publish is on \(reviewer turned it on\): galley publishes this pull request once the reviewer agents are done/);
       assert.equal(pr.created(), false);
       const box = await pr.page();
       assert.match(box, /<strong>Auto-publish is on<\/strong>/);
@@ -2361,7 +2361,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.match(box, /js-auto-publish-cancel/);
       assert.doesNotMatch(box, /Publish when reviews are done/);
 
-      // The agent fixes it and waits again. Codex has used its one review, so laatsux publishes the new commit.
+      // The agent fixes it and waits again. Codex has used its one review, so galley publishes the new commit.
       writeFileSync(join(repo, 'auto.js'), 'export const answer = 1;\n');
       git('commit', '-qam', 'Name the value');
       const second = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
@@ -2377,7 +2377,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       const after = await pr.page();
       assert.match(after, /published this pull request to <a [^>]*>acme\/widgets#7<\/a> at <code>[0-9a-f]{7}<\/code> \(signed 2 commits\) with auto-publish/);
       assert.doesNotMatch(after, /Auto-publish is on|Publish when reviews are done/);
-      assert.match(second.stdout, /It is published: commit and wait, and laatsux pushes each commit you wait with to GitHub\. Never push to GitHub yourself\./);
+      assert.match(second.stdout, /It is published: commit and wait, and galley pushes each commit you wait with to GitHub\. Never push to GitHub yourself\./);
       const refused = await fetch(`${server.url}${pr.base}/auto-publish`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
       assert.equal(refused.status, 422);
     } finally {
@@ -2658,7 +2658,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       const pr = await stage('feature/auto-observer', 'observer.js');
       await human('PUT', `${pr.base}/auto-publish`, {});
       const observe = async () => {
-        const res = await fetch(`${server.url}${pr.base}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'observer' } });
+        const res = await fetch(`${server.url}${pr.base}/wait?timeout=1`, { headers: { 'x-galley-actor': 'observer' } });
         return { status: res.status, message: (await res.json()).message };
       };
       // Another agent waiting is not the author waiting: Codex does not start ...
@@ -2809,7 +2809,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     return () => log().slice(start).split('\n').filter(Boolean);
   };
   const url = 'https://github.com/acme/widgets/pull/7';
-  /** Read the repository's settings from GitHub (the fake gh, with `env`) into laatsux's cache. */
+  /** Read the repository's settings from GitHub (the fake gh, with `env`) into galley's cache. */
   const refresh = async (env: Record<string, string>) => {
     Object.assign(process.env, env);
     try {
@@ -2818,7 +2818,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       for (const k of Object.keys(env)) delete process.env[k];
     }
   };
-  // The option shows once laatsux knows that the repository allows auto-merge.
+  // The option shows once galley knows that the repository allows auto-merge.
   await refresh({});
 
   await t.test('when publishing by hand, with the merge method from settings', async () => {
@@ -2954,7 +2954,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     await refresh({});
   });
 
-  await t.test('a merge gh accepted but laatsux could not check is not reported as auto-merge on', async () => {
+  await t.test('a merge gh accepted but galley could not check is not reported as auto-merge on', async () => {
     const pr = await stage('feature/merge-unknown', 'unknown-merge.js');
     process.env.FAKE_GH_VIEW = 'not JSON';
     try {
@@ -3012,7 +3012,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
 
   await t.test('asks GitHub before publishing, rather than trusting what it read earlier', async () => {
     // Auto-publish was approved with auto-merge while GitHub allowed squash merges; then the
-    // repository stopped allowing them, and laatsux's cache has not heard yet.
+    // repository stopped allowing them, and galley's cache has not heard yet.
     const pr = await stage('feature/merge-stale', 'stale-merge.js');
     await human('PUT', `${pr.base}/auto-publish`, { auto_merge: true });
     const calls = ghCalls();
@@ -3106,7 +3106,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       const refused = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auto_merge: true }) });
       delete process.env.FAKE_GH_SQUASH;
       assert.equal(refused.status, 422);
-      assert.match((await refused.json()).message, /acme\/widgets does not allow squash merges, the merge method in laatsux's settings \(it allows merge, rebase\)\. Change it under Settings → Publishing\./);
+      assert.match((await refused.json()).message, /acme\/widgets does not allow squash merges, the merge method in galley's settings \(it allows merge, rebase\)\. Change it under Settings → Publishing\./);
 
       // Not knowing, because gh failed, hides it too.
       await refresh({ FAKE_GH_API_FAIL: 'HTTP 502' });
@@ -3128,7 +3128,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
   writeFileSync(join(repo, 'restart.js'), 'export {};\n');
   git('add', 'restart.js');
   git('commit', '-qm', 'Add restart.js');
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-stop-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-stop-'));
   const start = ({ port = 0, gh = 'false' } = {}) => startServer({ port, dataDir: data, ghBin: gh, codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 });
   let s = await start();
   const port = s.port;
@@ -3140,7 +3140,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
   const pr = await (
     await fetch(`${s.url}${pulls}`, {
       method: 'POST',
-      headers: { ...json, 'x-laatsux-actor': 'agent' },
+      headers: { ...json, 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: 'Slow review', head: 'feature/restart-review', base: 'main', reviewers: [{ login: 'codex', max_iterations: 1 }] }),
     })
   ).json();
@@ -3157,7 +3157,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
   });
   try {
     // The author waits, which starts the automatic review, and the server stops under it.
-    const env = { ...process.env, LAATSUX_URL: s.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1', NO_COLOR: '1' };
+    const env = { ...process.env, GALLEY_URL: s.url, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1', NO_COLOR: '1' };
     const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env });
     for (let i = 0; i < 200 && !s.service.codex!.isRunning(pr.id); i++) await new Promise((r) => setTimeout(r, 25));
     // Until Codex is at work, with steps in its transcript.
@@ -3166,7 +3166,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
     const started = Date.now();
     await s.close();
     assert.ok(Date.now() - started < 5000, `close took ${Date.now() - started} ms`);
-    assert.doesNotMatch(git('worktree', 'list'), /laatsux-review-/);
+    assert.doesNotMatch(git('worktree', 'list'), /galley-review-/);
 
     // Interrupted, not failed: it runs again once the author's wait is back (on the same port), and the wait gets its review.
     writeFileSync(gate, '');
@@ -3199,7 +3199,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
 
     // Until it has run again, it holds things up: auto-publish does not publish while the server
     // stops, with the author waiting and nothing unseen, nor is the author told the agents are done.
-    const asAgent = { 'x-laatsux-actor': 'agent' };
+    const asAgent = { 'x-galley-actor': 'agent' };
     const shown = await (await fetch(`${s.url}${base}/wait?timeout=5`, { headers: asAgent })).json();
     assert.equal((await fetch(`${s.url}${base}/seen`, { method: 'PUT', headers: { ...asAgent, ...json }, body: JSON.stringify({ at: shown.seen_at }) })).status, 204);
     assert.equal((await fetch(`${s.url}${base}/auto-publish`, { method: 'PUT', headers: json, body: JSON.stringify({ sign: false }) })).status, 200);
@@ -3302,7 +3302,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
     s.service.bus.on('change', (e: ChangeEvent) => e.type === 'stopping' && heard.push(e));
     writeFileSync(gate, '');
     await finishing;
-    assert.deepEqual(heard, [{ pullId: null, type: 'stopping', actor: 'laatsux' }]);
+    assert.deepEqual(heard, [{ pullId: null, type: 'stopping', actor: 'galley' }]);
     s = await start();
     assert.deepEqual((await runs()).slice(9), [['manual', 'done', null]]);
 
@@ -3351,7 +3351,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
 });
 
 test('closing the server waits for a running poll before it closes the database', async () => {
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-poll-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-poll-'));
   const second = await startServer({ port: 0, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 10 });
   const errors = mock.method(console, 'error', () => {});
   // A slow poll: it reads the database once the server is closing.
@@ -3379,7 +3379,7 @@ test('closing the server waits for a running poll before it closes the database'
 test('an author an older CLI called "codex" moves to "codex-agent" when the reviewer starts', async () => {
   // As the reviewer took the name "codex", it moved such an author; on its new default it does so when it starts.
   for (const current of [false, true]) {
-    const data = mkdtempSync(join(tmpdir(), 'laatsux-upgrade-'));
+    const data = mkdtempSync(join(tmpdir(), 'galley-upgrade-'));
     const db = new Db(join(data, 'laatsux.db'));
     try {
       const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
@@ -3433,7 +3433,7 @@ test('a Codex reviewer on the former default name "codex" becomes "codex-review"
 });
 
 test('Codex reviews from before findings were counted are counted from their review', async () => {
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-findings-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-findings-'));
   const db = new Db(join(data, 'laatsux.db'));
   const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
   const reviewer = new CodexReviewer(s, join(dir, 'codex'));
@@ -3487,7 +3487,7 @@ test('Codex reviews from before findings were counted are counted from their rev
 
 test('a reviewer never takes the human reviewer\'s own name', async () => {
   // Known at startup: the human is set up first, and the reviewer takes another name.
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-viewer-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-viewer-'));
   const named = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), viewerLogin: 'codex-review', pollMs: 60_000 });
   try {
     assert.equal(named.service.viewer().type, 'User');
@@ -3500,7 +3500,7 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
   }
 
   // Learned later (from gh): the reviewer gives the name up.
-  const data2 = mkdtempSync(join(tmpdir(), 'laatsux-viewer-'));
+  const data2 = mkdtempSync(join(tmpdir(), 'galley-viewer-'));
   const db = new Db(join(data2, 'laatsux.db'));
   try {
     const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'someone' });
@@ -3516,7 +3516,7 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
 });
 
 test('pr wait keeps waiting when the server restarts under it', async () => {
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-restart-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-restart-'));
   const first = await startServer({ port: 0, dataDir: data, ghBin: 'false', viewerLogin: 'reviewer', pollMs: 60_000 });
   const port = first.port;
   const json = { 'content-type': 'application/json' };
@@ -3524,11 +3524,11 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
   const pr = await (
     await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
       method: 'POST',
-      headers: { ...json, 'x-laatsux-actor': 'agent' },
+      headers: { ...json, 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: 'Survives restarts', head: 'feature/by-codex', base: 'main' }),
     })
   ).json();
-  const env = { ...process.env, LAATSUX_URL: first.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1' };
+  const env = { ...process.env, GALLEY_URL: first.url, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1' };
   // No reviewer agent reviews it, which the first wait says; the next one waits for the reviewer.
   assert.match((await exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env })).stdout, /ask the reviewer to review it/);
   const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env });
@@ -3547,7 +3547,7 @@ test('pr wait keeps waiting when the server restarts under it', async () => {
 
     // Delivered but never confirmed (the CLI died, say): the next wait brings it again.
     const api = `${second.url}/api/repos/${registered.full_name}/pulls/${pr.number}`;
-    const asAgent = { 'x-laatsux-actor': 'agent' };
+    const asAgent = { 'x-galley-actor': 'agent' };
     await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/comments`, { method: 'POST', headers: json, body: JSON.stringify({ body: 'Second?' }) });
     const once = await (await fetch(`${api}/wait?timeout=5`, { headers: asAgent })).json();
     const twice = await (await fetch(`${api}/wait?timeout=5`, { headers: asAgent })).json();
@@ -3587,7 +3587,7 @@ async function waitLosingSeen(cwd: string, n: number): Promise<string> {
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
   const child = execFile(process.execPath, [BIN, 'pr', 'wait', String(n), '--timeout', '20s'], {
     cwd,
-    env: { ...process.env, LAATSUX_URL: `http://localhost:${(proxy.address() as AddressInfo).port}`, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1', NO_COLOR: '1' },
+    env: { ...process.env, GALLEY_URL: `http://localhost:${(proxy.address() as AddressInfo).port}`, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1', NO_COLOR: '1' },
   });
   let stdout = '';
   child.stdout!.on('data', (d) => (stdout += d));
@@ -3609,7 +3609,7 @@ test('pr wait says the reviewer agents are done before it confirms that it said 
   // Stopped while it waits for the answer, the agent was told all the same.
   assert.match(await waitLosingSeen(join(dir, 'handover'), pr.number), new RegExp(`^No reviewer agent reviews ${head.slice(0, 7)}; ask the reviewer to review it: `));
   // The server will not say it again.
-  const res = await fetch(`${server.url}/api/repos/acme/handover/pulls/${pr.number}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'agent' } });
+  const res = await fetch(`${server.url}/api/repos/acme/handover/pulls/${pr.number}/wait?timeout=1`, { headers: { 'x-galley-actor': 'agent' } });
   assert.equal((await res.json()).status, 'timeout');
 });
 
@@ -3618,7 +3618,7 @@ test('pr wait says the pull request was published before it confirms that it sai
   const pr = await stage('published-notice');
   await human('POST', `${api}/${pr.number}/publish`, {});
   assert.match(await waitLosingSeen(join(dir, 'published-notice'), pr.number), /^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
-  const res = await fetch(`${server.url}${api}/${pr.number}/wait?timeout=1`, { headers: { 'x-laatsux-actor': 'agent' } });
+  const res = await fetch(`${server.url}${api}/${pr.number}/wait?timeout=1`, { headers: { 'x-galley-actor': 'agent' } });
   assert.equal((await res.json()).status, 'timeout');
 });
 
@@ -3628,7 +3628,7 @@ test('auto-publish stays on when the server restarts', async () => {
   writeFileSync(join(repo, 'restart.js'), 'export {};\n');
   git('add', 'restart.js');
   git('commit', '-qm', 'Add restart');
-  const data = mkdtempSync(join(tmpdir(), 'laatsux-auto-restart-'));
+  const data = mkdtempSync(join(tmpdir(), 'galley-auto-restart-'));
   const options = { port: 0, dataDir: data, ghBin: join(dir, 'gh'), codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 };
   const json = { 'content-type': 'application/json' };
   const first = await startServer(options);
@@ -3636,7 +3636,7 @@ test('auto-publish stays on when the server restarts', async () => {
   const pr = await (
     await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
       method: 'POST',
-      headers: { ...json, 'x-laatsux-actor': 'agent' },
+      headers: { ...json, 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: 'Published after a restart', head: 'feature/auto-restart', base: 'main' }),
     })
   ).json();
@@ -3647,7 +3647,7 @@ test('auto-publish stays on when the server restarts', async () => {
     const api = `${second.url}/api/repos/${registered.full_name}/pulls/${pr.number}`;
     assert.equal((await (await fetch(api)).json()).auto_publish.enabled_by.login, 'reviewer');
     // The agent waits on the new server, which publishes.
-    const r = await (await fetch(`${api}/wait?timeout=10`, { headers: { 'x-laatsux-actor': 'agent' } })).json();
+    const r = await (await fetch(`${api}/wait?timeout=10`, { headers: { 'x-galley-actor': 'agent' } })).json();
     assert.equal(r.status, 'published');
     const timeline = await (await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/timeline`)).json();
     assert.equal(timeline.findLast((e: any) => e.event === 'published').auto, true);
@@ -3665,10 +3665,10 @@ test('the CLI starts a server when none is running', async () => {
     });
   });
   const url = `http://localhost:${port}`;
-  const home = mkdtempSync(join(tmpdir(), 'laatsux-autostart-'));
+  const home = mkdtempSync(join(tmpdir(), 'galley-autostart-'));
   try {
-    const r = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, LAATSUX_URL: url, LAATSUX_HOME: home, LAATSUX_ACTOR: 'agent' } });
-    assert.match(r.stderr, new RegExp(`Started the laatsux server at ${url}`));
+    const r = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent' } });
+    assert.match(r.stderr, new RegExp(`Started the galley server at ${url}`));
     // It keeps running after the command that started it.
     const health = await (await fetch(`${url}/api/health`)).json();
     assert.equal(health.ok, true);
@@ -3676,7 +3676,7 @@ test('the CLI starts a server when none is running', async () => {
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
-  const off = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, LAATSUX_URL: url, LAATSUX_NO_AUTOSTART: '1' } }).catch((e) => e);
+  const off = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_NO_AUTOSTART: '1' } }).catch((e) => e);
   assert.equal(off.code, 1);
   assert.match(off.stderr, /not running/);
 });
@@ -3786,7 +3786,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     const woken = await waiting;
     assert.equal(woken.code, 0, woken.stderr);
     assert.match(woken.stdout, new RegExp(`^    !\\[screenshot\\]\\(${path}\\)\n    Image: ${server.url}${path}$`, 'm'));
-    assert.match(woken.stdout, new RegExp(`laatsux pr view ${number} --comments --download-images <dir>`));
+    assert.match(woken.stdout, new RegExp(`galley pr view ${number} --comments --download-images <dir>`));
 
     await human('POST', `${base}/reviews`, { event: 'COMMENT', comments: [{ path: 'images.js', line: 1, side: 'RIGHT', body: `Like this:\n![after](${path})` }] });
     const view = await cli(['pr', 'view', String(number), '--comments']);
@@ -3806,9 +3806,9 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
     const before = await page();
     assert.match(before, /js-attach-image/);
-    assert.doesNotMatch(before, /stored in laatsux/);
+    assert.doesNotMatch(before, /stored in galley/);
     await human('PATCH', base, { body: `Before and after:\n\n![before](${path})\n![after](${path.replace('.png', '.gif')})` });
-    assert.match(await page(), /The description has 2 images stored in laatsux, which GitHub cannot show\. Remove them, or replace them with images uploaded to GitHub\./);
+    assert.match(await page(), /The description has 2 images stored in galley, which GitHub cannot show\. Remove them, or replace them with images uploaded to GitHub\./);
   });
 });
 
@@ -4020,7 +4020,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.match(conversation.text, new RegExp(`href="/acme/widgets/tree/${head}" title="Browse the repository at this revision"`));
   });
 
-  await t.test('laatsux browse prints the URL of a pull request, file or directory', async () => {
+  await t.test('galley browse prints the URL of a pull request, file or directory', async () => {
     const browse = async (...args: string[]) => {
       const r = await cli(['browse', ...args]);
       assert.equal(r.code, 0, r.stderr);
@@ -4052,12 +4052,12 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal((await page(new URL(await browse('long.js:12', '--commit', head)).pathname)).status, 200);
   });
 
-  await t.test('laatsux browse --repo looks up commits and paths in that repository, through the server', async () => {
+  await t.test('galley browse --repo looks up commits and paths in that repository, through the server', async () => {
     const other = join(dir, 'other');
     execFileSync('git', ['init', '-q', '-b', 'main', other]);
     execFileSync('git', ['-C', other, '-c', 'commit.gpgsign=false', '-c', 'user.name=Other', '-c', 'user.email=other@example.com', 'commit', '-q', '--allow-empty', '-m', 'Other']);
     const browseFrom = (cwd: string, ...args: string[]) =>
-      exec(process.execPath, [BIN, 'browse', ...args], { cwd, env: { ...process.env, LAATSUX_URL: server.url, LAATSUX_ACTOR: 'agent', NO_COLOR: '1' } }).then(
+      exec(process.execPath, [BIN, 'browse', ...args], { cwd, env: { ...process.env, GALLEY_URL: server.url, GALLEY_ACTOR: 'agent', NO_COLOR: '1' } }).then(
         (r) => r.stdout.trim(),
         (e) => `exit ${e.code}: ${e.stderr.trim()}`,
       );
@@ -4243,7 +4243,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         reasons: `agent is not waiting, 1 min · no review from reviewer yet · agent answered 1 thread · codex-review's findings in ${sha()} are answered · 1 unresolved thread`,
       });
       // The tab's title counts the pull requests waiting for the reviewer.
-      assert.match(front, new RegExp(`<title>\\(${yourTurn(front).length}\\) Staged pull requests · laatsux</title>`));
+      assert.match(front, new RegExp(`<title>\\(${yourTurn(front).length}\\) Staged pull requests · galley</title>`));
       assert.match((await cli(['pr', 'status'])).stdout, /^ {4}- the reviewer's turn: agent is not waiting, 1 min; no review from reviewer yet; agent answered 1 thread;/m);
     });
 
@@ -4437,7 +4437,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await human('POST', '/api/repos', { path: other });
       const res = await fetch(`${server.url}/api/repos/acme/pull/pulls`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+        headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
         body: JSON.stringify({ title: 'Change a', head: 'feature', base: 'main' }),
       });
       assert.equal(res.status, 201);
@@ -4678,18 +4678,18 @@ test('published pull requests are followed until they are merged or closed on Gi
     // The first wait after a publish reports it; the next one waits for GitHub.
     const heard = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
     assert.match(heard.stdout, /^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
-    assert.match(heard.stdout, new RegExp(`Run \`laatsux pr wait ${number}\` again to hear when it is merged or closed on GitHub`));
+    assert.match(heard.stdout, new RegExp(`Run \`galley pr wait ${number}\` again to hear when it is merged or closed on GitHub`));
     return {
       number,
       id,
       base,
       page: async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(),
       timeline: (): Promise<any[]> => human('GET', `/api/repos/acme/widgets/issues/${number}/timeline`),
-      /** How many times laatsux has asked GitHub about it. */
+      /** How many times galley has asked GitHub about it. */
       asked: () => readFileSync(join(dir, 'gh.log'), 'utf8').split(`p${id}:pullRequest(number:7)`).length - 1,
     };
   };
-  /** What GitHub says about these pull requests (by staged pull id), and laatsux asking it, as it does every minute. */
+  /** What GitHub says about these pull requests (by staged pull id), and galley asking it, as it does every minute. */
   const githubSays = async (nodes: Record<number, object>) => {
     const repository = Object.fromEntries(Object.entries(nodes).map(([id, node]) => [`p${id}`, node]));
     writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository } }));
@@ -4759,7 +4759,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal(res.status, 422);
       assert.match((await res.json()).message, /merged on GitHub/);
 
-      // Merged is final: laatsux stops asking GitHub about it.
+      // Merged is final: galley stops asking GitHub about it.
       const asked = pr.asked();
       await githubSays({ [pr.id]: merged });
       assert.equal(pr.asked(), asked);
@@ -4834,7 +4834,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal((await human('GET', pr.base)).github_state, 'closed');
       assert.equal((await pr.timeline()).filter((e) => e.event === 'closed_on_github').length, 1);
 
-      // Reopened on GitHub and published again: open, with no close time, though laatsux keeps the close to know it if GitHub reports it again.
+      // Reopened on GitHub and published again: open, with no close time, though galley keeps the close to know it if GitHub reports it again.
       writeFileSync(join(repo, 'close.js'), 'export const reopened = 1;\n');
       git('commit', '-qam', 'Reopened');
       await human('POST', `${pr.base}/publish`, { sign: false });
@@ -4914,7 +4914,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.match(blocked.row, /<\/svg> acme\/widgets#7<\/a><\/span><span class="turn-reason">waiting for review from eskilgh, cbjerkan, acme\/platform<\/span>/);
       assert.match(blocked.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
       assert.match(blocked.row, new RegExp(`<a class="pr-row-number" href="/acme/widgets/pull/${n}">#${n}</a>`));
-      // A token without the read:org scope: GitHub refuses the teams' names, so laatsux asks again without them, from then on.
+      // A token without the read:org scope: GitHub refuses the teams' names, so galley asks again without them, from then on.
       const follows = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.includes('reviewRequests('));
       const before = follows().length;
       process.env.FAKE_GH_NO_READ_ORG = '1';
@@ -5096,7 +5096,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       try {
         await human('PUT', `${base}/auto-publish`, { sign: false, auto_merge: true, merge_method: 'squash' });
         // The agent waits, auto-publish publishes, and gh merges: the agent hears of the merge (the
-        // publish may reach it first, a moment before laatsux has asked GitHub about the merge).
+        // publish may reach it first, a moment before galley has asked GitHub about the merge).
         let heard = (await cli(['pr', 'wait', n, '--timeout', '20s'])).stdout;
         if (/^Published to GitHub/m.test(heard)) heard = (await cli(['pr', 'wait', n, '--timeout', '20s'])).stdout;
         assert.match(heard, /^Merged on GitHub as e468a4e by reviewer/m);
@@ -5125,7 +5125,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, new RegExp(`^acme/widgets#${b.number} \\(feature/multi-b\\): ${server.url}/acme/widgets/pull/${b.number}$`, 'm'));
       assert.match(r.stdout, /One more thing on b\./);
-      assert.match(r.stdout, new RegExp(`then run \`laatsux pr wait ${both.join(' ')}\` again`));
+      assert.match(r.stdout, new RegExp(`then run \`galley pr wait ${both.join(' ')}\` again`));
 
       // News on both: a wait brings one, and the next the other. The poll it dropped lost nothing.
       await comment(a.number, 'Note on a.');
@@ -5144,7 +5144,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       const merge = await waitingAgain;
       assert.match(merge.stdout, new RegExp(`^acme/widgets#${a.number} \\(feature/multi-a\\)`, 'm'));
       assert.match(merge.stdout, /^Merged on GitHub as e468a4e by laat/m);
-      assert.match(merge.stdout, new RegExp(`Wait on the others with \`laatsux pr wait ${b.number}\`\\.`));
+      assert.match(merge.stdout, new RegExp(`Wait on the others with \`galley pr wait ${b.number}\`\\.`));
     });
   } finally {
     rmSync(join(dir, 'gh-pulls.json'), { force: true });
@@ -5238,7 +5238,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.match((await unsigned.wait()).stdout, /^Pushed [0-9a-f]{7} to GitHub/m);
     assert.deepEqual(unsigned.tip(), { sha: git('rev-parse', 'HEAD'), signed: false, parent: before.sha });
 
-    // Published unsigned before laatsux recorded whether a publish signed: GitHub's commit says so.
+    // Published unsigned before galley recorded whether a publish signed: GitHub's commit says so.
     const older = await published('feature/push-older', { sign: false });
     server.service.db.run("UPDATE events SET data = json_remove(data, '$.sign') WHERE pull_id = ? AND type = 'published'", older.id);
     const tip = older.tip();
@@ -5377,11 +5377,11 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.equal(pr.tip().sha, git('rev-parse', 'HEAD'));
   });
 
-  await t.test('nothing is pushed once GitHub says it was merged, also before laatsux has heard', async () => {
+  await t.test('nothing is pushed once GitHub says it was merged, also before galley has heard', async () => {
     const pr = await published('feature/push-merged');
     const before = pr.tip().sha;
     pr.commit('export const late = 1;\n');
-    // Merged on GitHub a moment ago: following has not asked yet, so laatsux knows only when it asks before the push.
+    // Merged on GitHub a moment ago: following has not asked yet, so galley knows only when it asks before the push.
     process.env.FAKE_GH_VIEW = JSON.stringify({ state: 'MERGED', mergedAt: '2026-10-17T12:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: 'e468a4e' + '2'.repeat(33) } });
     try {
       assert.match((await pr.wait()).stdout, /^Merged on GitHub as e468a4e by laat/m);
@@ -5452,7 +5452,7 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
     g('commit', '-qm', `Add ${name}`);
     const res = await fetch(server.url + api, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: `Add ${name}`, head: name, base: 'main', automatic_reviews: false }),
     });
     assert.equal(res.status, 201);
@@ -5572,7 +5572,7 @@ async function scratchRepo(name: string, { github = true } = {}) {
     g('commit', '-qm', `Add ${branch}`);
     const res = await fetch(server.url + api, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: `Add ${branch}`, head: branch, base: 'main', automatic_reviews: false }),
     });
     assert.equal(res.status, 201);
@@ -5690,9 +5690,12 @@ test('the reviewer pins pull requests to the top of the front page, until they u
   try {
     // The front page is the reviewer's: agents can not pin, or unpin.
     for (const method of ['PUT', 'DELETE']) {
-      const res = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-laatsux-actor': 'agent' } });
+      const res = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-galley-actor': 'agent' } });
       assert.equal(res.status, 403);
       assert.match((await res.json()).message, /only the reviewer can pin/);
+      // Also named by the header's name before the rename.
+      const before = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-laatsux-actor': 'agent' } });
+      assert.equal(before.status, 403);
     }
 
     const updated = (await human('GET', `${api}/${a.number}`)).updated_at;
@@ -5846,7 +5849,7 @@ test('the front page and a repository\'s list the repositories with pull request
 
 test('a pull request that conflicts with its base: the reviewer sees it, the author is told to rebase, and auto-publish waits', async (t) => {
   const { fullName, api, path, g } = await scratchRepo('conflicts');
-  const agent = { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' };
+  const agent = { 'content-type': 'application/json', 'x-galley-actor': 'agent' };
   const until = async (done: () => boolean | Promise<boolean>, what: string) => {
     for (let i = 0; i < 400 && !(await done()); i++) await new Promise((r) => setTimeout(r, 25));
     assert.ok(await done(), what);
@@ -5900,7 +5903,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     const told = await waiting;
     assert.equal(told.code, 0, told.stderr);
     assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
-    assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `laatsux pr wait \d+` again\./);
+    assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait \d+` again\./);
     assert.deepEqual(await pr.view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
     assert.match((await cli(['pr', 'view', pr.n], { cwd: path })).stdout, /^conflicts:\twith origin\/main in a\.js; rebase onto origin\/main\.$/m);
   });
@@ -5968,7 +5971,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     const release = hold();
     let waiting: ReturnType<typeof moving.wait> | undefined;
     try {
-      // main moves on to a commit that conflicts, and laatsux sees it while it works out the merge.
+      // main moves on to a commit that conflicts, and galley sees it while it works out the merge.
       g('checkout', '-q', 'main');
       writeFileSync(join(path, 'a.js'), 'export const a = 5;\n');
       g('commit', '-qam', 'Set a to 5');
@@ -6058,7 +6061,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.equal(told.code, 0, told.stderr);
     assert.match(told.stdout, /^reviewer reviewed: approved /m);
     assert.match(told.stdout, /^This branch conflicts with origin\/main in d\.js; rebase onto origin\/main\.$/m);
-    assert.match(told.stdout, /^Rebase onto origin\/main, resolve the conflicts and run the tests, then run `laatsux pr wait \d+` again\.$/m);
+    assert.match(told.stdout, /^Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait \d+` again\.$/m);
     assert.doesNotMatch(told.stdout, /nothing left open/);
     // The wait that hands it the conflict is not an action on it: it is the author's turn until it acts.
     assert.equal(approved.row().author_waited_at, waited);
@@ -6152,7 +6155,7 @@ test('the base branch is fetched when a page opens, at most once a minute per re
     g('commit', '-qm', `Set ${file} in ${branch}`);
     const res = await fetch(server.url + api, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: `Set ${file}`, head: branch, base: 'main', automatic_reviews: false }),
     });
     assert.equal(res.status, 201);
@@ -6217,7 +6220,7 @@ test('the base branch is fetched when a page opens, at most once a minute per re
     const url = `${server.url}/${fullName}/pull/${mine.n}`;
     const asked = await cli(['pr', 'publish', url, '--no-sign'], { actor: 'reviewer' });
     assert.equal(asked.code, 1);
-    assert.match(asked.stderr, new RegExp(`in a\\.js: GitHub can not merge it until the conflicts are resolved\\.\\nRun \`laatsux pr publish ${mine.n} --during-conflict\` to publish anyway\\.`));
+    assert.match(asked.stderr, new RegExp(`in a\\.js: GitHub can not merge it until the conflicts are resolved\\.\\nRun \`galley pr publish ${mine.n} --during-conflict\` to publish anyway\\.`));
     const published = await cli(['pr', 'publish', url, '--no-sign', '--during-conflict'], { actor: 'reviewer' });
     assert.equal(published.code, 0, published.stderr);
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr create --repo acme\/fetched --base main --head mine /m);
@@ -6240,7 +6243,7 @@ test('publishing fetches its base also while a fetch of the other base branches 
     g('commit', '-qm', `Set ${file}`);
     const res = await fetch(server.url + api, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: `Set ${file}`, head: branch, base, automatic_reviews: false }),
     });
     assert.equal(res.status, 201);
@@ -6286,7 +6289,7 @@ test('publishing fetches its own base alone, and a repository with nothing to fe
     g('commit', '-qm', `Add ${file}`);
     const res = await fetch(server.url + api, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: `Add ${file}`, head: branch, base, automatic_reviews: false }),
     });
     assert.equal(res.status, 201);
@@ -6323,7 +6326,7 @@ test('a page whose base is a local branch does not hold up fetching the bases st
     g('commit', '-qm', `Add ${branch}.js`);
     const res = await fetch(server.url + api, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
       body: JSON.stringify({ title: `Add ${branch}.js`, head: branch, base, automatic_reviews: false }),
     });
     assert.equal(res.status, 201);
@@ -6346,7 +6349,7 @@ test('a fetch that fails shows in the merge box, is logged once, and does not ho
   g('commit', '-qam', 'Set a');
   const res = await fetch(server.url + api, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+    headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
     body: JSON.stringify({ title: 'Set a', head: 'mine', base: 'main', automatic_reviews: false }),
   });
   const { number } = await res.json();
@@ -6390,7 +6393,7 @@ test('a remote with an ssh URL is fetched from GitHub over https with gh, and ne
   g('commit', '-qam', 'Set a');
   const res = await fetch(`${server.url}/api/repos/${fullName}/pulls`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+    headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
     body: JSON.stringify({ title: 'Set a', head: 'mine', base: 'main', automatic_reviews: false }),
   });
   const { number } = await res.json();
@@ -6442,7 +6445,7 @@ test('the server fetches base branches on its timer, and a waiting author hears 
   const head = g('rev-parse', 'HEAD');
   const timed = await startServer({ port: 0, dataDir: join(dir, 'timer-data'), ghBin: 'false', viewerLogin: 'reviewer', pollMs: 50, followMs: 50, fetchMs: 100 });
   try {
-    const agent = { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' };
+    const agent = { 'content-type': 'application/json', 'x-galley-actor': 'agent' };
     const call = async (method: string, p: string, body?: unknown) => {
       const res = await fetch(timed.url + p, { method, headers: agent, body: body === undefined ? undefined : JSON.stringify(body) });
       const text = await res.text();

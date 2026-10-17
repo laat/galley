@@ -21,7 +21,7 @@ export interface ReviewerSettings {
   runTests: boolean;
   /**
    * With runTests, let the tests it runs listen and connect on localhost, so tests that start
-   * servers work. Code in the pull request can then reach anything on localhost, laatsux's API
+   * servers work. Code in the pull request can then reach anything on localhost, galley's API
    * too, and Claude Code lets them listen on every interface, not just loopback. Only for a tool
    * whose sandbox can do that without letting them connect to other hosts (Claude).
    */
@@ -36,7 +36,7 @@ export const MERGE_METHODS = ['squash', 'merge', 'rebase'] as const;
 export type MergeMethod = (typeof MERGE_METHODS)[number];
 
 export interface PublishSettings {
-  /** How GitHub merges a pull request that laatsux turned on auto-merge for: gh pr merge --squash, --merge or --rebase. */
+  /** How GitHub merges a pull request that galley turned on auto-merge for: gh pr merge --squash, --merge or --rebase. */
   mergeMethod: MergeMethod;
 }
 

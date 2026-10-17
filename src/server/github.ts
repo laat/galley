@@ -1,4 +1,4 @@
-// Serializers that shape laatsux records like GitHub's REST API (snake_case) and like
+// Serializers that shape galley records like GitHub's REST API (snake_case) and like
 // `gh ... --json` output (camelCase, GraphQL-style), so tools that know GitHub feel at home.
 import type { Commit, TreeEntry } from './git.ts';
 import type { FileDiff } from './diff.ts';
@@ -43,7 +43,7 @@ export function userJson(s: Service, a: Actor) {
   return { login: a.login, id: a.id, type: a.type, avatar_url: avatarUrl(s, a) };
 }
 
-/** A GitHub user laatsux knows only by login, such as whoever merged a pull request there. */
+/** A GitHub user galley knows only by login, such as whoever merged a pull request there. */
 function githubUserJson(login: string) {
   return { login, avatar_url: `https://github.com/${login}.png`, html_url: `https://github.com/${login}` };
 }
@@ -99,7 +99,7 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     merged_at: merged ? pull.github_closed_at : null,
     merged_by: merged && pull.github_closed_by ? githubUserJson(pull.github_closed_by) : null,
     merge_commit_sha: pull.github_merge_sha,
-    // GitHub's auto_merge, for the published pull request: on when laatsux last turned it on there.
+    // GitHub's auto_merge, for the published pull request: on when galley last turned it on there.
     auto_merge: autoMergeJson(s, pull),
     // GitHub's mergeability, while it is open there; for a head GitHub does not have, whether it conflicts with its base here,
     // and whether it is behind it.
@@ -107,12 +107,12 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     mergeable_state: local ? 'dirty' : local === false && conflicts?.behind ? 'behind' : local === null && github ? github.mergeStateStatus.toLowerCase() : 'unknown',
     head: { label: `${repo.owner}:${pull.head_ref}`, ref: pull.head_ref, sha: pull.head_sha },
     base: { label: `${repo.owner}:${pull.base_ref}`, ref: pull.base_ref, sha: pull.base_sha },
-    // laatsux extensions:
+    // galley extensions:
     // staged, published (and open on GitHub), or done (merged or closed on GitHub, or closed here).
     staging_state: staging,
     published_url: pull.published_url,
     published_at: pull.published_at,
-    // The published pull request on GitHub: open, merged or closed there (null until laatsux has asked),
+    // The published pull request on GitHub: open, merged or closed there (null until galley has asked),
     // and when and by whom it was merged or closed.
     github_state: pull.github_state,
     github_closed_at: pull.github_closed_at,
@@ -137,7 +137,7 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
   return json;
 }
 
-/** Auto-publish while it is on (a laatsux extension, after GitHub's auto_merge), or null. */
+/** Auto-publish while it is on (a galley extension, after GitHub's auto_merge), or null. */
 function autoPublishJson(s: Service, pull: PullRow) {
   const auto = s.autoPublish(pull);
   return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge };
@@ -154,7 +154,7 @@ function autoMergeJson(s: Service, pull: PullRow) {
   return { enabled_by: userJson(s, s.db.actorById(merge.by)), merge_method: merge.method, commit_title: null, commit_message: null };
 }
 
-/** What came of turning on auto-merge when publishing (a laatsux extension): `enabled`, `merged` at once, `requested` (which of the two could not be checked), or `failed` with gh's message. */
+/** What came of turning on auto-merge when publishing (a galley extension): `enabled`, `merged` at once, `requested` (which of the two could not be checked), or `failed` with gh's message. */
 export function autoMergeResult(merge: AutoMerge | null) {
   return merge && { state: merge.state, merge_method: merge.method, error: merge.error ?? null };
 }
@@ -237,7 +237,7 @@ export function reviewCommentJson(s: Service, repo: RepoRow, pull: PullRow, c: C
     updated_at: c.updated_at,
     html_url: `${s.pullUrl(repo, pull)}#discussion_r${c.id}`,
     pull_request_url: `${apiBase(s, repo)}/pulls/${pull.number}`,
-    // laatsux extensions:
+    // galley extensions:
     priority: c.priority,
     outdated: placement?.outdated ?? null,
     resolved: !!root.resolved_at,
@@ -282,7 +282,7 @@ function ghAuthor(s: Service, id: number) {
   return { login: a.login, is_bot: a.type === 'Bot' };
 }
 
-/** As gh says it, with laatsux's STAGED and PUBLISHED for gh's OPEN: PUBLISHED until the pull request is merged or closed on GitHub. */
+/** As gh says it, with galley's STAGED and PUBLISHED for gh's OPEN: PUBLISHED until the pull request is merged or closed on GitHub. */
 function ghState(pull: PullRow) {
   if (pull.github_state === 'merged') return 'MERGED';
   if (pull.github_state === 'closed') return 'CLOSED';
@@ -367,7 +367,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('closed', () => stagingState(pull) === 'done');
   set('url', () => s.pullUrl(repo, pull));
   set('isDraft', () => !!pull.draft);
-  // laatsux extension, named as gh names it for issues: pinned to the top of the reviewer's front page.
+  // galley extension, named as gh names it for issues: pinned to the top of the reviewer's front page.
   set('isPinned', () => !!pull.pinned_at);
   set('createdAt', () => pull.created_at);
   set('updatedAt', () => pull.updated_at);
@@ -377,7 +377,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('mergedBy', () => (merged && pull.github_closed_by ? { login: pull.github_closed_by, is_bot: false } : null));
   set('mergeCommit', () => (merged && pull.github_merge_sha ? { oid: pull.github_merge_sha } : null));
   // As gh has them for the pull request on GitHub, while it is open there. For a head GitHub does
-  // not have, whether it conflicts with its base as laatsux worked it out, and BEHIND when it merges
+  // not have, whether it conflicts with its base as galley worked it out, and BEHIND when it merges
   // cleanly but the base has commits it does not; the rest of mergeStateStatus (checks, reviews)
   // is GitHub's to say.
   const github = githubStatus(pull);
@@ -385,7 +385,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   const local = conflicts && conflicts.clean !== null ? !conflicts.clean : null;
   set('mergeable', () => (local === null ? (github?.mergeable ?? 'UNKNOWN') : local ? 'CONFLICTING' : 'MERGEABLE'));
   set('mergeStateStatus', () => (local === null ? (github?.mergeStateStatus ?? 'UNKNOWN') : local ? 'DIRTY' : conflicts!.behind ? 'BEHIND' : 'UNKNOWN'));
-  // laatsux extension: the base branch the head was merged into here (origin/main) and its tip, whether it
+  // galley extension: the base branch the head was merged into here (origin/main) and its tip, whether it
   // conflicts, the files that do, git's message for each conflict in none of them, and how many commits
   // the base has that the head does not (`behindBy`, as in GitHub's compare API).
   set('baseConflicts', () =>
@@ -400,7 +400,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
         : { __typename: c.kind, context: c.name, state: c.status, targetUrl: c.url ?? '' },
     ),
   );
-  // laatsux extension: all it saw on GitHub, when it last asked (null before publishing, and once merged or closed there).
+  // galley extension: all it saw on GitHub, when it last asked (null before publishing, and once merged or closed there).
   set('githubStatus', () => github);
   set('author', () => ghAuthor(s, pull.author_id));
   set('headRefName', () => pull.head_ref);
@@ -412,13 +412,13 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('changedFiles', () => files.length);
   set('publishedUrl', () => pull.published_url);
   set('waiting', () => (s.waiters.get(pull.id) ?? 0) > 0);
-  // Auto-merge on the published pull request, as laatsux last turned it on there.
+  // Auto-merge on the published pull request, as galley last turned it on there.
   set('autoMergeRequest', () => {
     const merge = s.autoMerge(pull);
     if (merge?.state !== 'enabled') return null;
     return { authorEmail: null, commitBody: null, commitHeadline: null, enabledAt: merge.at, enabledBy: ghAuthor(s, merge.by), mergeMethod: merge.method.toUpperCase() };
   });
-  // laatsux extension, after gh's autoMergeRequest: auto-publish while it is on.
+  // galley extension, after gh's autoMergeRequest: auto-publish while it is on.
   set('autoPublishRequest', () => {
     const auto = s.autoPublish(pull);
     return auto && { enabledAt: auto.at, enabledBy: ghAuthor(s, auto.by), sign: auto.sign, draft: auto.draft, force: auto.force, autoMerge: auto.autoMerge };
@@ -456,7 +456,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     state: r.state,
     submittedAt: r.submitted_at,
     commit: { oid: r.commit_id },
-    // laatsux extension: posted by a reviewer agent, whose approval is its own and not in reviewDecision.
+    // galley extension: posted by a reviewer agent, whose approval is its own and not in reviewDecision.
     byReviewerAgent: (agentReviews ??= s.agentReviews(pull)).has(r.id),
   });
   set('reviews', () => reviews.map(review));
@@ -466,7 +466,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     return [...latest.values()].map(review);
   });
   set('reviewDecision', () => s.reviewDecision(pull, reviews));
-  // laatsux extensions: whose move it is, and what GitHub does not have yet (#6, #29). `state`
+  // galley extensions: whose move it is, and what GitHub does not have yet (#6, #29). `state`
   // stays PUBLISHED when an update is not published, as gh would show it.
   set('turn', () => ghTurn(s.turn(pull)));
   set('unpublishedChanges', () => s.unpublishedChanges(pull).map((c) => (c === 'description' ? 'BODY' : c.toUpperCase())));
@@ -474,7 +474,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('reviewRequests', () =>
     s.reviewersAtWork(pull).map(({ reviewer, work }) => {
       const a = reviewer.actor();
-      // laatsux extensions: status (as in GitHub's check runs), the commit, and when it started.
+      // galley extensions: status (as in GitHub's check runs), the commit, and when it started.
       return { __typename: a.type, login: a.login, status: work.status, commit: { oid: work.head_sha }, startedAt: work.started_at };
     }),
   );

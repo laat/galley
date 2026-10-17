@@ -47,7 +47,7 @@ const SANITIZE: sanitizeHtml.IOptions = {
       return { tagName: 'a', attribs: external ? { ...attribs, target: '_blank', rel: 'noopener noreferrer' } : attribs };
     },
     input: (tag, attribs) => ({ tagName: 'input', attribs: { ...attribs, disabled: '' } }),
-    // Images come from the web or from laatsux's own uploads, never from another local URL.
+    // Images come from the web or from galley's own uploads, never from another local URL.
     img: (tag, { src, ...attribs }) => ({ tagName: 'img', attribs: src && (/^https?:\/\//i.test(src) || UPLOAD_PATH.test(src)) ? { src, ...attribs } : attribs }),
   },
 };

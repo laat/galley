@@ -94,7 +94,7 @@ async function resolvePull(client: Client, cwd: string, repoFlag: string | undef
 }
 
 /**
- * Text that shows comments, with the images uploaded to laatsux in them as absolute URLs, or
+ * Text that shows comments, with the images uploaded to galley in them as absolute URLs, or
  * with `dir` (--download-images), as the files they were saved to: agents read image files,
  * not URLs. `found` is the number of images.
  */
@@ -187,10 +187,10 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
     reviewers,
     automatic_reviews: v['no-review'] ? false : undefined,
   });
-  for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: laatsux has no reviewer agent by that name for this repository.`);
+  for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
   if (v.web) openBrowser(pr.html_url);
-  err(c.gray(`Review happens in the browser. Run \`laatsux pr wait ${pr.number}\` to block until the reviewer responds.`));
+  err(c.gray(`Review happens in the browser. Run \`galley pr wait ${pr.number}\` to block until the reviewer responds.`));
   return 0;
 }
 
@@ -330,7 +330,7 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
   if (v.base !== undefined) patch.base = v.base;
   if (Object.keys(patch).length === 0) {
     if (Object.keys(v).some((k) => k in IGNORED)) {
-      err('assignees, labels, reviewers, projects and milestones do not exist in laatsux; nothing to change');
+      err('assignees, labels, reviewers, projects and milestones do not exist in galley; nothing to change');
       return 0;
     }
     throw new CliError('specify at least one of --title, --body, --body-file or --base');
@@ -418,7 +418,7 @@ async function setState(client: Client, cwd: string, args: string[], state: 'ope
   if (v.comment) await client.json('POST', `${repoPath(t.repo)}/issues/${t.number}/comments`, { body: v.comment });
   const pr = await client.json('PATCH', pullPath(t), { state });
   err(`✓ ${state === 'closed' ? 'Closed' : 'Reopened'} pull request ${t.repo.owner}/${t.repo.name}#${t.number} (${pr.title})`);
-  if (v['delete-branch']) err('The branch was left alone; laatsux never deletes branches.');
+  if (v['delete-branch']) err('The branch was left alone; galley never deletes branches.');
   return 0;
 }
 
@@ -512,7 +512,7 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
         asked = JSON.parse(e.body).acknowledge ?? asked;
       } catch {}
       const flags = new Set([...acknowledged, ...asked.map((field) => field.replace('_', '-'))]);
-      throw new CliError(`${e.message}\nRun \`laatsux pr publish ${t.number} ${[...flags].map((f) => `--${f}`).join(' ')}\` to publish anyway.`);
+      throw new CliError(`${e.message}\nRun \`galley pr publish ${t.number} ${[...flags].map((f) => `--${f}`).join(' ')}\` to publish anyway.`);
     }
     throw e;
   });
@@ -537,7 +537,7 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
 function approvedBefore(pr: any, fresh: Set<number>): string[] {
   if (pr.reviewDecision !== 'APPROVED') return [];
   const decisions = new Map<string, any>();
-  // A reviewer agent's approval is its own, not part of the decision (byReviewerAgent, a laatsux extension).
+  // A reviewer agent's approval is its own, not part of the decision (byReviewerAgent, a galley extension).
   for (const rv of pr.reviews) if (!rv.byReviewerAgent && (rv.state === 'APPROVED' || rv.state === 'CHANGES_REQUESTED')) decisions.set(rv.author.login, rv);
   const lines: string[] = [];
   for (const approval of [...decisions.values()].filter((rv) => rv.state === 'APPROVED')) {
@@ -567,7 +567,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
   while (true) {
     const left = Math.ceil((deadline - Date.now()) / 1000);
     if (left <= 0) {
-      err(`No feedback yet on ${names} (timed out). Run \`laatsux pr wait ${all}\` again to keep waiting.`);
+      err(`No feedback yet on ${names} (timed out). Run \`galley pr wait ${all}\` again to keep waiting.`);
       // Findings the author has not answered hold up the reviewer agents, which no wait would say.
       for (const t of targets) {
         const pull = await client.get<any>(pullPath(t)).catch(() => null);
@@ -608,7 +608,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(`New feedback on ${url} (review decision: ${pr.reviewDecision})\n`);
       out(text + '\n');
     }
-    if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`laatsux pr view ${t.number} --comments --download-images <dir>\`.`));
+    if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`galley pr view ${t.number} --comments --download-images <dir>\`.`));
     for (const line of approvedBefore(pr, new Set(r.reviews))) out(line);
     // The head conflicts with its base: the author's to rebase, with whatever else there is.
     const conflicts = conflictsText(pr);
@@ -618,7 +618,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       const { sha, reviewers } = r.agents_done;
       const done = reviewers.length ? `The reviewer agents are done with ${sha.slice(0, 7)} (${reviewers.join('; ')})` : `No reviewer agent reviews ${sha.slice(0, 7)}`;
       out(`${done}; ask the reviewer to review it: ${url}`);
-      out(c.gray(`Then run \`laatsux pr wait ${all}\` to wait for the review.`));
+      out(c.gray(`Then run \`galley pr wait ${all}\` to wait for the review.`));
     }
     // Before the confirmation below, like the feedback: once confirmed, no wait says it again.
     if (r.status === 'published') out(`Published to GitHub: ${r.published_url}`);
@@ -628,7 +628,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
-    const getIt = `run \`laatsux pr wait ${all}\` to get ${atWork.length > 1 ? 'their reviews' : 'its review'}.`;
+    const getIt = `run \`galley pr wait ${all}\` to get ${atWork.length > 1 ? 'their reviews' : 'its review'}.`;
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
@@ -636,14 +636,14 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         break;
       } catch (e) {
         if (!transient(e) || attempt === 10) {
-          err('Could not confirm the feedback as seen; the next `laatsux pr wait` will show it again.');
+          err('Could not confirm the feedback as seen; the next `galley pr wait` will show it again.');
           break;
         }
         await new Promise((res) => setTimeout(res, 3000));
       }
     }
     // Done with, here or on GitHub: every wait on it says so, so leave it out of the next one.
-    const rest = others.length ? ` Wait on the others with \`laatsux pr wait ${others.join(' ')}\`.` : '';
+    const rest = others.length ? ` Wait on the others with \`galley pr wait ${others.join(' ')}\`.` : '';
     if (r.status === 'merged') {
       const sha = pr.mergeCommit?.oid ? ` as ${String(pr.mergeCommit.oid).slice(0, 7)}` : '';
       out(`Merged on GitHub${sha}${r.github_closed_by ? ` by ${r.github_closed_by}` : ''}: ${r.published_url}`);
@@ -660,11 +660,11 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       if (rest) out(c.gray(rest.trim()));
       return 0;
     }
-    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`laatsux pr wait ${all}\` again.` : null;
+    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`galley pr wait ${all}\` again.` : null;
     if (r.status === 'published') {
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
       else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
-      out(c.gray(`Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      out(c.gray(`Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       out(c.gray(PUSHES));
       return 0;
     }
@@ -678,7 +678,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if ((r.status === 'pushed' || r.status === 'push_failed') && !text) {
       // A conflict told with it (it is marked as told above) is the author's to rebase.
-      out(c.gray(rebase ?? `Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      out(c.gray(rebase ?? `Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       return 0;
     }
     if (r.status === 'closed') {
@@ -699,13 +699,13 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(c.gray(`${stillReviewing(pr)}; ${getIt}`));
     } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
       // Approved, but it conflicts with its base: the rebase is left.
-      out(c.gray(rebase ?? `Approved with nothing left open. Run \`laatsux pr wait ${all}\` to wait until the reviewer publishes it.`));
+      out(c.gray(rebase ?? `Approved with nothing left open. Run \`galley pr wait ${all}\` to wait until the reviewer publishes it.`));
     } else {
       out(
         c.gray(
           `Address the feedback. Reply to each thread and resolve the ones you fixed with ` +
-            `\`laatsux pr comment ${t.number} --reply-to <thread> --resolve -b "…"\` ` +
-            `(leave out --resolve to keep a thread open for the reviewer), then run \`laatsux pr wait ${all}\` again.`,
+            `\`galley pr comment ${t.number} --reply-to <thread> --resolve -b "…"\` ` +
+            `(leave out --resolve to keep a thread open for the reviewer), then run \`galley pr wait ${all}\` again.`,
         ),
       );
     }
@@ -715,8 +715,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (auto) {
       out(
         c.gray(
-          `Auto-publish is on (${auto.enabledBy.login} turned it on): laatsux publishes this pull request once the reviewer agents are done with ` +
-            `your latest commit and you are waiting in \`laatsux pr wait ${all}\` with the feedback addressed` +
+          `Auto-publish is on (${auto.enabledBy.login} turned it on): galley publishes this pull request once the reviewer agents are done with ` +
+            `your latest commit and you are waiting in \`galley pr wait ${all}\` with the feedback addressed` +
             `${auto.autoMerge ? ', and turns on auto-merge on GitHub' : ''}.`,
         ),
       );
@@ -726,7 +726,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
 }
 
 /** What the author does once its pull request is published. */
-const PUSHES = 'It is published: commit and wait, and laatsux pushes each commit you wait with to GitHub. Never push to GitHub yourself.';
+const PUSHES = 'It is published: commit and wait, and galley pushes each commit you wait with to GitHub. Never push to GitHub yourself.';
 
 /**
  * One long poll per pull request. The first answer with news (or an error) wins, and the other
@@ -755,7 +755,7 @@ async function firstNews(client: Client, targets: Target[], seconds: number): Pr
 const USAGE = `Work with staged pull requests. Mirrors \`gh pr\`.
 
 USAGE
-  laatsux pr <command> [flags]
+  galley pr <command> [flags]
 
 COMMANDS (same flags as gh)
   create:      Stage a pull request for the current branch
@@ -772,7 +772,7 @@ COMMANDS (same flags as gh)
   checkout:    Check out the head branch
   status:      Show the pull request for the current branch
 
-LAATSUX COMMANDS
+GALLEY COMMANDS
   wait:        Block until the reviewer responds, then print the feedback, or until the
                reviewer agents are done with the latest commit. After publishing,
                pushes your commits to GitHub, and waits until it is merged or closed
@@ -819,9 +819,9 @@ export async function pr(client: Client, cwd: string, args: string[]): Promise<n
     case 'wait':
       return wait(client, cwd, rest);
     case 'checks':
-      throw new CliError(`no checks reported on the '${currentBranch(cwd) ?? 'current'}' branch (laatsux does not run CI)`);
+      throw new CliError(`no checks reported on the '${currentBranch(cwd) ?? 'current'}' branch (galley does not run CI)`);
     case 'merge':
-      throw new CliError('laatsux does not merge. When the reviewer is happy they publish the pull request to GitHub.');
+      throw new CliError('galley does not merge. When the reviewer is happy they publish the pull request to GitHub.');
     case undefined:
     case 'help':
     case '--help':
@@ -829,6 +829,6 @@ export async function pr(client: Client, cwd: string, args: string[]): Promise<n
       out(USAGE);
       return 0;
     default:
-      throw new CliError(`unknown command "${cmd}" for "laatsux pr"\n\n${USAGE}`);
+      throw new CliError(`unknown command "${cmd}" for "galley pr"\n\n${USAGE}`);
   }
 }

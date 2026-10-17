@@ -21,7 +21,7 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
   </nav>
   <div class="settings-main">${main}</div>
 </div>`;
-  return layout(s, { title: 'Settings · laatsux', crumbs: html`<a href="/">laatsux</a><span class="crumb-sep">/</span><a href="/settings"><strong>Settings</strong></a>`, body });
+  return layout(s, { title: 'Settings · galley', crumbs: html`<a href="/">galley</a><span class="crumb-sep">/</span><a href="/settings"><strong>Settings</strong></a>`, body });
 }
 
 export async function settingsPage(s: Service): Promise<string> {
@@ -64,13 +64,13 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
     </div>
     ${
       models.length === 0 && reviewer.catalogSource
-        ? html`<div class="flash flash-warn">${icon('alert')} Could not read the model list from <code>${reviewer.catalogSource}</code>. Check that ${label} is installed and logged in on the machine running laatsux.</div>`
+        ? html`<div class="flash flash-warn">${icon('alert')} Could not read the model list from <code>${reviewer.catalogSource}</code>. Check that ${label} is installed and logged in on the machine running galley.</div>`
         : ''
     }
     <form class="settings-form js-api-form" data-api="/api/settings/${kind}" data-method="PUT" data-toast="Settings saved">
       <div class="form-checkbox">
         <label><input type="checkbox" name="enabled"${settings.enabled ? raw(' checked') : ''}> Review automatically</label>
-        <p class="note">When the author agent runs <code>laatsux pr wait</code>, ${label} reviews the new commits first. Its review wakes the agent, which addresses the comments before you look. Each commit is reviewed once.</p>
+        <p class="note">When the author agent runs <code>galley pr wait</code>, ${label} reviews the new commits first. Its review wakes the agent, which addresses the comments before you look. Each commit is reviewed once.</p>
       </div>
       <div class="form-group">
         <label class="form-label" for="${kind}-name">Name</label>
@@ -96,13 +96,13 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
       </div>
       <div class="form-checkbox">
         <label><input type="checkbox" name="runTests"${settings.runTests ? raw(' checked') : ''}> Let ${label} install dependencies and run tests</label>
-        <p class="note">Before ${label} starts, laatsux installs the pull request's dependencies from its lockfile, without running its install scripts. ${label} may then run the typecheck, tests or build to check what it finds, without network access. It writes only to its checkout and a temporary directory, both removed after the review; your repository stays read-only. Off, ${label} only reads the code.</p>
+        <p class="note">Before ${label} starts, galley installs the pull request's dependencies from its lockfile, without running its install scripts. ${label} may then run the typecheck, tests or build to check what it finds, without network access. It writes only to its checkout and a temporary directory, both removed after the review; your repository stays read-only. Off, ${label} only reads the code.</p>
       </div>
       ${
         reviewer.localServers
           ? html`<div class="form-checkbox">
         <label><input type="checkbox" name="localhost"${settings.localhost ? raw(' checked') : ''}> Let ${label}'s tests listen on localhost</label>
-        <p class="note">With the setting above, ${label} may also run tests that start servers: its commands may listen and connect on localhost, but not connect to other hosts. Code in the pull request can then reach anything on localhost, including laatsux, which takes any local caller for you and could publish as you (<a href="https://github.com/laat/stage-pr/issues/52" target="_blank" rel="noopener">#52</a>). Claude Code also lets them listen on every interface, so while they run, other machines on your network can reach a server that does not listen on 127.0.0.1 only. Turn it on only for repositories whose code you trust.</p>
+        <p class="note">With the setting above, ${label} may also run tests that start servers: its commands may listen and connect on localhost, but not connect to other hosts. Code in the pull request can then reach anything on localhost, including galley, which takes any local caller for you and could publish as you (<a href="https://github.com/laat/galley/issues/52" target="_blank" rel="noopener">#52</a>). Claude Code also lets them listen on every interface, so while they run, other machines on your network can reach a server that does not listen on 127.0.0.1 only. Turn it on only for repositories whose code you trust.</p>
       </div>`
           : ''
       }
@@ -178,7 +178,7 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
       }
       <div class="form-checkbox">
         <label><input type="checkbox" name="enabled"${checked(d.enabled)}> Review automatically</label>
-        <p class="note">When the author agent runs <code>laatsux pr wait</code> on a pull request in its repositories, it reviews first, as Codex and Claude do. Off, it reviews when asked from the pull request.</p>
+        <p class="note">When the author agent runs <code>galley pr wait</code> on a pull request in its repositories, it reviews first, as Codex and Claude do. Off, it reviews when asked from the pull request.</p>
       </div>
       <div class="form-group">
         <span class="form-label">What it reviews</span>
@@ -221,7 +221,7 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
       </div>
       <div class="form-checkbox js-code-only"${d.reviews === 'code' ? '' : raw(' hidden')}>
         <label><input type="checkbox" name="run_tests"${checked(d.run_tests)}> Let it install dependencies and run tests</label>
-        <p class="note">As for Codex and Claude: laatsux installs the dependencies from the lockfile without their install scripts, and the reviewer may run the typecheck, tests or build without network access.</p>
+        <p class="note">As for Codex and Claude: galley installs the dependencies from the lockfile without their install scripts, and the reviewer may run the typecheck, tests or build without network access.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">${file ? 'Save reviewer' : 'Create reviewer'}</button> ${remove}</div>
@@ -275,7 +275,7 @@ export function publishingSettingsPage(s: Service): string {
         <select class="form-select" id="merge-method" name="mergeMethod">
           ${MERGE_METHODS.map((m) => html`<option value="${m}"${settings.mergeMethod === m ? raw(' selected') : ''}>${MERGE_METHOD_NAMES[m]}</option>`)}
         </select>
-        <p class="note">How GitHub merges a pull request that laatsux enabled auto-merge for.</p>
+        <p class="note">How GitHub merges a pull request that galley enabled auto-merge for.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>

@@ -21,7 +21,7 @@ import { pullReferences } from './web/references.ts';
 import { nextSettings, readSettings, REVIEWER_KINDS, saveSettings, type MergeMethod, type ReviewerKind } from './settings.ts';
 
 /**
- * A GitHub-compatible subset of the REST API, plus a few laatsux extensions
+ * A GitHub-compatible subset of the REST API, plus a few galley extensions
  * (publish, wait, resolve, gh-shaped JSON). Mounted at /api.
  */
 export function api(s: Service): Hono {
@@ -35,16 +35,20 @@ export function api(s: Service): Hono {
   });
   app.notFound((c) => c.json({ message: 'Not Found', status: '404' }, 404));
 
-  /** CLI callers name themselves; requests from the web UI act as the human viewer. */
+  /**
+   * CLI callers name themselves; requests from the web UI act as the human viewer. The headers'
+   * names from before the rename (#9), X-Laatsux-Actor and X-Laatsux-Actor-Type, still work.
+   */
   const actor = (c: Context): Actor => {
-    const login = c.req.header('x-laatsux-actor');
+    const prefix = c.req.header('x-galley-actor') ? 'x-galley' : 'x-laatsux';
+    const login = c.req.header(`${prefix}-actor`);
     if (!login) return s.viewer();
     // A reviewer agent posts from inside the server; anyone else using its name would be mistaken for it.
     const reviewer = s.reviewerAgents().find((r) => r.actor().login === login);
-    if (reviewer) throw new HttpError(409, `"${login}" is the name of the ${reviewer.label} reviewer. Set LAATSUX_ACTOR to another name.`);
+    if (reviewer) throw new HttpError(409, `"${login}" is the name of the ${reviewer.label} reviewer. Set GALLEY_ACTOR to another name.`);
     // So would a custom reviewer's bot while it does not run (its file deleted, or wrong), and its approvals would count as yours.
-    if (s.custom?.heldBy(login)) throw new HttpError(409, `"${login}" is the name of a custom reviewer. Set LAATSUX_ACTOR to another name.`);
-    const type = (c.req.header('x-laatsux-actor-type') as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
+    if (s.custom?.heldBy(login)) throw new HttpError(409, `"${login}" is the name of a custom reviewer. Set GALLEY_ACTOR to another name.`);
+    const type = (c.req.header(`${prefix}-actor-type`) as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
     return s.db.actor(login, type === 'User' ? 'User' : 'Bot');
   };
   const body = async (c: Context): Promise<Record<string, any>> => {
@@ -177,7 +181,7 @@ export function api(s: Service): Hono {
   app.get('/repos', (c) => c.json(s.repos().map((r) => repoJson(s, r))));
   app.get('/repos/:owner/:repo', (c) => c.json(repoJson(s, s.repo(c.req.param('owner'), c.req.param('repo')))));
 
-  // GitHub's "get a commit" and "get repository content", used by `laatsux browse --repo`. A ref
+  // GitHub's "get a commit" and "get repository content", used by `galley browse --repo`. A ref
   // is anything git resolves (a SHA, a branch, HEAD); contents default to HEAD, where GitHub
   // uses the default branch.
   const commitFor = async (repo: RepoRow, ref: string): Promise<string> => {
@@ -240,7 +244,7 @@ export function api(s: Service): Hono {
   app.post('/repos/:owner/:repo/pulls', async (c) => {
     const repo = s.repo(c.req.param('owner'), c.req.param('repo'));
     const b = await body(c);
-    // laatsux extension: `reviewers` and `automatic_reviews` decide the reviewer agents for this pull request.
+    // galley extension: `reviewers` and `automatic_reviews` decide the reviewer agents for this pull request.
     const review = s.reviewRequest(repo, b.reviewers, b.automatic_reviews);
     const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns }, actor(c));
     return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}) }, 201);
@@ -319,7 +323,7 @@ export function api(s: Service): Hono {
     return c.json(reviewCommentJson(s, x.repo, x.pull, comment, root, await s.place(x, root)), 201);
   });
 
-  // laatsux extension: add a comment to the caller's pending review (starting one if needed).
+  // galley extension: add a comment to the caller's pending review (starting one if needed).
   app.post('/repos/:owner/:repo/pulls/:n/pending-comments', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
@@ -327,7 +331,7 @@ export function api(s: Service): Hono {
     return c.json(reviewCommentJson(s, x.repo, x.pull, comment, comment, await s.place(x, comment)), 201);
   });
 
-  // laatsux extension: resolve and unresolve review threads.
+  // galley extension: resolve and unresolve review threads.
   app.put('/repos/:owner/:repo/pulls/:n/threads/:id/resolved', async (c) => {
     const x = await ctx(c);
     s.setResolved(x, num(c.req.param('id'), 'thread id'), true, actor(c));
@@ -339,7 +343,7 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
-  // laatsux extension: pin a pull request to the top of the reviewer's front page, and unpin it.
+  // galley extension: pin a pull request to the top of the reviewer's front page, and unpin it.
   app.put('/repos/:owner/:repo/pulls/:n/pinned', async (c) => {
     s.setPinned((await ctx(c, { sync: false })).pull, true, actor(c));
     return c.body(null, 204);
@@ -388,7 +392,7 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
-  // laatsux extension: mark a file as viewed (keyed by its blob, so a change un-views it).
+  // galley extension: mark a file as viewed (keyed by its blob, so a change un-views it).
   app.put('/repos/:owner/:repo/pulls/:n/viewed', async (c) => {
     const x = await ctx(c, { sync: false });
     const b = await body(c);
@@ -396,14 +400,14 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
-  // laatsux extension: ask a reviewer agent (`codex`, `claude`, or a custom reviewer by name) to review now, and list its runs.
+  // galley extension: ask a reviewer agent (`codex`, `claude`, or a custom reviewer by name) to review now, and list its runs.
   app.post('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     human(c);
     const x = await ctx(c);
     const reviewer = reviewerOf(c, x.repo);
     return c.json({ run_id: reviewer.request(x) }, 202);
   });
-  // laatsux extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
+  // galley extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
   app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     human(c);
     const x = await ctx(c);
@@ -411,7 +415,7 @@ export function api(s: Service): Hono {
     const b = await body(c);
     return c.json(reviewer.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
   });
-  // laatsux extension: stop iterating: no reviewer agent starts another automatic review. DELETE resumes.
+  // galley extension: stop iterating: no reviewer agent starts another automatic review. DELETE resumes.
   app.put('/repos/:owner/:repo/pulls/:n/stop-iterating', async (c) => {
     const who = human(c);
     const x = await ctx(c, { sync: false });
@@ -449,7 +453,7 @@ export function api(s: Service): Hono {
     return method;
   };
 
-  // laatsux extension: push the branch and open (or update) the pull request on GitHub.
+  // galley extension: push the branch and open (or update) the pull request on GitHub.
   app.post('/repos/:owner/:repo/pulls/:n/publish', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
@@ -461,7 +465,7 @@ export function api(s: Service): Hono {
     return c.json({ ...pullJson(s, x.repo, pull), auto_merge_result: autoMerge ? autoMergeResult(s.autoMerge(pull)) : undefined });
   });
 
-  // laatsux extension: auto-publish, like GitHub's auto-merge: publish once the agents are done.
+  // galley extension: auto-publish, like GitHub's auto-merge: publish once the agents are done.
   app.put('/repos/:owner/:repo/pulls/:n/auto-publish', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
@@ -475,11 +479,11 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
-  // laatsux extension: long-poll until someone other than the author gives feedback.
+  // galley extension: long-poll until someone other than the author gives feedback.
   app.get('/repos/:owner/:repo/pulls/:n/wait', async (c) => {
     const x = await ctx(c);
     if (x.pull.author_id === s.viewer().id) {
-      throw new HttpError(422, `${s.viewer().login} staged this pull request and is also the reviewer, so no feedback from anyone else will arrive. Agents should set LAATSUX_ACTOR.`);
+      throw new HttpError(422, `${s.viewer().login} staged this pull request and is also the reviewer, so no feedback from anyone else will arrive. Agents should set GALLEY_ACTOR.`);
     }
     const seconds = Number(c.req.query('timeout') ?? 240);
     const timeout = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 240, 3600) * 1000;
@@ -504,7 +508,7 @@ export function api(s: Service): Hono {
     });
   });
 
-  // laatsux extension: the author confirms it has shown the feedback a wait returned, that the
+  // galley extension: the author confirms it has shown the feedback a wait returned, that the
   // reviewer agents are done with a commit (`agents_done`, the SHA), and that a commit conflicts
   // with its base (`conflicts`, the SHA), when it said so.
   app.put('/repos/:owner/:repo/pulls/:n/seen', async (c) => {

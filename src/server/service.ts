@@ -62,10 +62,10 @@ export interface CommentInput {
   start_line?: number | null;
   start_side?: Side | null;
   subject_type?: SubjectType | null;
-  /** laatsux extension: high, medium or low. */
+  /** galley extension: high, medium or low. */
   priority?: string | null;
   commit_id?: string | null;
-  /** laatsux extension: the left side of the diff the comment was made on (for commit and interdiff views). */
+  /** galley extension: the left side of the diff the comment was made on (for commit and interdiff views). */
   base_commit_id?: string | null;
 }
 
@@ -142,7 +142,7 @@ export interface GithubPush {
   source: string;
   /** The commit GitHub got: a signed copy of `source` when it signed; null when nothing was pushed. */
   head: string | null;
-  /** What laatsux expected the branch on GitHub to be, which a force-push leased on. */
+  /** What galley expected the branch on GitHub to be, which a force-push leased on. */
   before: string | null;
   sign: boolean;
   signed: number;
@@ -159,7 +159,7 @@ export interface GithubPush {
 }
 
 /**
- * Whether a pull request's head merges cleanly into the tip of its base branch, as laatsux worked
+ * Whether a pull request's head merges cleanly into the tip of its base branch, as galley worked
  * it out with `git merge-tree` (see Service.baseConflicts).
  */
 export interface BaseConflicts {
@@ -167,7 +167,7 @@ export interface BaseConflicts {
   branch: string;
   /** The branch it was merged into: the remote-tracking one (origin/main) when there is one, else the local one. */
   ref: string;
-  /** That branch's tip, as this repository has it (laatsux fetches it: Service.fetchBases); null when there is no such branch. */
+  /** That branch's tip, as this repository has it (galley fetches it: Service.fetchBases); null when there is no such branch. */
   base: string | null;
   head: string;
   /** Whether the head merges cleanly: false when it conflicts, null when git could not tell (see error). */
@@ -306,7 +306,7 @@ export interface IterationsStopped {
 }
 
 /**
- * The last time laatsux turned on auto-merge for the published pull request, and what came of
+ * The last time galley turned on auto-merge for the published pull request, and what came of
  * it: on, merged at once (GitHub had nothing to wait for), requested (gh accepted it, but which
  * of the two it was could not be checked), or failed. It says what GitHub did then; the merge
  * itself is recorded when following the pull request finds it (followGithub).
@@ -327,7 +327,7 @@ export interface AutoMerge {
  */
 export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed';
 
-/** A repository on GitHub, as laatsux shows it: what merging there allows. */
+/** A repository on GitHub, as galley shows it: what merging there allows. */
 export interface GithubRepo {
   merging: {
     /** "Allow auto-merge" in the repository's settings. */
@@ -351,13 +351,13 @@ interface PushPlan {
   signed: number;
   /** It replaces the commit the branch has on GitHub, with a lease on that commit (`before`). */
   force: boolean;
-  /** The commit laatsux takes the branch on GitHub to have (Service.onGitHub). */
+  /** The commit galley takes the branch on GitHub to have (Service.onGitHub). */
   before: string | null;
   /** The `git push` arguments. */
   args: string[];
 }
 
-/** How often laatsux asks GitHub about published pull requests: while something runs there, and otherwise. */
+/** How often galley asks GitHub about published pull requests: while something runs there, and otherwise. */
 export const FOLLOW_BUSY_MS = 20_000;
 export const FOLLOW_IDLE_MS = 60_000;
 
@@ -371,7 +371,7 @@ export const AUTHOR_STALL_MS = 30 * 60 * 1000;
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
-/** How long after fetching a repository's base branches laatsux may fetch them again (Service.fetchBases). */
+/** How long after fetching a repository's base branches galley may fetch them again (Service.fetchBases). */
 export const FETCH_EVERY_MS = 60_000;
 /** How long fetching a base branch may take. */
 const FETCH_TIMEOUT_MS = 30_000;
@@ -384,7 +384,7 @@ interface FetchRound {
 }
 
 /**
- * Where laatsux keeps refs in the repositories it stages from. Each server has a namespace of its
+ * Where galley keeps refs in the repositories it stages from. Each server has a namespace of its
  * own under it (Db.instance), so servers staging from one repository never touch each other's.
  * A database pins its revisions in its namespace when it gets its id (Service.pinRevisions). Refs
  * from before namespaces (`refs/laatsux/pull/<n>/...`) stay where they are, since a copy of the
@@ -562,13 +562,13 @@ export class Service {
 
   // ------------------------------------------------------ following GitHub
 
-  /** Published pull requests that laatsux follows on GitHub: not known to be merged or closed there, and not closed here. */
+  /** Published pull requests that galley follows on GitHub: not known to be merged or closed there, and not closed here. */
   followed(): PullRow[] {
     return this.db.all<PullRow>("SELECT * FROM pulls WHERE state = 'published' AND COALESCE(github_state, 'open') = 'open'");
   }
 
   private following: Promise<void> = Promise.resolve();
-  /** When laatsux last asked GitHub about each repository's pull requests. */
+  /** When galley last asked GitHub about each repository's pull requests. */
   private githubAskedAt = new Map<string, number>();
   /** Whether to ask GitHub for the names of teams asked to review: not once it refused them for want of the read:org scope, until a restart. */
   githubTeamNames = true;
@@ -633,7 +633,7 @@ export class Service {
       // Threads on pages it could not read stay as they were.
       const status = readGithub(node, previous, now(), complete);
       this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status) });
-      // Pages show the status; tell them when it changed, not each time laatsux asked.
+      // Pages show the status; tell them when it changed, not each time galley asked.
       const same = previous && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
       return pull.github_state === 'open' && same ? null : 'github_status';
     });
@@ -677,7 +677,7 @@ export class Service {
       this.db.update('pulls', pull.id, { github_state: state, github_closed_at: at, github_closed_by: by, github_merge_sha: commit, updated_at: ts });
       // Published again after it was closed on GitHub, and still closed there: that close is in the timeline already.
       if (!merged && pull.github_closed_at === at) return 'github_state';
-      // The event says when laatsux learned of it, so `pr wait` delivers it like any news; `at` says when it happened.
+      // The event says when galley learned of it, so `pr wait` delivers it like any news; `at` says when it happened.
       this.addEvent(pull, viewer, merged ? 'merged' : 'closed_on_github', { url: pull.published_url, by, at, commit }, ts);
       return merged ? 'merged' : 'closed_on_github';
     });
@@ -774,7 +774,7 @@ export class Service {
 
   repo(owner: string, name: string): RepoRow {
     const repo = this.db.get<RepoRow>('SELECT * FROM repos WHERE owner = ? AND name = ?', owner, name) ?? this.movedRepo(owner, name);
-    if (!repo) throw new HttpError(404, `repository ${owner}/${name} is not known to laatsux`);
+    if (!repo) throw new HttpError(404, `repository ${owner}/${name} is not known to galley`);
     return repo;
   }
 
@@ -852,7 +852,7 @@ export class Service {
   }
 
   /**
-   * What staging asks of the reviewer agents (a laatsux extension to POST /pulls), as the
+   * What staging asks of the reviewer agents (a galley extension to POST /pulls), as the
    * pull request's own settings. `reviewers` turns the named ones on, with their own limit
    * when one is given; `automatic_reviews` turns all of them on or off. Logins that no reviewer
    * agent answers to are ignored, like gh's other reviewers, and returned so the caller can say so.
@@ -1018,7 +1018,7 @@ export class Service {
     this.observeBase(pull.id, baseTip);
     const mergeBase = (baseTip && (await git.mergeBase(baseTip, head))) ?? pull.base_sha;
     if (head === pull.head_sha && mergeBase === pull.base_sha) {
-      // Hashed once for a pull request staged before laatsux hashed them.
+      // Hashed once for a pull request staged before galley hashed them.
       if (pull.messages_sha === null) this.db.update('pulls', pull.id, { messages_sha: messagesSha(await git.log(mergeBase, head)) });
       return current();
     }
@@ -1079,7 +1079,7 @@ export class Service {
 
   // ---------------------------------------------------------- fetching bases
 
-  /** Per repository: when laatsux last started to fetch its base branches, which, and the fetch under way. */
+  /** Per repository: when galley last started to fetch its base branches, which, and the fetch under way. */
   private fetchRounds = new Map<number, FetchRound>();
   /** git's message for each base branch whose last fetch failed, by `<repo id> <branch>`. */
   private fetchErrors = new Map<string, string>();
@@ -1140,7 +1140,7 @@ export class Service {
     await Promise.all([...this.fetchRounds.values()].map((r) => r.running));
   }
 
-  /** git's message when the last fetch of a repository's base branch failed; null when it worked, or laatsux has not fetched it. */
+  /** git's message when the last fetch of a repository's base branch failed; null when it worked, or galley has not fetched it. */
   fetchError(repo: RepoRow, branch: string): string | null {
     return this.fetchErrors.get(`${repo.id} ${branch}`) ?? null;
   }
@@ -1208,7 +1208,7 @@ export class Service {
     return found && (tip === undefined || found.base === tip) ? found : null;
   }
 
-  /** The head is one GitHub does not have, of a pull request that is not done: whether it merges cleanly is for laatsux to work out. */
+  /** The head is one GitHub does not have, of a pull request that is not done: whether it merges cleanly is for galley to work out. */
   headUnpublished(pull: PullRow): boolean {
     return stagingState(pull) !== 'done' && pull.head_sha !== (pull.published_source_sha ?? pull.published_head_sha);
   }
@@ -1881,7 +1881,7 @@ export class Service {
     const author = this.db.actorById(ctx.pull.author_id);
     // Waiting says the author is ready for review, which starts reviewer agents and lets auto-publish go ahead.
     if (actor.id !== author.id) {
-      throw new HttpError(403, `only the author of this pull request (${author.login}) can wait for its feedback, not ${actor.login}. An agent carrying on the author's work sets LAATSUX_ACTOR=${author.login}.`);
+      throw new HttpError(403, `only the author of this pull request (${author.login}) can wait for its feedback, not ${actor.login}. An agent carrying on the author's work sets GALLEY_ACTOR=${author.login}.`);
     }
     // A pull request that is closed or merged is not ready for review: answer without saying the author waits.
     const already = this.waitResult(id);
@@ -2170,7 +2170,7 @@ export class Service {
       const acted = this.authorActedAt(pull);
       if (Date.now() - Date.parse(acted) < this.stallMs || this.stallsNoticed.get(pull.id) === acted) continue;
       this.stallsNoticed.set(pull.id, acted);
-      if (this.turn(pull).reasons.some((r) => r.state === 'stalled')) this.bus.emit('change', { pullId: pull.id, type: 'stalled', actor: 'laatsux' } satisfies ChangeEvent);
+      if (this.turn(pull).reasons.some((r) => r.state === 'stalled')) this.bus.emit('change', { pullId: pull.id, type: 'stalled', actor: 'galley' } satisfies ChangeEvent);
     }
   }
 
@@ -2265,14 +2265,14 @@ export class Service {
   }
 
   /**
-   * Approve the first publish in advance: laatsux publishes on its own once the agents are done
+   * Approve the first publish in advance: galley publishes on its own once the agents are done
    * (see readiness), even commits pushed after this. The options are fixed now, as the publish box
    * shows them: signing and draft as checked, force if it was checked and turns out to be needed,
    * and auto-merge with the merge method `autoMerge`.
    */
   async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean; autoMerge?: MergeMethod }, actor: Actor): Promise<AutoPublish> {
     const { pull, repo } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'auto-publish is for the reviewer, like publishing; ask the user to turn it on from laatsux');
+    if (actor.type === 'Bot') throw new HttpError(403, 'auto-publish is for the reviewer, like publishing; ask the user to turn it on from galley');
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
     if (pull.published_url) throw new HttpError(422, 'this pull request is published already; auto-publish is for the first publish, and each commit the author waits with is pushed to it');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
@@ -2413,7 +2413,7 @@ export class Service {
   }
 
   /**
-   * The commit the branch has on GitHub, as far as laatsux knows: what it published last or,
+   * The commit the branch has on GitHub, as far as galley knows: what it published last or,
    * before the first publish, the branch as last fetched or pushed. A force-push leases against it.
    */
   private async onGitHub(ctx: Ctx): Promise<string | null> {
@@ -2523,7 +2523,7 @@ export class Service {
   private async preparePush(ctx: Ctx, pull: PullRow, opts: { sign: boolean; force: boolean; lease?: boolean; auto?: boolean; timeoutMs?: number }): Promise<PushPlan> {
     const { repo, git } = ctx;
     const published = await this.onGitHub(ctx);
-    // Leased, the branch on GitHub as last fetched, when it moved on from what laatsux pushed and the
+    // Leased, the branch on GitHub as last fetched, when it moved on from what galley pushed and the
     // head has it in it (the author brought in the commits added there): the push goes on top of
     // it, with those commits as they are, overwriting nothing.
     const fetched = opts.lease && published ? await git.resolve(`refs/remotes/${repo.remote}/${pull.head_ref}`) : null;
@@ -2538,7 +2538,7 @@ export class Service {
         const at = await git.resolve(ref);
         // It holds the copies an earlier publish pushed, if any: commits this server signed.
         if (!at || this.db.get('SELECT 1 FROM signed_commits WHERE repo_id = ? AND signed_sha = ?', repo.id, at)) await this.moveRef(git, ref, at, pushed);
-        else console.error(`left ${ref} alone in ${git.gitDir}: it points at ${at}, which laatsux did not sign`);
+        else console.error(`left ${ref} alone in ${git.gitDir}: it points at ${at}, which galley did not sign`);
       }
     }
 
@@ -2618,7 +2618,7 @@ export class Service {
     actor: Actor,
   ): Promise<PullRow> {
     const { repo } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from laatsux');
+    if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from galley');
     // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
     await this.fetchBases(repo, { base: ctx.pull.base_ref });
     const pull = await this.sync(ctx.pull);
@@ -2716,7 +2716,7 @@ export class Service {
   /**
    * Turn on auto-merge for the pull request just published: GitHub merges it with `method`
    * once its requirements (such as required checks) are met. `--match-head-commit` makes GitHub
-   * refuse when the branch there is no longer the commit laatsux pushed, but it does not pin the
+   * refuse when the branch there is no longer the commit galley pushed, but it does not pin the
    * merge to that commit: a later push by someone without write access turns auto-merge off,
    * and one by someone with write access is merged too. The pull request is published whatever
    * happens here, so a failure is recorded on it rather than thrown.
@@ -2797,7 +2797,7 @@ export class Service {
 
   /**
    * Whether the published pull request's head may be pushed: GitHub does not have it, the pull
-   * request is open there as far as laatsux knows, the author waits with all feedback seen, and
+   * request is open there as far as galley knows, the author waits with all feedback seen, and
    * GitHub has not refused this head before.
    */
   private mayPush(pull: PullRow): boolean {
@@ -2821,7 +2821,7 @@ export class Service {
   }
 
   /**
-   * Whether pushes after publishing sign: as the last publish did. One published before laatsux
+   * Whether pushes after publishing sign: as the last publish did. One published before galley
    * recorded that signed if GitHub got signed copies of the commits, or the commit it has is signed.
    */
   private async signsUpdates(ctx: Ctx): Promise<boolean> {
@@ -2838,11 +2838,11 @@ export class Service {
    * Push the head the author waits with to the published pull request when pushReady says so,
    * unattended (each step gets UNATTENDED_TIMEOUT_MS). Only its head branch, as publishing pushes
    * (preparePush): signed as the last publish was (signsUpdates), and with a lease on the commit
-   * laatsux pushed last, so a branch that moved on GitHub is refused, not overwritten, also when
+   * galley pushed last, so a branch that moved on GitHub is refused, not overwritten, also when
    * the push is forced, until the head has the commits added there. GitHub is asked right before
    * the push whether the pull request is still open there: nothing is pushed once it is merged or
    * closed, nor without an answer. The title and description are left to publishing by hand.
-   * Auto-merge, when laatsux turned it on and GitHub has not said it is off since, is asked for
+   * Auto-merge, when galley turned it on and GitHub has not said it is off since, is asked for
    * again. The timeline says what came of it. The author's wait hears of a push, and of one GitHub
    * refused; one that failed otherwise is tried again when the author next waits (pushReady).
    */
@@ -2905,7 +2905,7 @@ export class Service {
       this.addEvent(pull, viewer, 'github_push', pushed, ts);
     });
     this.emit(pull.id, 'github_pushed', viewer);
-    // Turned on by laatsux (also when asking for it again failed since), and not turned off on
+    // Turned on by galley (also when asking for it again failed since), and not turned off on
     // GitHub since, as far as following saw: asked for again, for the commit pushed.
     const merge = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'auto_merge_enabled' ORDER BY id DESC LIMIT 1", pull.id);
     const github = githubStatus(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!);
@@ -2964,12 +2964,12 @@ export class Service {
     if (!merging) throw new HttpError(502, `could not ask GitHub whether ${slug} allows auto-merge`);
     if (!merging.autoMerge) throw new HttpError(422, `${slug} does not allow auto-merge. Turn on "Allow auto-merge" in the repository's settings on GitHub.`);
     if (!merging.methods.includes(method)) {
-      throw new HttpError(422, `${slug} does not allow ${method} merges, the merge method in laatsux's settings (it allows ${merging.methods.join(', ')}). Change it under Settings → Publishing.`);
+      throw new HttpError(422, `${slug} does not allow ${method} merges, the merge method in galley's settings (it allows ${merging.methods.join(', ')}). Change it under Settings → Publishing.`);
     }
     return method;
   }
 
-  /** What came of the last time laatsux turned on auto-merge for this pull request on GitHub; null if it never did. */
+  /** What came of the last time galley turned on auto-merge for this pull request on GitHub; null if it never did. */
   autoMerge(pull: PullRow): AutoMerge | null {
     const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type IN ('auto_merge_enabled', 'auto_merge_failed') ORDER BY id DESC LIMIT 1", pull.id);
     if (!e) return null;
@@ -3097,7 +3097,7 @@ export function stagingState(pull: Pick<PullRow, 'state' | 'github_state'>): Sta
   return pull.state;
 }
 
-/** What laatsux last saw of a published pull request on GitHub, while it is open there. */
+/** What galley last saw of a published pull request on GitHub, while it is open there. */
 export function githubStatus(pull: PullRow): GithubStatus | null {
   return pull.github_state === 'open' && pull.github_status ? (JSON.parse(pull.github_status) as GithubStatus) : null;
 }

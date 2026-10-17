@@ -51,7 +51,7 @@ async function stage(s: Service, head: string) {
 }
 
 before(() => {
-  dir = mkdtempSync(join(tmpdir(), 'laatsux-refs-'));
+  dir = mkdtempSync(join(tmpdir(), 'galley-refs-'));
   repo = join(dir, 'repo');
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
   writeFileSync(join(repo, 'README.md'), '# widgets\n');
@@ -198,7 +198,7 @@ test('a database from before namespaces pins its revisions in one, and leaves th
   const pull = await stage(before.s, 'feature/e');
   const second = amend('feature/e');
   await before.s.sync(pull);
-  // As an older laatsux left it: no instance id, its revisions pinned under names every server shared.
+  // As an older galley left it: no instance id, its revisions pinned under names every server shared.
   for (const [seq, sha] of [[1, first], [2, second]] as const) {
     git('update-ref', `refs/laatsux/pull/1/${seq}`, sha);
     git('update-ref', '-d', `refs/laatsux/${before.db.instance}/pull/1/${seq}`);

@@ -265,7 +265,7 @@ test('a long comment with emphasis in every paragraph and a long log still rende
 
 // ------------------------------------------------------- SHAs in a repository
 
-const dir = mkdtempSync(join(tmpdir(), 'laatsux-markdown-'));
+const dir = mkdtempSync(join(tmpdir(), 'galley-markdown-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 function gitIn(cwd: string, args: string[], input?: string): string {

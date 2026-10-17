@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliActor, dataDir, DEFAULT_PORT, serverUrl } from '../config.ts';
+import { cliActor, dataDir, DEFAULT_PORT, fromEnv, serverUrl } from '../config.ts';
 
 export class CliError extends Error {
   code: number;
@@ -37,14 +37,14 @@ const unreachable = (e: unknown) => {
 };
 
 /**
- * Start `laatsux serve` in the background for a local server URL that nothing answers on.
+ * Start `galley serve` in the background for a local server URL that nothing answers on.
  * The server is detached, so it outlives this command and the agent that ran it.
  */
 async function autostart(base: string): Promise<boolean> {
-  if (process.env.LAATSUX_NO_AUTOSTART) return false;
+  if (fromEnv('NO_AUTOSTART')) return false;
   const url = new URL(base);
   if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return false;
-  const bin = fileURLToPath(new URL('../../bin/laatsux.ts', import.meta.url));
+  const bin = fileURLToPath(new URL('../../bin/galley.ts', import.meta.url));
   let out: 'ignore' | number = 'ignore';
   const logFile = join(dataDir(), 'server.log');
   try {
@@ -56,7 +56,7 @@ async function autostart(base: string): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 200));
     try {
       if ((await fetch(`${base}/api/health`)).ok) {
-        process.stderr.write(`Started the laatsux server at ${base} (log: ${logFile})\n`);
+        process.stderr.write(`Started the galley server at ${base} (log: ${logFile})\n`);
         return true;
       }
     } catch {}
@@ -75,6 +75,9 @@ export class Client {
     const headers: Record<string, string> = { accept: 'application/json', ...opts.headers };
     const actor = cliActor();
     if (actor) {
+      headers['x-galley-actor'] = actor.login;
+      headers['x-galley-actor-type'] = actor.type;
+      // As they were called before the rename (#9), for a server that has not restarted since.
       headers['x-laatsux-actor'] = actor.login;
       headers['x-laatsux-actor-type'] = actor.type;
     }
@@ -90,7 +93,7 @@ export class Client {
         this.triedAutostart = true;
         if (await autostart(this.base)) return send();
       }
-      throw new CliError(`the laatsux server is not running at ${this.base}, and it could not be started. Run \`laatsux serve\` to see why.`);
+      throw new CliError(`the galley server is not running at ${this.base}, and it could not be started. Run \`galley serve\` to see why.`);
     }
   }
 

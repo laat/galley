@@ -3,10 +3,10 @@ import { readFileSync } from 'node:fs';
 import { CliError, Client, currentBranch, type RepoRef } from './client.ts';
 import { err, isTTY, out, runJq } from './output.ts';
 
-const USAGE = `Make a request to the laatsux API. Mirrors \`gh api\`.
+const USAGE = `Make a request to the galley API. Mirrors \`gh api\`.
 
 USAGE
-  laatsux api <endpoint> [flags]
+  galley api <endpoint> [flags]
 
 The endpoint is a path of the GitHub REST API, like "repos/{owner}/{repo}/pulls/1/comments".
 {owner}, {repo} and {branch} are filled in from the repository in the current directory.
@@ -24,7 +24,7 @@ Supported endpoints (GitHub-compatible):
   repos/{owner}/{repo}/issues/N/comments              GET, POST
   repos/{owner}/{repo}/issues/comments/ID             GET, PATCH, DELETE
   repos/{owner}/{repo}/issues/N/timeline              GET
-laatsux extensions:
+galley extensions:
   repos/{owner}/{repo}/pulls/N/threads/ID/resolved    PUT, DELETE
   repos/{owner}/{repo}/pulls/N/publish                POST
   repos/{owner}/{repo}/pulls/N/wait?timeout=SECONDS   GET
@@ -123,8 +123,8 @@ export async function api(client: Client, cwd: string, args: string[]): Promise<
   let endpoint = positionals[0];
   if (endpoint === 'graphql') {
     throw new CliError(
-      'laatsux does not implement the GraphQL API. Use `laatsux pr view --json reviewThreads` to read review threads, ' +
-        '`laatsux pr comment N --reply-to ID` to reply, and the REST endpoints listed in `laatsux api --help`.',
+      'galley does not implement the GraphQL API. Use `galley pr view --json reviewThreads` to read review threads, ' +
+        '`galley pr comment N --reply-to ID` to reply, and the REST endpoints listed in `galley api --help`.',
     );
   }
 
@@ -191,7 +191,7 @@ export async function api(client: Client, cwd: string, args: string[]): Promise<
     try {
       message = JSON.parse(text).message ?? message;
     } catch {}
-    err(`laatsux: ${message.split('\n')[0]} (HTTP ${res.status})`);
+    err(`galley: ${message.split('\n')[0]} (HTTP ${res.status})`);
     return 1;
   }
   return 0;

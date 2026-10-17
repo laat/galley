@@ -12,7 +12,7 @@ import { checkDefinition, readDefinitions, removeDefinition, reviewsRepo, writeD
 import { customActorKey, moveOff, Reviewer, type Engine, type OwnSettings } from './reviewer.ts';
 
 /**
- * How often laatsux checks that it follows the reviewers' directory: one removed or made again
+ * How often galley checks that it follows the reviewers' directory: one removed or made again
  * needs a watcher of its own, and a change the watcher missed (it can, right after it starts) is read then.
  */
 const FOLLOW_MS = 2000;

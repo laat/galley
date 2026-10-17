@@ -115,7 +115,7 @@ function toolEntry(b: RunBase, run: ReviewRunRow, call: ToolCallView, n: number)
 function entry(b: RunBase, run: ReviewRunRow, e: Entry, n: number): Safe {
   switch (e.type) {
     case 'prompt':
-      return html`<li class="run-entry run-prompt"><details class="js-keep-open" id="step-${n}"><summary class="run-tool-summary">${icon('chevron-right', { cls: 'run-chevron' })}${icon('person', { cls: 'run-kind' })} The prompt laatsux gave it</summary><pre class="run-output">${e.text}</pre></details></li>`;
+      return html`<li class="run-entry run-prompt"><details class="js-keep-open" id="step-${n}"><summary class="run-tool-summary">${icon('chevron-right', { cls: 'run-chevron' })}${icon('person', { cls: 'run-kind' })} The prompt galley gave it</summary><pre class="run-output">${e.text}</pre></details></li>`;
     case 'message': {
       const code = json(e.text);
       return html`<li class="run-entry run-message">${icon('comment', { cls: 'run-kind' })}<div class="run-text">${code ? html`<pre class="run-output">${code}</pre>` : html`<div class="markdown-body">${raw(renderMarkdown(e.text))}</div>`}</div></li>`;
@@ -157,6 +157,6 @@ export function transcriptContent(b: RunBase, o: { run: ReviewRunRow; login: str
     <p class="run-meta color-fg-muted">${plural(steps, 'step')}${usage ? ` · ${usageParts(usage).join(' · ')}` : ''}${run.status === 'running' && usage && usage.cost_usd === null ? ' so far' : ''}</p>
     ${run.status === 'failed' && run.error ? html`<pre class="run-output run-failure">${run.error}</pre>` : ''}
   </div>
-  ${entries.length ? html`<ol class="run-transcript">${entries.map((e, i) => entry(b, run, e, i))}</ol>` : html`<p class="blankslate">${run.status === 'running' ? 'Nothing yet: its steps show here as it takes them.' : 'laatsux did not keep a transcript of this run.'}</p>`}
+  ${entries.length ? html`<ol class="run-transcript">${entries.map((e, i) => entry(b, run, e, i))}</ol>` : html`<p class="blankslate">${run.status === 'running' ? 'Nothing yet: its steps show here as it takes them.' : 'galley did not keep a transcript of this run.'}</p>`}
 </div>`;
 }
