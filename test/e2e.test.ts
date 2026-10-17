@@ -206,7 +206,10 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /reviewer reviewed: changes requested/);
     assert.match(r.stdout, /thread \d+ on math\.js:6 \[unresolved\] \(high priority\)/);
-    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/1/files`)).text(), /<span class="Label Label--priority Label--priority-high" title="Priority">High<\/span>/);
+    // The priority is the thread's: it shows once, on the thread's header.
+    const files = await (await fetch(`${server.url}/acme/widgets/pull/1/files`)).text();
+    assert.match(files, /<summary class="review-thread-header">[^]*?<span class="Label Label--priority Label--priority-high" title="Priority">High<\/span>[^]*?<\/summary>/);
+    assert.equal(files.match(/Label--priority-high/g)?.length, 1);
     assert.match(r.stdout, /Add a doc comment\./);
     // Seen feedback is not returned twice.
     const again = await cli(['pr', 'wait', '--timeout', '1s']);
@@ -311,7 +314,12 @@ test('the agent loop, from staging to publishing', async (t) => {
     const after = JSON.parse((await cli(['pr', 'view', '--json', 'reviewThreads'])).stdout).reviewThreads.find((th: any) => th.databaseId === target);
     assert.equal(after.isResolved, true);
     assert.equal(after.comments.at(-1).body, 'Fixed in the last commit.');
-    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/1`)).text(), /agent marked this conversation as resolved/);
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page, /agent marked this conversation as resolved/);
+    // The collapsed header shows the priority, not a "Resolved" label.
+    const header = page.match(new RegExp(`id="thread-${target}"[^]*?</summary>`))![0];
+    assert.match(header, /Label--priority-high/);
+    assert.doesNotMatch(header, />Resolved</);
   });
 
   await t.test('agents cannot publish, and stale pages cannot publish', async () => {
