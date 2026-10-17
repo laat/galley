@@ -373,6 +373,8 @@ test('the agent loop, from staging to publishing', async (t) => {
     const threads = JSON.parse((await cli(['pr', 'view', '--json', 'reviewThreads'])).stdout).reviewThreads;
     const range = threads.find((th: any) => th.databaseId === review.id);
     assert.equal(range.isOutdated, true);
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page.match(new RegExp(`id="thread-${review.id}"[^]*?</summary>`))![0], /<span class="review-thread-range">L8–10<\/span>/);
     // Seen by the agent so it does not show up in the next wait.
     await cli(['pr', 'view', '--comments']);
   });
@@ -438,7 +440,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(after.isResolved, true);
     assert.equal(after.comments.at(-1).body, 'Fixed in the last commit.');
     const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
-    assert.match(page, /agent marked this conversation as resolved/);
+    assert.match(page, /Resolved by agent</);
     // The collapsed header shows the priority, not a "Resolved" label.
     const header = page.match(new RegExp(`id="thread-${target}"[^]*?</summary>`))![0];
     assert.match(header, /Label--priority-high/);

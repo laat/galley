@@ -282,13 +282,16 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     anchor: `discussion_r${c.id}`,
     markdownCtx: { suggestionLines, suggestionLang: lang, references: o.references },
   });
-  const range = root.start_line && root.start_line !== root.line ? `lines ${root.start_line} to ${root.line}` : root.line ? `line ${root.line}` : '';
+  const range = root.start_line && root.start_line !== root.line ? `L${root.start_line}–${root.line}` : root.line ? `L${root.line}` : '';
   let title: Safe;
   if (root.subject_type === 'commit') {
     const headline = o.commitTitle?.(root.commit_id!) ?? '';
-    title = html`${icon('git-commit')} <span class="review-thread-path">Commit <code>${shortSha(root.commit_id)}</code> ${headline}</span>`;
+    title = html`<span class="review-thread-title" title="${headline}">${icon('git-commit')} <span class="review-thread-path">Commit <code>${shortSha(root.commit_id)}</code> ${headline}</span></span>`;
   } else {
-    title = html`${icon('file')} <span class="review-thread-path">${root.path}</span>${range && o.standalone ? html` <span class="color-fg-muted">${range}</span>` : ''}`;
+    // The path gives way from its start, so the file name stays: `…/reviewers/custom.ts`.
+    const slash = root.path!.lastIndexOf('/') + 1;
+    const dir = root.path!.slice(0, slash);
+    title = html`<span class="review-thread-title" title="${root.path}">${icon('file')} <span class="review-thread-path is-file">${dir ? html`<span class="review-thread-dir"><bdi dir="ltr">${dir}</bdi></span>` : ''}<span class="review-thread-file">${root.path!.slice(slash)}</span></span>${range && o.standalone ? html` <span class="review-thread-range">${range}</span>` : ''}</span>`;
   }
   const badges = html`${t.placement.outdated ? html`<span class="Label Label--attention">Outdated</span>` : ''}${priorityPill(root.priority)}${t.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}`;
   const resolvedBy = root.resolved_by_id ? s.db.actorById(root.resolved_by_id).login : null;
@@ -296,8 +299,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
   <summary class="review-thread-header">
     ${o.standalone || t.resolved ? title : participants(s, comments)}
     ${badges}
-    <span class="flex-auto"></span>
-    ${t.resolved ? html`<span class="color-fg-muted review-thread-resolved-note">${resolvedBy} marked this conversation as resolved.</span>` : ''}
+    ${t.resolved ? html`<span class="review-thread-resolved-note"><span>Resolved${resolvedBy ? ` by ${resolvedBy}` : ''}</span></span>` : html`<span class="flex-auto"></span>`}
     <span class="review-thread-toggle">${icon('fold', { cls: 'when-open' })}${icon('unfold', { cls: 'when-closed' })}</span>
   </summary>
   ${o.standalone && root.subject_type === 'line' ? hunkSnippet(root.diff_hunk, root.path, root.start_line ?? root.line, root.line) : ''}
@@ -325,7 +327,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
 
 function participants(s: Service, comments: CommentRow[]): Safe {
   const people = [...new Map(comments.map((c) => [c.author_id, s.db.actorById(c.author_id)])).values()];
-  return html`<span class="review-thread-participants">${people.map((a) => avatar(avatarUrl(s, a), a.login, 16, a.type === 'Bot' ? 'avatar-bot' : 'avatar-circle'))} <span>${people.map((a) => a.login).join(', ')} · ${comments.length === 1 ? '1 comment' : `${comments.length} comments`}</span></span>`;
+  return html`<span class="review-thread-participants">${people.map((a) => avatar(avatarUrl(s, a), a.login, 16, a.type === 'Bot' ? 'avatar-bot' : 'avatar-circle'))} <span class="review-thread-participants-text">${people.map((a) => a.login).join(', ')} · ${comments.length === 1 ? '1 comment' : `${comments.length} comments`}</span></span>`;
 }
 
 export function copyButton(text: string, label = 'Copy'): Safe {
