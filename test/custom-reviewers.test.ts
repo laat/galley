@@ -296,7 +296,7 @@ test('a reviewer of the description reads no code, and approves what follows its
   assert.match(review.body, new RegExp(`<sub>house-rules \\(Claude, haiku, low effort\\) reviewed the title, description and commit messages at \`${sha(acme).slice(0, 7)}\`, automatic review 1 of 3\\.</sub>$`));
   // Done with the head, as one that found nothing is; the decision is still the reviewer's to make.
   const status = server.service.readiness(row('acme', number)).reviewers.find((r) => r.login === 'house-rules')!.status;
-  assert.deepEqual([status.state, status.done, status.description], ['approved', true, true]);
+  assert.deepEqual([status.state, status.description], ['approved', true]);
   const view = await cli(acme, ['pr', 'view', String(number), '--json', 'reviewDecision,turn']);
   assert.equal(JSON.parse(view.stdout).reviewDecision, 'REVIEW_REQUIRED');
   assert.match(await wait(acme, number), new RegExp(`^The reviewer agents are done with ${sha(acme).slice(0, 7)} \\(house-rules approved the description\\); ask the user to review it`, 'm'));

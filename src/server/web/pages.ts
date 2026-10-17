@@ -1,7 +1,8 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, TO_REVIEW, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type HeadStatus, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { doneForAutoPublish, type HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
@@ -296,7 +297,7 @@ function turnLine(
       return r.kind === 'author' || r.kind === 'reviewer_agent' ? 3 : 2;
     }
     // The agents': the reviewer agents that have the head to review, or else the author, first.
-    if (t.whose === 'reviewer_agents' && r.kind === 'reviewer_agent' && TO_REVIEW.includes(r.state as HeadStatus['state'])) return 0;
+    if (t.whose === 'reviewer_agents' && r.to_review) return 0;
     return r.kind === 'author' ? 1 : 2;
   };
   const pulse = icon('dot-fill', { cls: 'turn-mark turn-pulse' });
@@ -314,12 +315,7 @@ function turnLine(
     const actor = r.state === 'reviewing' && s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', agent.login);
     if (actor) atWork.push({ actor, doing: r.text });
     // Each failed review has its own Retry; the others share a phrase with those that say the same.
-    const words =
-      r.state === 'failed'
-        ? "'s review failed"
-        : r.state === 'answered'
-          ? "'s findings answered"
-          : ` ${agentPhrase(r.state as HeadStatus['state'], agent.status, pull, author.login, waiting)}`;
+    const words = agentPhrase(agent.status, pull, author.login, waiting);
     const key = r.state === 'failed' ? `failed ${r.reviewer}` : `agent${words}`;
     const same = phrases.get(key);
     if (same) {
@@ -364,32 +360,39 @@ function reasonPhrase(r: TurnReason, author: string): string {
 }
 
 /**
- * What a reviewer agent is at with the head, after its name (reviewerAgentText in service.ts says
- * it in full). The commit only when it is not the head, as for a review that started before a push.
+ * What a reviewer agent is at with the head, to follow its name (" reviewing", "'s review failed";
+ * reviewerAgentText in service.ts says it in full). The commit only when it is not the head, as for
+ * a review that started before a push.
  */
-function agentPhrase(state: HeadStatus['state'], status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean): string {
+function agentPhrase(status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean): string {
   const older = !status.description && status.commit !== pull.head_sha ? shortSha(status.commit) : '';
   const what = status.description ? ' the description' : older ? ` ${older}` : '';
-  switch (state) {
+  switch (status.state) {
     case 'reviewing':
-      return older ? `reviewing an earlier commit, ${older}` : `reviewing${what}`;
+      return older ? ` reviewing an earlier commit, ${older}` : ` reviewing${what}`;
     case 'queued':
-      return `about to review${what}`;
+      return ` about to review${what}`;
     case 'interrupted':
-      return `to review${what} again after a restart`;
+      return ` to review${what} again after a restart`;
     case 'unreviewed':
-      return authorWaiting ? `about to review${what}` : `waiting for ${author}`;
+      return authorWaiting ? ` about to review${what}` : ` waiting for ${author}`;
     case 'findings':
-      return what ? `commented on${what}` : 'commented';
+      return what ? ` commented on${what}` : ' commented';
+    case 'answered':
+      return "'s findings answered";
+    case 'failed':
+      return "'s review failed";
     case 'cancelled':
-      return `cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
+      return ` cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
     case 'clean':
-      return what ? `found nothing in${what}` : 'found nothing';
+      return what ? ` found nothing in${what}` : ' found nothing';
     case 'approved':
-      return `approved${what}`;
-    default:
-      // Capped: it has no automatic review left. (Turned off, it has no reason.)
-      return 'out of automatic reviews';
+      return ` approved${what}`;
+    case 'capped':
+      return ' out of automatic reviews';
+    case 'off':
+      // Turned off, it has no reason (reviewerAgentText).
+      return ' off';
   }
 }
 
@@ -1038,7 +1041,7 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const options = [auto.sign ? 'signed' : null, auto.draft ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
   const item = (state: 'done' | 'waiting' | 'failed', text: Safe | string) =>
     html`<li>${state === 'done' ? icon('check', { cls: 'color-fg-success' }) : state === 'failed' ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' })} <span>${text}</span></li>`;
-  const items = r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
+  const items = r.reviewers.map(({ login, status }) => item(doneForAutoPublish(status.state) ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
   items.push(
     r.authorWaiting && !r.unseen
       ? item('done', `${author.login} is waiting for review, with all feedback seen`)
