@@ -2178,6 +2178,9 @@ test('browsing the repository at a commit of a pull request', async (t) => {
   writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
   writeFileSync(join(repo, 'data.bin'), Buffer.from([0, 1, 2, 0, 3]));
   writeFileSync(join(repo, 'doomed.txt'), 'gone soon\n');
+  mkdirSync(join(repo, 'nested', 'deeper'), { recursive: true });
+  writeFileSync(join(repo, 'nested', 'deeper', 'leaf.txt'), 'leaf\n');
+  writeFileSync(join(repo, 'nested', 'top.txt'), 'top\n');
   git('add', '-A');
   git('commit', '-qm', 'Add files to browse');
   const base = git('rev-parse', 'HEAD');
@@ -2269,6 +2272,48 @@ test('browsing the repository at a commit of a pull request', async (t) => {
       assert.equal((await page(path)).status, 404, path);
     }
     assert.equal((await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=a&to=2&delta=0`)).status, 400);
+  });
+
+  await t.test('a file tree beside the pages, open down to the page, its directories loading when opened', async () => {
+    const at = (path: string) => `/acme/widgets/${path}`.replace('@', head);
+    // A file: its directories open, the file highlighted, other directories closed and empty.
+    const leaf = await page(at('blob/@/nested/deeper/leaf.txt'));
+    assert.match(leaf.text, new RegExp(`<nav class="file-tree browse-tree js-browse-tree" aria-label="Files" data-sha="${head}" data-items="/acme/widgets/file-tree/${head}" data-paths="/acme/widgets/tree-list/${head}"`));
+    assert.match(leaf.text, /<details data-path="nested" open><summary>/);
+    assert.match(leaf.text, /<details data-path="nested\/deeper" open><summary>/);
+    assert.match(leaf.text, new RegExp(`<a href="/acme/widgets/blob/${head}/nested/deeper/leaf\\.txt" aria-current="page">`));
+    assert.match(leaf.text, new RegExp(`<a href="/acme/widgets/blob/${head}/nested/top\\.txt">`));
+    assert.match(leaf.text, /<details data-path="dir with space"><summary>/);
+    assert.doesNotMatch(leaf.text, /notes\.md/);
+    assert.equal(leaf.text.match(/aria-current="page"/g)?.length, 1);
+    // A directory: open and highlighted itself.
+    const dirPage = await page(at('tree/@/nested/deeper'));
+    assert.match(dirPage.text, new RegExp(`<a class="tree-name" href="/acme/widgets/tree/${head}/nested/deeper" aria-current="page">deeper</a>`));
+    assert.match(dirPage.text, /<details data-path="nested\/deeper" open><summary>/);
+    // The root: nothing open, directories before files.
+    const root = await page(at('tree/@'));
+    assert.doesNotMatch(root.text, /<details data-path="[^"]*" open>/);
+    assert.doesNotMatch(root.text, /aria-current/);
+    assert.match(root.text, /data-path="nested"[^]*long\.js/);
+
+    // A directory's items, as the tree loads them.
+    const items = await page(at('file-tree/@/nested'));
+    assert.equal(items.status, 200);
+    assert.match(items.text, /^<ul><li class="tree-dir"><details data-path="nested\/deeper"><summary>/);
+    assert.match(items.text, new RegExp(`<a href="/acme/widgets/blob/${head}/nested/top\\.txt">.*<span class="tree-name">top\\.txt</span></a></li></ul>$`));
+    assert.match((await page(at('file-tree/@/dir%20with%20space'))).text, new RegExp(`<a href="/acme/widgets/blob/${head}/dir%20with%20space/notes\\.md">`));
+    assert.match((await page(at('file-tree/@'))).text, /data-path="nested"/);
+    for (const path of ['file-tree/@/long.js', 'file-tree/@/nope', 'file-tree/@/nested/..%2F..%2Fetc', `file-tree/${'0'.repeat(40)}`, 'file-tree/not-a-sha/nested', 'tree-list/not-a-sha']) {
+      assert.equal((await page(at(path))).status, 404, path);
+    }
+
+    // Every file's path, for "Go to file"; the browser keeps it when asked by full SHA.
+    const list = await page(at('tree-list/@'));
+    const paths: string[] = JSON.parse(list.text).paths;
+    assert.ok(paths.includes('nested/deeper/leaf.txt') && paths.includes('dir with space/notes.md') && paths.includes('long.js'), paths.join());
+    assert.ok(!paths.includes('doomed.txt') && !paths.includes('nested'), paths.join());
+    assert.match(list.headers.get('cache-control')!, /immutable/);
+    assert.equal((await page(`/acme/widgets/tree-list/${head.slice(0, 7)}`)).headers.get('cache-control'), null);
   });
 
   await t.test('the unfold arrows load lines of the file as diff rows', async () => {

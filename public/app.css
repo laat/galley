@@ -818,7 +818,7 @@ code.wrap { word-break: break-all; }
 .files-layout { display: flex; gap: 16px; padding-top: 16px; padding-bottom: 32px; align-items: flex-start; }
 .files { flex: 1; min-width: 0; }
 .file-tree { position: sticky; top: 56px; width: 280px; max-height: calc(100vh - 72px); overflow: auto; flex-shrink: 0; font-size: 14px; }
-body.tree-hidden .file-tree { display: none; }
+body.tree-hidden .files-layout > .file-tree { display: none; }
 .file-tree ul { list-style: none; margin: 0; padding: 0 0 0 12px; }
 .file-tree > ul { padding-left: 0; }
 .file-tree summary, .tree-file { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; color: var(--fg); white-space: nowrap; }
@@ -843,7 +843,7 @@ body.tree-hidden .file-tree { display: none; }
 .tree-threads { position: relative; display: inline-flex; align-items: center; gap: 4px; margin: -2px 0; padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: var(--fg-muted); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
 .tree-threads:hover { color: var(--accent); background: var(--neutral-muted); }
 .file-tree .tree-threads:hover .octicon { color: var(--accent); }
-@media (max-width: 1011px) { .file-tree { display: none; } }
+@media (max-width: 1011px) { .files-layout > .file-tree { display: none; } }
 
 .file { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; scroll-margin-top: 64px; }
 .file-header {
@@ -1012,7 +1012,26 @@ body.selecting { user-select: none; cursor: ns-resize; }
 
 /* ------------------------------------------------------ repository browser */
 
-.browse { padding-top: 24px; padding-bottom: 32px; }
+.browse-layout { display: flex; gap: 24px; align-items: flex-start; padding-top: 24px; padding-bottom: 32px; }
+.browse { flex: 1; min-width: 0; }
+/* The file tree beside it looks like the Files changed tree. Shown on wide screens and hidden on
+   narrow ones, where it goes above the page, until the viewer says otherwise (public/app.js). */
+.browse-tree { top: 16px; max-height: calc(100vh - 32px); }
+.browse-tree-filter { position: sticky; top: 0; z-index: 1; padding-bottom: 8px; background: var(--bg); }
+.browse-tree summary { cursor: pointer; }
+.browse-tree summary > a.tree-name { flex: 0 1 auto; color: var(--fg); }
+.browse-tree summary:has(> a[aria-current]), .browse-tree .tree-file:has(> a[aria-current]) { background: var(--accent-subtle); }
+.browse-tree .tree-file:has(> a:focus-visible) { background: var(--neutral-muted); }
+.browse-tree-results .tree-file { white-space: normal; }
+.browse-tree-results .tree-name { word-break: break-all; }
+.browse-tree-results mark { background: none; color: inherit; font-weight: 600; }
+.browse-tree-note { padding: 3px 8px; color: var(--fg-muted); }
+body.browse-tree-hidden .browse-tree { display: none; }
+@media (max-width: 1011px) {
+  .browse-layout { flex-direction: column; align-items: stretch; }
+  .browse-tree { position: static; width: auto; max-height: 50vh; }
+  body:not(.browse-tree-shown) .browse-tree { display: none; }
+}
 .browse-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
 .browse-ref { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; font-size: 14px; background: var(--btn-bg); border: 1px solid var(--btn-border); border-radius: 6px; }
 .browse-ref code { font-size: 13px; }

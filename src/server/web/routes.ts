@@ -4,7 +4,7 @@ import { HttpError, type Service } from '../service.ts';
 import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, pullList } from './pages.ts';
 import { publishingSettingsPage, settingsPage } from './settings.ts';
 import { browseUrl, type DiffMode } from './diffview.ts';
-import { blobPage, excerpt, locate, rawFile, treePage } from './browse.ts';
+import { blobPage, excerpt, locate, rawFile, treeItemsHtml, treePage } from './browse.ts';
 
 export function web(s: Service): Hono {
   const app = new Hono();
@@ -62,6 +62,22 @@ export function web(s: Service): Hono {
     return c.html(await blobPage(s, loc, entry, { plain: c.req.query('plain') === '1' }));
   });
   app.get('/:owner/:repo/raw/:sha/:path{.+}', async (c) => rawFile(await at(c)));
+  // For the file tree in public/app.js (an extension): the items of a directory it opens.
+  const items = async (c: Context) => {
+    const loc = await at(c);
+    const htmlText = await treeItemsHtml(loc);
+    if (htmlText === null) throw notFound(loc.path);
+    return c.html(htmlText);
+  };
+  app.get('/:owner/:repo/file-tree/:sha', items);
+  app.get('/:owner/:repo/file-tree/:sha/:path{.+}', items);
+  // Every file's path, for "Go to file", as GitHub's /tree-list. The browser keeps it: a commit's
+  // files never change.
+  app.get('/:owner/:repo/tree-list/:sha', async (c) => {
+    const loc = await at(c);
+    const immutable = c.req.param('sha') === loc.sha;
+    return c.json({ paths: await loc.git.files(loc.sha) }, 200, immutable ? { 'cache-control': 'private, max-age=31536000, immutable' } : {});
+  });
   app.get('/:owner/:repo/blob_excerpt/:sha', async (c) => {
     const loc = await locate(s, c.req.param('owner'), c.req.param('repo'), c.req.param('sha'), c.req.query('path') ?? '');
     const [from, to, delta] = ['from', 'to', 'delta'].map((k) => Number(c.req.query(k)));

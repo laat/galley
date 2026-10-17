@@ -1005,6 +1005,181 @@
     thread.classList.add('is-flash');
   }
 
+  // ----------------------------------------------------- browser file tree
+  // The tree beside the repository browser. A directory loads its items when it opens, what is
+  // open stays open on the next page of the same commit (per tab), and "Go to file" filters the
+  // commit's paths, fetched once.
+
+  const FILE_ICON =
+    '<svg class="octicon octicon-file" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"></path></svg>';
+  const SHOWN_MATCHES = 100;
+  const browseTree = () => $('.js-browse-tree');
+  const pathUrl = (path) => path.split('/').map(encodeURIComponent).join('/');
+  /** { sha, open }: the commit browsed and the directories open in its tree. */
+  let treeState = null;
+  let treePaths = null;
+  const treeLoads = new WeakMap();
+
+  /** `at` is where the link clicked was in the tree, for the next page to show its entry there. */
+  function saveTreeState(at) {
+    try {
+      sessionStorage.setItem('laatsux:browse-tree-open', JSON.stringify({ sha: treeState.sha, open: [...treeState.open], at }));
+    } catch {}
+  }
+
+  /** Load a directory's items, once, and open those of its directories that were open. */
+  function loadTreeDir(details) {
+    if (!treeLoads.has(details)) {
+      const load = (async () => {
+        if (!$(':scope > ul', details)) {
+          const res = await fetch(`${browseTree().dataset.items}/${pathUrl(details.dataset.path)}`);
+          if (!res.ok) throw new Error(`Could not load ${details.dataset.path}`);
+          const items = document.createElement('template');
+          items.innerHTML = await res.text();
+          details.append(items.content);
+        }
+        await openTreeDirs(details);
+      })().catch((err) => {
+        treeLoads.delete(details);
+        toast(err.message);
+      });
+      treeLoads.set(details, load);
+    }
+    return treeLoads.get(details);
+  }
+
+  function openTreeDirs(root) {
+    const dirs = $$('details[data-path]', root).filter((d) => treeState.open.has(d.dataset.path));
+    return Promise.all(
+      dirs.map((d) => {
+        d.open = true;
+        return loadTreeDir(d);
+      }),
+    );
+  }
+
+  document.addEventListener(
+    'toggle',
+    (e) => {
+      const d = e.target;
+      if (!treeState || !(d instanceof HTMLDetailsElement) || !d.dataset.path || !d.closest('.js-browse-tree')) return;
+      if (d.open) {
+        treeState.open.add(d.dataset.path);
+        loadTreeDir(d);
+      } else treeState.open.delete(d.dataset.path);
+      saveTreeState();
+    },
+    true, // toggle does not bubble
+  );
+
+  /** Show the page's own entry where the link clicked on the last page was, or else in view. */
+  function placeActiveEntry(tree, at) {
+    const active = $('[aria-current="page"]', tree);
+    if (!active || !tree.clientHeight) return;
+    const row = active.closest('summary, .tree-file');
+    const offset = row.getBoundingClientRect().top - tree.getBoundingClientRect().top;
+    if (typeof at === 'number') tree.scrollTop += offset - at;
+    else if (offset + row.offsetHeight > tree.clientHeight) tree.scrollTop += offset - tree.clientHeight / 2;
+  }
+
+  function setUpBrowseTree() {
+    const tree = browseTree();
+    if (!tree) return;
+    let saved = null;
+    try {
+      saved = JSON.parse(sessionStorage.getItem('laatsux:browse-tree-open'));
+    } catch {}
+    const same = saved && saved.sha === tree.dataset.sha && Array.isArray(saved.open);
+    treeState = { sha: tree.dataset.sha, open: new Set(same ? saved.open : []) };
+    // The directories down to this page are open now, and stay open on the next.
+    for (const d of $$('details[open][data-path]', tree)) treeState.open.add(d.dataset.path);
+    saveTreeState();
+    openTreeDirs(tree).then(() => placeActiveEntry(tree, same ? saved.at : undefined));
+  }
+
+  function rememberTreeLink(link) {
+    const tree = link.closest('.js-browse-tree');
+    saveTreeState(link.getBoundingClientRect().top - tree.getBoundingClientRect().top);
+  }
+
+  // Shown on wide screens and hidden on narrow ones (app.css), until the viewer says otherwise.
+  function toggleBrowseTree() {
+    const hide = getComputedStyle(browseTree()).display !== 'none';
+    document.body.classList.toggle('browse-tree-hidden', hide);
+    document.body.classList.toggle('browse-tree-shown', !hide);
+    try {
+      localStorage.setItem('laatsux:browse-tree', hide ? 'hidden' : 'shown');
+    } catch {}
+  }
+
+  /** "Go to file": the paths containing the text, the ones whose file name does first. */
+  async function filterTree(input) {
+    const tree = input.closest('.js-browse-tree');
+    const results = $('.js-browse-results', tree);
+    const filtering = () => input.value.trim().toLowerCase();
+    $('.js-browse-items', tree).hidden = !!filtering();
+    results.hidden = !filtering();
+    if (!filtering()) {
+      // An empty box leaves nothing for Enter or the arrows to open.
+      results.replaceChildren();
+      return;
+    }
+    if (!treePaths) {
+      treePaths = fetch(tree.dataset.paths).then(async (res) => {
+        if (!res.ok) throw new Error('Could not load the files');
+        return (await res.json()).paths;
+      });
+    }
+    let paths;
+    try {
+      paths = await treePaths;
+    } catch (err) {
+      treePaths = null;
+      results.innerHTML = `<li class="browse-tree-note">${esc(err.message)}</li>`;
+      return;
+    }
+    // Typing on while the paths loaded: show what the box says now.
+    const q = filtering();
+    if (!q) return;
+    const inName = (p) => p.slice(p.lastIndexOf('/') + 1).toLowerCase().includes(q);
+    const hits = paths.filter((p) => p.toLowerCase().includes(q)).sort((a, b) => inName(b) - inName(a));
+    const rows = hits.slice(0, SHOWN_MATCHES).map((p) => {
+      const at = p.toLowerCase().lastIndexOf(q);
+      const name = `${esc(p.slice(0, at))}<mark>${esc(p.slice(at, at + q.length))}</mark>${esc(p.slice(at + q.length))}`;
+      return `<li class="tree-file"><a href="${esc(`${tree.dataset.blob}/${pathUrl(p)}`)}">${FILE_ICON}<span class="tree-name">${name}</span></a></li>`;
+    });
+    const more = hits.length - rows.length;
+    if (!hits.length) rows.push('<li class="browse-tree-note">No files match</li>');
+    else if (more) rows.push(`<li class="browse-tree-note">${more} more ${more === 1 ? 'file matches' : 'files match'}</li>`);
+    results.innerHTML = rows.join('');
+  }
+
+  document.addEventListener('input', (e) => {
+    if (e.target.matches && e.target.matches('.js-browse-filter')) filterTree(e.target);
+  });
+
+  // Up and down move between the box and the files found, Enter opens one, Escape clears the box.
+  document.addEventListener('keydown', (e) => {
+    const tree = e.target.closest && e.target.closest('.js-browse-tree');
+    if (!tree || e.altKey || e.ctrlKey || e.metaKey) return;
+    const input = $('.js-browse-filter', tree);
+    const results = $('.js-browse-results', tree);
+    const links = results.hidden ? [] : $$('a', results);
+    const at = links.indexOf(e.target);
+    if (e.target !== input && at < 0) return;
+    if (e.key === 'ArrowDown' && links[at + 1]) links[at + 1].focus();
+    else if (e.key === 'ArrowUp' && at >= 0) (links[at - 1] || input).focus();
+    else if (e.key === 'Enter' && e.target === input && links[0]) {
+      rememberTreeLink(links[0]);
+      location.href = links[0].href;
+    } else if (e.key === 'Escape' && input.value) {
+      input.value = '';
+      input.focus();
+      filterTree(input);
+    } else return;
+    e.preventDefault();
+  });
+
   // --------------------------------------------------------------- clicks
 
   document.addEventListener('click', async (e) => {
@@ -1115,6 +1290,10 @@
       if (desc) desc.hidden = !desc.hidden;
     } else if ((el = on('.js-tree-threads'))) {
       nextTreeThread(el);
+    } else if ((el = on('.js-tree-toggle[data-tree="browse"]'))) {
+      toggleBrowseTree();
+    } else if ((el = on('.js-browse-tree a[href]'))) {
+      rememberTreeLink(el);
     } else if ((el = on('.js-tree-toggle'))) {
       document.body.classList.toggle('tree-hidden');
       try {
@@ -1281,11 +1460,14 @@
 
   try {
     if (localStorage.getItem('laatsux:tree-hidden')) document.body.classList.add('tree-hidden');
+    const browseTreeShown = localStorage.getItem('laatsux:browse-tree');
+    if (browseTreeShown === 'hidden' || browseTreeShown === 'shown') document.body.classList.add(`browse-tree-${browseTreeShown}`);
   } catch {}
   // Avatars that failed before this script ran.
   for (const img of $$('img[data-fallback]')) if (img.complete && !img.naturalWidth) avatarFallback(img);
   afterRender();
   markLines(true);
+  setUpBrowseTree();
   connectLive();
   setInterval(updateTimes, 30_000);
 })();
