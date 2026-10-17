@@ -119,7 +119,10 @@ export interface WaitResult {
 /** The reviewer agents are done with the head: what `pr wait` tells the author once per commit. */
 export interface AgentsDone {
   sha: string;
-  /** What each reviewer agent made of the commit ("codex-review found nothing in 8c64534"); none for those turned off. */
+  /**
+   * What each reviewer agent made of the commit ("codex-review found nothing in 8c64534"); none for
+   * those turned off. Once automatic reviews are stopped, who stopped them, said once for all.
+   */
   reviewers: string[];
 }
 
@@ -197,6 +200,13 @@ export interface AutoPublish {
   force: boolean;
   /** Turn on auto-merge on GitHub after publishing, with this merge method; null for no auto-merge. */
   autoMerge: MergeMethod | null;
+}
+
+/** Automatic reviews, once the reviewer stopped them: who did, when, and after which round (see Service.automaticRound). */
+export interface IterationsStopped {
+  by: number;
+  at: string;
+  round: number;
 }
 
 /**
@@ -1441,7 +1451,10 @@ export class Service {
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
     if (reviewers.some((r) => r.status.state === 'reviewing' || r.status.state === 'queued' || r.status.state === 'unreviewed')) return null;
-    return { sha: pull.head_sha, reviewers: reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true) ?? []) };
+    const stopped = this.stoppedText(pull);
+    const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
+    // Once, whatever each reviewer agent made of the commit.
+    return { sha: pull.head_sha, reviewers: stopped ? [...texts, stopped] : texts };
   }
 
   /**
@@ -1512,10 +1525,13 @@ export class Service {
     if (whose === 'none') return { whose, reasons: [] };
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
+    const stopped = this.stoppedText(pull);
     for (const { login, engine, status } of r.reviewers) {
-      const text = reviewerAgentText(login, status, pull, author, state === 'waiting');
+      const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
       if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine });
     }
+    // Once, whatever each reviewer agent is at.
+    if (stopped) reasons.push({ kind: 'reviewer_agent', state: 'capped', text: stopped });
     // The agents at work come first, since that is whose turn it is.
     if (whose === 'reviewer_agents') reasons.sort((a, b) => Number(b.kind === 'reviewer_agent') - Number(a.kind === 'reviewer_agent'));
 
@@ -1680,6 +1696,59 @@ export class Service {
     const off = this.db.run('UPDATE pulls SET auto_publish = NULL WHERE id = ? AND auto_publish IS NOT NULL', pull.id).changes > 0;
     if (off) this.addEvent(pull, actor, 'auto_publish_disabled', { reason }, ts);
     return off;
+  }
+
+  // ------------------------------------------------------------ stop iterating
+
+  /** Whether the reviewer stopped automatic reviews of the pull request (see stopIterating); null while they go on. */
+  iterationsStopped(pull: PullRow): IterationsStopped | null {
+    return pull.iterations_stopped ? (JSON.parse(pull.iterations_stopped) as IterationsStopped) : null;
+  }
+
+  /** The automatic review round a pull request is in or done with: the most automatic reviews any reviewer agent has done or is running. */
+  automaticRound(pull: PullRow): number {
+    return Math.max(0, ...this.reviewerAgents().map((r) => r.automaticReviewsStarted(pull)));
+  }
+
+  /**
+   * The reviewer's call that the reviewer agents have reviewed enough. A running review finishes
+   * and reaches the author; while stopped, no reviewer agent starts an automatic review and each
+   * counts as done (capped), whatever its limit and runs say, so the author's next `pr wait`
+   * hands its commit to the reviewer. Asking a reviewer agent by hand still works.
+   */
+  stopIterating(ctx: Ctx, actor: Actor): IterationsStopped {
+    const { pull } = ctx;
+    const stop: IterationsStopped = { by: actor.id, at: now(), round: this.automaticRound(pull) };
+    // Decided in the database, not on ctx, which may be from before another stop: the first one stays.
+    const stopped = this.db.transaction(() => {
+      if (this.db.run('UPDATE pulls SET iterations_stopped = ? WHERE id = ? AND iterations_stopped IS NULL', JSON.stringify(stop), pull.id).changes === 0) return false;
+      this.addEvent(pull, actor, 'iterations_stopped', { round: stop.round }, stop.at);
+      return true;
+    });
+    if (!stopped) return this.iterationsStopped(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!)!;
+    this.emit(pull.id, 'updated', actor);
+    return stop;
+  }
+
+  /** Undo stopIterating: the limits apply again, and a waiting author's head is reviewed at once. False when they were not stopped. */
+  resumeIterating(ctx: Ctx, actor: Actor): boolean {
+    const { pull } = ctx;
+    // Decided in the database, like stopIterating: ctx may be from before the stop.
+    const resumed = this.db.transaction(() => {
+      if (this.db.run('UPDATE pulls SET iterations_stopped = NULL WHERE id = ? AND iterations_stopped IS NOT NULL', pull.id).changes === 0) return false;
+      this.addEvent(pull, actor, 'iterations_resumed');
+      return true;
+    });
+    if (!resumed) return false;
+    this.emit(pull.id, 'updated', actor);
+    if ((this.waiters.get(pull.id) ?? 0) > 0) for (const r of this.reviewerAgents()) r.consider(pull.id);
+    return true;
+  }
+
+  /** "laat stopped automatic reviews after round 2", while they are stopped: said once, beside what each reviewer agent is at. */
+  private stoppedText(pull: PullRow): string | null {
+    const stop = this.iterationsStopped(pull);
+    return stop && `${this.db.actorById(stop.by).login} stopped automatic reviews ${afterRound(stop.round)}`;
   }
 
   // ---------------------------------------------------- publishing and signing
@@ -2022,8 +2091,12 @@ export class Service {
 /** Environment for git and gh when nobody can answer a prompt. */
 const UNPROMPTED = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
 
-/** A reviewer agent's progress with the head, as a reason in Turn; null when it has nothing to do with the pull request. */
-function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean): string | null {
+/**
+ * A reviewer agent's progress with the head, as a reason in Turn; null when it has nothing to do
+ * with the pull request, or no automatic reviews left because the reviewer stopped them (`stopped`),
+ * which stoppedText says once for all of them.
+ */
+function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean, stopped: boolean): string | null {
   const sha = status.commit.slice(0, 7);
   switch (status.state) {
     case 'reviewing':
@@ -2039,10 +2112,16 @@ function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, aut
     case 'clean':
       return `${login} found nothing in ${sha}`;
     case 'capped':
+      if (stopped) return null;
       return status.automatic ? `${login} used ${status.automatic.used} of ${status.automatic.limit} automatic reviews` : `${login} has used up its automatic reviews`;
     case 'off':
       return null;
   }
+}
+
+/** The round automatic reviews stopped after, in words. */
+export function afterRound(round: number): string {
+  return round ? `after round ${round}` : 'before the first round';
 }
 
 /** Why a command failed: its output, or that it ran out of time (and, given, what it may have waited for). */

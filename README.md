@@ -201,6 +201,8 @@ both take the `merge_method` the page shows, and answer 412 when the setting has
 agents are done with the head, and `agents_done` has the commit's `sha` and what each found; the
 author confirms what it showed with `PUT …/pulls/{n}/seen`), `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
 `PUT|DELETE …/pulls/{n}/pinned` (pin to the top of the front page, for the reviewer only),
+`PUT|DELETE …/pulls/{n}/stop-iterating` (stop the reviewer agents' automatic reviews, or resume
+them, for the reviewer only),
 `POST|GET …/pulls/{n}/reviewers/{codex|claude}` (ask a reviewer agent to review; list its runs,
 with what each cost as `usage` when the tool says, and this pull request's settings),
 `PATCH …/pulls/{n}/reviewers/{codex|claude}` (this pull request's own `enabled` and
@@ -211,7 +213,9 @@ with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, a
 is done (merged included), and `?state=` on the list takes laatsux's states too, as `pr list
 --state` does. A pull request also has `staging_state` (`staged`, `published` or `done`), `turn`
 (`whose`: `author`, `reviewer_agents`, `reviewer` or `none`, and `reasons`),
-`unpublished_changes` and `pinned_at` (when you pinned it; null when it is not), and once
+`unpublished_changes`, `pinned_at` (when you pinned it; null when it is not) and
+`iterations_stopped` (who stopped automatic reviews, when, and after which `round`; null while
+they go on), and once
 published `github_state` (`open`, `merged` or `closed` on GitHub; null until laatsux has asked),
 `github_closed_at` and `github_closed_by`, and GitHub's own `merged`, `merged_at`, `merged_by` and
 `merge_commit_sha`.
@@ -342,6 +346,14 @@ How they run:
   pull request whatever the settings say, and its limit, set with the − and + after the number
   ("Automatic reviews: 3 of 3 − +"). "reset" goes back to the setting. If the author is
   waiting when a reviewer is turned on or its limit goes up, it starts right away.
+- **Stop iterating**, in the merge box, is your call that the pull request has had enough
+  automatic reviews. A running review finishes and reaches the author; after that no reviewer
+  starts an automatic review and each counts as done, whatever its limit, and the author's
+  next `pr wait` hands its commit to you ("The reviewer agents are done with 3f2a1c9 (laat
+  stopped automatic reviews after round 2); ask the reviewer to review it"). The merge box then
+  says "Iterations stopped by laat after round 2", and **Resume** lets them go on up to their
+  limits; setting a limit by hand resumes them too. A review that fails after the stop does not
+  hold things up, and the sidebar still shows it. Asking a reviewer to review still works.
 - Staging can decide for one pull request, whatever the setting says:
   `laatsux pr create --reviewer codex:3` turns Codex's automatic reviews on with a limit of 3,
   `--reviewer claude` turns Claude's on with the limit from settings (a reviewer's name works
@@ -411,8 +423,8 @@ you do not trust.
 GitHub's "Enable auto-merge". laatsux then publishes on its own once:
 
 - every reviewer agent is done with the head commit: its latest review of it found nothing,
-  it has used up its automatic reviews, or it is off for the pull request (in Settings, or
-  with `pr create --no-review`);
+  it has used up its automatic reviews (or you stopped them), or it is off for the pull request
+  (in Settings, or with `pr create --no-review`);
 - the author agent is waiting in `laatsux pr wait`, with all feedback seen;
 - none of the conversations you started is unresolved.
 

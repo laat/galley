@@ -122,8 +122,9 @@ feedback, and the loop repeats until the user publishes it.
    ```
 
    It says so once per commit, when none of them reviews it or is about to: their review was
-   clean, they used up their automatic reviews, or they have nothing more to say. When none is
-   turned on, it says `No reviewer agent reviews 3f2a1c9; ask the reviewer to review it` instead.
+   clean, they used up their automatic reviews (or the user stopped them), or they have nothing
+   more to say. When none is turned on, it says
+   `No reviewer agent reviews 3f2a1c9; ask the reviewer to review it` instead.
 
 6. Ask the user to review. Tell them the pull request is ready for their review, with the URL,
    and in a few lines what the reviewer agents found and what you changed. Then run

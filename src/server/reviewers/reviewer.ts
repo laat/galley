@@ -360,19 +360,21 @@ export class Reviewer {
 
   /**
    * Whether the reviewer is done with the pull request's head: its latest review of the commit
-   * found nothing, it has used up its automatic reviews, or it is off for the pull request. A
-   * failed review of the commit holds things up until someone asks for another one.
+   * found nothing, it has used up its automatic reviews (or the reviewer stopped them), or it is
+   * off for the pull request. A failed review of the commit holds things up until someone asks
+   * for another one, unless automatic reviews are stopped: then only a running review does.
    */
   headStatus(pull: PullRow): HeadStatus {
     const work = this.atWork(pull);
     if (work) return { state: work.status === 'QUEUED' ? 'queued' : 'reviewing', done: false, commit: work.head_sha, startedAt: work.started_at };
     const commit = pull.head_sha;
     const last = this.attempt(pull);
-    if (last?.status === 'failed') return { state: 'failed', done: false, commit, failedAt: last.finished_at };
+    if (last?.status === 'failed' && !pull.iterations_stopped) return { state: 'failed', done: false, commit, failedAt: last.finished_at };
     if (last?.status === 'done' && last.findings === 0) return { state: 'clean', done: true, commit };
     if (!this.enabled(pull)) return { state: 'off', done: true, commit };
     const automatic = { used: this.automaticReviews(pull), limit: this.limit(pull) };
-    if (automatic.used >= automatic.limit) return { state: 'capped', done: true, commit, automatic };
+    // Stopped (Service.stopIterating), it has no automatic review left, whatever the counts say.
+    if (automatic.used >= automatic.limit || pull.iterations_stopped) return { state: 'capped', done: true, commit, automatic };
     // It found something in this commit and reviews the author's next one, or it reviews this one when the author waits.
     return { state: last ? 'findings' : 'unreviewed', done: false, commit, automatic };
   }
@@ -451,13 +453,21 @@ export class Reviewer {
    */
   configure(ctx: Ctx, change: ReviewerChange): ReviewerConfig {
     this.s.db.update('pulls', ctx.pull.id, this.columns(change));
-    this.s.emit(ctx.pull.id, 'updated', this.s.viewer());
-    if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.consider(ctx.pull.id);
+    // A limit set by hand resumes stopped automatic reviews, as Resume does (which tells pages and reconsiders every reviewer).
+    if (change.max_iterations === undefined || !this.s.resumeIterating(ctx, this.s.viewer())) {
+      this.s.emit(ctx.pull.id, 'updated', this.s.viewer());
+      if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.consider(ctx.pull.id);
+    }
     return this.config(this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!);
   }
 
   automaticReviews(pull: PullRow): number {
     return this.s.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND trigger = 'auto' AND status = 'done'", pull.id, this.engine)!.n;
+  }
+
+  /** Automatic reviews done or running: the round the pull request is in, as far as this reviewer goes (Service.automaticRound). */
+  automaticReviewsStarted(pull: PullRow): number {
+    return this.s.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND trigger = 'auto' AND status IN ('done', 'running')", pull.id, this.engine)!.n;
   }
 
   /** Decide in the background whether to review automatically (see maybeReview). */
@@ -483,6 +493,8 @@ export class Reviewer {
   /** Whether an automatic review of the pull request's head would start now. */
   private wouldReview(pull: PullRow): boolean {
     if (this.stopped || !this.enabled(pull) || pull.state === 'closed' || pull.author_id === this.actor().id) return false;
+    // The reviewer stopped automatic reviews (Service.stopIterating); asking by hand still works.
+    if (pull.iterations_stopped) return false;
     // One attempt per head, failed or not: a failure is retried by asking from the page.
     if (this.attempt(pull)) return false;
     return this.automaticReviews(pull) < this.limit(pull);

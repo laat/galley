@@ -1278,6 +1278,10 @@
       el.disabled = true;
       await api('PATCH', el.dataset.api, { enabled: el.dataset.enabled === 'true' }).catch((err) => toast(err.message));
       refresh();
+    } else if ((el = on('.js-iterations'))) {
+      el.disabled = true;
+      await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
+      refresh();
     } else if ((el = on('.js-auto-publish-cancel'))) {
       el.disabled = true;
       await api('DELETE', el.dataset.api).catch((err) => toast(err.message));

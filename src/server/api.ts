@@ -378,6 +378,18 @@ export function api(s: Service): Hono {
     const b = await body(c);
     return c.json(reviewer.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
   });
+  // laatsux extension: stop iterating: no reviewer agent starts another automatic review. DELETE resumes.
+  app.put('/repos/:owner/:repo/pulls/:n/stop-iterating', async (c) => {
+    const who = human(c);
+    const x = await ctx(c, { sync: false });
+    s.stopIterating(x, who);
+    return c.json(pullJson(s, x.repo, s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id)!));
+  });
+  app.delete('/repos/:owner/:repo/pulls/:n/stop-iterating', async (c) => {
+    const who = human(c);
+    s.resumeIterating(await ctx(c, { sync: false }), who);
+    return c.body(null, 204);
+  });
   app.get('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     const x = await ctx(c, { sync: false });
     const reviewer = s.reviewerAgents().find((r) => r.engine === c.req.param('kind'));
