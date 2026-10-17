@@ -163,8 +163,11 @@ export interface AgentsDone {
 
 /** Where a reviewer agent stands with a pull request's head commit. */
 export interface HeadStatus {
-  /** `approved`: it found nothing and approved (custom reviewers that may), which counts as done like `clean`, and for nobody's decision. */
-  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'failed' | 'cancelled' | 'clean' | 'approved' | 'capped' | 'off';
+  /**
+   * `approved`: it found nothing and approved (custom reviewers that may), which counts as done like `clean`, and for nobody's decision.
+   * `answered`: it found problems, and the author answered them without a new commit (Reviewer.answered), which counts as done too.
+   */
+  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'answered' | 'failed' | 'cancelled' | 'clean' | 'approved' | 'capped' | 'off';
   /** Nothing more is coming from the reviewer for this commit. */
   done: boolean;
   /** The commit this is about: the head, or the earlier commit a running review started on. */
@@ -184,8 +187,8 @@ export interface HeadStatus {
 /**
  * The states in which a reviewer agent still has the head to review: at it, about to, to run it
  * again after a restart, or when the author waits. The reviewer agents are done with the head once
- * none of them is in one (Service.agentsDone); until then it is their turn, or the author's to
- * start them (Service.turn).
+ * none of them is in one, nor has findings in it the author has not answered (Service.agentsDone);
+ * until then it is their turn, or the author's to start them (Service.turn).
  */
 export const TO_REVIEW: HeadStatus['state'][] = ['reviewing', 'queued', 'interrupted', 'unreviewed'];
 
@@ -1852,7 +1855,7 @@ export class Service {
    * For a waiting author with all feedback seen: none of the reviewer agents reviews the head or
    * is about to, so it is the reviewer's turn with a commit the author has not handed over yet.
    * They found nothing in it, used up their automatic reviews, are off, or have nothing more to
-   * say (the author answered their comments without a new commit, or a review failed). `pr wait`
+   * say (the author answered their findings without a new commit, or a review failed). `pr wait`
    * says so once per commit, so the author asks the reviewer to review it. Not under
    * auto-publish, which publishes then instead, nor for a commit that is published already, nor
    * before it is known whether the commit conflicts with its base, which the author hears of first.
@@ -1862,7 +1865,8 @@ export class Service {
     if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
-    if (reviewers.some((r) => TO_REVIEW.includes(r.status.state))) return null;
+    // Findings the author has not answered hold them up too (Reviewer.answered).
+    if (reviewers.some((r) => TO_REVIEW.includes(r.status.state) || r.status.state === 'findings')) return null;
     const stopped = this.stoppedText(pull);
     const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
     // Once, whatever each reviewer agent made of the commit.
@@ -2609,6 +2613,8 @@ function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, aut
       return authorWaiting ? `${login} is about to review ${what}` : `${login} reviews ${what} when ${author} waits for review`;
     case 'findings':
       return `${login} commented on ${what}`;
+    case 'answered':
+      return `${login}'s findings in ${what} are answered`;
     case 'failed':
       return `${login}'s review of ${what} failed`;
     case 'cancelled':

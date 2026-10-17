@@ -295,7 +295,12 @@ function turnLine(
     const actor = r.state === 'reviewing' && s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', agent.login);
     if (actor) atWork.push({ actor, doing: r.text });
     // Each failed review has its own Retry; the others share a phrase with those that say the same.
-    const words = r.state === 'failed' ? "'s review failed" : ` ${agentPhrase(r.state as HeadStatus['state'], agent.status, pull, author.login, waiting)}`;
+    const words =
+      r.state === 'failed'
+        ? "'s review failed"
+        : r.state === 'answered'
+          ? `'s findings${agent.status.description ? ' in the description' : ''} answered`
+          : ` ${agentPhrase(r.state as HeadStatus['state'], agent.status, pull, author.login, waiting)}`;
     const key = r.state === 'failed' ? `failed ${r.reviewer}` : `agent${words}`;
     const same = phrases.get(key);
     if (same) {
@@ -1018,6 +1023,8 @@ function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: 
       return status.description
         ? html`${login} found problems in the description, and reviews it again once it changes`
         : html`${login} found problems in ${sha}, and reviews the commit that addresses them`;
+    case 'answered':
+      return html`${login}'s findings in ${what} are answered`;
     case 'failed':
       return html`${login}'s review of ${what} failed. Ask it to review again, or publish by hand.`;
     case 'cancelled':
