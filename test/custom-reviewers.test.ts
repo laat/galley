@@ -299,7 +299,7 @@ test('a reviewer of the description reads no code, and approves what follows its
   assert.deepEqual([status.state, status.done, status.description], ['approved', true, true]);
   const view = await cli(acme, ['pr', 'view', String(number), '--json', 'reviewDecision,turn']);
   assert.equal(JSON.parse(view.stdout).reviewDecision, 'REVIEW_REQUIRED');
-  assert.match(await wait(acme, number), new RegExp(`^The reviewer agents are done with ${sha(acme).slice(0, 7)} \\(house-rules approved the description\\); ask the reviewer to review it`, 'm'));
+  assert.match(await wait(acme, number), new RegExp(`^The reviewer agents are done with ${sha(acme).slice(0, 7)} \\(house-rules approved the description\\); ask the user to review it`, 'm'));
   const turn = server.service.turn(row('acme', number));
   assert.ok(turn.reasons.some((r) => r.text === 'house-rules approved the description' && r.reviewer === 'house-rules'));
   assert.ok(!turn.reasons.some((r) => r.kind === 'approved'));
@@ -518,7 +518,7 @@ test('findings on the description keep the reviewer agents from being done until
     process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] });
     assert.equal((await cli(acme, ['pr', 'edit', String(number), '--title', 'Add mod, the remainder'])).code, 0);
     assert.match(await wait(acme, number), /house-rules reviewed: approved/);
-    assert.match(await wait(acme, number), /^The reviewer agents are done with [0-9a-f]{7} \(house-rules approved the description\); ask the reviewer to review it/m);
+    assert.match(await wait(acme, number), /^The reviewer agents are done with [0-9a-f]{7} \(house-rules approved the description\); ask the user to review it/m);
     assert.equal((await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`)).runs.length, 2);
   } finally {
     await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });

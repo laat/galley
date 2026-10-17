@@ -57,9 +57,15 @@ description: Stage a pull request in galley, the user's local review server, ins
          Use the backoff helper here.
    ```
 
-   - `thread <id> on <path>:<lines>`: about those lines. `[outdated]`: the code changed since;
-     check whether it still applies.
-   - `thread <id> on commit <sha>`: about that commit's message. Reword the commit.
+   - `thread <id> on <path>:<lines>`: about those lines; with `(old side)`, about those lines as
+     they were before the change. `[unresolved, outdated]`: the code changed since; check whether
+     it still applies.
+   - `thread <id> on file <path>`: about the whole file.
+   - `thread <id> on the message of commit <sha> "<headline>"`: about that commit's message.
+     Reword the commit. `(no longer in the branch)` in place of the headline: a rewrite replaced
+     the commit; check whether its new message still has the problem.
+   - `(high priority)`, `(medium priority)` or `(low priority)` after the brackets: how much it
+     matters, as its author judged it.
    - A ```` ```suggestion ```` block replaces the commented lines. Apply it unless it is wrong.
    - Comments without a thread: about the whole pull request, often the title or description.
    - `This branch conflicts with origin/main …; rebase onto origin/main`: rebase onto it (it is
@@ -94,10 +100,10 @@ description: Stage a pull request in galley, the user's local review server, ins
    your latest commit:
 
    ```
-   The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the reviewer to review it: <url>
+   The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the user to review it: <url>
    ```
 
-   or `No reviewer agent reviews 3f2a1c9; ask the reviewer to review it`.
+   or `No reviewer agent reviews 3f2a1c9; ask the user to review it`.
 
 6. Ask the user to review: the URL, and in a few lines what the reviewer agents found and what
    you changed. Wait again.
@@ -124,8 +130,11 @@ Unless the user wants to keep something:
 
 1. `git fetch origin`, then `git merge --ff-only origin/<base>` where the base is checked out,
    or `git fetch origin <base>:<base>` when it is checked out nowhere.
-2. Remove your worktree and delete the branch with `git branch -D` (`-d` refuses: GitHub
-   merged copies of your commits).
+2. If `pr wait` listed commits GitHub merged it without, keep the branch: those commits are
+   only there. Tell the user, and move them onto the merge with the `git rebase --onto` it
+   printed and stage them as a new pull request, or ask the user how when it printed none.
+   Otherwise remove your worktree and delete the branch with `git branch -D` (`-d` refuses:
+   GitHub merged copies of your commits).
 3. Rebase your other pull requests that touch the merged files onto `origin/<base>` (compare
    `galley pr diff s4 --name-only`).
 
@@ -140,9 +149,10 @@ of the next wait.
 
 Codex, Claude and reviewers the user defined review when you wait, until the pull request is
 published, and their reviews wake you like the user's. Some review only the title, description
-and commit messages, again whenever you change them. One loop is one review from each and your answer. A reviewer agent's approval
-is not the user's: wait for the user all the same. The settings decide whether they review,
-unless the user says otherwise when asking you to stage. Add to `galley pr create`:
+and commit messages, again whenever you change them. One loop is one review from each and your
+answer. A reviewer agent's approval is not the user's: wait for the user all the same. The
+settings decide whether they review, unless the user says otherwise when asking you to stage.
+Add to `galley pr create`:
 
 - "with codex": `--reviewer codex` (as many loops as the settings allow); "codex 3 loops":
   `--reviewer codex:3`. The same for `claude`, or a reviewer the user defined by its name

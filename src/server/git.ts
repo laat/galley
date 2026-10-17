@@ -212,6 +212,30 @@ export interface Commit {
   message: string;
 }
 
+const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%aI', '%cn', '%ce', '%cI', '%B'].join('%x00') + '%x1e';
+
+/** `git log --format=${LOG_FORMAT}` output, as commits. */
+function parseLog(text: string): Commit[] {
+  return text
+    .split('\x1e')
+    .map((s) => s.replace(/^\n/, ''))
+    .filter((s) => s.length > 0)
+    .map((rec) => {
+      const [sha, parents, an, ae, ad, cn, ce, cd, message] = rec.split('\x00');
+      return {
+        sha,
+        parents: parents ? parents.split(' ') : [],
+        authorName: an,
+        authorEmail: ae,
+        authorDate: ad,
+        committerName: cn,
+        committerEmail: ce,
+        committerDate: cd,
+        message: message.replace(/\n+$/, ''),
+      };
+    });
+}
+
 /** A commit object as stored, for recreating it exactly (apart from its signature). */
 export interface RawCommit {
   tree: string;
@@ -291,27 +315,18 @@ export class Repo {
   }
 
   async log(from: string, to: string): Promise<Commit[]> {
-    const fmt = ['%H', '%P', '%an', '%ae', '%aI', '%cn', '%ce', '%cI', '%B'].join('%x00') + '%x1e';
-    const args = ['log', '--reverse', `--format=${fmt}`, `${from}..${to}`];
-    const text = SHA_RE.test(from) && SHA_RE.test(to) ? await this.cached(args) : await this.out(args);
-    return text
-      .split('\x1e')
-      .map((s) => s.replace(/^\n/, ''))
-      .filter((s) => s.length > 0)
-      .map((rec) => {
-        const [sha, parents, an, ae, ad, cn, ce, cd, message] = rec.split('\x00');
-        return {
-          sha,
-          parents: parents ? parents.split(' ') : [],
-          authorName: an,
-          authorEmail: ae,
-          authorDate: ad,
-          committerName: cn,
-          committerEmail: ce,
-          committerDate: cd,
-          message: message.replace(/\n+$/, ''),
-        };
-      });
+    const args = ['log', '--reverse', `--format=${LOG_FORMAT}`, `${from}..${to}`];
+    return parseLog(SHA_RE.test(from) && SHA_RE.test(to) ? await this.cached(args) : await this.out(args));
+  }
+
+  /**
+   * The commits of `to` that `remote` was never given, as far as this repository knows, oldest
+   * first: neither in `from` (what was pushed) nor on a remote-tracking branch of `remote`. Copies
+   * a rebase made of pushed commits count: telling them by their patch would also take a commit
+   * that applies a reverted one again for a copy.
+   */
+  async notPushed(from: string, to: string, remote: string): Promise<Commit[]> {
+    return parseLog(await this.out(['log', '--reverse', `--format=${LOG_FORMAT}`, to, `^${from}`, '--not', `--remotes=${remote}`]));
   }
 
   async commit(sha: string): Promise<Commit | null> {

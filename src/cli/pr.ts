@@ -230,7 +230,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   // A server from before reviewer_agents does not say.
   if (pr.reviewer_agents) err(whoReviews(pr.reviewer_agents));
   if (v.web) openBrowser(pr.html_url);
-  err(c.gray(`Review happens in the browser. Run \`galley pr wait s${pr.number}\` to block until the reviewer responds.`));
+  err(c.gray(`Review happens in the browser. Run \`galley pr wait s${pr.number}\` to block until the reviewer agents or the user respond.`));
   return 0;
 }
 
@@ -845,7 +845,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'agents_done') {
       const { sha, reviewers } = r.agents_done;
       const done = reviewers.length ? `The reviewer agents are done with ${sha.slice(0, 7)} (${reviewers.join('; ')})` : `No reviewer agent reviews ${sha.slice(0, 7)}`;
-      out(`${done}; ask the reviewer to review it: ${url}`);
+      out(`${done}; ask the user to review it: ${url}`);
       out(c.gray(`Then run \`galley pr wait ${all}\` to wait for the review.`));
     }
     // Before the confirmation below, like the feedback: once confirmed, no wait says it again.
@@ -881,6 +881,29 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'merged') {
       const sha = pr.mergeCommit?.oid ? ` as ${String(pr.mergeCommit.oid).slice(0, 7)}` : '';
       out(`Merged on GitHub${sha}${r.github_closed_by ? ` by ${r.github_closed_by}` : ''}: ${r.published_url}`);
+      // Commits GitHub never got (a server older than the CLI does not say): only the branch has them.
+      const left: { head: string; deleted: boolean; commits: { sha: string; parents: string[]; message: string }[] } | null = r.left_out ?? null;
+      if (left) {
+        const { commits } = left;
+        const [branch, base, them] = [pr.headRefName, pr.baseRefName, commits.length === 1 ? 'it' : 'them'];
+        out(`GitHub merged it without ${commits.length === 1 ? 'this commit' : `these ${commits.length} commits`} of ${branch}, which it never got:`);
+        for (const cm of commits) out(`  ${cm.sha.slice(0, 7)} ${cm.message.split('\n')[0]}`);
+        // One line of commits, each on the one before: a rebase carries over exactly these. Not a
+        // merge, whose changes a rebase would drop.
+        const line = commits.every((cm, i) => cm.parents.length === 1 && (i === 0 || cm.parents[0] === commits[i - 1].sha));
+        const restore = left.deleted ? `The branch ${branch} is gone here; bring it back with \`git branch ${branch} ${left.head}\`. ` : '';
+        const others = `rebase the other open pull requests that touch the same files.${rest}`;
+        out(
+          c.gray(
+            line
+              ? `${restore}Next: keep the branch ${branch} and tell the user. Fast-forward your ${base} to the merge, move ${them} onto it with ` +
+                  `\`git rebase --onto ${base} ${commits[0].parents[0].slice(0, 7)} ${branch}\`, stage ${them} as a new pull request, and ${others}`
+              : `${restore}Next: keep the branch ${branch}, tell the user, and ask how to stage ${them} as a new pull request: a rebase would not carry ` +
+                  `${them} over as ${commits.length === 1 ? 'it is' : 'they are'} (a merge, say). Fast-forward your ${base} to the merge, and ${others}`,
+          ),
+        );
+        return 0;
+      }
       out(
         c.gray(
           `Next: fast-forward your ${pr.baseRefName} to the merge, remove the worktree and the branch ${pr.headRefName}, ` +
@@ -897,7 +920,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`galley pr wait ${all}\` again.` : null;
     if (r.status === 'published') {
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
-      else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
+      else out(text ? 'Published, but read the feedback above: the user may still want changes.' : 'The user is done with this pull request.');
       out(c.gray(`Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       out(c.gray(PUSHES));
       return 0;
@@ -905,7 +928,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'push_failed') {
       out(
         c.gray(
-          'Nothing on GitHub was overwritten, and this commit is not tried again. Do not push or force-push to GitHub yourself: the reviewer has been told, and decides. ' +
+          'Nothing on GitHub was overwritten, and this commit is not tried again. Do not push or force-push to GitHub yourself: the user has been told, and decides. ' +
             `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (fetch ${pr.headRefName} from origin and rebase onto it), or leaves out what GitHub declined.`,
         ),
       );
@@ -916,7 +939,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       return 0;
     }
     if (r.status === 'closed') {
-      out(`The reviewer closed ${url} without publishing it.`);
+      out(`The user closed ${url} without publishing it.`);
       if (rest) out(c.gray(rest.trim()));
       return 0;
     }
@@ -933,7 +956,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(c.gray(`${stillReviewing(pr)}; ${getIt}`));
     } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
       // Approved, but it conflicts with its base: the rebase is left.
-      out(c.gray(rebase ?? `Approved with nothing left open. Run \`galley pr wait ${all}\` to wait until the reviewer publishes it.`));
+      out(c.gray(rebase ?? `Approved with nothing left open. Run \`galley pr wait ${all}\` to wait until the user publishes it.`));
     } else if (toCome) {
       const still = toCome.length ? ` for the ${toCome.length > 1 ? 'reviews' : 'review'} still to come (${toCome.join('; ')})` : '';
       out(c.gray(rebase ?? `Nothing to address. Run \`galley pr wait ${all}\` again${still}.`));
@@ -942,7 +965,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         c.gray(
           `Address the feedback. Reply to each thread and resolve the ones you fixed with ` +
             `\`galley pr comment s${t.number} --reply-to <thread> --resolve -b "…"\` ` +
-            `(leave out --resolve to keep a thread open for the reviewer), then run \`galley pr wait ${all}\` again.`,
+            `(leave out --resolve to keep a thread open for the user), then run \`galley pr wait ${all}\` again.`,
         ),
       );
     }
@@ -1010,10 +1033,10 @@ COMMANDS (same flags as gh)
   status:      Show the pull request for the current branch
 
 GALLEY COMMANDS
-  wait:        Block until the reviewer responds, then print the feedback, or until the
-               reviewer agents are done with the latest commit. After publishing,
-               pushes your commits to GitHub, and waits until it is merged or closed
-               there. Several (as in s4 s5): whichever is first
+  wait:        Block until the reviewer agents or the user respond, then print the
+               feedback, or until the reviewer agents are done with the latest commit.
+               After publishing, pushes your commits to GitHub, and waits until it is
+               merged or closed there. Several (as in s4 s5): whichever is first
   publish:     Push the branch and open the pull request on GitHub (--auto: once the
                reviews are done; --auto-merge: and turn on auto-merge there)
 
@@ -1060,7 +1083,7 @@ export async function pr(client: Client, cwd: string, args: string[]): Promise<n
     case 'checks':
       throw new CliError(`no checks reported on the '${currentBranch(cwd) ?? 'current'}' branch (galley does not run CI)`);
     case 'merge':
-      throw new CliError('galley does not merge. When the reviewer is happy they publish the pull request to GitHub.');
+      throw new CliError('galley does not merge. When the user is happy they publish the pull request to GitHub.');
     case undefined:
     case 'help':
     case '--help':

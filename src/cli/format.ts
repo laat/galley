@@ -76,11 +76,11 @@ const MERGE_METHOD: Record<string, string> = { MERGE: 'a merge commit', REBASE: 
 const WHOSE: Record<string, string> = {
   AUTHOR: "the author's turn",
   REVIEWER_AGENTS: "the reviewer agents' turn",
-  REVIEWER: "the reviewer's turn",
+  REVIEWER: "the user's turn",
   NONE: "nobody's turn",
 };
 
-/** Whose move it is and why: "the reviewer's turn: claude is waiting for review, 3 min; codex-review found nothing in 8c64534". */
+/** Whose move it is and why: "the user's turn: claude is waiting for review, 3 min; codex-review found nothing in 8c64534". */
 export function turnLine(turn: { whose: string; reasons: string[] }): string {
   return `${WHOSE[turn.whose] ?? turn.whose.toLowerCase()}${turn.reasons.length ? `: ${turn.reasons.join('; ')}` : ''}`;
 }

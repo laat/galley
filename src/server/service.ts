@@ -1360,7 +1360,7 @@ export class Service {
 
   async deletePull(ctx: Ctx, actor: Actor): Promise<void> {
     const { pull, git } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can delete a staged pull request; close it instead');
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can delete a staged pull request; close it instead');
     for (const rev of this.revisions(pull)) await this.moveRef(git, this.ref(pull, rev.seq), rev.head_sha, null);
     this.db.run('DELETE FROM pulls WHERE id = ?', pull.id);
     this.emit(null, 'deleted', actor);
@@ -1747,7 +1747,7 @@ export class Service {
    * reviewer's, so agents can not pin. Pinning is not activity: updated_at stays.
    */
   setPinned(pull: PullRow, pinned: boolean, actor: Actor): void {
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can pin a pull request to the top of their front page');
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can pin a pull request to the top of their front page');
     // Pinned again, it keeps its place.
     const changed = pinned
       ? this.db.run('UPDATE pulls SET pinned_at = ? WHERE id = ? AND pinned_at IS NULL', this.nextPinAt(), pull.id).changes
@@ -2239,6 +2239,24 @@ export class Service {
     return changed;
   }
 
+  /**
+   * What a merged pull request's branch has that GitHub did not merge: commits synced before galley
+   * heard of the merge, so never pushed, or made after it, when galley no longer follows the branch.
+   * Deleting the branch would lose them. None on a remote-tracking branch, such as the base's, but
+   * copies a rebase made of published ones (Repo.notPushed). `head` is the branch's tip, or what
+   * galley last saw of a branch deleted here (`deleted`). Null when there are none.
+   */
+  async leftOut(pull: PullRow): Promise<{ head: string; deleted: boolean; commits: Commit[] } | null> {
+    const source = pull.published_source_sha ?? pull.published_head_sha;
+    if (pull.github_state !== 'merged' || !source) return null;
+    const repo = this.repoById(pull.repo_id);
+    const git = this.git(repo);
+    const tip = await git.resolve(`refs/heads/${pull.head_ref}`);
+    const head = tip ?? pull.head_sha;
+    const commits = head === source ? [] : await git.notPushed(source, head, repo.remote).catch(() => []);
+    return commits.length ? { head, deleted: !tip, commits } : null;
+  }
+
   // ------------------------------------------------------------ auto-publish
 
   /**
@@ -2271,7 +2289,7 @@ export class Service {
    */
   async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean; autoMerge?: MergeMethod }, actor: Actor): Promise<AutoPublish> {
     const { pull, repo } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'auto-publish is for the reviewer, like publishing; ask the user to turn it on from galley');
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can turn on auto-publish; ask them to turn it on from galley');
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
     if (pull.published_url) throw new HttpError(422, 'this pull request is published already; auto-publish is for the first publish, and each commit the author waits with is pushed to it');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
@@ -2293,7 +2311,7 @@ export class Service {
   }
 
   disableAutoPublish(ctx: Ctx, actor: Actor): void {
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can turn off auto-publish');
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can turn off auto-publish');
     if (this.db.transaction(() => this.autoPublishOff(ctx.pull, actor, 'cancelled'))) this.emit(ctx.pull.id, 'auto_publish', actor);
   }
 
@@ -2617,7 +2635,7 @@ export class Service {
     actor: Actor,
   ): Promise<PullRow> {
     const { repo } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from galley');
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can publish; ask them to publish from galley');
     // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
     await this.fetchBases(repo, { base: ctx.pull.base_ref });
     const pull = await this.sync(ctx.pull);
