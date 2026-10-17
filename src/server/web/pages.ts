@@ -71,9 +71,9 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     p.github_state === 'merged'
       ? html`<span class="Label Label--merged">Merged</span>`
       : p.state === 'closed'
-        ? html`<span class="Label">Closed</span>`
+        ? html`<span class="Label Label--closed">Closed</span>`
         : p.github_state === 'closed'
-          ? html`<span class="Label">Closed on GitHub</span>`
+          ? html`<span class="Label Label--closed">Closed on GitHub</span>`
           : '';
 
   /** A pull request with what it waits for: whose turn it is and why, the decision, and what GitHub does not have yet. */
@@ -370,7 +370,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
       return timelineBadge(
         'mark-github',
         html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${data.auto ? ' with auto-publish' : ''} ${when}`,
-        { cls: 'timeline-badge--done' },
+        { cls: 'timeline-badge--open' },
       );
     case 'auto_publish_enabled': {
       const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null, data.auto_merge ? `with auto-merge (${data.auto_merge}) on GitHub` : null].filter(Boolean);
@@ -512,7 +512,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   if (!target) {
     publishRow = html`<div class="merge-row merge-actions">${icon('alert', { cls: 'color-fg-attention' })}<div><strong>No GitHub remote</strong><div class="color-fg-muted">Remote <code>${repo.remote}</code> is not a github.com repository, so this pull request can not be published.</div></div></div>`;
   } else if (pull.published_url && changed.length === 0) {
-    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-done' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version.</div></div>
+    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-open' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version.</div></div>
       <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div>`;
   } else {
     publishable = true;
@@ -531,7 +531,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const checked = !!(approved || mergeOn);
     publishRow = html`<form class="merge-row merge-actions js-api-form js-publish-form" data-api="${p.apiBase}/publish" data-method="POST">
       <input type="hidden" name="expected" value="${publishFingerprint(pull)}">
-      ${icon('rocket', { cls: 'color-fg-done' })}
+      ${icon('rocket', { cls: 'color-fg-open' })}
       <div class="flex-auto">
         <strong>${pull.published_url ? 'Unpublished changes' : 'Ready to publish?'}</strong>
         <div class="color-fg-muted">${what}</div>
@@ -582,8 +582,10 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   }
   if (merge) rows.push(autoMergeRow(p, merge));
   const closedOnGithub = pull.github_state === 'closed';
-  return html`<div class="merge-box${closedOnGithub ? ' merge-box--closed' : pull.state === 'published' ? ' merge-box--published' : ''}">
-    <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
+  // An update GitHub does not have yet is staged, as in stateBadge.
+  const published = pull.state === 'published' && changed.length === 0;
+  return html`<div class="merge-box${closedOnGithub ? ' merge-box--closed' : published ? ' merge-box--published' : ''}">
+    <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : published ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
 }
@@ -684,7 +686,7 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const merging = method && p.repo.github_slug ? s.githubRepo(p.repo.github_slug)?.merging : null;
   if (merging && !merging.autoMerge) items.push(item('failed', `${p.repo.github_slug} does not allow auto-merge, so publishing will fail`));
   else if (merging && method && !merging.methods.includes(method)) items.push(item('failed', `${p.repo.github_slug} does not allow ${method} merges, so publishing will fail`));
-  return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-done' })}<div class="flex-auto">
+  return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-open' })}<div class="flex-auto">
     <strong>Auto-publish is on until the pull request is merged</strong>
     <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes each update${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method}) after each` : ''}. Publishing by hand leaves it on.</div>
     <ul class="merge-checks">${items}</ul>
