@@ -5564,6 +5564,61 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.deepEqual(await pr.pushes(), []);
   });
 
+  await t.test('while a commit is pushed, and until galley asks GitHub again, the merge GitHub offered for the commit before is nobody\'s turn', async () => {
+    const pr = await published('feature/push-stale');
+    /** GitHub would merge `head` now, and auto-merge is off; galley asks, as it does every minute. */
+    const mergeable = async (head: string) => {
+      const node = { state: 'OPEN', mergedAt: null, closedAt: null, mergedBy: null, mergeCommit: null, timelineItems: { nodes: [] }, headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', autoMergeRequest: null };
+      writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${pr.id}`]: node } } }));
+      await server.service.followGithub();
+    };
+    const turn = async () => {
+      const { whose, reasons } = (await human('GET', pr.base)).turn;
+      return { whose, github: reasons.filter((r: any) => r.kind === 'github').map((r: any) => r.text) };
+    };
+    // GitHub takes the next push once the gate opens.
+    const hook = join(remote, 'hooks', 'pre-receive');
+    const pushing = join(dir, 'push-stale-pushing');
+    const gate = join(dir, 'push-stale-gate');
+    writeFileSync(hook, `#!/bin/sh\ncat >/dev/null\ntouch "${pushing}"\nwhile [ ! -f "${gate}" ]; do sleep 0.05; done\n`);
+    chmodSync(hook, 0o755);
+    let waiting: ReturnType<typeof pr.wait> | null = null;
+    try {
+      const first = pr.tip().sha;
+      await mergeable(first);
+      assert.deepEqual(await turn(), { whose: 'reviewer', github: ['ready to merge on GitHub'] });
+      // The agent commits and waits, and its commit is on its way to GitHub.
+      const sha = pr.commit('export const stale = 1;\n');
+      waiting = pr.wait();
+      await until(() => existsSync(pushing), 'the push started');
+      assert.deepEqual(await turn(), { whose: 'none', github: [] });
+      writeFileSync(gate, '');
+      assert.match((await waiting).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
+      assert.deepEqual(await turn(), { whose: 'none', github: [] });
+      // Force-pushed back to the first commit on GitHub before galley asked: GitHub says what it said
+      // before, which is about GitHub's commit now, and pages hear of it.
+      const heard: string[] = [];
+      const hear = (e: ChangeEvent) => void (e.pullId === pr.id && heard.push(e.type));
+      server.service.bus.on('change', hear);
+      try {
+        await mergeable(first);
+      } finally {
+        server.service.bus.off('change', hear);
+      }
+      assert.ok(heard.includes('github_status'), heard.join());
+      assert.deepEqual(await turn(), { whose: 'reviewer', github: ['ready to merge on GitHub'] });
+      // Pushed again, GitHub would merge the new commit: the reviewer's turn.
+      await mergeable(pr.tip().sha);
+      assert.deepEqual(await turn(), { whose: 'reviewer', github: ['ready to merge on GitHub'] });
+    } finally {
+      // The push goes through, also after a failure, before the next test pushes.
+      rmSync(hook, { force: true });
+      writeFileSync(gate, '');
+      await waiting;
+      for (const f of [pushing, gate, join(dir, 'gh-pulls.json')]) rmSync(f, { force: true });
+    }
+  });
+
   await t.test('a push GitHub declines, for a secret say, is told to the author, and not tried again', async () => {
     const pr = await published('feature/push-declined');
     const before = pr.tip().sha;

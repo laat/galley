@@ -779,16 +779,17 @@ export class Reviewer {
   /**
    * Change this pull request's own settings: turn automatic reviews on or off, raise or lower
    * the limit, or with null go back to the setting. If the author is waiting and the reviewer
-   * may now review, it starts at once instead of at the author's next wait.
+   * may now review, it starts at once instead of at the author's next wait. The user's to do.
    */
-  configure(ctx: Ctx, change: ReviewerChange): ReviewerConfig {
+  configure(ctx: Ctx, change: ReviewerChange, actor: Actor): ReviewerConfig {
+    this.s.requireHuman(actor);
     this.s.db.transaction(() => {
       const pull = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!;
       this.s.db.update('pulls', pull.id, this.columns(change, pull));
     });
     // A limit set by hand resumes stopped automatic reviews, as Resume does (which tells pages and reconsiders every reviewer).
-    if (change.max_iterations === undefined || !this.s.resumeIterating(ctx, this.s.viewer())) {
-      this.s.emit(ctx.pull.id, 'updated', this.s.viewer());
+    if (change.max_iterations === undefined || !this.s.resumeIterating(ctx, actor)) {
+      this.s.emit(ctx.pull.id, 'updated', actor);
       if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.consider(ctx.pull.id);
     }
     return this.config(this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!);
@@ -857,8 +858,9 @@ export class Reviewer {
     );
   }
 
-  /** Review now, whatever the settings say about automatic reviews. */
-  request(ctx: Ctx): number {
+  /** Review now, whatever the settings say about automatic reviews. The user's to ask for. */
+  request(ctx: Ctx, actor: Actor): number {
+    this.s.requireHuman(actor);
     if (this.stopped) throw new HttpError(503, 'the server is shutting down');
     if (!this.appliesTo(ctx.repo)) throw new HttpError(404, `${this.label} does not review ${ctx.repo.github_slug ?? 'repositories without a GitHub remote'}`);
     if (this.jobs.has(ctx.pull.id)) throw new HttpError(409, `${this.label} is already reviewing this pull request`);

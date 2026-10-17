@@ -76,12 +76,8 @@ export function api(s: Service): Hono {
 
   // ------------------------------------------------- settings (extension)
 
-  /** Settings and reviewer controls belong to the person reviewing, not to agents. */
-  const human = (c: Context): Actor => {
-    const a = actor(c);
-    if (a.type === 'Bot') throw new HttpError(403, 'only the user can do this');
-    return a;
-  };
+  /** Settings and reviewer controls belong to the person reviewing, not to agents (Service.requireHuman): refused before any work. */
+  const human = (c: Context): Actor => s.requireHuman(actor(c));
 
   /** The reviewer agent in the path: of a kind (`codex`, `claude`), or a custom reviewer by name; given a repository, one that reviews it. */
   const reviewerOf = (c: Context, repo?: RepoRow) => {
@@ -410,18 +406,18 @@ export function api(s: Service): Hono {
 
   // galley extension: ask a reviewer agent (`codex`, `claude`, or a custom reviewer by name) to review now, and list its runs.
   app.post('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
-    human(c);
+    const who = human(c);
     const x = await ctx(c);
     const reviewer = reviewerOf(c, x.repo);
-    return c.json({ run_id: reviewer.request(x) }, 202);
+    return c.json({ run_id: reviewer.request(x, who) }, 202);
   });
   // galley extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
   app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
-    human(c);
+    const who = human(c);
     const x = await ctx(c);
     const reviewer = reviewerOf(c, x.repo);
     const b = await body(c);
-    return c.json(reviewer.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
+    return c.json(reviewer.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }, who));
   });
   // galley extension: stop iterating: no reviewer agent starts another automatic review. DELETE resumes.
   app.put('/repos/:owner/:repo/pulls/:n/stop-iterating', async (c) => {

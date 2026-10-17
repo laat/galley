@@ -383,6 +383,12 @@ interface FetchRound {
   running: Promise<void> | null;
 }
 
+/** What GitHub's GraphQL API answered (Service.graphql). */
+interface GraphqlAnswer {
+  data: Record<string, any> | null;
+  errors: { type?: string; message?: string }[];
+}
+
 /**
  * Where galley keeps refs in the repositories it stages from. Each server has a namespace of its
  * own under it (Db.instance), so servers staging from one repository never touch each other's.
@@ -456,6 +462,16 @@ export class Service {
     this.viewer();
   }
 
+  /**
+   * The actor, refused with 403 and `message` when it is an agent (a Bot): for what is the user's
+   * to do, as docs/api.md lists it. Publishing, auto-publish, deleting, pinning and stop-iterating
+   * are checked here, asking for or configuring a reviewer agent in Reviewer, settings in the API.
+   */
+  requireHuman(actor: Actor, message = 'only the user can do this'): Actor {
+    if (actor.type === 'Bot') throw new HttpError(403, message);
+    return actor;
+  }
+
   /** Look up the GitHub login of whoever `gh` is authenticated as, so the UI can show their avatar. */
   async detectViewer(): Promise<void> {
     if (this.db.getMeta('viewer_login')) return;
@@ -474,6 +490,43 @@ export class Service {
 
   // --------------------------------------------------------- GitHub repos
 
+  /** The failures of GitHub's GraphQL API logged so far, as `<slug> <message>`: each is logged once, until a restart. */
+  private graphqlErrors = new Set<string>();
+
+  /**
+   * Ask GitHub's GraphQL API with gh about the repository `slug`: the query gets its `owner` and
+   * `name` as variables, and `vars`. GitHub answers what it could alongside its errors (a number
+   * that is not there, a scope the token lacks), so both come back; null when gh gave no answer
+   * (not logged in, offline, timed out). Each failure is logged once per repository and message.
+   */
+  private async graphql(slug: string, query: string, vars: Record<string, string> = {}): Promise<GraphqlAnswer | null> {
+    const [owner, name] = slug.split('/');
+    // -f, not -F: -F would turn a repository named "123" or "true" into a number or boolean.
+    const args = ['api', 'graphql', '-f', `query=${query}`, ...Object.entries({ owner, name, ...vars }).flatMap(([k, v]) => ['-f', `${k}=${v}`])];
+    let answer: GraphqlAnswer | null = null;
+    let failures: string[];
+    try {
+      const r = await run(this.ghBin, args, { allowFail: true, timeoutMs: 15_000 });
+      try {
+        const json = JSON.parse(r.stdout);
+        answer = { data: json.data ?? null, errors: json.errors ?? [] };
+      } catch {}
+      if (answer?.errors.length) failures = answer.errors.map((e) => e.message ?? JSON.stringify(e));
+      else if (r.code === 0 && answer?.data) failures = [];
+      else if (r.timedOut) failures = ['gh timed out'];
+      // Neither: refused before GraphQL answered (a token revoked, say, gets GitHub's REST error), gh says why on stderr.
+      else failures = [(r.stderr || r.stdout).trim() || `gh exited with ${r.code}`];
+    } catch (e) {
+      failures = [(e as Error).message];
+    }
+    for (const message of failures) {
+      if (this.graphqlErrors.has(`${slug} ${message}`)) continue;
+      this.graphqlErrors.add(`${slug} ${message}`);
+      console.error(`asking GitHub about ${slug} failed: ${message}`);
+    }
+    return answer;
+  }
+
   private githubRepoCache = new Map<string, { at: number; value: GithubRepo | null; loading?: Promise<void> }>();
 
   /**
@@ -490,17 +543,15 @@ export class Service {
   refreshGithubRepo(slug: string): Promise<void> {
     const current = this.githubRepoCache.get(slug);
     if (current?.loading) return current.loading;
-    const [owner, name] = slug.split('/');
     const query = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){autoMergeAllowed squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed}}';
-    // -f, not -F: -F would turn a repository named "123" or "true" into a number or boolean.
-    const loading = run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
-      .then((r): GithubRepo => {
-        const repo = JSON.parse(r.stdout).data.repository;
+    const loading = this.graphql(slug, query)
+      .then((answer): GithubRepo | null => {
+        const repo = answer?.data?.repository;
+        // What merging allows is not known now.
+        if (!repo) return null;
         const allowed = { squash: repo.squashMergeAllowed, merge: repo.mergeCommitAllowed, rebase: repo.rebaseMergeAllowed };
         return { merging: { autoMerge: repo.autoMergeAllowed === true, methods: MERGE_METHODS.filter((m) => allowed[m] === true) } };
       })
-      // What merging allows is not known now.
-      .catch(() => null)
       .then((value) => {
         this.githubRepoCache.set(slug, { at: Date.now(), value });
         // Pages rendered before this answer came show old or no options; let them refresh.
@@ -538,14 +589,11 @@ export class Service {
   }
 
   async refreshGithubIssues(slug: string, numbers: number[]): Promise<void> {
-    const [owner, name] = slug.split('/');
     // Numbers are digits (references.ts), so they can go into the query itself.
     const fields = numbers.map((n) => `i${n}:issueOrPullRequest(number:${n}){__typename ...on Issue{title state stateReason} ...on PullRequest{title state isDraft}}`);
     const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${fields.join(' ')}}}`;
     // An unknown number fails the query but still answers for the others.
-    const found = await run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
-      .then((r) => JSON.parse(r.stdout).data.repository as Record<string, any>)
-      .catch(() => null);
+    const found: Record<string, any> | null = (await this.graphql(slug, query))?.data?.repository ?? null;
     let changed = false;
     for (const n of numbers) {
       const key = `${slug}#${n}`;
@@ -593,23 +641,18 @@ export class Service {
       // A second of slack, so a timer ticking every 20 seconds does not skip a round.
       if (due && Date.now() - (this.githubAskedAt.get(slug) ?? 0) < every - 1000) continue;
       this.githubAskedAt.set(slug, Date.now());
-      const [owner, name] = slug.split('/');
       const ask = (fields: string) => {
         // Aliased by pull id: one GitHub pull request can have been published from several staged ones.
         const pulls = items.map(({ pull, number }) => `p${pull.id}:pullRequest(number:${number}){${fields}}`);
-        const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${pulls.join(' ')}}}`;
-        return run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 });
+        return this.graphql(slug, `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${pulls.join(' ')}}}`);
       };
-      const found = await ask(this.githubTeamNames ? PULL_FIELDS : PULL_FIELDS_WITHOUT_TEAMS)
-        .then((r) => {
-          // Refused for the teams' names (gh prints GitHub's answer, errors and all): ask again without them, from now on.
-          const errors: { type?: string }[] = (r.code !== 0 && JSON.parse(r.stdout || '{}').errors) || [];
-          if (!this.githubTeamNames || !errors.some((e) => e.type === 'INSUFFICIENT_SCOPES')) return r;
-          this.githubTeamNames = false;
-          return ask(PULL_FIELDS_WITHOUT_TEAMS);
-        })
-        .then((r) => JSON.parse(r.stdout).data.repository as Record<string, GithubPull | null>)
-        .catch(() => null);
+      let answer = await ask(this.githubTeamNames ? PULL_FIELDS : PULL_FIELDS_WITHOUT_TEAMS);
+      // Refused for the teams' names: ask again without them, from now on.
+      if (this.githubTeamNames && answer?.errors.some((e) => e.type === 'INSUFFICIENT_SCOPES')) {
+        this.githubTeamNames = false;
+        answer = await ask(PULL_FIELDS_WITHOUT_TEAMS);
+      }
+      const found: Record<string, GithubPull | null> | null = answer?.data?.repository ?? null;
       // Those without an answer (gh failed, or the pull request is gone) are asked again next time.
       for (const { pull, number } of items) {
         const node = found?.[`p${pull.id}`];
@@ -631,8 +674,11 @@ export class Service {
       // Threads on pages it could not read stay as they were.
       const status = readGithub(node, previous, now(), complete);
       this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status) });
-      // Pages show the status; tell them when it changed, not each time galley asked.
-      const same = previous && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
+      // Pages show the status; tell them when it changed, not each time galley asked. The first
+      // answer since galley's latest push or publish is news even when GitHub says the same: what it
+      // said before may have been taken for news of a commit that push replaced (turn).
+      const same =
+        previous && previous.checkedAt >= (pull.published_at ?? '') && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
       return pull.github_state === 'open' && same ? null : 'github_status';
     });
     // From GitHub, like what merging allows: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
@@ -644,14 +690,10 @@ export class Service {
    * (up to 20 pages more). False when some could not be read.
    */
   private async readEarlierThreads(slug: string, number: number, node: GithubPull): Promise<boolean> {
-    const [owner, name] = slug.split('/');
     for (let i = 0; i < 20; i++) {
       const cursor = earlierThreads(node);
       if (!cursor) return true;
-      const args = ['api', 'graphql', '-f', `query=${earlierThreadsQuery(number)}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-f', `cursor=${cursor}`];
-      const page = await run(this.ghBin, args, { allowFail: true, timeoutMs: 15_000 })
-        .then((r) => JSON.parse(r.stdout).data.repository.pullRequest.reviewThreads)
-        .catch(() => null);
+      const page = (await this.graphql(slug, earlierThreadsQuery(number), { cursor }))?.data?.repository?.pullRequest?.reviewThreads;
       if (!page) return false;
       prependThreads(node, page);
     }
@@ -1067,14 +1109,25 @@ export class Service {
         const base = refs.get(`refs/remotes/${repo.remote}/${pull.base_ref}`) ?? refs.get(`refs/heads/${pull.base_ref}`);
         const key = `${head} ${base}`;
         if (head && this.lastPolled.get(pull.id) !== key) {
-          this.lastPolled.set(pull.id, key);
-          await this.sync(pull).catch(() => {});
+          // Once synced: a sync that failed (a git error) is tried again on the next poll.
+          try {
+            await this.sync(pull);
+            this.lastPolled.set(pull.id, key);
+            this.syncErrors.delete(pull.id);
+          } catch (e) {
+            const error = (e as Error).message;
+            if (error !== this.syncErrors.get(pull.id)) console.error(`could not sync ${pull.head_ref} (s#${pull.number}) in ${repo.git_dir}: ${error}`);
+            this.syncErrors.set(pull.id, error);
+          }
         }
         this.observeBase(pull.id, base ?? null);
       }
     }
   }
+  /** The branches each pull request was last synced at by the poll, as `<head> <base>`. */
   private lastPolled = new Map<number, string>();
+  /** The error the poll's last sync of each pull request failed with, logged once. */
+  private syncErrors = new Map<number, string>();
 
   // ---------------------------------------------------------- fetching bases
 
@@ -1360,7 +1413,7 @@ export class Service {
 
   async deletePull(ctx: Ctx, actor: Actor): Promise<void> {
     const { pull, git } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can delete a staged pull request; close it instead');
+    this.requireHuman(actor, 'only the user can delete a staged pull request; close it instead');
     for (const rev of this.revisions(pull)) await this.moveRef(git, this.ref(pull, rev.seq), rev.head_sha, null);
     this.db.run('DELETE FROM pulls WHERE id = ?', pull.id);
     this.emit(null, 'deleted', actor);
@@ -1747,7 +1800,7 @@ export class Service {
    * reviewer's, so agents can not pin. Pinning is not activity: updated_at stays.
    */
   setPinned(pull: PullRow, pinned: boolean, actor: Actor): void {
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can pin a pull request to the top of their front page');
+    this.requireHuman(actor, 'only the user can pin a pull request to the top of their front page');
     // Pinned again, it keeps its place.
     const changed = pinned
       ? this.db.run('UPDATE pulls SET pinned_at = ? WHERE id = ? AND pinned_at IS NULL', this.nextPinAt(), pull.id).changes
@@ -2100,7 +2153,11 @@ export class Service {
     // So does what GitHub has once it is published: failed checks, changes requested, threads, a
     // conflict, the merge. It is for the reviewer to act on (or hand to an agent), not feedback for the author.
     const onGithub = githubStatus(pull);
-    const github = githubAsks(onGithub, pull.base_ref);
+    // Of a commit a push replaces, GitHub's checks and merge ask nothing: the author has a commit
+    // GitHub does not, or galley pushed one since following last asked. Asked since, another commit
+    // is GitHub's latest all the same: one made there (Update branch, a suggestion), or a force-push back.
+    const pushedOver = !!onGithub && onGithub.head !== pull.published_head_sha && onGithub.checkedAt < (pull.published_at ?? '');
+    const github = githubAsks(onGithub, pull.base_ref, unpushed || pushedOver);
     // Published, what GitHub does not have is the reviewer's to publish, except commits about to be
     // pushed: the author waits with them, and pushing them has not failed.
     const toPublish = unpublished.filter((c) => c !== 'commits' || !waiting || !!pushFailed);
@@ -2289,7 +2346,7 @@ export class Service {
    */
   async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean; autoMerge?: MergeMethod }, actor: Actor): Promise<AutoPublish> {
     const { pull, repo } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can turn on auto-publish; ask them to turn it on from galley');
+    this.requireHuman(actor, 'only the user can turn on auto-publish; ask them to turn it on from galley');
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
     if (pull.published_url) throw new HttpError(422, 'this pull request is published already; auto-publish is for the first publish, and each commit the author waits with is pushed to it');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
@@ -2311,7 +2368,7 @@ export class Service {
   }
 
   disableAutoPublish(ctx: Ctx, actor: Actor): void {
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can turn off auto-publish');
+    this.requireHuman(actor, 'only the user can turn off auto-publish');
     if (this.db.transaction(() => this.autoPublishOff(ctx.pull, actor, 'cancelled'))) this.emit(ctx.pull.id, 'auto_publish', actor);
   }
 
@@ -2361,6 +2418,7 @@ export class Service {
    */
   stopIterating(ctx: Ctx, actor: Actor): IterationsStopped {
     const { pull } = ctx;
+    this.requireHuman(actor, 'only the user can stop automatic reviews');
     const stop: IterationsStopped = { by: actor.id, at: now(), round: this.automaticRound(pull) };
     // Decided in the database, not on ctx, which may be from before another stop: the first one stays.
     const stopped = this.db.transaction(() => {
@@ -2376,6 +2434,7 @@ export class Service {
   /** Undo stopIterating: the limits apply again, and a waiting author's head is reviewed at once. False when they were not stopped. */
   resumeIterating(ctx: Ctx, actor: Actor): boolean {
     const { pull } = ctx;
+    this.requireHuman(actor, 'only the user can resume automatic reviews');
     // Decided in the database, like stopIterating: ctx may be from before the stop.
     const resumed = this.db.transaction(() => {
       if (this.db.run('UPDATE pulls SET iterations_stopped = NULL WHERE id = ? AND iterations_stopped IS NOT NULL', pull.id).changes === 0) return false;
@@ -2635,7 +2694,7 @@ export class Service {
     actor: Actor,
   ): Promise<PullRow> {
     const { repo } = ctx;
-    if (actor.type === 'Bot') throw new HttpError(403, 'only the user can publish; ask them to publish from galley');
+    this.requireHuman(actor, 'only the user can publish; ask them to publish from galley');
     // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
     await this.fetchBases(repo, { base: ctx.pull.base_ref });
     const pull = await this.sync(ctx.pull);

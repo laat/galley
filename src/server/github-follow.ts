@@ -254,18 +254,20 @@ export function checksSummary(status: Pick<GithubStatus, 'checks' | 'checksResul
  * What on GitHub waits for the reviewer, as reasons for whose turn it is: failed checks, changes
  * requested, unresolved threads, a conflict, or the merge: GitHub would merge it now (CLEAN, or
  * HAS_HOOKS where pre-receive hooks run), and auto-merge is off. Running checks wait for GitHub, and passing ones for nobody.
+ * `replaced`: the status is about a commit that a push replaces, so the checks and the merge, which
+ * are about that commit, ask nothing; the conflict stays as last known, as readGithub keeps it.
  */
-export function githubAsks(status: GithubStatus | null, base: string): string[] {
+export function githubAsks(status: GithubStatus | null, base: string, replaced = false): string[] {
   if (!status) return [];
   const checks = checksSummary(status);
   const threads = status.threads.length;
   return [
     // A failure past the first page shows only in the sum.
-    checks.failed ? `${checks.failed} ${checks.failed === 1 ? 'check' : 'checks'} failed on GitHub` : checks.result === 'failed' ? 'checks failed on GitHub' : null,
+    replaced ? null : checks.failed ? `${checks.failed} ${checks.failed === 1 ? 'check' : 'checks'} failed on GitHub` : checks.result === 'failed' ? 'checks failed on GitHub' : null,
     status.reviewDecision === 'CHANGES_REQUESTED' ? 'changes requested on GitHub' : null,
     threads ? `${threads} unresolved ${threads === 1 ? 'thread' : 'threads'} on GitHub` : null,
     status.conflicting ? `conflicts with ${base} on GitHub` : null,
-    (status.mergeStateStatus === 'CLEAN' || status.mergeStateStatus === 'HAS_HOOKS') && status.autoMerge === false ? 'ready to merge on GitHub' : null,
+    !replaced && (status.mergeStateStatus === 'CLEAN' || status.mergeStateStatus === 'HAS_HOOKS') && status.autoMerge === false ? 'ready to merge on GitHub' : null,
   ].filter((x) => x !== null);
 }
 
