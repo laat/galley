@@ -3,6 +3,7 @@
 // "claude-review" unless renamed in settings, since the CLI calls author agents in Claude Code
 // "claude".
 import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
@@ -48,11 +49,28 @@ const SESSION_VARIABLES = [
   'AI_AGENT',
 ];
 
+/**
+ * Claude Code's own temporary directory, which its sandbox lets commands write to ($TMPDIR in
+ * there). Short, since it keeps sockets there: past about 30 bytes Claude Code falls back to
+ * /tmp/claude-<uid>, where the user's own Claude Code sessions keep their files. Where /tmp is
+ * not writable, as for laatsux's own tests run by a reviewer agent in its sandbox, it goes in
+ * $TMPDIR.
+ */
+function ownTmp(): string {
+  try {
+    return mkdtempSync('/tmp/lx-');
+  } catch (e) {
+    if (!['EPERM', 'EACCES', 'EROFS'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+    return mkdtempSync(join(tmpdir(), 'lx-'));
+  }
+}
+
 export class ClaudeEngine implements Engine {
   readonly id = 'claude';
   readonly label = 'Claude';
   readonly authorLogin = 'claude';
   readonly authorTool = 'Claude Code';
+  readonly localServers = true;
   private bin: string;
   private sandboxExec: string | undefined;
 
@@ -71,10 +89,7 @@ export class ClaudeEngine implements Engine {
 
   async review(job: EngineJob): Promise<EngineResult> {
     const { checkout, settings, timeoutMs } = job;
-    // Claude Code's own temporary directory, which its sandbox lets commands write to ($TMPDIR
-    // in there). Short, since it keeps sockets there: past about 30 bytes Claude Code falls back
-    // to /tmp/claude-<uid>, where the user's own Claude Code sessions keep their files.
-    const own = mkdtempSync('/tmp/lx-');
+    const own = ownTmp();
     try {
       const args = [
         '-p',
@@ -138,10 +153,12 @@ export class ClaudeEngine implements Engine {
   /**
    * Claude Code's sandbox for the commands Claude runs. Its network is off, so code from the
    * pull request can not reach laatsux's API on localhost, which takes any local caller for the
-   * user. It writes to the checkout (when it runs the tests), its own temporary directory and
-   * the review's, and nowhere else: not to the git directory the checkout points into, which
-   * Claude Code would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude
-   * Code fall back to it. It may not leave the sandbox.
+   * user, unless the user lets the tests listen and connect on localhost (the localhost setting),
+   * which opens every port there, laatsux's too, and lets them listen on every interface. It
+   * writes to the checkout (when it runs the tests), its own temporary directory and the
+   * review's, and nowhere else: not to the git directory the checkout points into, which Claude
+   * Code would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude Code
+   * fall back to it. It may not leave the sandbox.
    */
   private sandbox(job: EngineJob, own: string) {
     const uid = process.getuid?.();
@@ -151,7 +168,7 @@ export class ClaudeEngine implements Engine {
       autoAllowBashIfSandboxed: job.settings.runTests,
       allowUnsandboxedCommands: false,
       excludedCommands: [],
-      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true },
+      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true, allowLocalBinding: job.settings.runTests && job.settings.localhost },
       filesystem: {
         allowWrite: job.tmp ? [job.tmp] : [],
         denyWrite: [

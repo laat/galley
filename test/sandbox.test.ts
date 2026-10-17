@@ -7,13 +7,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxed } from '../src/server/reviewers/sandbox.ts';
 
+/**
+ * Why sandbox-exec can not run here, if it can not: outside macOS, and inside another sandbox
+ * (a reviewer agent's), which macOS refuses to nest.
+ */
+function noSandboxExec(): string | false {
+  if (process.platform !== 'darwin') return 'macOS only';
+  const s = sandboxed(['/usr/bin/true'], { writable: [], readOnly: [] })!;
+  const r = spawnSync(s.bin, s.args, { encoding: 'utf8' });
+  return /sandbox_apply: Operation not permitted/.test(r.stderr) && 'already in a sandbox, and macOS does not nest them';
+}
+const skip = noSandboxExec();
+
 test('there is none to install in outside macOS, unless one stands in', () => {
   const none = sandboxed(['true'], { writable: [], readOnly: [] });
   assert.equal(none === null, process.platform !== 'darwin');
   assert.equal(sandboxed(['true'], { writable: [], readOnly: [] }, '/bin/echo')?.bin, '/bin/echo');
 });
 
-test('it writes only to the checkout and its TMPDIR, and never to the checkout\'s .git', { skip: process.platform !== 'darwin' && 'macOS only' }, () => {
+test('it writes only to the checkout and its TMPDIR, and never to the checkout\'s .git', { skip }, () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'laatsux-sandbox-')));
   try {
     const checkout = join(dir, 'checkout');
@@ -37,4 +49,13 @@ test('it writes only to the checkout and its TMPDIR, and never to the checkout\'
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('inside another sandbox, as a reviewer agent runs the tests, it skips what needs sandbox-exec and says why', { skip }, () => {
+  const r = spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1)(allow default)', process.execPath, '--test-reporter=tap', import.meta.filename], {
+    encoding: 'utf8',
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^ok \d+ - it writes only to the checkout .* # SKIP already in a sandbox, and macOS does not nest them$/m);
 });

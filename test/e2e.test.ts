@@ -19,6 +19,17 @@ import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { Repo } from '../src/server/git.ts';
 
 const BIN = join(import.meta.dirname, '..', 'bin', 'laatsux.ts');
+
+/** Whether /tmp is writable here: not in a reviewer agent's sandbox. */
+function slashTmpWritable(): boolean {
+  try {
+    rmSync(mkdtempSync('/tmp/lx-'), { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const exec = promisify(execFile);
 
 let dir: string;
@@ -748,6 +759,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
   assert.equal(call.npmCache, join(call.tmpdir, 'npm'));
   assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile [^`]*`, which runs no install scripts/);
   assert.match(call.prompt, /\n    Packages: \+3\n    Done in 1s\n/);
+  // Its sandbox can not let the tests serve on localhost without opening more (README).
   assert.match(call.prompt, /you may run the typecheck, tests or build/);
   assert.match(call.prompt, /There is no network, so you can not install anything/);
   assert.match(call.prompt, /changes you make to it are lost/);
@@ -851,7 +863,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
   await human('PUT', '/api/settings/codex', { enabled: false });
 });
 
-test('claude reviews when the author waits, in its own sandbox, and says what it cost', async () => {
+test('claude reviews when the author waits, in its own sandbox, and says what it cost', async (t) => {
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/claude');
   writeFileSync(join(repo, 'claude.js'), 'export const answer = 41;\n');
@@ -878,6 +890,14 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(settingsPage, /<option value="haiku"[^>]* selected>Haiku/);
   assert.match(settingsPage, /<input type="checkbox" name="skipOwnKind"> Skip pull requests by agents in Claude Code/);
   assert.match(settingsPage, /<input type="checkbox" name="skipOwnKind"> Skip pull requests by agents in Codex/);
+  // Letting its tests listen on localhost is a setting of Claude's alone, off by default, and says
+  // what it opens. Codex's sandbox can not do it without letting the tests connect to other hosts.
+  assert.equal((await human('GET', '/api/settings')).claude.localhost, false);
+  assert.match(settingsPage, /<input type="checkbox" name="localhost"> Let Claude's tests listen on localhost/);
+  assert.match(settingsPage, /Code in the pull request can then reach anything on localhost, including laatsux, which takes any local caller for you and could publish as you/);
+  assert.match(settingsPage, /other machines on your network can reach a server that does not listen on 127\.0\.0\.1 only/);
+  assert.doesNotMatch(settingsPage.split('id="claude"')[0], /name="localhost"/);
+  await assert.rejects(human('PUT', '/api/settings/codex', { localhost: true }), /Codex's sandbox can not let its tests listen on localhost/);
 
   const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
   assert.equal(r.code, 0, r.stderr);
@@ -905,9 +925,10 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.deepEqual(call.args.slice(call.args.indexOf('--allowedTools') + 1, call.args.indexOf('--disallowedTools')), ['Read', 'Grep', 'Glob']);
   assert.equal(flag('--permission-mode'), 'dontAsk');
   assert.equal(flag('--permission-prompts'), 'none');
-  // Commands run in Claude Code's sandbox, never outside it: no network, writes to the checkout,
-  // Claude Code's own temporary directory and the review's, and not to the user's repository (nor
-  // to /tmp/claude-<uid>, where the user's own Claude Code sessions keep theirs).
+  // Commands run in Claude Code's sandbox, never outside it: no network (not even localhost, by
+  // default), writes to the checkout, Claude Code's own temporary directory and the review's, and
+  // not to the user's repository (nor to /tmp/claude-<uid>, where the user's own Claude Code
+  // sessions keep theirs).
   const checkout = call.cwd;
   const tmp = join(dirname(checkout), 'tmp');
   const uid = process.getuid!();
@@ -919,13 +940,15 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
       excludedCommands: [],
-      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true },
+      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true, allowLocalBinding: false },
       filesystem: { allowWrite: [tmp], denyWrite: [join(checkout, '.git'), git_dir, `/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`] },
     },
   });
   assert.equal(call.tmpdir, tmp);
-  // Short, or Claude Code falls back to /tmp/claude-<uid>.
-  assert.ok(Buffer.byteLength(`${call.claudeTmpdir}/claude-${uid}`) <= 30, call.claudeTmpdir);
+  // Short, or Claude Code falls back to /tmp/claude-<uid>. Where /tmp is not writable, it is under
+  // $TMPDIR, which may be longer.
+  if (slashTmpWritable()) assert.ok(Buffer.byteLength(`${call.claudeTmpdir}/claude-${uid}`) <= 30, call.claudeTmpdir);
+  else t.diagnostic(`not checking that ${call.claudeTmpdir} is short: /tmp is not writable here (in a reviewer agent's sandbox?), so it is under $TMPDIR`);
   assert.equal(call.claudeTmpdirExists, true);
   assert.equal(existsSync(call.claudeTmpdir), false, 'removed after the review');
   assert.equal(call.session, null, 'not taken for part of a Claude Code session the server was started from');
@@ -946,6 +969,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.equal(install.cwd, checkout);
   assert.equal(install.store, join(tmp, 'pnpm-store'));
   assert.match(call.prompt, /laatsux installed the dependencies with `pnpm install [^`]*`[^]*\n    Packages: \+1\n/);
+  assert.match(call.prompt, /There is no network, so you can not install anything/);
+  assert.doesNotMatch(call.prompt, /localhost/);
 
   // The review is Claude's, and the run says what it cost, in the API and in the sidebar.
   const { runs } = await human('GET', `${base}/reviewers/claude`);
@@ -979,9 +1004,10 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(transcript, /<code class="run-command">pnpm install --frozen-lockfile [^<]*<\/code><\/span> <svg[^>]*octicon-check[^]*?Packages: \+1/);
 
   // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
-  // read-only too, and nothing installed. A failed run keeps Claude Code's error.
+  // read-only too, and nothing installed. Nothing listens on localhost, whatever that setting says.
+  // A failed run keeps Claude Code's error.
   const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
-  await human('PUT', '/api/settings/claude', { runTests: false });
+  await human('PUT', '/api/settings/claude', { runTests: false, localhost: true });
   process.env.FAKE_CLAUDE_FAIL = '1';
   const pull = await human('GET', base);
   await human('POST', `${base}/reviewers/claude`);
@@ -996,6 +1022,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.equal(sandbox.autoAllowBashIfSandboxed, false);
   assert.deepEqual(sandbox.filesystem.allowWrite, []);
   assert.ok(sandbox.filesystem.denyWrite.includes(readOnly.cwd));
+  assert.equal(sandbox.network.allowLocalBinding, false);
   assert.match(readOnly.prompt, /Do not modify any files\./);
   assert.equal(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length, installs, 'nothing is installed for a read-only review');
   await human('PUT', '/api/settings/claude', { runTests: true });
@@ -1006,6 +1033,21 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.equal(failed.usage.cost_usd, 0.004);
   assert.equal(failed.usage.output_tokens, 300);
   assert.match(await page(), /Last run: \$0\.0040 · 5 tokens in, 300 out · 2 turns\. 2 runs: \$0\.02/);
+
+  // With the tests and localhost on, the tests may start servers there, and Claude is told so.
+  // They still can not connect to other hosts.
+  await human('POST', `${base}/reviewers/claude`);
+  await server.service.claude!.settle(pull.id);
+  const serving = lastCall();
+  assert.deepEqual(JSON.parse(serving.args[serving.args.indexOf('--settings') + 1]).sandbox.network, {
+    allowedDomains: [],
+    deniedDomains: ['*'],
+    strictAllowlist: true,
+    allowLocalBinding: true,
+  });
+  assert.match(serving.prompt, /you may run the typecheck, the whole test suite \(tests that start servers on localhost included\) or the build/);
+  assert.match(serving.prompt, /There is no network beyond localhost, so you can not install anything/);
+  await human('PUT', '/api/settings/claude', { localhost: false });
 
   // One identity whose name is a setting. It can not take an author agent's name, nor another
   // reviewer's, and nobody can post under it.
