@@ -350,9 +350,17 @@ export class Reviewer {
     );
     for (const run of runs) {
       // About to start from now on (see atWork), so nothing takes the reviewer for done meanwhile.
-      const p = this.rerun(run)
-        .catch((e) => console.error(`${this.engine} review:`, e))
-        .finally(() => this.deciding.delete(p));
+      const p: Promise<void> = this.rerun(run).then(
+        () => void this.deciding.delete(p),
+        (e: unknown) => {
+          console.error(`${this.engine} review:`, e);
+          this.deciding.delete(p);
+          // It does not run again after all: failed, so it holds nothing up and can be asked for again.
+          const error = String(e instanceof Error ? e.message : e).slice(0, 4000);
+          this.s.db.run("UPDATE review_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND status = 'interrupted'", error, now(), run.id);
+          this.s.emit(run.pull_id, `${this.engine}_failed`, this.actor());
+        },
+      );
       this.deciding.set(p, { pullId: run.pull_id, resume: true });
     }
   }

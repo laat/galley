@@ -172,6 +172,14 @@ export interface HeadStatus {
   automatic?: { used: number; limit: number };
 }
 
+/**
+ * The states in which a reviewer agent still has the head to review: at it, about to, to run it
+ * again after a restart, or when the author waits. The reviewer agents are done with the head once
+ * none of them is in one (Service.agentsDone); until then it is their turn, or the author's to
+ * start them (Service.turn).
+ */
+const TO_REVIEW: HeadStatus['state'][] = ['reviewing', 'queued', 'interrupted', 'unreviewed'];
+
 /** Whether the agents are done with a pull request, so the reviewer can take it from here. */
 export interface Readiness {
   reviewers: { login: string; engine: string; status: HeadStatus }[];
@@ -190,9 +198,10 @@ export type Whose = 'author' | 'reviewer_agents' | 'reviewer' | 'none';
 
 /**
  * Where the author agent is: working on feedback it was handed (until its next action), not yet
- * handed feedback that asks something of it, waiting in `pr wait`, or stopped.
+ * handed feedback that asks something of it, waiting in `pr wait`, or stopped. Stalled is stopped
+ * for Service.stallMs while the reviewer agents wait for it to start them.
  */
-export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped';
+export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped' | 'stalled';
 
 /** One reason for whose turn it is, as the list row and `pr view` say it. */
 export interface TurnReason {
@@ -213,11 +222,12 @@ export interface TurnReason {
 
 /**
  * Whose move a pull request waits for (#6). The author agent's from being handed feedback that
- * asks something of it until its next action (a push, an edit, a reply, a wait); a reviewer
- * agent's while one reviews the pull request or is about to; then the reviewer's: the author has
- * answered and waits or has stopped, and the reviewer agents are done with the head. Nobody's once
- * it is closed (here, or merged or closed on GitHub), or published with nothing new and no
- * feedback the author has yet to be handed.
+ * asks something of it until its next action (a push, an edit, a reply, a wait). While a reviewer
+ * agent still has the head to review, the reviewer agents', or the author's when they start only
+ * once it waits (#94). Then the reviewer's: the reviewer agents are done with the head (or none
+ * reviews it), feedback the author is not waiting for is the reviewer's to pass on, or the author
+ * stalled. Nobody's once it is closed (here, or merged or closed on GitHub), or published with
+ * nothing new and no feedback the author has yet to be handed.
  */
 export interface Turn {
   whose: Whose;
@@ -284,6 +294,13 @@ export interface AutoMergeOption {
 export const FOLLOW_BUSY_MS = 20_000;
 export const FOLLOW_IDLE_MS = 60_000;
 
+/**
+ * How long an author agent may stay away from `pr wait` while the reviewer agents wait for it to
+ * start them. After that it has stalled, its session has probably ended, and the pull request is
+ * the reviewer's turn (Service.turn).
+ */
+export const AUTHOR_STALL_MS = 30 * 60 * 1000;
+
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
@@ -315,6 +332,8 @@ export class Service {
   stopping = false;
   /** Number of `pr wait` calls currently blocked, per pull id. */
   waiters = new Map<number, number>();
+  /** When an author that keeps the reviewer agents waiting has stalled (AUTHOR_STALL_MS; tests shorten it). */
+  stallMs = AUTHOR_STALL_MS;
   private syncing = new Map<number, Promise<PullRow>>();
   private viewerLogin: string;
 
@@ -1676,7 +1695,7 @@ export class Service {
     if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
-    if (reviewers.some((r) => ['reviewing', 'queued', 'interrupted', 'unreviewed'].includes(r.status.state))) return null;
+    if (reviewers.some((r) => TO_REVIEW.includes(r.status.state))) return null;
     const stopped = this.stoppedText(pull);
     const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
     // Once, whatever each reviewer agent made of the commit.
@@ -1719,16 +1738,25 @@ export class Service {
     // A wait that just ended counts for a few seconds more (see setWaiting), long enough for the
     // author to confirm the feedback it was handed.
     const waiting = r.authorWaiting || this.waitingStopped.has(pull.id);
-    const state: AuthorState = working ? 'working' : unseen ? 'unseen' : waiting ? 'waiting' : 'stopped';
+    // A reviewer agent still has the head to review and starts when the author waits: until then
+    // the author has to ask for review. Not for a head GitHub has, which is the reviewer's to follow.
+    const toStart = !waiting && this.headUnpublished(pull) && r.reviewers.some((x) => x.status.state === 'unreviewed');
+    // Away from `pr wait` for that long since its last action, its session has probably ended.
+    const stalled = toStart && !working && Date.now() - Date.parse(acted) >= this.stallMs;
+    const state: AuthorState = working ? 'working' : unseen ? 'unseen' : waiting ? 'waiting' : stalled ? 'stalled' : 'stopped';
 
     const reasons: TurnReason[] = [];
     if (working) reasons.push({ kind: 'author', state, text: `${author} is working on the feedback`, since: pull.author_handed_at });
     if (unseen) reasons.push({ kind: 'author', state: 'unseen', text: `${author} has not seen the latest feedback` });
     if (state === 'waiting') reasons.push({ kind: 'author', state, text: `${author} is waiting for review`, since: this.waitingSince.get(pull.id) ?? null });
-    // Not waiting, it does not hear of anything new: the reviewer has to tell it.
-    if (state === 'stopped' || (state === 'unseen' && !waiting)) reasons.push({ kind: 'author', state: 'stopped', text: `${author} is not waiting`, since: acted });
+    // Not waiting, it does not hear of anything new: the reviewer has to tell it. Nor do the reviewer agents start.
+    if (!working && !waiting) {
+      const text = stalled ? `${author} stopped without asking for review` : toStart ? `${author} has not asked for review yet (pr wait)` : `${author} is not waiting`;
+      reasons.push({ kind: 'author', state: stalled ? 'stalled' : 'stopped', text, since: acted });
+    }
 
-    const atWork = r.reviewers.some((x) => x.status.state === 'reviewing' || x.status.state === 'queued');
+    // At work, about to be, or to run again after a restart, whether the author waits or not.
+    const atWork = r.reviewers.some((x) => TO_REVIEW.includes(x.status.state) && x.status.state !== 'unreviewed');
     // A waiting author starts the reviewer agents that have not reviewed its head.
     const next = state === 'waiting' && r.reviewers.some((x) => x.status.state === 'unreviewed');
     const unpublished = this.unpublishedChanges(pull);
@@ -1738,16 +1766,18 @@ export class Service {
     // conflict. It is for the reviewer to act on (or hand to an agent), not feedback for the author.
     const github = githubAsks(githubStatus(pull), pull.base_ref);
     // Feedback being handed over (the author waits) makes it the author's turn; feedback it is not
-    // waiting for is the reviewer's to pass on, published or not.
+    // waiting for is the reviewer's to pass on, published or not, and so is a stalled author.
     const whose: Whose = atWork
       ? 'reviewer_agents'
       : working || (unseen && waiting)
         ? 'author'
         : next
           ? 'reviewer_agents'
-          : pull.state === 'published' && !unpublished.length && !failed && !unseen && !github.length
-            ? 'none'
-            : 'reviewer';
+          : toStart && !unseen && !stalled
+            ? 'author'
+            : pull.state === 'published' && !unpublished.length && !failed && !unseen && !github.length
+              ? 'none'
+              : 'reviewer';
     if (whose === 'none') return { whose, reasons: [] };
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
@@ -1780,6 +1810,23 @@ export class Service {
     }
     for (const text of github) reasons.push({ kind: 'github', text });
     return { whose, reasons };
+  }
+
+  /** The author action each pull request was last looked at for by noticeStalls. */
+  private stallsNoticed = new Map<number, string>();
+
+  /**
+   * Tell pages about authors that just stalled (see turn). Time alone does that, with no change to
+   * announce, so the server calls this when it polls: each author action is looked at once, when
+   * it is stallMs old.
+   */
+  noticeStalls(): void {
+    for (const pull of this.db.all<PullRow>(`SELECT * FROM pulls WHERE ${LISTED.get('open')}`)) {
+      const acted = this.authorActedAt(pull);
+      if (Date.now() - Date.parse(acted) < this.stallMs || this.stallsNoticed.get(pull.id) === acted) continue;
+      this.stallsNoticed.set(pull.id, acted);
+      if (this.turn(pull).reasons.some((r) => r.state === 'stalled')) this.bus.emit('change', { pullId: pull.id, type: 'stalled', actor: 'laatsux' } satisfies ChangeEvent);
+    }
   }
 
   /** What changed since the reviewer last reviewed: pushes, and threads the author answered. */

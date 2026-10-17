@@ -150,6 +150,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const poll = async () => {
     try {
       await service.pollAll();
+      service.noticeStalls();
       autoPublisher.considerAll();
     } catch (e) {
       console.error('poll failed:', e);

@@ -237,7 +237,7 @@ function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['a
 
 /** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, unresolved threads, conflicts with the base, or something on GitHub. */
 function reasonClass(r: TurnReason): string {
-  if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' ? '' : 'working';
+  if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' || r.state === 'stalled' ? '' : 'working';
   if (r.kind === 'reviewer_agent') return r.state === 'reviewing' || r.state === 'queued' ? 'running' : r.state === 'failed' ? 'failed' : '';
   return r.kind === 'threads' || r.kind === 'conflicts' || r.kind === 'github' ? r.kind : '';
 }
