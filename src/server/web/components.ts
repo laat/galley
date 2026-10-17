@@ -9,8 +9,9 @@ import type { ReferenceContext } from './references.ts';
 export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
   const data = Object.entries(opts.data ?? {}).map(([k, v]) => html` data-${raw(k)}="${v}"`);
-  // The server was asked to stop, and lets the running reviews post first. In #main, which live updates refresh.
+  // The server was asked to stop, and lets the running reviews post first. Live updates swap it along with #main.
   const running = s.stopping ? s.reviewsRunning() : 0;
+  const waiting = `Waiting for ${plural(running, 'running review')} to finish before the server stops.`;
   return (
     '<!doctype html>' +
     html`<html lang="en">
@@ -28,12 +29,13 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
   <a class="app-header-logo" href="/" title="All staged pull requests">${icon('git-pull-request', { size: 24 })}</a>
   <nav class="app-header-context">${opts.crumbs ?? html`<a href="/"><strong>laatsux</strong></a>`}</nav>
   <div class="app-header-actions">
+    ${running ? html`<span id="server-stopping" class="stopping-indicator" role="status" title="${waiting}" aria-label="${waiting}">${icon('alert')}<span class="stopping-indicator-long">Stopping · ${plural(running, 'review')} running</span><span class="stopping-indicator-short">${running}</span></span>` : html`<span id="server-stopping" hidden></span>`}
     <a class="app-header-button" href="/settings" title="Settings" aria-label="Settings">${icon('gear')}</a>
     ${avatar(avatarUrl(s, viewer), viewer.login, 32, 'avatar-circle')}
   </div>
 </div>
 </header>
-<div id="main"${data}>${running ? html`<div class="container container-xl"><div class="flash flash-warn">${icon('alert')}<span>Waiting for ${plural(running, 'running review')} to finish before the server stops.</span></div></div>` : ''}${opts.body}</div>
+<div id="main"${data}>${opts.body}</div>
 <div id="toast" class="toast" hidden></div>
 </body>
 </html>`.value

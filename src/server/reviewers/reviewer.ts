@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CancelReason, type Db, type CommentRow, type Priority, type PullRow, type RepoRow, type ReviewRunRow, type Side } from '../db.ts';
-import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
+import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type ChangeEvent, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
 import type { Reviews, Verdict } from './definition.ts';
 import { cacheEnv, installCommand } from './install.ts';
@@ -888,7 +888,11 @@ export class Reviewer {
         if (!stopped) this.s.db.update('review_runs', runId, { status: 'failed', error: e.message.slice(0, 4000), finished_at: now() });
         this.s.emit(ctx.pull.id, `reviewer_${stopped ?? 'failed'}`, actor);
       })
-      .finally(() => this.jobs.delete(ctx.pull.id));
+      .finally(() => {
+        this.jobs.delete(ctx.pull.id);
+        // The pages of every pull request say how many reviews a stopping server still waits for.
+        if (this.s.stopping) this.s.bus.emit('change', { pullId: null, type: 'stopping', actor: 'laatsux' } satisfies ChangeEvent);
+      });
     this.jobs.set(ctx.pull.id, { runId, done, abort, log, reads: plan.reads });
     return runId;
   }
