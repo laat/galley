@@ -52,7 +52,7 @@ export interface PullRow {
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
-  /** When the author last waited for review with all feedback seen: the latest `pr wait` that had nothing to return. */
+  /** When the author last waited for review with all feedback seen: the latest `pr wait` that had nothing to return, or only what asks nothing of it (an approval). */
   author_waited_at: string | null;
   /** When the author was last handed feedback that asks something of it (`pr wait`, `pr view --comments`); its turn until its next action. */
   author_handed_at: string | null;

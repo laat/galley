@@ -2755,6 +2755,19 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       assert.equal(reasons[0], 'agent is working on the feedback');
     });
 
+    await t.test("an approval the next wait returns, while the author works on feedback: the reviewer's", async () => {
+      // The author works on the comment it was handed above, and an approval arrives meanwhile.
+      await human('POST', `${base}/reviews`, { event: 'APPROVE', body: 'Fine as it is.' });
+      assert.equal((await turn()).whose, 'author');
+      // Its next wait returns only the approval, which asks nothing: waiting is its latest action.
+      const r = await cli(['pr', 'wait', String(number), '--timeout', '5s']);
+      assert.match(r.stdout, /Fine as it is\./);
+      const { whose, reasons } = await turn();
+      assert.equal(whose, 'reviewer');
+      assert.ok(!reasons.includes('agent is working on the feedback'), reasons.join('; '));
+      assert.ok(reasons.includes('approved'), reasons.join('; '));
+    });
+
     await t.test("closed: nobody's", async () => {
       await human('PATCH', base, { state: 'closed' });
       assert.deepEqual(await turn(), { whose: 'none', reasons: [] });

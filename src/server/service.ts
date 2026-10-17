@@ -1311,16 +1311,18 @@ export class Service {
       while (true) {
         const checkedAt = now();
         const result = this.waitResult(id);
-        if (result) return result;
+        if (result) {
+          // What asks nothing of the author (an approval, a review that found nothing, a publish)
+          // hands it no turn, so the wait that returns it is its latest action all the same.
+          const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
+          const asked = pull ? this.askedAt(pull) : null;
+          if (pull && (asked === null || asked <= pull.author_seen_at)) this.recordWait(pull, checkedAt, author);
+          return result;
+        }
         const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!;
         const remaining = deadline - Date.now();
         if (remaining <= 0 || signal?.aborted) return { status: 'timeout', reviews: [], comments: [] };
-        // Waiting with nothing new to read says the author is done with the feedback so far (see
-        // turn). When that ends the author's turn, pages hear of it: a wait started within seconds
-        // of the last one announces nothing (setWaiting). Renewals that change nothing stay quiet.
-        const working = pull.author_handed_at !== null && pull.author_handed_at > this.authorActedAt(pull);
-        this.db.update('pulls', id, { author_waited_at: checkedAt });
-        if (working) this.emit(id, 'waiting', author);
+        this.recordWait(pull, checkedAt, author);
         await new Promise<void>((resolve) => {
           const done = () => {
             clearTimeout(timer);
@@ -1339,6 +1341,18 @@ export class Service {
     } finally {
       this.setWaiting(id, -1, author);
     }
+  }
+
+  /**
+   * Record that the author waited at `at`, with nothing new to read that asks something of it:
+   * it is done with the feedback so far (see turn). When that ends the author's turn, pages hear
+   * of it: a wait started within seconds of the last one announces nothing (setWaiting).
+   * Renewals that change nothing stay quiet.
+   */
+  private recordWait(pull: PullRow, at: string, author: Actor): void {
+    const working = pull.author_handed_at !== null && pull.author_handed_at > this.authorActedAt(pull);
+    this.db.update('pulls', pull.id, { author_waited_at: at });
+    if (working) this.emit(pull.id, 'waiting', author);
   }
 
   /** The reviewer agents this server runs. */
