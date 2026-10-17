@@ -79,7 +79,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
+| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Reviews from [reviewer agents](#reviewer-agents) come together, once all of them are done with the commit. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
@@ -326,7 +326,10 @@ How they run:
   not take an author agent's name (`claude`, `codex-agent`, `opencode`), nor a name `--reviewer`
   would take for the other reviewer (its kind or name, in any case), and the API refuses
   CLI callers that use a reviewer's. Findings on lines outside the diff go in the review's body.
-- A reviewer at work shows with a dot under Reviewers in the sidebar, and in its own section.
+- With two reviewers, the author's `pr wait` returns once every reviewer that reviews the head
+  has reviewed it, so the agent answers both in one round. Feedback from anyone else comes back
+  at once, with what the reviewers posted so far, and says who is still reviewing. A reviewer at
+  work shows with a dot under Reviewers in the sidebar, and in its own section.
 - The review wakes the author's `pr wait`, so the agent addresses the comments and waits
   again; the reviewers then review the new commit, until their caps are reached. When the
   reviewer agents are done with the latest commit (each found nothing, used up its automatic

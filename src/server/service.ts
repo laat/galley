@@ -1333,7 +1333,7 @@ export class Service {
     const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
     // Closed here, or merged or closed on GitHub: nothing more is coming, so every wait says so.
     const ended = pull.state === 'closed' ? 'closed' : pull.github_state === 'merged' ? 'merged' : pull.github_state === 'closed' ? 'closed_on_github' : null;
-    const status = ended ?? (published ? 'published' : fb.reviews.length || fb.comments.length ? 'feedback' : null);
+    const status = ended ?? (published ? 'published' : (fb.reviews.length || fb.comments.length) && !this.agentsStillReviewing(pull, fb) ? 'feedback' : null);
     // Not marked as seen here: the author confirms once it has shown the feedback, so a
     // response lost on the way (a restart) delivers it again instead of losing it.
     return status && { status, ...fb, seenAt: checkedAt };
@@ -1405,6 +1405,18 @@ export class Service {
   /** The reviewer agents this server runs: each one actor that reviews on its own. */
   reviewerAgents(): Reviewer[] {
     return [this.codex, this.claude].filter((r) => r !== null);
+  }
+
+  /**
+   * Whether the feedback waits for more of its kind: it is all reviews from reviewer agents, and
+   * another reviewer agent is still at work on the pull request. The author then gets the
+   * reviews of a commit together and answers them in one round. Anything from anyone else comes
+   * back at once, with what the reviewer agents posted so far.
+   */
+  private agentsStillReviewing(pull: PullRow, fb: { reviews: ReviewRow[]; comments: CommentRow[] }): boolean {
+    if (fb.comments.length || !this.reviewersAtWork(pull).length) return false;
+    const agents = new Set(this.reviewerAgents().map((r) => r.actor().id));
+    return fb.reviews.every((r) => agents.has(r.author_id));
   }
 
   /** The reviewer agents reviewing the pull request or about to, and what each is at. */

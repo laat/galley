@@ -1062,6 +1062,86 @@ test('a reviewer can leave pull requests by its own kind of agent to the other',
   }
 });
 
+test('with two reviewer agents, pr wait hands the author both reviews of a commit together', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/two-reviewers');
+  writeFileSync(join(repo, 'two-reviewers.js'), 'export const two = 1;\n');
+  git('add', 'two-reviewers.js');
+  git('commit', '-qm', 'Add two-reviewers.js');
+  const created = await cli(['pr', 'create', '--title', 'Two reviewers', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  const until = async (ok: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400; i++) {
+      if (await ok()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(`timed out waiting until ${what}`);
+  };
+  const finished = async (kind: string, n: number) => (await human('GET', `${base}/reviewers/${kind}`)).runs.filter((r: any) => r.status === 'done').length === n;
+  const comment = (body: string) => ({ path: 'two-reviewers.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body });
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Codex has one thing.', comments: [comment('From Codex.')] });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Claude has another.', comments: [comment('From Claude.')] });
+  const gate = join(dir, 'claude-gate');
+  process.env.FAKE_CLAUDE_GATE = gate;
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 2 });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 2 });
+  try {
+    // Codex is done with the commit and Claude is still at it: the author keeps waiting.
+    let returned = false;
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '30s']).finally(() => (returned = true));
+    await until(() => finished('codex', 1), 'Codex has reviewed');
+    await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(returned, false, 'pr wait returned before Claude reviewed');
+    // Who is still reviewing: in pr view, its turn, and the sidebar.
+    const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewRequests,turn'])).stdout);
+    assert.deepEqual(view.reviewRequests.map((r: any) => [r.login, r.status]), [['claude-review', 'IN_PROGRESS']]);
+    assert.equal(view.turn.whose, 'REVIEWER_AGENTS');
+    const html = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+    assert.match(html, /<span class="flex-auto">claude-review<\/span> <span title="Reviewing [0-9a-f]{7}">/);
+    assert.match(html, /<span class="flex-auto">codex<\/span> <svg[^>]*octicon-comment/);
+    assert.match(html, /<strong>Claude is still reviewing this commit<\/strong>/);
+
+    // Then both reviews come back together.
+    writeFileSync(gate, '');
+    const both = await waiting;
+    assert.equal(both.code, 0, both.stderr);
+    assert.match(both.stdout, /codex reviewed: commented/);
+    assert.match(both.stdout, /claude-review reviewed: commented/);
+    assert.match(both.stdout, /From Codex\.[^]*From Claude\.|From Claude\.[^]*From Codex\./);
+    await server.service.claude!.settle(id);
+
+    // Feedback from anyone else comes back at once, with what the reviewer agents posted so far
+    // and who is still reviewing.
+    rmSync(gate);
+    writeFileSync(join(repo, 'two-reviewers.js'), 'export const two = 2;\n');
+    git('commit', '-qam', 'Answer both');
+    const second = cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    await until(() => finished('codex', 2), 'Codex has reviewed the new commit');
+    await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews the new commit');
+    await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Looks better.' });
+    const early = await second;
+    assert.equal(early.code, 0, early.stderr);
+    assert.match(early.stdout, /reviewer commented/);
+    assert.match(early.stdout, /codex reviewed: commented/);
+    assert.doesNotMatch(early.stdout, /claude-review reviewed/);
+    assert.match(early.stdout, /^claude-review is reviewing [0-9a-f]{7} \(started [^)]*\)\.$/m);
+    writeFileSync(gate, '');
+    const last = await cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    assert.match(last.stdout, /claude-review reviewed: commented/);
+    await server.service.claude!.settle(id);
+  } finally {
+    delete process.env.FAKE_CLAUDE_GATE;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
+  }
+});
+
 test('symlinks in a pull request lead the reviewer nowhere: not to /dev/zero, not outside the checkout', async () => {
   const outside = mkdtempSync(join(tmpdir(), 'laatsux-outside-'));
   writeFileSync(join(outside, 'secret'), 'keep\n');
