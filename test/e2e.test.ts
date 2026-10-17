@@ -2649,7 +2649,10 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const plain = (await cli(['pr', 'view', String(number)])).stdout;
       assert.match(plain, /^unpublished:\tcommits, title$/m);
       assert.match(plain, /^turn:\treviewer\tagent is not waiting, 1 min; 1 push since reviewer's review;/m);
-      assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="State State--staged">.*?Update not published<\/span>/);
+      // Staged, in the badge and the merge box, until GitHub has the update.
+      const pullPage = await page(`/acme/widgets/pull/${number}`);
+      assert.match(pullPage, /<span class="State State--staged">.*?Update not published<\/span>/);
+      assert.match(pullPage, /<div class="merge-box">/);
       assert.match(await page('/acme/widgets?state=published'), /<span class="Label Label--attention">.*?Update not published: commits, title<\/span>/);
       assert.equal(await group(), 'published: Your turn');
     });
@@ -3289,18 +3292,20 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   assert.match(front, /<a class="UnderlineNav-item selected" href="\/acme\/tabs">[^]*?Staged <span class="Counter">1<\/span><\/a>/);
   assert.match(front, /<a class="list-tab selected" href="\/acme\/tabs\?state=staged">/);
   assert.deepEqual(listed(front), [staged.number]);
-  assert.deepEqual(listed(await page('/acme/tabs?state=published')), [published.number]);
+  const publishedTab = await page('/acme/tabs?state=published');
+  assert.deepEqual(listed(publishedTab), [published.number]);
   const done = await page('/acme/tabs?state=done');
   assert.deepEqual(listed(done), [merged.number, closedOnGithub.number, closedHere.number].sort());
-  // Done says how each ended.
+  // Done says how each ended, in the colours of the states: purple merged, red closed. Open on GitHub is green.
   const row = (html: string, n: number) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/tabs/pull/${n}"`))!;
   assert.match(row(done, merged.number), /octicon-git-merge color-fg-done[^]*<span class="Label Label--merged">Merged<\/span>/);
-  assert.match(row(done, closedOnGithub.number), /<span class="Label">Closed on GitHub<\/span>/);
-  assert.match(row(done, closedHere.number), /<span class="Label">Closed<\/span>/);
+  assert.match(row(done, closedOnGithub.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed on GitHub<\/span>/);
+  assert.match(row(done, closedHere.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed<\/span>/);
+  assert.match(row(publishedTab, published.number), /octicon-mark-github color-fg-open/);
   // The staged one waits for the reviewer: its tab says so, whichever tab is shown. The published one waits on GitHub.
   assert.match(done, /href="\/acme\/tabs\?state=staged">[^]*? 1 Staged <span class="list-tab-turn" title="1 pull request waiting for you">/);
   assert.match(front, /<h2 class="turn-group-title">Your turn<\/h2>[^]*?href="\/acme\/tabs\/pull\/1">/);
-  assert.match(await page('/acme/tabs?state=published'), /<h2 class="turn-group-title">Waiting on GitHub<\/h2>/);
+  assert.match(publishedTab, /<h2 class="turn-group-title">Waiting on GitHub<\/h2>/);
   // Staged in a colour of its own, and said in words: staged, not asking to merge.
   const pullPage = await page(`/acme/tabs/pull/${staged.number}`);
   assert.match(pullPage, /<span class="State State--staged"><svg [^>]*octicon-git-pull-request[^>]*>[^]*?<\/svg> Staged<\/span>/);

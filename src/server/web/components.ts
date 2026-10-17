@@ -64,7 +64,8 @@ export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {
 
 /**
  * Staged in a colour of its own, not GitHub's green for open: a staged pull request is not open
- * anywhere yet. `unpublished`: published, with changes GitHub does not have yet
+ * anywhere yet. Published, it is open on GitHub and takes GitHub's green; merged, GitHub's purple;
+ * closed, here or on GitHub, red. `unpublished`: published, with changes GitHub does not have yet
  * (Service.unpublishedChanges), which are staged.
  */
 export function stateBadge(pull: PullRow, size: 'md' | 'sm' = 'md', unpublished = false): Safe {
@@ -82,7 +83,7 @@ export function pullIcon(pull: PullRow, unpublished = false): Safe {
   if (pull.github_state === 'merged') return icon('git-merge', { cls: 'color-fg-done' });
   if (pull.state === 'closed' || pull.github_state === 'closed') return icon('git-pull-request-closed', { cls: 'color-fg-closed' });
   if (pull.state === 'published' && unpublished) return icon('git-pull-request', { cls: 'color-fg-staged' });
-  if (pull.state === 'published') return icon('mark-github', { cls: 'color-fg-done' });
+  if (pull.state === 'published') return icon('mark-github', { cls: 'color-fg-open' });
   if (pull.draft) return icon('git-pull-request-draft', { cls: 'color-fg-muted' });
   return icon('git-pull-request', { cls: 'color-fg-staged' });
 }

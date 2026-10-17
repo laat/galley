@@ -151,6 +151,7 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .color-fg-done { color: var(--done) !important; }
 .color-fg-attention { color: var(--attention) !important; }
 .color-fg-staged { color: var(--staged); }
+.color-fg-open { color: var(--success); }
 .color-fg-closed { color: var(--danger); }
 .link-muted { color: var(--fg-muted); }
 .link-muted:hover { color: var(--accent); }
@@ -333,9 +334,10 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .State--staged { background: var(--staged-emphasis); }
 .State--draft { background: var(--neutral-emphasis); }
 .State--closed { background: var(--danger-emphasis); }
-.State--published { background: var(--done-emphasis); }
+.State--published { background: var(--success-emphasis); }
 .State--merged { background: var(--done-emphasis); }
 .Label--merged { color: var(--done); border-color: var(--done); }
+.Label--closed { color: var(--danger); border-color: var(--danger); }
 
 .branch-name {
   display: inline-block;
@@ -670,11 +672,12 @@ kbd {
   background: var(--staged-emphasis);
   border-radius: 6px;
 }
-.merge-box--published .merge-box-icon { background: var(--done-emphasis); }
+.merge-box--published .merge-box-icon { background: var(--success-emphasis); }
 .merge-box--closed .merge-box-icon { background: var(--danger-emphasis); }
 .merge-box--merged .merge-box-icon { background: var(--done-emphasis); }
 .merge-box .Box { flex: 1; min-width: 0; }
-.merge-box--published .Box, .merge-box--merged .Box { border-color: var(--done-emphasis); }
+.merge-box--published .Box { border-color: var(--success-emphasis); }
+.merge-box--merged .Box { border-color: var(--done-emphasis); }
 .merge-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border-muted); }
 .merge-row:first-child { border-top: 0; }
 .merge-row > .octicon { margin-top: 3px; }
@@ -690,8 +693,6 @@ kbd {
 .checks-indicator { margin-left: 2px; }
 .checks-indicator .octicon { vertical-align: text-bottom; }
 .merge-error { margin: 8px 0 0; max-height: 200px; overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
-.btn-publish { background: var(--done-emphasis); }
-.btn-publish:hover { background: #7b47d8; }
 
 /* -------------------------------------------------------------- sidebar */
 
