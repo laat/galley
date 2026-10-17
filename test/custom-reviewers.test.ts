@@ -273,6 +273,9 @@ test('a reviewer of the description reads no code, and approves what follows its
   assert.match(out, /house-rules reviewed: approved/);
   assert.match(out, /Follows the rules\./);
   assert.doesNotMatch(out, /Approved with nothing left open/, 'not the reviewer\'s approval');
+  // The only reviewer agent, done: nothing to address, and the next wait hands the commit over.
+  assert.match(out, new RegExp(`^Nothing to address\\. Run \`galley pr wait s${number}\` again\\.$`, 'm'));
+  assert.doesNotMatch(out, /Address the feedback/);
 
   // Claude Code in an empty directory, with no tools, the instructions, and what it reviews in the prompt.
   const call = calls(process.env.FAKE_CLAUDE_LOG!).at(-1);
@@ -360,6 +363,7 @@ test('it reviews again when the title, description or commit messages change, no
   git(acme, 'commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Widgets multiply now.');
   out = await wait(acme, number);
   assert.match(out, /The message does not say why\./);
+  assert.match(out, /^Address the feedback\./m, 'with nothing to point at, its summary is the finding');
   await human('DELETE', `/api/repos/acme/widgets/pulls/${number}/auto-publish`);
   review = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviews`)).at(-1);
   assert.equal(review.state, 'COMMENTED');

@@ -1370,6 +1370,73 @@ test('with two reviewer agents, pr wait hands the author both reviews of a commi
   }
 });
 
+test('pr wait says when the reviewer agents leave nothing to address, and which reviews are still to come', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/nothing-to-address');
+  writeFileSync(join(repo, 'nothing.js'), 'export const nothing = 1;\n');
+  git('add', 'nothing.js');
+  git('commit', '-qm', 'Add nothing.js');
+  const created = await cli(['pr', 'create', '--title', 'Add nothing.js', '--body', 'x', '--reviewer', 'codex:4']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const { id } = await human('GET', `/api/repos/acme/widgets/pulls/${number}`);
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  const sha = () => git('rev-parse', '--short=7', 'HEAD');
+  const wait = async () => {
+    const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    assert.equal(r.code, 0, r.stderr);
+    await server.service.codex!.settle(id);
+    return r.stdout;
+  };
+  const commit = async (n: number) => {
+    writeFileSync(join(repo, 'nothing.js'), `export const nothing = ${n};\n`);
+    git('commit', '-qam', `Count to ${n}`);
+    for (let i = 0; i < 400 && row().head_sha !== git('rev-parse', 'HEAD'); i++) await new Promise((r) => setTimeout(r, 25));
+  };
+  try {
+    // A finding outside the diff has no thread to answer in, and asks something of the author all the same.
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'math.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Not in this diff.' }] });
+    const found = await wait();
+    assert.match(found, /`math\.js:1` \(low priority\): Not in this diff\./);
+    assert.match(found, /^Address the feedback\./m);
+
+    // Codex finds nothing in the next commit, and Claude's review of it is still to run, as after a restart.
+    await commit(2);
+    const interrupted = server.service.db.insert('review_runs', { pull_id: id, reviewer: 'claude', head_sha: row().head_sha, trigger: 'manual', status: 'interrupted', started_at: now(), finished_at: now() });
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
+    const clean = await wait();
+    assert.match(clean, /codex-review reviewed: commented/);
+    assert.match(clean, new RegExp(`^Nothing to address\\. Run \`galley pr wait s${number}\` again for the review still to come \\(claude-review's review of ${sha()} was interrupted by a restart; it will run again\\)\\.$`, 'm'));
+    assert.doesNotMatch(clean, /Address the feedback/);
+    server.service.db.run('DELETE FROM review_runs WHERE id = ?', interrupted);
+    assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(codex-review found nothing in ${sha()}\\); `));
+
+    // A thread the author was shown and has not answered since its latest comment is still to address,
+    // whatever the reviewer agents found.
+    await human('POST', `/api/repos/acme/widgets/pulls/${number}/reviews`, { event: 'COMMENT', comments: [{ path: 'nothing.js', line: 1, side: 'RIGHT', body: 'Why a constant?' }] });
+    const thread = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/comments`)).at(-1).id;
+    assert.equal((await cli(['pr', 'comment', String(number), '--reply-to', String(thread), '-b', 'It is all it needs.'])).code, 0);
+    await human('POST', `/api/repos/acme/widgets/pulls/${number}/comments/${thread}/replies`, { body: 'Is it?' });
+    await cli(['pr', 'view', String(number), '--comments']);
+    await commit(3);
+    const open = await wait();
+    assert.match(open, /codex-review reviewed: commented/);
+    assert.match(open, /^Address the feedback\./m);
+    assert.equal((await cli(['pr', 'comment', String(number), '--reply-to', String(thread), '-b', 'Yes.'])).code, 0);
+    assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} `));
+
+    // Once answered, it may stay open. The only reviewer agent finds nothing: the next wait hands the commit over.
+    await commit(4);
+    const done = await wait();
+    assert.match(done, new RegExp(`^Unresolved threads: ${thread}$`, 'm'));
+    assert.match(done, new RegExp(`^Nothing to address\\. Run \`galley pr wait s${number}\` again\\.$`, 'm'));
+    assert.doesNotMatch(done, /Address the feedback/);
+    assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(codex-review found nothing in ${sha()}\\); `));
+  } finally {
+    await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });
+  }
+});
+
 test('stop iterating: a running review finishes, no new one starts, the author hands over, and Resume lets them go on', async () => {
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/stop-iterating');
