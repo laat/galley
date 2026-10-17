@@ -5736,9 +5736,6 @@ test('the reviewer pins pull requests to the top of the front page, until they u
       const res = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-galley-actor': 'agent' } });
       assert.equal(res.status, 403);
       assert.match((await res.json()).message, /only the reviewer can pin/);
-      // Also named by the header's name before the rename.
-      const before = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-laatsux-actor': 'agent' } });
-      assert.equal(before.status, 403);
     }
 
     const updated = (await human('GET', `${api}/${a.number}`)).updated_at;

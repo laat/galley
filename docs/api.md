@@ -7,7 +7,7 @@ under `/api/repos/{owner}/{repo}`.
 
 ## Identity
 
-- `X-Galley-Actor: <login>`: who the caller is; without it, the user. `X-Galley-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409. `X-Laatsux-Actor` and `X-Laatsux-Actor-Type`, their names before the rename, still work.
+- `X-Galley-Actor: <login>`: who the caller is; without it, the user. `X-Galley-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409.
 - Another agent can review as a GitHub review bot does, under its own name: `GALLEY_ACTOR=reviewer galley pr review <n> --comment -b "…"`, or `POST …/pulls/{n}/reviews`. Its reviews wake the author's `pr wait` like the user's.
 - Callers of type `Bot` get 403 from what is the user's to do: publishing, auto-publish, deleting, pinning, stop-iterating, settings, and asking for or configuring a reviewer agent.
 

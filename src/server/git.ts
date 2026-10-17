@@ -270,8 +270,8 @@ export class Repo {
     return r.code === 0 ? r.stdout.trim() : null;
   }
 
-  async refs(prefixes = ['refs/heads', 'refs/remotes']): Promise<Map<string, string>> {
-    const text = await this.out(['for-each-ref', '--format=%(refname) %(objectname)', ...prefixes]);
+  async refs(): Promise<Map<string, string>> {
+    const text = await this.out(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/remotes']);
     const map = new Map<string, string>();
     for (const line of text.split('\n')) {
       const i = line.indexOf(' ');

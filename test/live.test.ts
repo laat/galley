@@ -51,9 +51,9 @@ test('the shared worker passes every message on to every tab, whatever its type'
 /**
  * public/app.js on a transcript page following run 5 of pull request 1, in a VM against
  * stand-ins for the DOM. The page's fetches wait for an answer from the test, and its timers
- * run when the test says. Its storage is empty unless given.
+ * run when the test says.
  */
-function transcriptPage(stores: { local?: MemoryStorage; session?: MemoryStorage } = {}) {
+function transcriptPage() {
   const page = (html: string) => ({ html, dataset: html.includes('running') ? { runLive: '5' } : {}, replaceWith: (next: unknown) => (main = next as typeof main) });
   let main = page('running: 2 steps');
   const fetches: { url: string; answer: (html: string) => void; fail: () => void }[] = [];
@@ -93,8 +93,8 @@ function transcriptPage(stores: { local?: MemoryStorage; session?: MemoryStorage
     DOMParser,
     fetch,
     location: { href: 'http://localhost/acme/widgets/pull/1/runs/5', hash: '', pathname: '/acme/widgets/pull/1/runs/5' },
-    localStorage: stores.local ?? storage,
-    sessionStorage: stores.session ?? storage,
+    localStorage: storage,
+    sessionStorage: storage,
     setTimeout: (fn: () => void) => timers.push(fn),
     clearTimeout() {},
     setInterval() {},
@@ -113,43 +113,6 @@ function transcriptPage(stores: { local?: MemoryStorage; session?: MemoryStorage
     settle: () => new Promise((r) => setImmediate(r)),
   };
 }
-
-/** localStorage or sessionStorage, as a browser keeps it for one origin. */
-class MemoryStorage {
-  map = new Map<string, string>();
-  get length() {
-    return this.map.size;
-  }
-  key(i: number) {
-    return [...this.map.keys()][i] ?? null;
-  }
-  getItem(key: string) {
-    return this.map.get(key) ?? null;
-  }
-  setItem(key: string, value: string) {
-    this.map.set(key, String(value));
-  }
-  removeItem(key: string) {
-    this.map.delete(key);
-  }
-}
-
-test('keys named laatsux: before the rename move to galley: when a page loads, so unsent drafts carry over', () => {
-  const local = new MemoryStorage();
-  const session = new MemoryStorage();
-  local.setItem('laatsux:notify', '1');
-  local.setItem('elsewhere', 'x');
-  session.setItem('laatsux:draft:1:new-comment', '{"value":"Half a thought"}');
-  // A key under the new name already is newer than the one under the old.
-  session.setItem('galley:draft:1:reply-12', '{"value":"newer"}');
-  session.setItem('laatsux:draft:1:reply-12', '{"value":"older"}');
-  transcriptPage({ local, session });
-  assert.deepEqual(Object.fromEntries(local.map), { 'galley:notify': '1', elsewhere: 'x' });
-  assert.deepEqual(Object.fromEntries(session.map), {
-    'galley:draft:1:new-comment': '{"value":"Half a thought"}',
-    'galley:draft:1:reply-12': '{"value":"newer"}',
-  });
-});
 
 const progress = { type: 'progress', event: { pullId: 1, runId: 5 } };
 const finished = { type: 'change', event: { pullId: 1, type: 'reviewer_finished', actor: 'codex-review' } };

@@ -15,7 +15,6 @@ import { CustomReviewers } from './reviewers/custom.ts';
 import { configDir, fromEnv, META } from '../config.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
-import { databaseFile, moveFromLaatsux } from './rename.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
@@ -94,8 +93,6 @@ export interface StartOptions {
   port: number;
   host?: string;
   dataDir: string;
-  /** Move the data and config directories from their names before the rename, as `galley serve` does (rename.ts). */
-  moveFromLaatsux?: boolean;
   ghBin?: string;
   codexBin?: string;
   claudeBin?: string;
@@ -138,14 +135,12 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     server = serve({ fetch, port: opts.port, hostname: host }, (info) => resolve(info.port));
     server.once('error', reject);
   });
-  // The database opens once the port is ours: a second server on the port stops before it, and
-  // moving the directories from laatsux's names can not pull them from under the first.
+  // The database opens once the port is ours: a second server on the port stops before it.
   let db: Db;
-  let dataDir = opts.dataDir;
+  const dataDir = opts.dataDir;
   try {
-    if (opts.moveFromLaatsux) dataDir = moveFromLaatsux(dataDir);
     mkdirSync(dataDir, { recursive: true });
-    db = new Db(databaseFile(dataDir));
+    db = new Db(join(dataDir, 'galley.db'));
   } catch (e) {
     server!.close();
     throw e;

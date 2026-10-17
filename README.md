@@ -143,12 +143,6 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
 | `GALLEY_CLAUDE` | `claude` | Claude Code binary used for reviews |
 | `GALLEY_NO_AUTOSTART` | unset | Do not start a server when none is running |
 
-galley was called laatsux before. For a while, the `laatsux` command and the `LAATSUX_*` variables
-still work. The server moves `~/.local/share/laatsux` and `~/.config/laatsux` to galley's names
-when it starts, unless a server from before the rename still runs from them. galley's port
-was 7171: until that server restarts, the CLI finds it there. After the restart, open
-http://localhost:24823; pages still open at 7171 stop updating.
-
 ## Security
 
 - The server listens on 127.0.0.1 and refuses requests from web pages on other sites. Any

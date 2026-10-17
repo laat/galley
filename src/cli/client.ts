@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliActor, dataDir, DEFAULT_PORT, fromEnv, PORT_BEFORE, serverUrl } from '../config.ts';
+import { cliActor, dataDir, DEFAULT_PORT, fromEnv, serverUrl } from '../config.ts';
 
 export class CliError extends Error {
   code: number;
@@ -42,8 +42,7 @@ const silent = (base: string) =>
 
 /**
  * What answers at `base`: galley, galley still starting, another program, one that takes the
- * connection but does not answer in time, or nothing. galley from before GET /api/meta (#41) is
- * known by its GET /api/health.
+ * connection but does not answer in time, or nothing.
  */
 export async function identify(base: string): Promise<'galley' | 'starting' | 'other' | 'silent' | 'none'> {
   const signal = AbortSignal.timeout(5000);
@@ -56,12 +55,8 @@ export async function identify(base: string): Promise<'galley' | 'starting' | 'o
     throw e;
   }
   const meta = await res.json().catch(() => null);
-  if (meta?.name === 'galley') return res.ok ? 'galley' : 'starting';
-  if (res.status !== 404) return 'other';
-  const health = await fetch(`${base}/api/health`, { signal })
-    .then((r) => r.json())
-    .catch(() => null);
-  return health?.ok === true && typeof health.pid === 'number' && 'viewer' in health ? 'galley' : 'other';
+  if (meta?.name !== 'galley') return 'other';
+  return res.ok ? 'galley' : 'starting';
 }
 
 /**
@@ -92,32 +87,19 @@ async function autostart(base: string): Promise<boolean> {
 
 export class Client {
   base: string;
-  /** Where galley may still be when nothing answers at `base`: its port before #41, when the CLI looks on the default one. */
-  before: string | null;
   private triedAutostart = false;
   /** Making sure that galley answers at `base`, before the first request (check). */
   private checking: Promise<void> | null = null;
-  constructor(base = serverUrl(), before = base === serverUrl() && !fromEnv('URL') && !fromEnv('PORT') ? `http://localhost:${PORT_BEFORE}` : null) {
+  constructor(base = serverUrl()) {
     this.base = base;
-    this.before = before;
   }
 
   /**
    * Make sure galley answers at `base`, so that no request goes to another program on its port.
-   * When nothing answers there, galley may still be at `before`; otherwise one is started.
+   * When nothing answers there, one is started.
    */
   private async check(): Promise<void> {
     let found = await identify(this.base);
-    if (found === 'none' && this.before) {
-      // Also one starting there: a second server on the default port would share its data.
-      const there = await identify(this.before);
-      if (there === 'silent') throw new CliError(`${silent(this.before)} (${this.before} is galley's port before ${DEFAULT_PORT}; set GALLEY_PORT=${DEFAULT_PORT} not to look there.)`);
-      if (there === 'galley' || there === 'starting') {
-        process.stderr.write(`galley answers at ${this.before}, its port before ${DEFAULT_PORT}. Restart it without --port to move it.\n`);
-        this.base = this.before;
-        found = there;
-      }
-    }
     if (found === 'none') {
       // Once per command: a wait that asks again while the server is away starts no more.
       if (!this.triedAutostart) {
@@ -159,9 +141,6 @@ export class Client {
     if (actor) {
       headers['x-galley-actor'] = actor.login;
       headers['x-galley-actor-type'] = actor.type;
-      // As they were called before the rename (#9), for a server that has not restarted since.
-      headers['x-laatsux-actor'] = actor.login;
-      headers['x-laatsux-actor-type'] = actor.type;
     }
     let body: string | undefined = opts.rawBody;
     if (opts.body !== undefined) body = JSON.stringify(opts.body);
