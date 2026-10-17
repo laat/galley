@@ -147,8 +147,10 @@ test('references only add links to what marked renders, in random texts', () => 
   for (let i = 0; i < 3000; i++) onlyAddsLinks(Array.from({ length: 1 + random(24) }, () => pieces[random(pieces.length)]).join(''));
 });
 
-test('rendering stays linear: 50,000 characters of adversarial text take well under 100 ms', { skip: 'depends on machine speed; see #55' }, () => {
-  const n = 50_000;
+// The quadratic first version took 28 s for 5,000 characters; a linear one takes milliseconds,
+// so the limit is generous enough for a slow or busy machine.
+test('rendering stays linear: 20,000 characters of adversarial text take under 2 seconds', () => {
+  const n = 20_000;
   const fill = (unit: string) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
   const inputs = [
     'x ' + 'a'.repeat(n) + ' #12', // one long word of hex letters
@@ -166,15 +168,10 @@ test('rendering stays linear: 50,000 characters of adversarial text take well un
   renderMarkdown('warm up #1 @laat abc1234', { references: refs });
   for (const text of inputs) {
     for (const references of [undefined, refs]) {
-      // The best of three, so that a collection or a busy machine does not count.
-      const ms = Math.min(
-        ...[1, 2, 3].map(() => {
-          const started = performance.now();
-          renderMarkdown(text, { references });
-          return performance.now() - started;
-        }),
-      );
-      assert.ok(ms < 100, `${ms.toFixed(0)} ms for ${JSON.stringify(text.slice(0, 24))}…${references ? ' with references' : ''}`);
+      const started = performance.now();
+      renderMarkdown(text, { references });
+      const ms = performance.now() - started;
+      assert.ok(ms < 2000, `${ms.toFixed(0)} ms for ${JSON.stringify(text.slice(0, 24))}…${references ? ' with references' : ''}`);
     }
   }
 });
