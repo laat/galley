@@ -135,11 +135,11 @@ before(async () => {
     gh,
     // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error, FAKE_GH_API_FAIL `gh api ...`. A file gh-merge-fail makes
     // the next `gh pr merge` fail with its contents. `gh pr view` answers FAKE_GH_VIEW, or an open pull request. With
-    // FAKE_GH_GATE, `gh pr create` answers once that file exists.
+    // FAKE_GH_GATE, `gh pr create` answers once that file exists, and with FAKE_GH_EDIT_GATE, `gh pr edit`.
     // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. What GitHub
     // says about published pull requests comes from gh-pulls.json (see githubSays), an earlier page of their review threads
     // from gh-pulls-earlier.json. With FAKE_GH_NO_READ_ORG, GitHub refuses to name requested teams, as for a token without read:org.
-    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
+    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_EDIT_GATE" ] && [ "$1 $2" = "pr edit" ]; then while [ ! -f "$FAKE_GH_EDIT_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
       `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
       `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) case "$4" in *combinedSlug*) if [ -n "$FAKE_GH_NO_READ_ORG" ]; then echo '{"errors":[{"type":"INSUFFICIENT_SCOPES","message":"Your token has not been granted the required scopes to execute this query."}]}'; echo 'gh: Your token has not been granted the required scopes to execute this query.' >&2; exit 1; fi ;; esac; cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
@@ -558,7 +558,8 @@ test('the agent loop, from staging to publishing', async (t) => {
   await t.test('pr wait reports feedback that comes with a close', async () => {
     // The agent has seen everything so far (including the last publish).
     await cli(['pr', 'view', '--comments']);
-    await handedOver();
+    // Published, its wait pushes the rewritten history, which the commit added on GitHub refuses, once.
+    assert.match((await cli(['pr', 'wait', '--timeout', '20s'])).stdout, /^Could not push [0-9a-f]{7} to GitHub: git push failed \(the branch on GitHub changed since it was last published/m);
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
     await new Promise((r) => setTimeout(r, 300));
     await human('POST', '/api/repos/acme/widgets/issues/1/comments', { body: 'Closing: we went another way.' });
@@ -2287,7 +2288,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.match(first.stdout, /Auto-publish is on \(reviewer turned it on\): laatsux publishes this pull request once the reviewer agents are done/);
       assert.equal(pr.created(), false);
       const box = await pr.page();
-      assert.match(box, /<strong>Auto-publish is on until the pull request is merged<\/strong>/);
+      assert.match(box, /<strong>Auto-publish is on<\/strong>/);
       assert.match(box, /codex-review has used up its automatic reviews/);
       assert.match(box, /agent is working \(not waiting for review\)/);
       assert.match(box, /js-auto-publish-cancel/);
@@ -2304,12 +2305,14 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.equal(published.auto, true);
       assert.equal(published.source, git('rev-parse', 'HEAD'));
       assert.equal(published.signed, 2);
-      // It stays on for the next update, and has nothing to publish until there is one.
-      assert.ok((await human('GET', pr.base)).auto_publish);
+      // It approved the first publish only: the commits after it are pushed when the agent waits.
+      assert.equal((await human('GET', pr.base)).auto_publish, null);
       const after = await pr.page();
       assert.match(after, /published this pull request to <a [^>]*>acme\/widgets#7<\/a> at <code>[0-9a-f]{7}<\/code> \(signed 2 commits\) with auto-publish/);
-      assert.match(after, /GitHub has the latest commit: the next one pushed to feature\/auto is published once the agents are done with it/);
-      assert.match(second.stdout, /Auto-publish stays on until the merge/);
+      assert.doesNotMatch(after, /Auto-publish is on|Publish when reviews are done/);
+      assert.match(second.stdout, /It is published: commit and wait, and laatsux pushes each commit you wait with to GitHub\. Never push to GitHub yourself\./);
+      const refused = await fetch(`${server.url}${pr.base}/auto-publish`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(refused.status, 422);
     } finally {
       await human('PUT', '/api/settings/codex', defaults);
     }
@@ -2826,7 +2829,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.equal(JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'autoPublishRequest'])).stdout).autoPublishRequest.autoMerge, 'squash');
     await human('PUT', '/api/settings/publish', { mergeMethod: 'rebase' });
     try {
-      assert.match(await pr.page(), /and enables auto-merge on GitHub \(squash\) after each\./);
+      assert.match(await pr.page(), /and enables auto-merge on GitHub \(squash\)\. After that, each commit agent waits with is pushed\./);
       const calls = ghCalls();
       const waited = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       assert.match(waited.stdout, /Published to GitHub/);
@@ -4243,7 +4246,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       assert.match(rowOf(await page('/'))!, /<span class="Label Label--success">.*?Approved<\/span>/);
     });
 
-    await t.test("published: nobody's, until an update is not published", async () => {
+    await t.test("published: nobody's, until a commit is not pushed: the author's, whose wait pushes it", async () => {
       // Codex's review of this commit failed before it was published: that holds nothing up now.
       await human('POST', `${base}/publish`, {});
       assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
@@ -4277,43 +4280,35 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       git('commit', '-qam', 'Count two rounds');
       assert.equal((await cli(['pr', 'edit', String(number), '--title', 'Take turns, in rounds'])).code, 0);
       await waitEnded();
-      assert.deepEqual(await turn(), {
-        whose: 'reviewer',
-        reasons: ['agent is not waiting', "1 push since reviewer's review", 'codex-review used 2 of 2 automatic reviews', 'approved', 'update not published: commits, title'],
-      });
+      // A commit GitHub does not have is the author's: its wait pushes it.
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not waited since its last commit', 'approved', 'update not published: commits, title'] });
       // gh's state stays as gh would show it; the update is an extension field.
       const view = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'state,unpublishedChanges'])).stdout);
       assert.deepEqual(view, { state: 'PUBLISHED', unpublishedChanges: ['COMMITS', 'TITLE'] });
       const plain = (await cli(['pr', 'view', String(number)])).stdout;
       assert.match(plain, /^unpublished:\tcommits, title$/m);
-      assert.match(plain, /^turn:\treviewer\tagent is not waiting, 1 min; 1 push since reviewer's review;/m);
+      assert.match(plain, /^turn:\tauthor\tagent has not waited since its last commit, 1 min; approved; update not published: commits, title$/m);
       // Staged, in the badge and the merge box, until GitHub has the update.
       const pullPage = await page(`/acme/widgets/pull/${number}`);
       assert.match(pullPage, /<span class="State State--staged">.*?Update not published<\/span>/);
       assert.match(pullPage, /<div class="merge-box">/);
-      assert.match(await page('/acme/widgets?state=published'), /<span class="Label Label--attention">.*?Update not published: commits, title<\/span>/);
-      assert.equal(await group(), 'published: Your turn');
+      assert.match(pullPage, /Staged changes not on GitHub yet: commits, title\.[^]*? The commits are also pushed when agent waits\./);
+      assert.match(rowOf(await page('/acme/widgets?state=published'))!, /<span class="turn-reason" title="agent has not waited since its last commit">agent not waiting<span class="turn-since">[^]*?<span class="turn-reason">update not published: commits, title<\/span>/);
+      assert.equal(await group(), 'published: With agents');
+      assert.ok(!yourTurn(await page('/')).some((x) => x.id === id), 'not your turn');
     });
 
-    await t.test("an update Codex reviews: the author's to start it, then the reviewer agents', not the reviewer's", async () => {
-      process.env.FAKE_CODEX_GATE = gate;
-      assert.match(await handedOver(number), /codex-review used 2 of 2 automatic reviews/);
-      await waitEnded();
-      // With an automatic review to spare, Codex reviews the update once the author waits.
+    await t.test("an update: the author's wait pushes its commit, which Codex does not review; the title is the reviewer's to publish", async () => {
+      // An automatic review to spare, which a published pull request does not get.
       await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 3 });
-      assert.deepEqual(await turn(), {
-        whose: 'author',
-        reasons: ['agent has not asked for review yet (pr wait)', `codex-review reviews ${sha()} when agent waits for review`, 'approved', 'update not published: commits, title'],
-      });
-      assert.equal(await group(), 'published: With agents');
-      const waited = cli(['pr', 'wait', String(number), '--timeout', '20s']);
-      await until(() => server.service.codex!.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
-      const { whose, reasons } = await turn();
-      assert.equal(whose, 'reviewer_agents');
-      assert.deepEqual([reasons[0], reasons.at(-1)], [`codex-review is reviewing ${sha()}`, 'update not published: commits, title']);
-      writeFileSync(gate, '');
-      assert.equal((await waited).code, 0);
-      await server.service.codex!.settle(id);
+      const runs = (await human('GET', `${base}/reviewers/codex`)).runs.length;
+      const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`^Pushed ${sha()} to GitHub: https://github\\.com/acme/widgets/pull/7$`, 'm'));
+      assert.equal((await human('GET', `${base}/reviewers/codex`)).runs.length, runs);
+      await waitEnded();
+      assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent is not waiting', "1 push since reviewer's review", 'approved', 'update not published: title'] });
+      assert.equal(await group(), 'published: Your turn');
     });
 
     await t.test("an edit to its own comment is the author's next action", async () => {
@@ -4557,7 +4552,7 @@ test("while the reviewer agents still have the head to review, it is theirs or t
       assert.equal((await turn()).whose, 'author');
     });
 
-    await t.test("a review asked for by hand: the reviewer agents'; cancelled by publishing: nobody's; an update: the author's", async () => {
+    await t.test("a review asked for by hand: the reviewer agents'; cancelled by publishing: nobody's; an update: the author's to wait with", async () => {
       process.env.FAKE_CODEX_GATE = codexGate;
       await human('POST', `${base}/reviewers/codex`);
       await until(() => server.service.codex!.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
@@ -4574,10 +4569,8 @@ test("while the reviewer agents still have the head to review, it is theirs or t
       writeFileSync(join(repo, 'agents-first.js'), 'export const first = 3;\n');
       git('commit', '-qam', 'Count from three');
       await until(() => row().head_sha === git('rev-parse', 'HEAD'), 'the push is seen');
-      assert.deepEqual(await turn(), {
-        whose: 'author',
-        reasons: ['agent has not asked for review yet (pr wait)', toStart('codex-review'), toStart('claude-review'), 'update not published: commits'],
-      });
+      // No reviewer agent reviews it on its own once it is published: the author's wait pushes it.
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not waited since its last commit', 'update not published: commits'] });
       assert.equal(await group(), 'published: With agents');
     });
 
@@ -4749,14 +4742,10 @@ test('published pull requests are followed until they are merged or closed on Gi
 
     await t.test('closed on GitHub without merging, and followed again when published again', async () => {
       const pr = await published('feature/follow-close', 'close.js');
-      // On, with nothing new to publish: it waits for an update, until the close turns it off.
-      await human('PUT', `${pr.base}/auto-publish`, { sign: false });
       const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       await untilWaiting(pr.base);
       await githubSays({ [pr.id]: closed });
       const r = await waiting;
-      assert.equal((await human('GET', pr.base)).auto_publish, null);
-      assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_disabled').reason, 'closed_on_github');
       assert.match(r.stdout, /^Closed on GitHub without merging by octocat: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
       assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Closed on GitHub without merging/m);
       const view = await cli(['pr', 'view', String(pr.number), '--json', 'state,closed,closedAt,mergedAt,turn']);
@@ -4772,15 +4761,11 @@ test('published pull requests are followed until they are merged or closed on Gi
       await human('POST', `${pr.base}/publish`, { sign: false });
       assert.equal((await human('GET', pr.base)).github_state, null);
       assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '5s'])).stdout, /^Published to GitHub/m);
-      // Auto-publish on again, for a pull request GitHub still has closed: that close turns it off too.
-      await human('PUT', `${pr.base}/auto-publish`, { sign: false });
       const asked = pr.asked();
       await githubSays({ [pr.id]: closed });
       assert.equal(pr.asked(), asked + 1);
       assert.equal((await human('GET', pr.base)).github_state, 'closed');
       assert.equal((await pr.timeline()).filter((e) => e.event === 'closed_on_github').length, 1);
-      assert.equal((await human('GET', pr.base)).auto_publish, null);
-      assert.deepEqual((await pr.timeline()).filter((e) => e.event === 'auto_publish_disabled').map((e) => e.reason), ['closed_on_github', 'closed_on_github']);
 
       // Reopened on GitHub and published again: open, with no close time, though laatsux keeps the close to know it if GitHub reports it again.
       writeFileSync(join(repo, 'close.js'), 'export const reopened = 1;\n');
@@ -4945,7 +4930,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.doesNotMatch(heard, /Export a function|Checks failed|Conflicts/);
     });
 
-    await t.test('auto-publish stays on: it publishes the fix for a failed check, until a merge turns it off', async () => {
+    await t.test("after auto-publish's first publish, the agent's wait pushes the fix for a failed check, unreviewed, and asks for auto-merge again; nothing after a merge", async () => {
       git('checkout', '-q', 'main');
       git('checkout', '-qb', 'feature/follow-auto');
       writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = true;\n');
@@ -4966,59 +4951,69 @@ test('published pull requests are followed until they are merged or closed on Gi
       process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Looks right.', comments: [] });
       await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
       try {
-        // With auto-merge, which it asks for again after each update it publishes.
+        // With auto-merge, which is asked for again after each push.
         await human('PUT', `${base}/auto-publish`, { sign: false, auto_merge: true, merge_method: 'squash' });
         const merges = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter((l) => l.startsWith('pr merge https://github.com/acme/widgets/pull/7 --auto --squash --match-head-commit ')).length;
         const mergesBefore = merges();
-        // Codex finds nothing; once the agent has seen that and waits, the first publish.
+        // Codex finds nothing; once the agent has seen that and waits, the first publish, which uses auto-publish up.
         await wait(/Looks right\./);
-        assert.match(await wait(/^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m), /Auto-publish stays on until the merge/);
-        const { id } = await human('GET', base);
-        assert.ok((await human('GET', base)).auto_publish, 'still on after publishing');
+        assert.match(await wait(/^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m), /It is published: commit and wait/);
+        const { id, auto_publish } = await human('GET', base);
+        assert.equal(auto_publish, null);
         assert.equal(remoteHead(), git('rev-parse', 'HEAD'));
-        // Publishing by hand leaves it on too.
-        assert.equal((await cli(['pr', 'edit', n, '--title', 'Add auto-fix.js, retitled'])).code, 0);
-        await human('POST', `${base}/publish`, { sign: false });
-        assert.ok((await human('GET', base)).auto_publish, 'still on after publishing by hand');
-        await wait(/^Published to GitHub/m);
-        assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text(), /<strong>Auto-publish is on until the pull request is merged<\/strong>[^]*Publishing by hand leaves it on\./);
+        const reviews = (await human('GET', `${base}/reviewers/codex`)).runs.length;
 
-        // A check fails on GitHub: the reviewer's turn. The reviewer hands it to the agent, which pushes a fix.
+        // A check fails on GitHub: the reviewer's turn. The reviewer hands it to the agent, which commits a fix and waits.
         const check = { __typename: 'CheckRun', databaseId: 21, name: 'test', status: 'COMPLETED', conclusion: 'FAILURE', detailsUrl: 'https://github.com/acme/widgets/actions/runs/2/job/21', checkSuite: { workflowRun: { workflow: { name: 'CI' } } } };
         await githubSays({ [id]: { ...open, headRefOid: remoteHead(), mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [check] } }, checkSuites: { nodes: [] } } }] } } });
         assert.equal(JSON.parse((await cli(['pr', 'view', n, '--json', 'turn'])).stdout).turn.whose, 'REVIEWER');
         await comment(Number(n), 'The test fails on GitHub; please fix it.');
-        await wait(/The test fails on GitHub; please fix it\./);
+        await wait(/The test fails on GitHub; please fix it\.[^]*It is published: commit and wait/);
         const before = updates();
         writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = false;\n');
         git('commit', '-qam', 'Fix auto-fix.js');
 
-        // Codex reviews the fix and finds nothing; the agent waits, and laatsux publishes the update.
-        await wait(/Looks right\./);
-        await wait(/^Published to GitHub/m);
-        assert.equal(updates(), before + 1);
+        // Its wait pushes the fix, unsigned as the publish was, with no review from Codex; the title and description are left alone.
+        await wait(new RegExp(`^Pushed ${git('rev-parse', '--short=7', 'HEAD')} to GitHub: https://github\\.com/acme/widgets/pull/7$`, 'm'));
         assert.equal(remoteHead(), git('rev-parse', 'HEAD'));
-        assert.equal(merges(), mergesBefore + 2, 'auto-merge asked for after the first publish and after the update');
-        const published = (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'published');
-        assert.deepEqual([published.auto, published.first], [true, false]);
+        assert.equal((await human('GET', `${base}/reviewers/codex`)).runs.length, reviews);
+        assert.equal(updates(), before);
+        await until(() => merges() === mergesBefore + 2, 'auto-merge asked for after the first publish and after the push');
+        // Asking for it again failed once: the push after that asks again all the same.
+        writeFileSync(join(dir, 'gh-merge-fail'), 'GraphQL: Something went wrong while executing your query.');
+        writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = false; // 1\n');
+        git('commit', '-qam', 'Fix auto-fix.js again');
+        await wait(/^Pushed [0-9a-f]{7} to GitHub/m);
+        await until(async () => (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).some((e: any) => e.event === 'auto_merge_failed'), 'asking for auto-merge failed');
+        writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = false; // 2\n');
+        git('commit', '-qam', 'Fix auto-fix.js once more');
+        await wait(/^Pushed [0-9a-f]{7} to GitHub/m);
+        await until(() => merges() === mergesBefore + 4, 'auto-merge asked for again after the failure');
+        // Turned off on GitHub since: the next push leaves it off.
+        await githubSays({ [id]: { ...open, headRefOid: remoteHead(), autoMergeRequest: null } });
+        writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = false; // 3\n');
+        git('commit', '-qam', 'Fix auto-fix.js with auto-merge off');
+        await wait(/^Pushed [0-9a-f]{7} to GitHub/m);
+        await new Promise((r) => setTimeout(r, 300));
+        assert.equal(merges(), mergesBefore + 4);
+        const pushed = (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'github_push');
+        assert.deepEqual([pushed.result, pushed.source, pushed.head, pushed.force, pushed.sign], ['pushed', git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD'), false, false]);
+        assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text(), new RegExp(`Pushed an update to <a [^>]*>acme/widgets#7</a> at <code>${git('rev-parse', '--short=7', 'HEAD')}</code> when agent waited`));
+        assert.equal(updates(), before);
 
-        // Merged on GitHub: auto-publish turns off, and the agent's next push goes nowhere.
+        // Merged on GitHub: the agent's next commit goes nowhere.
         await githubSays({ [id]: merged });
-        assert.equal((await human('GET', base)).auto_publish, null);
-        const off = (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'auto_publish_disabled');
-        assert.equal(off.reason, 'merged');
         writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = 0;\n');
         git('commit', '-qam', 'After the merge');
         await wait(/^Merged on GitHub as e468a4e by laat/m);
         await new Promise((r) => setTimeout(r, 500));
-        assert.equal(updates(), before + 1);
         assert.notEqual(remoteHead(), git('rev-parse', 'HEAD'));
       } finally {
         await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
       }
     });
 
-    await t.test('auto-merge that merges at once ends auto-publish: the next commit is not published', async () => {
+    await t.test('auto-merge that merges at once: the next commit is not pushed', async () => {
       git('checkout', '-q', 'main');
       git('checkout', '-qb', 'feature/follow-merged-at-once');
       writeFileSync(join(repo, 'at-once.js'), 'export const once = 1;\n');
@@ -5040,7 +5035,6 @@ test('published pull requests are followed until they are merged or closed on Gi
         assert.match(heard, /^Merged on GitHub as e468a4e by reviewer/m);
         const pull = await human('GET', base);
         assert.deepEqual([pull.github_state, pull.auto_publish], ['merged', null]);
-        assert.equal((await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'auto_publish_disabled').reason, 'merged');
         // Another commit, and the agent waits again: nothing is pushed over the merge.
         const pushed = remoteHead();
         writeFileSync(join(repo, 'at-once.js'), 'export const once = 2;\n');
@@ -5088,6 +5082,282 @@ test('published pull requests are followed until they are merged or closed on Gi
   } finally {
     rmSync(join(dir, 'gh-pulls.json'), { force: true });
   }
+});
+
+test('after publishing, the author waiting pushes each commit to GitHub, safely', async (t) => {
+  /** The branch's tip on GitHub (the bare remote): its commit, whether it is signed, and its parent. */
+  const tip = (branch: string) => {
+    const sha = execFileSync('git', ['--git-dir', remote, 'rev-parse', branch], { encoding: 'utf8' }).trim();
+    const commit = execFileSync('git', ['--git-dir', remote, 'cat-file', 'commit', sha], { encoding: 'utf8' });
+    return { sha, signed: /^gpgsig /m.test(commit), parent: commit.match(/^parent ([0-9a-f]+)$/m)?.[1] ?? null };
+  };
+  /** Stage a branch with one commit as the agent, publish it as the reviewer, and let the agent hear of the publish. */
+  const published = async (branch: string, opts: { sign?: boolean } = {}) => {
+    const file = `${branch.split('/').pop()}.js`;
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', branch);
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+    const created = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x']);
+    assert.equal(created.code, 0, created.stderr);
+    const n = created.stdout.trim().split('/').pop()!;
+    const base = `/api/repos/acme/widgets/pulls/${n}`;
+    const { id } = await human('POST', `${base}/publish`, { sign: opts.sign ?? false });
+    assert.match((await cli(['pr', 'wait', n, '--timeout', '20s'])).stdout, /^Published to GitHub: /m);
+    return {
+      n,
+      id,
+      base,
+      /** A new commit, as the agent; its short SHA. */
+      commit: (text: string) => {
+        writeFileSync(join(repo, file), text);
+        git('commit', '-qam', `Change ${file}`);
+        return git('rev-parse', '--short=7', 'HEAD');
+      },
+      wait: (timeout = '20s') => cli(['pr', 'wait', n, '--timeout', timeout]),
+      tip: () => tip(branch),
+      pushes: async (): Promise<any[]> => (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).filter((e: any) => e.event === 'github_push'),
+      page: async () => (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text(),
+    };
+  };
+  const ghCalls = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter(Boolean);
+
+  await t.test('a commit is pushed when the author waits, and no reviewer agent reviews it', async () => {
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      const pr = await published('feature/push-update');
+      const before = pr.tip();
+      const calls = ghCalls().length;
+      const sha = pr.commit('export const updated = 1;\n');
+      const r = await pr.wait();
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`^Pushed ${sha} to GitHub: https://github\\.com/acme/widgets/pull/7$`, 'm'));
+      // A fast-forward of the agent's commit, as the publish was unsigned.
+      assert.deepEqual(pr.tip(), { sha: git('rev-parse', 'HEAD'), signed: false, parent: before.sha });
+      assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs, []);
+      // GitHub was asked whether it is still open first; the title and description were left alone.
+      const asked = ghCalls().slice(calls);
+      assert.ok(asked.includes('pr view https://github.com/acme/widgets/pull/7 --json state,mergedAt,mergedBy,mergeCommit,closedAt'), asked.join('\n'));
+      assert.ok(!asked.some((c) => c.startsWith('pr edit ')), asked.join('\n'));
+      const [push] = await pr.pushes();
+      assert.deepEqual([push.result, push.source, push.head, push.before, push.force], ['pushed', git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD'), before.sha, false]);
+      assert.deepEqual((await human('GET', pr.base)).turn, { whose: 'none', reasons: [] });
+      // No Stop iterating once published: there are no automatic reviews to stop.
+      const page = await pr.page();
+      assert.doesNotMatch(page, /Stop iterating/);
+      assert.match(page, /<span class="agent-chunk">Automatic: 0 before publishing<\/span>/);
+    } finally {
+      await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
+    }
+  });
+
+  await t.test('signed as the publish was: signed copies after a signed publish, the commits as they are after an unsigned one', async () => {
+    const signed = await published('feature/push-signed', { sign: true });
+    const first = signed.tip();
+    assert.equal(first.signed, true);
+    signed.commit('export const signed = 1;\n');
+    assert.match((await signed.wait()).stdout, /^Pushed [0-9a-f]{7} to GitHub/m);
+    const copy = signed.tip();
+    assert.deepEqual([copy.signed, copy.parent], [true, first.sha]);
+    assert.notEqual(copy.sha, git('rev-parse', 'HEAD'));
+    assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${copy.sha}^{tree}`], { encoding: 'utf8' }).trim(), git('rev-parse', 'HEAD^{tree}'));
+    assert.deepEqual((await signed.pushes()).map((p) => [p.sign, p.signed, p.force]), [[true, 1, false]]);
+
+    // git signs by default here, but this one was published unsigned: its update is not signed either, nor forced.
+    const unsigned = await published('feature/push-unsigned', { sign: false });
+    const before = unsigned.tip();
+    unsigned.commit('export const unsigned = 1;\n');
+    assert.match((await unsigned.wait()).stdout, /^Pushed [0-9a-f]{7} to GitHub/m);
+    assert.deepEqual(unsigned.tip(), { sha: git('rev-parse', 'HEAD'), signed: false, parent: before.sha });
+
+    // Published unsigned before laatsux recorded whether a publish signed: GitHub's commit says so.
+    const older = await published('feature/push-older', { sign: false });
+    server.service.db.run("UPDATE events SET data = json_remove(data, '$.sign') WHERE pull_id = ? AND type = 'published'", older.id);
+    const tip = older.tip();
+    older.commit('export const older = 1;\n');
+    assert.match((await older.wait()).stdout, /^Pushed [0-9a-f]{7} to GitHub/m);
+    assert.deepEqual(older.tip(), { sha: git('rev-parse', 'HEAD'), signed: false, parent: tip.sha });
+  });
+
+  await t.test('a branch that moved on GitHub is not overwritten: the author and the reviewer hear why, and it is not tried again', async () => {
+    const pr = await published('feature/push-moved');
+    // Someone pushes to the branch on GitHub ...
+    const at = pr.tip().sha;
+    const tree = execFileSync('git', ['--git-dir', remote, 'rev-parse', `${at}^{tree}`], { encoding: 'utf8' }).trim();
+    const theirs = execFileSync('git', ['--git-dir', remote, 'commit-tree', tree, '-p', at, '-m', 'Commit suggestion'], {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: 'GitHub', GIT_AUTHOR_EMAIL: 'gh@example.com', GIT_COMMITTER_NAME: 'GitHub', GIT_COMMITTER_EMAIL: 'gh@example.com' },
+    }).trim();
+    execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-moved', theirs]);
+    // ... while the agent rewrites its commit, which needs a force-push.
+    git('commit', '-q', '--amend', '-m', 'Add push-moved.js, reworded');
+    const sha = git('rev-parse', '--short=7', 'HEAD');
+    const r = await pr.wait();
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^Could not push ${sha} to GitHub: git push failed \\(the branch on GitHub changed since it was last published`, 'm'));
+    assert.match(r.stdout, /stale info/);
+    assert.match(r.stdout, /Nothing on GitHub was overwritten, and this commit is not tried again\. Do not push or force-push to GitHub yourself/);
+    assert.equal(pr.tip().sha, theirs);
+    const [push] = await pr.pushes();
+    assert.deepEqual([push.result, push.source, push.head, push.before, push.force, push.retry], ['failed', git('rev-parse', 'HEAD'), null, at, true, false]);
+
+    // The reviewer sees why, and it is the reviewer's to sort out.
+    const page = await pr.page();
+    assert.match(page, new RegExp(`<strong>Could not force-push <code>${sha}</code> to GitHub <relative-time [^]*?<pre class="merge-error">git push failed \\(the branch on GitHub changed since it was last published`));
+    assert.match(page, new RegExp(`Could not force-push <code>${sha}</code> to <a [^>]*>acme/widgets#7</a> [^]*?; nothing on GitHub was overwritten`));
+    const { turn } = await human('GET', pr.base);
+    assert.equal(turn.whose, 'reviewer');
+    assert.ok(turn.reasons.some((x: any) => x.text === `update not published: commits; pushing ${sha} failed`), JSON.stringify(turn.reasons));
+
+    // Not tried again for this commit: the next wait waits, and GitHub keeps its commit.
+    assert.equal((await pr.wait('1s')).code, 124);
+    assert.equal(pr.tip().sha, theirs);
+    assert.equal((await pr.pushes()).length, 1);
+
+    // The agent brings in the commit added on GitHub: its next commit is pushed on top of it.
+    git('fetch', '-q', remote, '+refs/heads/feature/push-moved:refs/remotes/origin/feature/push-moved');
+    git('reset', '-q', '--hard', 'origin/feature/push-moved');
+    const next = pr.commit('export const moved = 1;\n');
+    assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${next} to GitHub`, 'm'));
+    assert.deepEqual([pr.tip().sha, pr.tip().parent], [git('rev-parse', 'HEAD'), theirs]);
+  });
+
+  await t.test('signed, the commit added on GitHub that the author brought in is kept as it is, and its commit goes on top', async () => {
+    const pr = await published('feature/push-kept', { sign: true });
+    // Someone pushes an unsigned commit to the branch on GitHub.
+    const at = pr.tip().sha;
+    const tree = execFileSync('git', ['--git-dir', remote, 'rev-parse', `${at}^{tree}`], { encoding: 'utf8' }).trim();
+    const theirs = execFileSync('git', ['--git-dir', remote, 'commit-tree', tree, '-p', at, '-m', 'Commit suggestion'], {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: 'Someone', GIT_AUTHOR_EMAIL: 'someone@example.com', GIT_COMMITTER_NAME: 'Someone', GIT_COMMITTER_EMAIL: 'someone@example.com' },
+    }).trim();
+    execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-kept', theirs]);
+    // The agent brings it in and commits on top: signing copies the agent's commit, not theirs.
+    git('fetch', '-q', remote, '+refs/heads/feature/push-kept:refs/remotes/origin/feature/push-kept');
+    git('reset', '-q', '--hard', 'origin/feature/push-kept');
+    const sha = pr.commit('export const kept = 1;\n');
+    assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
+    const tip = pr.tip();
+    assert.deepEqual([tip.signed, tip.parent], [true, theirs]);
+    assert.deepEqual((await pr.pushes()).map((p) => [p.result, p.force, p.before]), [['pushed', false, theirs]]);
+  });
+
+  await t.test('a publish by hand under way goes first: the push for the waiting author waits for it, and sees no refusal in it', async () => {
+    const pr = await published('feature/push-race');
+    pr.commit('export const raced = 1;\n');
+    const gate = join(dir, 'push-race-gate');
+    process.env.FAKE_GH_EDIT_GATE = gate;
+    try {
+      // The reviewer publishes the update by hand, signed this time, which force-pushes signed copies; gh pr edit holds it up.
+      const publishing = human('POST', `${pr.base}/publish`, { sign: true, force: true });
+      await until(() => pr.tip().signed, 'the publish pushed');
+      // Meanwhile the agent waits with the same head.
+      const waiting = pr.wait();
+      await until(async () => (await human('GET', pr.base)).author_waiting, 'the agent waits');
+      await new Promise((r) => setTimeout(r, 500));
+      writeFileSync(gate, '');
+      await publishing;
+      assert.match((await waiting).stdout, /^Published to GitHub/m);
+    } finally {
+      delete process.env.FAKE_GH_EDIT_GATE;
+      rmSync(gate, { force: true });
+    }
+    assert.deepEqual(await pr.pushes(), []);
+  });
+
+  await t.test('a push GitHub declines, for a secret say, is told to the author, and not tried again', async () => {
+    const pr = await published('feature/push-declined');
+    const before = pr.tip().sha;
+    // GitHub's push protection, or a rule on the branch.
+    const hook = join(remote, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\nwhile read old new ref; do if [ "$ref" = refs/heads/feature/push-declined ]; then echo "GH013: Repository rule violations found: push cannot contain secrets" >&2; exit 1; fi; done\n');
+    chmodSync(hook, 0o755);
+    try {
+      const sha = pr.commit('export const token = "ghp_0";\n');
+      const r = await pr.wait();
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`^Could not push ${sha} to GitHub: git push failed \\(GitHub declined it, for example for a secret in it, or a rule on the branch\\)`, 'm'));
+      assert.match(r.stdout, /GH013: Repository rule violations found/);
+      assert.equal((await pr.wait('1s')).code, 124);
+    } finally {
+      rmSync(hook, { force: true });
+    }
+    assert.equal(pr.tip().sha, before);
+  });
+
+  await t.test('GitHub could not be asked: nothing is pushed, the author waits on, and its next wait tries again', async () => {
+    const pr = await published('feature/push-retry');
+    const before = pr.tip().sha;
+    const sha = pr.commit('export const retried = 1;\n');
+    process.env.FAKE_GH_FAIL = 'HTTP 502: gh is down';
+    try {
+      // The author hears nothing of it, and one wait tries once.
+      assert.equal((await pr.wait('3s')).code, 124);
+    } finally {
+      delete process.env.FAKE_GH_FAIL;
+    }
+    assert.equal(pr.tip().sha, before);
+    const failed = await pr.pushes();
+    assert.deepEqual(failed.map((p) => [p.result, p.retry, p.error]), [['failed', true, 'could not ask GitHub whether https://github.com/acme/widgets/pull/7 is still open:\nHTTP 502: gh is down']]);
+    // The reviewer sees it, and that it is tried again.
+    assert.match(await pr.page(), new RegExp(`<strong>Could not push <code>${sha}</code> to GitHub <relative-time [^]*?It is tried again each time agent waits`));
+    const { turn } = await human('GET', pr.base);
+    assert.equal(turn.whose, 'reviewer');
+    assert.ok(turn.reasons.some((x: any) => x.text === `update not published: commits; pushing ${sha} failed`), JSON.stringify(turn.reasons));
+    // GitHub answers again: the next wait pushes it.
+    assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
+    assert.equal(pr.tip().sha, git('rev-parse', 'HEAD'));
+  });
+
+  await t.test('nothing is pushed once GitHub says it was merged, also before laatsux has heard', async () => {
+    const pr = await published('feature/push-merged');
+    const before = pr.tip().sha;
+    pr.commit('export const late = 1;\n');
+    // Merged on GitHub a moment ago: following has not asked yet, so laatsux knows only when it asks before the push.
+    process.env.FAKE_GH_VIEW = JSON.stringify({ state: 'MERGED', mergedAt: '2026-10-17T12:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: 'e468a4e' + '2'.repeat(33) } });
+    try {
+      assert.match((await pr.wait()).stdout, /^Merged on GitHub as e468a4e by laat/m);
+    } finally {
+      delete process.env.FAKE_GH_VIEW;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(pr.tip().sha, before);
+    assert.deepEqual(await pr.pushes(), []);
+  });
+
+  await t.test('feedback the author has not seen holds the push until it has', async () => {
+    const pr = await published('feature/push-held');
+    const before = pr.tip().sha;
+    const sha = pr.commit('export const held = 1;\n');
+    // The reviewer asks Codex and Claude to look at the new commit. Codex comments; Claude is still at it.
+    const gate = join(dir, 'push-held-gate');
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'push-held.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name the value.' }] });
+    process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
+    process.env.FAKE_CLAUDE_GATE = gate;
+    try {
+      await human('POST', `${pr.base}/reviewers/codex`);
+      await human('POST', `${pr.base}/reviewers/claude`);
+      await server.service.codex!.settle(pr.id);
+      // The agent waits: its wait holds Codex's review for Claude's, and its commit is not pushed meanwhile.
+      const waiting = pr.wait();
+      await until(async () => (await human('GET', pr.base)).author_waiting, 'the agent waits');
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(pr.tip().sha, before);
+      writeFileSync(gate, '');
+      const r = await waiting;
+      assert.match(r.stdout, /Name the value\./);
+      assert.doesNotMatch(r.stdout, /Pushed/);
+      await server.service.claude!.settle(pr.id);
+      assert.equal(pr.tip().sha, before);
+      // Seen, the next wait pushes it.
+      assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
+      assert.equal(pr.tip().sha, git('rev-parse', 'HEAD'));
+    } finally {
+      delete process.env.FAKE_CLAUDE_GATE;
+      rmSync(gate, { force: true });
+    }
+  });
 });
 
 test('the list has a tab for each state: staged, published and open on GitHub, and done', async () => {

@@ -633,9 +633,9 @@ export class Reviewer {
    * Whether the reviewer is done with the pull request's head: its latest review of the commit
    * found nothing, approved it or was cancelled, the author answered what it found (answered), it
    * has used up its automatic reviews (or the reviewer stopped them), or it is off for the pull
-   * request. A failed review of the commit holds things up until someone asks for another one,
-   * unless automatic reviews are stopped: then only a running review does, or one asked for by
-   * hand that a stop interrupted, until it has run again.
+   * request, as every one is once it is published. A failed review of the commit holds things up
+   * until someone asks for another one, unless automatic reviews are stopped: then only a running
+   * review does, or one asked for by hand that a stop interrupted, until it has run again.
    * For a reviewer of the description, it is about the version of the title, description and
    * commit messages the head has (see subject).
    */
@@ -658,7 +658,8 @@ export class Reviewer {
       const approved = this.s.db.get<{ state: string }>('SELECT state FROM reviews WHERE id = ?', last.review_id)?.state === 'APPROVED';
       return { state: approved ? 'approved' : 'clean', done: true, commit };
     }
-    if (!this.enabled(pull)) return { state: 'off', done: true, commit };
+    // Published, GitHub's reviews take over: none reviews it on its own (wouldReview).
+    if (!this.enabled(pull) || pull.published_url) return { state: 'off', done: true, commit };
     const automatic = { used: this.automaticReviews(pull), limit: this.limit(pull) };
     // Stopped (Service.stopIterating), it has no automatic review left, whatever the counts say.
     if (automatic.used >= automatic.limit || pull.iterations_stopped) return { state: 'capped', done: true, commit, automatic };
@@ -814,7 +815,7 @@ export class Reviewer {
     await ending?.done;
     if (this.stopped || this.jobs.has(pullId)) return;
     const stale = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
-    if (!stale || stagingState(stale) === 'done' || !this.enabled(stale) || !this.appliesToPull(stale)) return;
+    if (!stale || stagingState(stale) !== 'staged' || !this.enabled(stale) || !this.appliesToPull(stale)) return;
     if (stale.author_id === this.actor().id) return;
     const repo = this.s.repoById(stale.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, stale.number);
@@ -822,9 +823,13 @@ export class Reviewer {
     this.launch(ctx, 'auto');
   }
 
-  /** Whether an automatic review of the pull request's head would start now: not once it is closed, here or on GitHub, or merged. */
+  /**
+   * Whether an automatic review of the pull request's head would start now: not once it is
+   * published (GitHub's reviews take over; asking by hand still works), nor once it is closed, here
+   * or on GitHub, or merged.
+   */
   private wouldReview(pull: PullRow): boolean {
-    if (this.stopped || !this.enabled(pull) || stagingState(pull) === 'done' || pull.author_id === this.actor().id || !this.appliesToPull(pull)) return false;
+    if (this.stopped || !this.enabled(pull) || stagingState(pull) !== 'staged' || pull.author_id === this.actor().id || !this.appliesToPull(pull)) return false;
     // The reviewer stopped automatic reviews (Service.stopIterating); asking by hand still works.
     if (pull.iterations_stopped) return false;
     // One attempt per head (or version of the description), failed and cancelled ones too: a failure is retried by asking from the page. An interrupted one runs again.

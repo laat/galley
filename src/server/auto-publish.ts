@@ -1,7 +1,8 @@
-// Auto-publish, after GitHub's auto-merge. The reviewer approves publishing in advance, and
+// Auto-publish, after GitHub's auto-merge. The reviewer approves the first publish in advance, and
 // laatsux publishes on its own once the agents are done with the pull request: the reviewer
-// agents with its head, and the author with their feedback (Service.readiness). It stays on and
-// publishes each later update the same way, until the pull request is merged or closed.
+// agents with its head, and the author with their feedback (Service.readiness). After that, each
+// commit the author waits with is pushed to the published pull request, with no approval and no
+// review here (Service.pushUpdate): GitHub's reviews and checks take over.
 import type { PullRow } from './db.ts';
 import { HttpError, publishFingerprint, type ChangeEvent, type Service } from './service.ts';
 
@@ -35,16 +36,18 @@ export class AutoPublisher {
   }
 
   /**
-   * Check every pull request that has auto-publish on. The server does this when it polls, for
-   * what changes without an event: settings, or an automatic review that decided not to start.
+   * Check every pull request that has auto-publish on, and every one whose author waits. The
+   * server does this when it polls, for what changes without an event: settings, or an automatic
+   * review that decided not to start.
    */
   considerAll(): void {
     // A poll that was under way when the server closed must not touch the closed database.
     if (this.stopped) return;
-    for (const { id } of this.s.db.all<{ id: number }>("SELECT id FROM pulls WHERE auto_publish IS NOT NULL AND state != 'closed'")) this.consider(id);
+    const approved = this.s.db.all<{ id: number }>("SELECT id FROM pulls WHERE auto_publish IS NOT NULL AND state = 'staged'").map((p) => p.id);
+    for (const id of new Set([...approved, ...this.s.waiters.keys()])) this.consider(id);
   }
 
-  /** Publish in the background if auto-publish is on and the agents are done. */
+  /** Publish, or push an update, in the background if the pull request is ready for it. */
   consider(pullId: number): void {
     if (this.stopped) return;
     if (this.running.has(pullId)) {
@@ -65,9 +68,13 @@ export class AutoPublisher {
     await new Promise((resolve) => setImmediate(resolve));
     const known = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
     // Most checks end here, without running git: the poll syncs pushes, and announces them.
-    if (!known || !this.s.autoPublishReady(known)) return;
+    if (!known) return;
+    const pushing = this.s.pushReady(known);
+    if (!pushing && !this.s.autoPublishReady(known)) return;
     const repo = this.s.repoById(known.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, known.number);
+    // Published: the head the author waits with goes to GitHub.
+    if (pushing) return this.s.pushUpdate(ctx);
     const pull = ctx.pull;
     if (!this.s.autoPublishReady(pull)) return;
     // The attempt is bound to this exact approval: replaced or turned off, it stops.

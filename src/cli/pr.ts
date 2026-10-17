@@ -622,6 +622,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     // Before the confirmation below, like the feedback: once confirmed, no wait says it again.
     if (r.status === 'published') out(`Published to GitHub: ${r.published_url}`);
+    // Published, the commit it waited with went to GitHub, or could not.
+    if (r.status === 'pushed') out(`${r.push.force ? 'Force-pushed' : 'Pushed'} ${r.push.source.slice(0, 7)} to GitHub: ${r.published_url}`);
+    if (r.status === 'push_failed') out(`Could not push ${r.push.source.slice(0, 7)} to GitHub: ${r.push.error}`);
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
@@ -657,11 +660,25 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       if (rest) out(c.gray(rest.trim()));
       return 0;
     }
+    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`laatsux pr wait ${all}\` again.` : null;
     if (r.status === 'published') {
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
       else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
       out(c.gray(`Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
-      if (pr.autoPublishRequest) out(c.gray('Auto-publish stays on until the merge: it publishes each update once the reviewer agents are done with it and you are waiting.'));
+      out(c.gray(PUSHES));
+      return 0;
+    }
+    if (r.status === 'push_failed') {
+      out(
+        c.gray(
+          'Nothing on GitHub was overwritten, and this commit is not tried again. Do not push or force-push to GitHub yourself: the reviewer has been told, and decides. ' +
+            `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (fetch ${pr.headRefName} from origin and rebase onto it), or leaves out what GitHub declined.`,
+        ),
+      );
+    }
+    if ((r.status === 'pushed' || r.status === 'push_failed') && !text) {
+      // A conflict told with it (it is marked as told above) is the author's to rebase.
+      out(c.gray(rebase ?? `Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       return 0;
     }
     if (r.status === 'closed') {
@@ -670,7 +687,6 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       return 0;
     }
     if (r.status === 'agents_done') return 0;
-    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`laatsux pr wait ${all}\` again.` : null;
     if (r.status === 'conflicts') {
       // Gone again before it could be shown (the base moved once more): nothing to say, so keep waiting.
       if (!rebase) continue;
@@ -693,20 +709,24 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         ),
       );
     }
+    if (pr.state === 'PUBLISHED') out(c.gray(PUSHES));
     // The reviewer approved in advance; publishing happens while the author waits.
     const auto = pr.autoPublishRequest;
     if (auto) {
       out(
         c.gray(
           `Auto-publish is on (${auto.enabledBy.login} turned it on): laatsux publishes this pull request once the reviewer agents are done with ` +
-            `your latest commit and you are waiting in \`laatsux pr wait ${all}\` with the feedback addressed, and each update after that until it is merged` +
-            `${auto.autoMerge ? ', turning on auto-merge on GitHub each time' : ''}.`,
+            `your latest commit and you are waiting in \`laatsux pr wait ${all}\` with the feedback addressed` +
+            `${auto.autoMerge ? ', and turns on auto-merge on GitHub' : ''}.`,
         ),
       );
     }
     return 0;
   }
 }
+
+/** What the author does once its pull request is published. */
+const PUSHES = 'It is published: commit and wait, and laatsux pushes each commit you wait with to GitHub. Never push to GitHub yourself.';
 
 /**
  * One long poll per pull request. The first answer with news (or an error) wins, and the other
@@ -755,7 +775,8 @@ COMMANDS (same flags as gh)
 LAATSUX COMMANDS
   wait:        Block until the reviewer responds, then print the feedback, or until the
                reviewer agents are done with the latest commit. After publishing,
-               until it is merged or closed on GitHub. Several numbers: whichever is first
+               pushes your commits to GitHub, and waits until it is merged or closed
+               there. Several numbers: whichever is first
   publish:     Push the branch and open the pull request on GitHub (--auto: once the
                reviews are done; --auto-merge: and turn on auto-merge there)
 
