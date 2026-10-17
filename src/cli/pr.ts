@@ -573,7 +573,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         const pull = await client.get<any>(pullPath(t)).catch(() => null);
         const which = targets.length > 1 ? `${t.repo.owner}/${t.repo.name}#${t.number}: ` : '';
         for (const r of pull?.turn.reasons ?? []) {
-          if (r.state === 'findings') err(`${which}${r.text}: reply to or resolve each of its threads, or push a commit. The reviewer agents are not done with it until then.`);
+          if (r.state !== 'findings') continue;
+          const answer = r.description ? 'edit the title or description, or reword the commits, as it asks; a reply does not answer it' : 'reply to or resolve each of its threads, or push a commit';
+          err(`${which}${r.text}: ${answer}. The reviewer agents are not done with it until then.`);
         }
       }
       return 124;

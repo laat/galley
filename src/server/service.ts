@@ -165,7 +165,8 @@ export interface AgentsDone {
 export interface HeadStatus {
   /**
    * `approved`: it found nothing and approved (custom reviewers that may), which counts as done like `clean`, and for nobody's decision.
-   * `answered`: it found problems, and the author answered them without a new commit (Reviewer.answered), which counts as done too.
+   * `answered`: it found problems in the code, and the author answered them without a new commit (Reviewer.answered), which counts as done too.
+   * A reviewer of the description stays at `findings` until it reviews a new version of it.
    */
   state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'answered' | 'failed' | 'cancelled' | 'clean' | 'approved' | 'capped' | 'off';
   /** Nothing more is coming from the reviewer for this commit. */
@@ -233,6 +234,8 @@ export interface TurnReason {
   engine?: string;
   /** A reviewer agent as the API calls it (`…/reviewers/{reviewer}`), for asking it to review again. */
   reviewer?: string;
+  /** A reviewer agent of the title, description and commit messages (HeadStatus.description): only a new version of them answers its findings. */
+  description?: boolean;
 }
 
 /**
@@ -2035,7 +2038,7 @@ export class Service {
     const stopped = this.stoppedText(pull);
     for (const { login, engine, reviewer, status } of r.reviewers) {
       const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
-      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine, reviewer });
+      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine, reviewer, ...(status.description ? { description: true } : {}) });
     }
     // Once, whatever each reviewer agent is at.
     if (stopped) reasons.push({ kind: 'reviewer_agent', state: 'capped', text: stopped });

@@ -97,7 +97,8 @@ verdict: approve          # approve when it finds nothing; left out: comment onl
 Check the title and description against these rules: …
 ```
 
-A description reviewer reviews again when the title, description or a commit message changes.
+A description reviewer reviews again when the title, description or a commit message changes,
+and until then its findings hold things up, whatever the replies.
 A custom reviewer's approval is its own; it never counts as yours.
 
 ## Auto-publish
