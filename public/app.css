@@ -979,6 +979,10 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
   border-bottom: 1px solid var(--border);
 }
 .file.is-collapsed .file-header { border-bottom: 0; border-radius: 0 0 6px 6px; }
+/* The sticky header's "…" menu stays in the header's stacking context, under the next file's header and corners.
+   While it is open the file goes over them, and under the files toolbar; lifting the header alone would cover
+   its own rounded corners. */
+.file:has(.file-menu[open]) { z-index: 12; }
 .file-toggle .when-collapsed { display: none; }
 .file.is-collapsed .file-toggle .when-collapsed { display: inline-block; }
 .file.is-collapsed .file-toggle .when-expanded { display: none; }

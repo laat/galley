@@ -602,7 +602,7 @@ test('a reviewer of the code with its own instructions, run by Codex, staged for
   assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 }, 'house-rules': { enabled: null, max_iterations: 5 } });
   await human('PATCH', `${base}/reviewers/house-rules`, { max_iterations: null });
   assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 } });
-  assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Off for this pull request<\/span>/);
+  assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Automatic: off for this pull request<\/span>/);
 });
 
 test('a running review is cancelled for a change to what it reads as it started, whatever its definition says now', async () => {
