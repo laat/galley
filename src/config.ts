@@ -3,7 +3,12 @@ import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 export const VERSION = '0.1.0';
-export const DEFAULT_PORT = 7171;
+/** Unassigned with IANA, below the ports macOS and Linux hand out for outgoing connections, and no dev server's default (#41). */
+export const DEFAULT_PORT = 24823;
+/** galley's port before #41: the CLI looks for a server there when none answers on DEFAULT_PORT. */
+export const PORT_BEFORE = 7171;
+/** What GET /api/meta answers (an extension), so the CLI knows galley from another program on its port. */
+export const META = { name: 'galley', version: VERSION };
 
 /** A setting from the environment: GALLEY_<name>, or LAATSUX_<name> as it was called before the rename (#9). */
 export function fromEnv(name: string): string | undefined {

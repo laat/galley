@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { ApiError, CliError, Client } from './client.ts';
+import { ApiError, CliError, Client, identify } from './client.ts';
 import { pr } from './pr.ts';
 import { api } from './api.ts';
 import { browse } from './browse.ts';
@@ -42,7 +42,14 @@ async function serve(args: string[]): Promise<number> {
   });
   const { startServer } = await import('../server/server.ts');
   const port = Number(v.port ?? fromEnv('PORT') ?? DEFAULT_PORT);
-  const server = await startServer({ port, host: String(v.host), dataDir: dataDir(), moveFromLaatsux: true });
+  const server = await startServer({ port, host: String(v.host), dataDir: dataDir(), moveFromLaatsux: true }).catch(async (e) => {
+    if ((e as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw e;
+    const url = `http://localhost:${port}`;
+    const found = await identify(url).catch(() => 'other');
+    if (found === 'galley' || found === 'starting') throw new CliError(`galley is already running at ${url}`);
+    const by = found === 'silent' ? 'a program that does not answer (galley stuck, or another one)' : 'another program';
+    throw new CliError(`port ${port} is taken by ${by}. Run galley on another port with GALLEY_PORT=<port> or --port, and set GALLEY_PORT for your agents too.`);
+  });
   out(`galley is serving ${server.url} (data in ${dataDir()})`);
   if (v.open) (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore' });
   await new Promise<void>((resolve) => {

@@ -13,7 +13,7 @@ const OPENCODE = 'https://avatars.githubusercontent.com/in/1549082?s=80&v=4';
 test('known agents get their official logos, with the generated avatar as the fallback', () => {
   const db = new Db(':memory:');
   try {
-    const s = new Service({ db, baseUrl: 'http://localhost:7171' });
+    const s = new Service({ db, baseUrl: 'http://localhost:24823' });
     s.setViewerLogin('reviewer');
     const codex = new CodexReviewer(s);
     s.codex = codex;
@@ -25,9 +25,9 @@ test('known agents get their official logos, with the generated avatar as the fa
     // The Codex reviewer is known by identity, whatever its name; a bot that takes its old name is not it.
     codex.rename('robo');
     assert.equal(userJson(s, codex.actor()).avatar_url, CODEX);
-    assert.equal(url('codex'), 'http://localhost:7171/avatars/codex.svg');
-    assert.equal(url('agent'), 'http://localhost:7171/avatars/agent.svg');
-    assert.equal(url('someone', 'User'), 'http://localhost:7171/avatars/someone.svg');
+    assert.equal(url('codex'), 'http://localhost:24823/avatars/codex.svg');
+    assert.equal(url('agent'), 'http://localhost:24823/avatars/agent.svg');
+    assert.equal(url('someone', 'User'), 'http://localhost:24823/avatars/someone.svg');
     assert.equal(url('reviewer', 'User'), 'https://github.com/reviewer.png?size=80');
 
     // Pages swap an image from elsewhere for the generated one when it can't load (public/app.js).

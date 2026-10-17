@@ -213,7 +213,7 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
   });
   const repo = await client.repoFor(cwd, v.repo as string | undefined);
   if (v.web) {
-    openBrowser(client.base + `/${repo.owner}/${repo.name}`);
+    openBrowser(await client.url(`/${repo.owner}/${repo.name}`));
     return 0;
   }
   const state = String(v.state);
@@ -260,7 +260,7 @@ async function view(client: Client, cwd: string, args: string[]): Promise<number
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.web) {
-    openBrowser(`${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`);
+    openBrowser(await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}`));
     return 0;
   }
   if (v.json !== undefined) {
@@ -287,7 +287,7 @@ async function diff(client: Client, cwd: string, args: string[]): Promise<number
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.web) {
-    openBrowser(`${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}/files`);
+    openBrowser(await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}/files`));
     return 0;
   }
   if (v['name-only']) {

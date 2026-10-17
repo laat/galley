@@ -3681,6 +3681,28 @@ test('the CLI starts a server when none is running', async () => {
   assert.match(off.stderr, /not running/);
 });
 
+test('the server says it is galley, and serve says who has its port', async () => {
+  assert.deepEqual(await (await fetch(`${server.url}/api/meta`)).json(), { name: 'galley', version: '0.1.0' });
+  const home = mkdtempSync(join(tmpdir(), 'galley-taken-'));
+  const other = createHttpServer((req, res) => res.end('hello'));
+  try {
+    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+    // Its data in a directory of its own, should it start after all.
+    const env = { ...process.env, GALLEY_HOME: home, GALLEY_CONFIG_DIR: home, XDG_DATA_HOME: home, XDG_CONFIG_HOME: home };
+    const serve = (port: string) => exec(process.execPath, [BIN, 'serve', '--port', port], { env, timeout: 20_000 }).catch((e) => e);
+    const port = new URL(server.url).port;
+    const running = await serve(port);
+    assert.equal(running.code, 1);
+    assert.match(running.stderr, new RegExp(`galley is already running at http://localhost:${port}`));
+    const taken = await serve(String((other.address() as AddressInfo).port));
+    assert.equal(taken.code, 1);
+    assert.match(taken.stderr, /port \d+ is taken by another program\. Run galley on another port with GALLEY_PORT=<port> or --port, and set GALLEY_PORT for your agents too\./);
+  } finally {
+    other.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('images pasted into comments are stored, shown to agents, and warned about before publishing', async (t) => {
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/images');

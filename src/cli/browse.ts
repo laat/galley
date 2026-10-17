@@ -58,7 +58,7 @@ export async function browse(client: Client, cwd: string, args: string[]): Promi
     return 0;
   }
   if (positionals.length > 1) throw new CliError(`accepts at most 1 arg, received ${positionals.length}`);
-  const url = client.base + (await target(client, cwd, positionals[0], v));
+  const url = await client.url(await target(client, cwd, positionals[0], v));
   out(url);
   if (isTTY && !v['no-browser']) {
     const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
