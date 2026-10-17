@@ -33,9 +33,12 @@ test('aborting kills the command and its children', async () => {
 
 test('descendants that ignore SIGTERM are killed even after the command itself exits', async () => {
   // The shell dies on SIGTERM; the background subshell (and its sleep) ignore it.
-  const r = await run('sh', ['-c', '(trap "" TERM; sleep 3) & echo $!; wait'], { allowFail: true, timeoutMs: 200, graceMs: 200 });
+  // The timeout leaves a slow machine time to print the pid before the shell is killed.
+  const r = await run('sh', ['-c', '(trap "" TERM; sleep 3) & echo $!; wait'], { allowFail: true, timeoutMs: 1000, graceMs: 200 });
   assert.equal(r.timedOut, true);
   const pid = Number(r.stdout.trim());
+  // Number('') is 0, and process.kill(0, 0) would signal our own process group.
+  assert.ok(Number.isInteger(pid) && pid > 0, `no pid in the output: ${JSON.stringify(r.stdout)}`);
   await new Promise((resolve) => setTimeout(resolve, 600));
   assert.throws(() => process.kill(pid, 0), /ESRCH/, `process ${pid} survived the timeout`);
 });
