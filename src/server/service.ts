@@ -114,9 +114,11 @@ const LISTED = new Map([
 export interface WaitResult {
   /**
    * `merged` and `closed_on_github` are about the published pull request on GitHub; `agents_done`,
-   * see Service.agentsDone; `conflicts`, the head conflicts with its base (Service.baseConflicts).
+   * see Service.agentsDone; `conflicts`, the head conflicts with its base (Service.baseConflicts);
+   * `pushed` and `push_failed`, what came of pushing the head the author waited with once it is
+   * published (Service.pushUpdate).
    */
-  status: 'feedback' | 'published' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'conflicts' | 'timeout';
+  status: 'feedback' | 'published' | 'pushed' | 'push_failed' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'conflicts' | 'timeout';
   reviews: ReviewRow[];
   comments: CommentRow[];
   /** What the author confirms with markSeen once it has shown this feedback. */
@@ -125,6 +127,35 @@ export interface WaitResult {
   agentsDone?: AgentsDone;
   /** The head, when it conflicts with its base: the author confirms with markSeen that it was told. */
   conflicts?: string;
+  /** With `pushed` and `push_failed`: the push. */
+  push?: GithubPush;
+}
+
+/**
+ * A push of a published pull request's head to its branch on GitHub, made when the author waited
+ * with it (Service.pushUpdate), as its `github_push` event in the timeline has it.
+ */
+export interface GithubPush {
+  at: string;
+  url: string;
+  /** The staged head it pushed, or tried to. */
+  source: string;
+  /** The commit GitHub got: a signed copy of `source` when it signed; null when nothing was pushed. */
+  head: string | null;
+  /** What laatsux expected the branch on GitHub to be, which a force-push leased on. */
+  before: string | null;
+  sign: boolean;
+  signed: number;
+  force: boolean;
+  result: 'pushed' | 'failed';
+  /** Why nothing was pushed. */
+  error?: string;
+  /**
+   * A failure that is not GitHub refusing the push: GitHub could not be reached or asked, or
+   * signing failed (a prompt nobody answered). Tried again when the author next waits, and not told
+   * to the author meanwhile. A refusal is final for the commit.
+   */
+  retry?: boolean;
 }
 
 /**
@@ -243,11 +274,12 @@ export interface TurnReason {
  * Whose move a pull request waits for (#6). The author agent's from being handed feedback that
  * asks something of it until its next action (a push, an edit, a reply, a wait). While a reviewer
  * agent still has the head to review, the reviewer agents', or the author's when they start only
- * once it waits (#94). Then the reviewer's: the reviewer agents are done with the head (or none
- * reviews it), feedback the author is not waiting for is the reviewer's to pass on, or the author
- * stalled. Nobody's once it is closed (here, or merged or closed on GitHub), or published with
- * nothing new and no feedback the author has yet to be handed; then the reasons say what GitHub
- * waits for, if anything.
+ * once it waits (#94). Published, a commit GitHub does not have is the author's too: its wait
+ * pushes it. Then the reviewer's: the reviewer agents are done with the head (or none reviews it),
+ * feedback the author is not waiting for is the reviewer's to pass on, a push failed, or the
+ * author stalled. Nobody's once it is closed (here, or merged or closed on GitHub), or published
+ * with nothing new (or a commit being pushed) and no feedback the author has yet to be handed;
+ * then the reasons say what GitHub waits for, if anything.
  */
 export interface Turn {
   whose: Whose;
@@ -289,7 +321,11 @@ export interface AutoMerge {
   error?: string;
 }
 
-export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed' | 'merged' | 'closed_on_github';
+/**
+ * Why auto-publish was turned off before it published. (Events from before it ended at the first
+ * publish also say `merged` or `closed_on_github`.)
+ */
+export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed';
 
 /** A repository on GitHub, as laatsux shows it: what merging there allows. */
 export interface GithubRepo {
@@ -305,6 +341,20 @@ export interface AutoMergeOption {
   method: MergeMethod;
   methodAllowed: boolean;
   methods: MergeMethod[];
+}
+
+/** A push to a pull request's branch on GitHub, ready to go (Service.preparePush). */
+interface PushPlan {
+  /** The commit to push: the head, or its signed copy. */
+  pushed: string;
+  /** How many commits were signed for it. */
+  signed: number;
+  /** It replaces the commit the branch has on GitHub, with a lease on that commit (`before`). */
+  force: boolean;
+  /** The commit laatsux takes the branch on GitHub to have (Service.onGitHub). */
+  before: string | null;
+  /** The `git push` arguments. */
+  args: string[];
 }
 
 /** How often laatsux asks GitHub about published pull requests: while something runs there, and otherwise. */
@@ -625,8 +675,6 @@ export class Service {
       const commit = node.mergeCommit?.oid ?? null;
       const ts = now();
       this.db.update('pulls', pull.id, { github_state: state, github_closed_at: at, github_closed_by: by, github_merge_sha: commit, updated_at: ts });
-      // Approved for a pull request open on GitHub, also when this close is one seen before.
-      this.autoPublishOff(pull, viewer, merged ? 'merged' : 'closed_on_github', ts);
       // Published again after it was closed on GitHub, and still closed there: that close is in the timeline already.
       if (!merged && pull.github_closed_at === at) return 'github_state';
       // The event says when laatsux learned of it, so `pr wait` delivers it like any news; `at` says when it happened.
@@ -1763,6 +1811,8 @@ export class Service {
 
   /** When each author's `pr wait` began, kept across its re-polls; for "waiting 12 min". */
   private waitingSince = new Map<number, string>();
+  /** How many waits each author started, re-polls included: one push of a head is tried per wait (pushReady). */
+  private waitsStarted = new Map<number, number>();
 
   /**
    * `pr wait` re-polls every few minutes. Announce that the author started waiting at once,
@@ -1771,7 +1821,10 @@ export class Service {
   private waitingStopped = new Map<number, ReturnType<typeof setTimeout>>();
   private setWaiting(id: number, delta: 1 | -1, author: Actor): void {
     // Reviewer agents start when the author says it is ready, every time it does.
-    if (delta === 1) this.bus.emit('author-waiting', id);
+    if (delta === 1) {
+      this.waitsStarted.set(id, (this.waitsStarted.get(id) ?? 0) + 1);
+      this.bus.emit('author-waiting', id);
+    }
     const before = this.waiters.get(id) ?? 0;
     const n = before + delta;
     if (n > 0) this.waiters.set(id, n);
@@ -1804,6 +1857,9 @@ export class Service {
     // Feedback always comes back, also when it arrives together with a close, a publish or a merge.
     const fb = this.unseenFeedback(pull);
     const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
+    // What came of pushing the head it waited with, the latest push it has not been told of. A
+    // failure that is tried again is the reviewer's to see; the author waits on.
+    const push = this.lastPush(pull, pull.author_seen_at);
     // Closed here, or merged or closed on GitHub: nothing more is coming, so every wait says so.
     const ended = pull.state === 'closed' ? 'closed' : pull.github_state === 'merged' ? 'merged' : pull.github_state === 'closed' ? 'closed_on_github' : null;
     const unseen = fb.reviews.length > 0 || fb.comments.length > 0;
@@ -1813,10 +1869,11 @@ export class Service {
     // other news, but not ahead of held reviews, which a wait that returned would mark as seen.
     const conflicts = this.baseConflicts(pull)?.clean === false ? pull.head_sha : undefined;
     const fresh = conflicts !== undefined && conflicts !== pull.conflicts_told_sha;
-    const status = ended ?? (published ? 'published' : held ? null : unseen ? 'feedback' : fresh ? 'conflicts' : null);
+    const pushed = push && (push.result === 'pushed' ? 'pushed' : push.retry ? null : 'push_failed');
+    const status = ended ?? (published ? 'published' : held ? null : (pushed ?? (unseen ? 'feedback' : fresh ? 'conflicts' : null)));
     // Not marked as seen here: the author confirms once it has shown the feedback, so a
     // response lost on the way (a restart) delivers it again instead of losing it.
-    return status && { status, ...fb, seenAt: checkedAt, conflicts };
+    return status && { status, ...fb, seenAt: checkedAt, conflicts, push: push ?? undefined };
   }
 
   async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
@@ -1939,12 +1996,12 @@ export class Service {
    * They found nothing in it, used up their automatic reviews, are off, or have nothing more to
    * say (the author answered their findings without a new commit, or a review failed). `pr wait`
    * says so once per commit, so the author asks the reviewer to review it. Not under
-   * auto-publish, which publishes then instead, nor for a commit that is published already, nor
-   * before it is known whether the commit conflicts with its base, which the author hears of first.
+   * auto-publish, which publishes then instead, nor once it is published (its wait pushes each
+   * commit then: pushUpdate), nor before it is known whether the commit conflicts with its base,
+   * which the author hears of first.
    */
   private agentsDone(pull: PullRow): AgentsDone | null {
-    if (pull.state === 'closed' || pull.auto_publish || pull.agents_done_sha === pull.head_sha) return null;
-    if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
+    if (pull.state !== 'staged' || pull.auto_publish || pull.agents_done_sha === pull.head_sha || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
     // Findings the author has not answered hold them up too (Reviewer.answered).
@@ -2006,9 +2063,14 @@ export class Service {
     // A wait that just ended counts for a few seconds more (see setWaiting), long enough for the
     // author to confirm the feedback it was handed.
     const waiting = r.authorWaiting || this.waitingStopped.has(pull.id);
-    // A reviewer agent still has the head to review and starts when the author waits: until then
-    // the author has to ask for review. Not for a head GitHub has, which is the reviewer's to follow.
-    const toStart = !waiting && this.headUnpublished(pull) && r.reviewers.some((x) => x.status.state === 'unreviewed');
+    // Published, a commit GitHub does not have is pushed when the author waits (pushUpdate), unless
+    // pushing it failed: then the reviewer decides.
+    const unpushed = stagingState(pull) === 'published' && this.headUnpublished(pull);
+    const pushFailed = unpushed ? this.pushFailed(pull) : null;
+    // A reviewer agent still has the head to review and starts when the author waits, or, published,
+    // the head is pushed when it waits: until then the author has to wait. Not for a head GitHub has,
+    // which is the reviewer's to follow.
+    const toStart = !waiting && (unpushed ? !pushFailed : this.headUnpublished(pull) && r.reviewers.some((x) => x.status.state === 'unreviewed'));
     // Away from `pr wait` for that long since its last action, its session has probably ended.
     const stalled = toStart && !working && Date.now() - Date.parse(acted) >= this.stallMs;
     const state: AuthorState = working ? 'working' : unseen ? 'unseen' : waiting ? 'waiting' : stalled ? 'stalled' : 'stopped';
@@ -2017,9 +2079,15 @@ export class Service {
     if (working) reasons.push({ kind: 'author', state, text: `${author} is working on the feedback`, since: pull.author_handed_at });
     if (unseen) reasons.push({ kind: 'author', state: 'unseen', text: `${author} has not seen the latest feedback` });
     if (state === 'waiting') reasons.push({ kind: 'author', state, text: `${author} is waiting for review`, since: this.waitingSince.get(pull.id) ?? null });
-    // Not waiting, it does not hear of anything new: the reviewer has to tell it. Nor do the reviewer agents start.
+    // Not waiting, it does not hear of anything new: the reviewer has to tell it. Nor do the reviewer agents start, nor is its commit pushed.
     if (!working && !waiting) {
-      const text = stalled ? `${author} stopped without asking for review` : toStart ? `${author} has not asked for review yet (pr wait)` : `${author} is not waiting`;
+      const text = stalled
+        ? `${author} stopped without ${unpushed ? 'waiting since its last commit' : 'asking for review'}`
+        : toStart
+          ? unpushed
+            ? `${author} has not waited since its last commit`
+            : `${author} has not asked for review yet (pr wait)`
+          : `${author} is not waiting`;
       reasons.push({ kind: 'author', state: stalled ? 'stalled' : 'stopped', text, since: acted });
     }
 
@@ -2034,6 +2102,9 @@ export class Service {
     // conflict, the merge. It is for the reviewer to act on (or hand to an agent), not feedback for the author.
     const onGithub = githubStatus(pull);
     const github = githubAsks(onGithub, pull.base_ref);
+    // Published, what GitHub does not have is the reviewer's to publish, except commits about to be
+    // pushed: the author waits with them, and pushing them has not failed.
+    const toPublish = unpublished.filter((c) => c !== 'commits' || !waiting || !!pushFailed);
     // Feedback being handed over (the author waits) makes it the author's turn; feedback it is not
     // waiting for is the reviewer's to pass on, published or not, and so is a stalled author.
     const whose: Whose = atWork
@@ -2044,14 +2115,15 @@ export class Service {
           ? 'reviewer_agents'
           : toStart && !unseen && !stalled
             ? 'author'
-            : pull.state === 'published' && !unpublished.length && !failed && !unseen && !github.length
+            : pull.state === 'published' && !toPublish.length && !failed && !unseen && !github.length
               ? 'none'
               : 'reviewer';
     // Waiting on GitHub: for whom, when it says.
     if (whose === 'none') return { whose, reasons: githubWaits(onGithub).map((text) => ({ kind: 'github', text })) };
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
-    const stopped = this.stoppedText(pull);
+    // Automatic reviews end at the first publish: once published, there are none to stop.
+    const stopped = pull.state === 'staged' ? this.stoppedText(pull) : null;
     for (const { login, engine, reviewer, status } of r.reviewers) {
       const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
       if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine, reviewer, ...(status.description ? { description: true } : {}) });
@@ -2071,7 +2143,10 @@ export class Service {
       pull.id,
     )!.n;
     if (unresolved) reasons.push({ kind: 'threads', text: `${unresolved} unresolved thread${unresolved === 1 ? '' : 's'}` });
-    if (unpublished.length) reasons.push({ kind: 'unpublished', text: `update not published: ${unpublished.join(', ')}` });
+    if (unpublished.length) {
+      const failure = pushFailed ? `; pushing ${pull.head_sha.slice(0, 7)} failed` : '';
+      reasons.push({ kind: 'unpublished', text: `update not published: ${unpublished.join(', ')}${failure}` });
+    }
     const conflicts = this.baseConflicts(pull);
     if (conflicts?.clean === false) {
       const { files } = conflicts;
@@ -2168,19 +2243,15 @@ export class Service {
   // ------------------------------------------------------------ auto-publish
 
   /**
-   * Auto-publish is on and may publish now: there is something GitHub does not have yet, the agents
-   * are done, none of the reviewer's threads is open, and the head is known not to conflict with
-   * its base as it is now. It stays on after publishing, for the next update, until the pull
-   * request is merged or closed (see AutoPublishOff).
+   * Auto-publish is on and may publish now: the agents are done, none of the reviewer's threads is
+   * open, and the head is known not to conflict with its base as it is now. It approves the first
+   * publish only, which turns it off: after that, each commit the author waits with is pushed
+   * (pushUpdate).
    */
   autoPublishReady(pull: PullRow): boolean {
-    if (!pull.auto_publish || pull.state === 'closed') return false;
-    if (pull.published_url && !this.unpublishedChanges(pull).length) return false;
+    if (!pull.auto_publish || pull.state !== 'staged') return false;
     // Known to merge cleanly into the base as it is now: not while that is worked out, nor when git could not tell.
-    if (this.headUnpublished(pull)) {
-      const conflicts = this.currentConflicts(pull);
-      if (conflicts?.clean !== true) return false;
-    }
+    if (this.currentConflicts(pull)?.clean !== true) return false;
     const r = this.readiness(pull);
     return r.agentsDone && r.openThreads === 0;
   }
@@ -2194,8 +2265,8 @@ export class Service {
   }
 
   /**
-   * Approve publishing in advance: laatsux publishes on its own once the agents are done (see
-   * readiness), even commits pushed after this. The options are fixed now, as the publish box
+   * Approve the first publish in advance: laatsux publishes on its own once the agents are done
+   * (see readiness), even commits pushed after this. The options are fixed now, as the publish box
    * shows them: signing and draft as checked, force if it was checked and turns out to be needed,
    * and auto-merge with the merge method `autoMerge`.
    */
@@ -2203,7 +2274,7 @@ export class Service {
     const { pull, repo } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'auto-publish is for the reviewer, like publishing; ask the user to turn it on from laatsux');
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
-    if (pull.github_state === 'merged') throw new HttpError(422, 'this pull request was merged on GitHub; there is nothing left to publish');
+    if (pull.published_url) throw new HttpError(422, 'this pull request is published already; auto-publish is for the first publish, and each commit the author waits with is pushed to it');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
     const autoMerge = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
     const auto: AutoPublish = {
@@ -2367,9 +2438,10 @@ export class Service {
   /**
    * Make a signed copy of every commit in the pull request, with the user as committer
    * (GitHub only verifies a signature whose key belongs to the committer). Trees, messages
-   * and authors stay as the agent made them.
+   * and authors stay as the agent made them. `keep` and the commits under it stay as they are
+   * (signedVersions).
    */
-  async signCommits(ctx: Ctx, pull: PullRow, timeoutMs?: number): Promise<{ head: string; signed: number }> {
+  async signCommits(ctx: Ctx, pull: PullRow, timeoutMs?: number, keep?: string | null): Promise<{ head: string; signed: number }> {
     const { repo, git } = ctx;
     const signer = await this.signer(ctx);
     if (!signer) throw new HttpError(422, 'set user.name and user.email in git to sign commits');
@@ -2397,13 +2469,14 @@ export class Service {
       );
       signed++;
       return copy;
-    });
+    }, keep);
     return { head: versions.get(pull.head_sha) ?? pull.head_sha, signed };
   }
 
   /**
    * What a signed publish pushes for each commit of the pull request: a copy made before, the
-   * commit itself when it is signed and its parents stay, or a new copy from `copy`. Copies are
+   * commit itself when it is signed and its parents stay, or a new copy from `copy`; `keep` and
+   * the commits under it (on GitHub already) as they are. Copies are
    * remembered per source commit, so publishing again after the agent added commits reuses them
    * and GitHub sees a fast-forward. To predict without signing, `copy` returns null: a copy
    * still to be made (and so is every copy on top of it).
@@ -2412,13 +2485,21 @@ export class Service {
     ctx: Ctx,
     pull: PullRow,
     copy: (sha: string, c: RawCommit, parents: string[]) => Promise<string | null>,
+    keep?: string | null,
   ): Promise<{ shas: string[]; versions: Map<string, string | null> }> {
     const { repo, git } = ctx;
     const versions = new Map<string, string | null>(
       this.db.all<{ source_sha: string; signed_sha: string }>('SELECT source_sha, signed_sha FROM signed_commits WHERE repo_id = ?', repo.id).map((r) => [r.source_sha, r.signed_sha]),
     );
     const shas = (await git.out(['rev-list', '--reverse', '--topo-order', `${pull.base_sha}..${pull.head_sha}`])).split('\n').filter(Boolean);
+    // Commits GitHub has that the head was built on (`keep` and those under it): pushed as they are,
+    // signed or not, so the push adds to them (preparePush).
+    const kept = new Set(keep ? (await git.out(['rev-list', `${pull.base_sha}..${keep}`])).split('\n').filter(Boolean) : []);
     for (const sha of shas) {
+      if (kept.has(sha)) {
+        versions.set(sha, sha);
+        continue;
+      }
       const known = versions.get(sha);
       if (known && (await git.exists(known))) continue;
       const c = await git.rawCommit(sha);
@@ -2427,6 +2508,86 @@ export class Service {
       else versions.set(sha, parents.includes(null) ? null : await copy(sha, c, parents as string[]));
     }
     return { shas, versions };
+  }
+
+  /**
+   * Get the head ready to push to the pull request's own branch on GitHub, and to nothing else:
+   * publishing and pushUpdate both push this way, preparePush and then pushPrepared. Signed copies
+   * when `sign`. A push that would replace the commit the branch has on GitHub (onGitHub) is
+   * forced only when `force` allows it, and never plainly: with a lease on that commit, so commits
+   * added there since are not overwritten. With `lease`, every push leases on it, so a branch that
+   * moved on GitHub in any way, or that GitHub deleted after a merge, is refused rather than
+   * overwritten or brought back. `auto` says in the refusal to force-push that auto-publish's
+   * options did not allow it.
+   */
+  private async preparePush(ctx: Ctx, pull: PullRow, opts: { sign: boolean; force: boolean; lease?: boolean; auto?: boolean; timeoutMs?: number }): Promise<PushPlan> {
+    const { repo, git } = ctx;
+    const published = await this.onGitHub(ctx);
+    // Leased, the branch on GitHub as last fetched, when it moved on from what laatsux pushed and the
+    // head has it in it (the author brought in the commits added there): the push goes on top of
+    // it, with those commits as they are, overwriting nothing.
+    const fetched = opts.lease && published ? await git.resolve(`refs/remotes/${repo.remote}/${pull.head_ref}`) : null;
+    const onTop = fetched && fetched !== published && (await git.isAncestor(published!, fetched)) && (await git.isAncestor(fetched, pull.head_sha)) ? fetched : null;
+    let pushed = pull.head_sha;
+    let signed = 0;
+    if (opts.sign) {
+      ({ head: pushed, signed } = await this.signCommits(ctx, pull, opts.timeoutMs, onTop));
+      // The signed copies exist only here and on GitHub; keep them from being garbage collected.
+      if (pushed !== pull.head_sha) {
+        const ref = this.ref(pull, 'published');
+        const at = await git.resolve(ref);
+        // It holds the copies an earlier publish pushed, if any: commits this server signed.
+        if (!at || this.db.get('SELECT 1 FROM signed_commits WHERE repo_id = ? AND signed_sha = ?', repo.id, at)) await this.moveRef(git, ref, at, pushed);
+        else console.error(`left ${ref} alone in ${git.gitDir}: it points at ${at}, which laatsux did not sign`);
+      }
+    }
+
+    // Force is decided on the commit actually pushed, signed copies and all, and used only when allowed.
+    const before = onTop && (await git.isAncestor(onTop, pushed)) ? onTop : published;
+    const force = !!before && !(await git.isAncestor(before, pushed));
+    if (force && !opts.force) {
+      throw new HttpError(
+        409,
+        `The branch on GitHub has commits this push would replace (a rewritten history, or the agent's unsigned commits that signing replaces with copies), and ${opts.auto ? 'force-pushing was not chosen when auto-publish was turned on' : 'force-pushing was not chosen'}.`,
+      );
+    }
+    const branch = `refs/heads/${pull.head_ref}`;
+    const args = ['push'];
+    // Overwrite only the commit seen on GitHub, never commits added there since. (Without one, a
+    // lease asks that there be no branch.)
+    if (force || opts.lease) args.push(`--force-with-lease=${branch}:${before ?? ''}`);
+    args.push(repo.remote, `${pushed}:${branch}`);
+    return { pushed, signed, force, before, args };
+  }
+
+  /**
+   * Push what preparePush got ready. `ready`, when given, is the last check, after every await
+   * before the push (signing can wait minutes for a prompt): it throws to stop the push. Nothing is
+   * pushed to a pull request merged on GitHub.
+   */
+  private async pushPrepared(ctx: Ctx, pull: PullRow, plan: PushPlan, opts: { timeoutMs?: number; ready?: () => Promise<void> }): Promise<void> {
+    const { repo, git } = ctx;
+    await opts.ready?.();
+    // Merged on GitHub while this push signed or looked things up (following found it meanwhile):
+    // pushing now would add to a merged pull request, or bring back a branch GitHub deleted.
+    if (this.db.get<Pick<PullRow, 'github_state'>>('SELECT github_state FROM pulls WHERE id = ?', pull.id)?.github_state === 'merged') {
+      throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
+    }
+    // No await may come between the checks above and this call, which starts the push at once.
+    const push = await git.run(plan.args, { cwd: repo.work_dir ?? tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs: opts.timeoutMs });
+    if (push.code !== 0) {
+      const stale = /stale info/.test(push.stderr);
+      const declined = /\[remote rejected\]/.test(push.stderr);
+      const rejected = stale || declined || /\[rejected\]|non-fast-forward|fetch first/.test(push.stderr);
+      const why = stale
+        ? ' (the branch on GitHub changed since it was last published, for example by "Commit suggestion" or "Update branch"; bring those commits into the branch first)'
+        : declined
+          ? ' (GitHub declined it, for example for a secret in it, or a rule on the branch)'
+          : rejected
+            ? ' (the remote branch has commits that are not in this pull request)'
+            : '';
+      throw new HttpError(rejected ? 409 : 502, `git push failed${why}:\n${failure(push)}`);
+    }
   }
 
   /**
@@ -2443,7 +2604,20 @@ export class Service {
     opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod },
     actor: Actor,
   ): Promise<PullRow> {
-    const { repo, git } = ctx;
+    const release = await this.pushLock(ctx.pull.id);
+    try {
+      return await this.publishNow(ctx, opts, actor);
+    } finally {
+      release();
+    }
+  }
+
+  private async publishNow(
+    ctx: Ctx,
+    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod },
+    actor: Actor,
+  ): Promise<PullRow> {
+    const { repo } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'publishing is for the reviewer; ask the user to publish from laatsux');
     // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
     await this.fetchBases(repo, { base: ctx.pull.base_ref });
@@ -2477,61 +2651,21 @@ export class Service {
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
     const cwd = repo.work_dir ?? tmpdir();
     const timeoutMs = auto ? UNATTENDED_TIMEOUT_MS : undefined;
-
-    let pushed = pull.head_sha;
-    let signed = 0;
-    if (opts.sign ?? (await this.signsByDefault(ctx))) {
-      ({ head: pushed, signed } = await this.signCommits(ctx, pull, timeoutMs));
-      // The signed copies exist only here and on GitHub; keep them from being garbage collected.
-      if (pushed !== pull.head_sha) {
-        const ref = this.ref(pull, 'published');
-        const at = await git.resolve(ref);
-        // It holds the copies an earlier publish pushed, if any: commits this server signed.
-        if (!at || this.db.get('SELECT 1 FROM signed_commits WHERE repo_id = ? AND signed_sha = ?', repo.id, at)) await this.moveRef(git, ref, at, pushed);
-        else console.error(`left ${ref} alone in ${git.gitDir}: it points at ${at}, which laatsux did not sign`);
-      }
-    }
-
-    // Force is decided on the commit actually pushed, signed copies and all, and used only when allowed.
-    const theirs = await this.onGitHub(ctx);
-    const force = !!theirs && !(await git.isAncestor(theirs, pushed));
-    if (force && !opts.force) {
-      throw new HttpError(
-        409,
-        `The branch on GitHub has commits this push would replace (a rewritten history, or the agent's unsigned commits that signing replaces with copies), and ${auto ? 'force-pushing was not chosen when auto-publish was turned on' : 'force-pushing was not chosen'}.`,
-      );
-    }
-    const branch = `refs/heads/${pull.head_ref}`;
-    const args = ['push'];
-    // Overwrite only the commit seen on GitHub, never commits added there since.
-    if (force) args.push(`--force-with-lease=${branch}:${theirs}`);
-    args.push(repo.remote, `${pushed}:${branch}`);
-    if (auto) {
-      // Every await above (signing can wait minutes for a prompt) lets a cancel, a replaced
-      // approval, new feedback or a starting review come in. So the last check comes after all
-      // of them: the approval is the same, the agents are still done, the pull request is unchanged.
-      const latest = await this.sync(pull);
-      if (publishFingerprint(latest) !== publishFingerprint(pull) || !this.stillApproved(latest, opts.approval!)) {
-        throw new HttpError(412, 'the pull request or auto-publish changed before the push');
-      }
-    }
-    // Merged on GitHub while this publish signed or looked things up (following found it meanwhile):
-    // pushing now would add to a merged pull request, or bring back a branch GitHub deleted.
-    if (this.db.get<Pick<PullRow, 'github_state'>>('SELECT github_state FROM pulls WHERE id = ?', pull.id)?.github_state === 'merged') {
-      throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
-    }
-    // No await may come between the checks above and this call, which starts the push at once.
-    const push = await git.run(args, { cwd, env: UNPROMPTED, allowFail: true, timeoutMs });
-    if (push.code !== 0) {
-      const stale = /stale info/.test(push.stderr);
-      const rejected = stale || /\[rejected\]|non-fast-forward|fetch first/.test(push.stderr);
-      const why = stale
-        ? ' (the branch on GitHub changed since it was last published, for example by "Commit suggestion" or "Update branch"; bring those commits into the branch first)'
-        : rejected
-          ? ' (the remote branch has commits that are not in this pull request)'
-          : '';
-      throw new HttpError(rejected ? 409 : 502, `git push failed${why}:\n${failure(push)}`);
-    }
+    const sign = opts.sign ?? (await this.signsByDefault(ctx));
+    // Every await before the push (signing can wait minutes for a prompt) lets a cancel, a replaced
+    // approval, new feedback or a starting review come in. So auto-publish's last check comes after
+    // all of them: the approval is the same, the agents are still done, the pull request is unchanged.
+    const ready = auto
+      ? async () => {
+          const latest = await this.sync(pull);
+          if (publishFingerprint(latest) !== publishFingerprint(pull) || !this.stillApproved(latest, opts.approval!)) {
+            throw new HttpError(412, 'the pull request or auto-publish changed before the push');
+          }
+        }
+      : undefined;
+    const plan = await this.preparePush(ctx, pull, { sign, force: !!opts.force, auto, timeoutMs });
+    await this.pushPrepared(ctx, pull, plan, { timeoutMs, ready });
+    const { pushed, signed, force } = plan;
 
     let url = pull.published_url;
     // An earlier publish, or a pull request someone opened on GitHub for the same branch, gets updated in place.
@@ -2564,11 +2698,13 @@ export class Service {
         published_title: pull.title,
         published_body: pull.body,
         updated_at: ts,
+        // Auto-publish approves the first publish, whoever publishes: later commits are pushed when the author waits (pushUpdate).
+        auto_publish: null,
         // Closed on GitHub and published again: follow it again, in case it was reopened there.
         ...(pull.github_state === 'closed' ? { github_state: null } : {}),
       });
-      // Auto-publish stays on, whoever published: it publishes the next update too, until the merge.
-      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force, auto }, ts);
+      // `sign`, whether it signed: what the pushes after it do (signsUpdates).
+      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto }, ts);
     });
     // Published during a review (a second click): its findings would come too late.
     this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!, 'published');
@@ -2617,8 +2753,188 @@ export class Service {
     this.addEvent(pull, actor, type, error === null ? { url, method, merged } : { url, method, error });
     this.emit(pull.id, type, actor);
     // Merged at once: record it as following would, before anything else can be published over it
-    // (the merge guard before a push, auto-publish turning off, the pull request freezing).
+    // (the merge guard before a push, the pull request freezing).
     if (merged && view) this.recordGithubEnd(pull.id, view);
+  }
+
+  // ------------------------------------------------------ pushing after publishing
+
+  /**
+   * Whether to push the published pull request's head now (pushUpdate): it may be pushed
+   * (mayPush), and has not been tried yet while the author waits this time. A push that failed for
+   * want of GitHub or a signature is tried again when the author next waits, at least as often as
+   * `pr wait` asks again; one GitHub refused is not tried again for the same commit: the reviewer
+   * decides, and the author's next commit is pushed when it waits.
+   */
+  pushReady(pull: PullRow): boolean {
+    return this.mayPush(pull) && this.pushTries.get(pull.id) !== this.pushTry(pull);
+  }
+
+  /**
+   * Pushes to each pull request's branch under way, publishing's and pushUpdate's, one after the
+   * other: neither finds the branch moved under it by the other, nor takes the other's push for
+   * someone else's. Resolves when those before it are done, with the function that ends this one.
+   */
+  private pushLocks = new Map<number, Promise<void>>();
+  private async pushLock(pullId: number): Promise<() => void> {
+    const before = this.pushLocks.get(pullId);
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => (release = resolve));
+    const mine = (before ?? Promise.resolve()).then(() => done);
+    this.pushLocks.set(pullId, mine);
+    await before;
+    return () => {
+      release();
+      if (this.pushLocks.get(pullId) === mine) this.pushLocks.delete(pullId);
+    };
+  }
+
+  /** The head and the wait each push was last tried for (pushReady). */
+  private pushTries = new Map<number, string>();
+  private pushTry(pull: PullRow): string {
+    return `${pull.head_sha} ${this.waitsStarted.get(pull.id) ?? 0}`;
+  }
+
+  /**
+   * Whether the published pull request's head may be pushed: GitHub does not have it, the pull
+   * request is open there as far as laatsux knows, the author waits with all feedback seen, and
+   * GitHub has not refused this head before.
+   */
+  private mayPush(pull: PullRow): boolean {
+    if (stagingState(pull) !== 'published' || !this.headUnpublished(pull) || !this.waiters.get(pull.id)) return false;
+    const fb = this.unseenFeedback(pull);
+    if (fb.reviews.length || fb.comments.length) return false;
+    const failed = this.pushFailed(pull);
+    return !failed || !!failed.retry;
+  }
+
+  /** The latest push of the pull request made when its author waited (pushUpdate), or the latest after `since`. */
+  lastPush(pull: PullRow, since = ''): GithubPush | null {
+    const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'github_push' AND created_at > ? ORDER BY id DESC LIMIT 1", pull.id, since);
+    return e ? { ...(JSON.parse(e.data) as Omit<GithubPush, 'at'>), at: e.created_at } : null;
+  }
+
+  /** The push of the head that failed, when the latest try to push it failed. */
+  pushFailed(pull: PullRow): GithubPush | null {
+    const push = this.lastPush(pull);
+    return push?.result === 'failed' && push.source === pull.head_sha ? push : null;
+  }
+
+  /**
+   * Whether pushes after publishing sign: as the last publish did. One published before laatsux
+   * recorded that signed if GitHub got signed copies of the commits, or the commit it has is signed.
+   */
+  private async signsUpdates(ctx: Ctx): Promise<boolean> {
+    const { pull, git } = ctx;
+    const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' ORDER BY id DESC LIMIT 1", pull.id);
+    const sign = e && (JSON.parse(e.data) as { sign?: boolean }).sign;
+    if (typeof sign === 'boolean') return sign;
+    if (!pull.published_head_sha) return false;
+    if (pull.published_head_sha !== pull.published_source_sha) return true;
+    return (await git.rawCommit(pull.published_head_sha).catch(() => null))?.signed === true;
+  }
+
+  /**
+   * Push the head the author waits with to the published pull request when pushReady says so,
+   * unattended (each step gets UNATTENDED_TIMEOUT_MS). Only its head branch, as publishing pushes
+   * (preparePush): signed as the last publish was (signsUpdates), and with a lease on the commit
+   * laatsux pushed last, so a branch that moved on GitHub is refused, not overwritten, also when
+   * the push is forced, until the head has the commits added there. GitHub is asked right before
+   * the push whether the pull request is still open there: nothing is pushed once it is merged or
+   * closed, nor without an answer. The title and description are left to publishing by hand.
+   * Auto-merge, when laatsux turned it on and GitHub has not said it is off since, is asked for
+   * again. The timeline says what came of it. The author's wait hears of a push, and of one GitHub
+   * refused; one that failed otherwise is tried again when the author next waits (pushReady).
+   */
+  async pushUpdate(ctx: Ctx): Promise<void> {
+    // After a publish by hand under way, which may push the head itself.
+    const release = await this.pushLock(ctx.pull.id);
+    try {
+      await this.pushNow(ctx);
+    } finally {
+      release();
+    }
+  }
+
+  private async pushNow(ctx: Ctx): Promise<void> {
+    const pull = await this.sync(ctx.pull);
+    if (!this.pushReady(pull)) return;
+    this.pushTries.set(pull.id, this.pushTry(pull));
+    const url = pull.published_url!;
+    const viewer = this.viewer();
+    const timeoutMs = UNATTENDED_TIMEOUT_MS;
+    const sign = await this.signsUpdates(ctx);
+    // After every await before the push: open on GitHub, and nothing changed here (a commit,
+    // feedback, the author no longer waiting).
+    const ready = async () => {
+      if (!(await this.openOnGithub(ctx, url))) throw new HttpError(412, 'merged or closed on GitHub');
+      const latest = await this.sync(pull);
+      if (latest.head_sha !== pull.head_sha || !this.mayPush(latest)) throw new HttpError(412, 'the pull request changed before the push');
+    };
+    let plan: PushPlan | null = null;
+    try {
+      plan = await this.preparePush(ctx, pull, { sign, force: true, lease: true, timeoutMs });
+      await this.pushPrepared(ctx, pull, plan, { timeoutMs, ready });
+    } catch (e) {
+      // What changed brings another try, or ends it: a merge or close on GitHub, which the author hears of.
+      if (e instanceof HttpError && e.status === 412) return;
+      const failed: Omit<GithubPush, 'at'> = {
+        url,
+        source: pull.head_sha,
+        head: null,
+        before: plan?.before ?? pull.published_head_sha,
+        sign,
+        signed: plan?.signed ?? 0,
+        force: plan?.force ?? false,
+        result: 'failed',
+        error: (e instanceof Error ? e.message : String(e)).slice(0, 4000),
+        // GitHub refused it (409): final for this commit. Anything else is tried again.
+        retry: !(e instanceof HttpError && e.status === 409),
+      };
+      // The same failure again, tried again: the timeline has it already.
+      const last = this.pushFailed(pull);
+      if (last?.retry && failed.retry && last.error === failed.error) return;
+      this.addEvent(pull, viewer, 'github_push', failed);
+      this.emit(pull.id, 'github_push_failed', viewer);
+      return;
+    }
+    const ts = now();
+    const pushed: Omit<GithubPush, 'at'> = { url, source: pull.head_sha, head: plan.pushed, before: plan.before, sign, signed: plan.signed, force: plan.force, result: 'pushed' };
+    this.db.transaction(() => {
+      this.db.update('pulls', pull.id, { published_head_sha: plan.pushed, published_source_sha: pull.head_sha, published_at: ts, updated_at: ts });
+      this.addEvent(pull, viewer, 'github_push', pushed, ts);
+    });
+    this.emit(pull.id, 'github_pushed', viewer);
+    // Turned on by laatsux (also when asking for it again failed since), and not turned off on
+    // GitHub since, as far as following saw: asked for again, for the commit pushed.
+    const merge = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'auto_merge_enabled' ORDER BY id DESC LIMIT 1", pull.id);
+    const github = githubStatus(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!);
+    const off = github?.autoMerge === false && !!merge && github.checkedAt > merge.created_at;
+    if (merge && !off) await this.enableAutoMerge(ctx, url, plan.pushed, (JSON.parse(merge.data) as { method: MergeMethod }).method, viewer, timeoutMs);
+  }
+
+  /**
+   * Whether the published pull request is open on GitHub, asked now: following asks only every
+   * minute or so. A merge or close it finds is recorded as following records it. When GitHub can
+   * not be asked, or does not say, it throws: nothing is pushed without an answer.
+   */
+  private async openOnGithub(ctx: Ctx, url: string): Promise<boolean> {
+    let state: string | undefined;
+    let why = 'gh answered with something other than a pull request';
+    try {
+      const r = await run(this.ghBin, ['pr', 'view', url, '--json', 'state,mergedAt,mergedBy,mergeCommit,closedAt'], { cwd: ctx.repo.work_dir ?? tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs: UNATTENDED_TIMEOUT_MS });
+      if (r.code !== 0) why = failure(r);
+      else {
+        const view = JSON.parse(r.stdout) as GithubPull;
+        state = view.state;
+        if (state === 'MERGED' || state === 'CLOSED') this.recordGithubEnd(ctx.pull.id, view);
+      }
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) why = (e as Error).message;
+    }
+    if (state === 'OPEN') return true;
+    if (state === 'MERGED' || state === 'CLOSED') return false;
+    throw new HttpError(503, `could not ask GitHub whether ${url} is still open:\n${why}`);
   }
 
   /**

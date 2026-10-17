@@ -58,7 +58,7 @@ export interface PullRow {
   reviewer_overrides: string | null;
   /** The commit messages from base to head, hashed: what reviewers of the description read besides the title and description. Null until a reviewer needs it. */
   messages_sha: string | null;
-  /** Auto-publish, when it is on: an AutoPublish as JSON (see Service.autoPublish). */
+  /** Auto-publish, when it is on (until the first publish): an AutoPublish as JSON (see Service.autoPublish). */
   auto_publish: string | null;
   /** Automatic reviews, when the reviewer stopped them: an IterationsStopped as JSON (see Service.stopIterating). */
   iterations_stopped: string | null;
@@ -375,6 +375,8 @@ export class Db {
     }
     // A staged pull request was stored as open, GitHub's word for what others can see.
     this.sql.exec("UPDATE pulls SET state = 'staged' WHERE state = 'open'");
+    // Auto-publish approves the first publish only; one left on after it, from before, is used up.
+    this.sql.exec('UPDATE pulls SET auto_publish = NULL WHERE auto_publish IS NOT NULL AND published_url IS NOT NULL');
     const dir = file === ':memory:' ? file : dirname(realpathSync(file));
     let instance = this.getMeta('instance_id');
     if (!instance || this.getMeta('data_dir') !== dir) {

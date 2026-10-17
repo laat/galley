@@ -64,6 +64,12 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 5. **You publish.** Publish pushes the commit you reviewed and opens the pull request on GitHub,
    or updates it. It can sign the agent's commits as you and turn on auto-merge. laatsux then
    shows the pull request's checks and reviews on GitHub, and tells the agent when it is merged.
+6. **After that, GitHub's reviews and checks take over.** The agent commits and waits, and
+   laatsux pushes each commit it waits with, without reviews here: signed as you published,
+   force-pushed only over what laatsux pushed last, and with auto-merge asked for again if it
+   was on. A push GitHub refuses is not tried again, and you and the agent hear why; one that
+   fails otherwise (GitHub out of reach, a signing prompt nobody answered) is tried again when
+   the agent next waits.
 
 The conversation stays in laatsux; GitHub gets the branch, title and description.
 
@@ -76,12 +82,12 @@ turn.
 
 Codex and Claude can review a pull request before you do. Turn them on in **Settings**. Each
 reviews every new commit in a sandboxed checkout, with the dependencies installed so it can run
-the tests, until it finds nothing or uses up its automatic reviews. It is also done with a
-commit once the author has seen its review and replied to or resolved each thread the review
-opened. They only comment; the review decision is yours. A pull request's sidebar shows what
-each is doing and its transcript, and lets you turn it on or off, change its limit, or ask for a
-review now. **Stop iterating** in the merge box ends the automatic reviews. You can also name
-reviewers when you ask an agent to stage.
+the tests, until it finds nothing, uses up its automatic reviews, or you publish. It is also
+done with a commit once the author has seen its review and replied to or resolved each thread
+the review opened. They only comment; the review decision is yours. A pull request's sidebar
+shows what each is doing and its transcript, and lets you turn it on or off, change its limit,
+or ask for a review now. **Stop iterating** in the merge box ends the automatic reviews. You can
+also name reviewers when you ask an agent to stage.
 
 You can add reviewer agents of your own, each with its own instructions, in
 `~/.config/laatsux/reviewers/<name>.md` or under **Settings** → Custom reviewers (saving there
@@ -107,10 +113,9 @@ A custom reviewer's approval is its own; it never counts as yours.
 **Publish when reviews are done**, next to Publish, approves publishing in advance, like
 GitHub's auto-merge. laatsux publishes once the reviewer agents are done with the latest commit,
 the agent is waiting with all feedback seen, your conversations are resolved, and the branch
-merges cleanly into its base. It publishes later updates the same way until the pull request is
-merged or closed on GitHub. Cancel, closing it, your own Request changes, a new base or a failed
-publish turns it off. With **Enable auto-merge on GitHub** checked too, GitHub merges it once its
-required checks pass.
+merges cleanly into its base. It is for the first publish only. Cancel, closing it, your own
+Request changes, a new base or a failed publish turns it off. With **Enable auto-merge on
+GitHub** checked too, GitHub merges it once its required checks pass.
 
 ## Settings
 
@@ -138,6 +143,7 @@ tests may listen on localhost. Under Publishing: the merge method for auto-merge
   process running as you can still call its API as you, publishing included: agents are kept
   from publishing only by the name the CLI gives them, which `LAATSUX_ACTOR` overrides
   ([#52](https://github.com/laat/stage-pr/issues/52)).
+- Secrets in a push are left to GitHub's push protection.
 - Reviewer agents run code from the pull request in a sandbox with no network, except while the
   dependencies install. Code that gets past the install's precautions could reach the API.
   Turn off installing and running tests for repositories you do not trust.

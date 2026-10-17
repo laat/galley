@@ -499,6 +499,8 @@ export function api(s: Service): Hono {
       agents_done: r.agentsDone ?? null,
       // The head, when it conflicts with its base (`pr.baseConflicts` says with what); said once per commit.
       conflicts: r.conflicts ?? null,
+      // With status pushed or push_failed: the push of the head the author waited with, published.
+      push: r.push ?? null,
     });
   });
 

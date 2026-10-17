@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, TO_REVIEW, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, TO_REVIEW, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type HeadStatus, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
@@ -586,6 +586,23 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${data.auto ? ' with auto-publish' : ''} ${when}`,
         { cls: 'timeline-badge--open' },
       );
+    case 'github_push': {
+      const to = githubPull(data.url);
+      if (data.result === 'pushed') {
+        const how = [data.signed ? `signed ${plural(data.signed, 'commit')}` : null, data.force ? 'force-pushed' : null].filter(Boolean);
+        return timelineBadge(
+          'repo-push',
+          html`Pushed an update to ${to} at <code>${shortSha(data.head)}</code>${how.length ? ` (${how.join(', ')})` : ''} when ${p.author.login} waited ${when}`,
+          { cls: 'timeline-badge--open' },
+        );
+      }
+      return timelineBadge(
+        'x',
+        html`Could not ${data.force ? 'force-push' : 'push'} <code>${shortSha(data.source)}</code> to ${to} ${when}; nothing on GitHub was overwritten${data.retry ? `, and it is tried again when ${p.author.login} waits` : ''}
+        <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        { cls: 'timeline-badge--danger' },
+      );
+    }
     case 'auto_publish_enabled': {
       const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null, data.auto_merge ? `with auto-merge (${data.auto_merge}) on GitHub` : null].filter(Boolean);
       return timelineBadge('clock', html`${who} enabled auto-publish${options.length ? ` (${options.join(', ')})` : ''} ${when}`);
@@ -605,6 +622,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         { cls: 'timeline-badge--danger' },
       );
     case 'auto_publish_disabled':
+      // From before auto-publish ended at the first publish.
       if (data.reason === 'merged' || data.reason === 'closed_on_github') {
         return timelineBadge('clock', html`Auto-publish turned itself off when the pull request was ${data.reason === 'merged' ? 'merged' : 'closed'} on GitHub ${when}`);
       }
@@ -713,6 +731,9 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   }
 
   const changed = s.unpublishedChanges(pull);
+  // Published, a commit the author waited with that could not be pushed: the reviewer's to sort out.
+  const pushFailed = changed.includes('commits') && stagingState(pull) === 'published' ? s.pushFailed(pull) : null;
+  if (pushFailed) rows.push(pushFailedRow(p, pushFailed));
   const unsigned = await s.unsignedCommits(p.ctx, p.commits);
   const signer = unsigned.length ? await s.signer(p.ctx) : null;
   const signByDefault = unsigned.length ? await s.signsByDefault(p.ctx) : false;
@@ -734,13 +755,13 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   if (!target) {
     publishRow = html`<div class="merge-row merge-actions">${icon('alert', { cls: 'color-fg-attention' })}<div><strong>No GitHub remote</strong><div class="color-fg-muted">Remote <code>${repo.remote}</code> is not a github.com repository, so this pull request can not be published.</div></div></div>`;
   } else if (pull.published_url && changed.length === 0) {
-    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-open' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version.</div></div>
+    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-open' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version. Each commit ${p.author.login} waits with is pushed there.</div></div>
       <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div>`;
   } else {
     publishable = true;
     const verb = pull.published_url ? 'Publish update' : 'Publish pull request';
     const what = pull.published_url
-      ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.`
+      ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.${changed.includes('commits') && !pushFailed ? ` The commits are also pushed when ${p.author.login} waits.` : ''}`
       : html`Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>) to <code>${repo.remote}</code> and opens a pull request on <strong>${target}</strong> with this title and description.`;
     // Images pasted into the description live on this machine; GitHub has no API to upload them to.
     const images = uploadsIn(pull.body).length;
@@ -779,7 +800,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
       <div class="merge-buttons">
-        ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above, and keep publishing updates that way until the pull request is merged">${icon('clock')} Publish when reviews are done</button>`}
+        ${auto || pull.published_url ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above. After that, each commit ${p.author.login} waits with is pushed">${icon('clock')} Publish when reviews are done</button>`}
         <button type="submit" class="btn btn-primary btn-publish"${acknowledge.length ? html` data-confirm="Click again to publish anyway" data-acknowledge="${acknowledge.join(' ')}"` : ''}>${icon('mark-github')} ${verb}</button>
       </div>
     </form>`;
@@ -818,6 +839,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
 /** Stop iterating, while a reviewer agent may still review on its own; Resume once stopped. Both say what the last round found. */
 function iterationsRows(p: PullPage): Safe[] {
   const { s, pull, author } = p;
+  // Automatic reviews end at the first publish: there is nothing to stop or resume.
+  if (pull.published_url) return [];
   const api = `${p.apiBase}/stop-iterating`;
   const stop = s.iterationsStopped(pull);
   if (stop) {
@@ -872,6 +895,20 @@ function lastRound(p: PullPage): Safe {
   if (!running && !parts.length) return raw('');
   const round = running ? `Round ${s.automaticRound(pull)} running` : '';
   return html`<div class="iterations-found">${round}${round && parts.length ? ' · ' : ''}${parts.length ? html`${round ? 'last' : 'Last'} round: ${parts}` : ''}</div>`;
+}
+
+/**
+ * Published, the commit the author waited with could not be pushed to GitHub (Service.pushUpdate):
+ * GitHub refused it, and it is not tried again, or it failed otherwise, and is tried again.
+ */
+function pushFailedRow(p: PullPage, push: GithubPush): Safe {
+  const { author } = p;
+  const next = push.retry
+    ? html`It is tried again each time ${author.login} waits, every few minutes while it does. Publish the update yourself to push it now, signing it if a prompt went unanswered.`
+    : html`${author.login} was told. It is not tried again: publish the update yourself once the branch on GitHub is sorted out. A later commit ${author.login} waits with is pushed if GitHub takes it: one that has the commits added there (fetched, and rebased onto), or leaves out what GitHub declined.`;
+  return html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Could not ${push.force ? 'force-push' : 'push'} <code>${shortSha(push.source)}</code> to GitHub ${relTime(push.at)}</strong>
+    <div class="color-fg-muted">Nothing on GitHub was overwritten. ${next}</div>
+    <pre class="merge-error">${push.error ?? ''}</pre></div></div>`;
 }
 
 /** What came of the last time laatsux turned on auto-merge on GitHub. */
@@ -991,12 +1028,10 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const { s, pull, author } = p;
   const r = s.readiness(pull);
   const by = s.db.actorById(auto.by);
-  const options = [auto.sign ? 'signed' : null, auto.draft && !pull.published_url ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
-  const upToDate = !!pull.published_url && !s.unpublishedChanges(pull).length;
+  const options = [auto.sign ? 'signed' : null, auto.draft ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
   const item = (state: 'done' | 'waiting' | 'failed', text: Safe | string) =>
     html`<li>${state === 'done' ? icon('check', { cls: 'color-fg-success' }) : state === 'failed' ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' })} <span>${text}</span></li>`;
-  const items = upToDate ? [item('waiting', `GitHub has the latest commit: the next one pushed to ${pull.head_ref} is published once the agents are done with it`)] : [];
-  items.push(...r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author))));
+  const items = r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
   items.push(
     r.authorWaiting && !r.unseen
       ? item('done', `${author.login} is waiting for review, with all feedback seen`)
@@ -1017,8 +1052,8 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   if (merging && !merging.autoMerge) items.push(item('failed', `${p.repo.github_slug} does not allow auto-merge, so publishing will fail`));
   else if (merging && method && !merging.methods.includes(method)) items.push(item('failed', `${p.repo.github_slug} does not allow ${method} merges, so publishing will fail`));
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-open' })}<div class="flex-auto">
-    <strong>Auto-publish is on until the pull request is merged</strong>
-    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes each update${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method}) after each` : ''}. Publishing by hand leaves it on.</div>
+    <strong>Auto-publish is on</strong>
+    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the pull request${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with the latest commit and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method})` : ''}. After that, each commit ${author.login} waits with is pushed.</div>
     <ul class="merge-checks">${items}</ul>
   </div>
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;
@@ -1180,7 +1215,8 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
   }
   const used = reviewer.automaticReviews(pull);
   const limit = reviewer.limit(pull);
-  if (enabled) meta.push(html`Automatic: ${pull.iterations_stopped ? 'stopped at ' : ''}${used} of ${limit}`);
+  // Automatic reviews end at the first publish.
+  if (enabled) meta.push(pull.published_url ? html`Automatic: ${used} before publishing` : html`Automatic: ${pull.iterations_stopped ? 'stopped at ' : ''}${used} of ${limit}`);
   else if (runs.length || work) meta.push(html`${off}`);
   const usage = runUsage(runs);
   if (usage) meta.push(usage);

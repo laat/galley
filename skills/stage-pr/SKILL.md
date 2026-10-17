@@ -9,7 +9,8 @@ description: Stage a pull request in laatsux, the user's local review server, in
 
 ## Rules
 
-- Do not `git push` or run `gh pr create`. The user publishes.
+- Do not `git push` or run `gh pr create`. The user publishes. After that, commit and run
+  `laatsux pr wait`: it pushes your commits. Never push to GitHub yourself.
 - Do not run `laatsux pr publish`, `pr close` or `pr review` unless the user asks.
 - Commit on a branch, with at least one commit over the base.
 - Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
@@ -103,12 +104,16 @@ description: Stage a pull request in laatsux, the user's local review server, in
    agents are done with it. If auto-publish is on, address the feedback and wait; laatsux
    publishes. With auto-merge, GitHub merges it, not you.
 
-8. After `Published to GitHub: <url>`, tell the user the GitHub URL and wait again:
+8. After `Published to GitHub: <url>`, tell the user the GitHub URL and wait again. From now on
+   no reviewer agent reviews your commits, and each commit you wait with is pushed to GitHub:
 
    - `Merged on GitHub as e468a4e by laat: <url>`: clean up as in [After the merge](#after-the-merge).
    - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
      user says otherwise.
-   - New feedback: address it as in step 4 and wait again.
+   - New feedback: address it as in step 4, commit, and wait again.
+   - `Pushed 3f2a1c9 to GitHub: <url>`: wait again.
+   - `Could not push 3f2a1c9 to GitHub: …`: nothing was pushed. Do not push or force-push it
+     yourself; the user decides. Tell the user why, and wait again.
 
 ## After the merge
 
@@ -130,9 +135,9 @@ of the next wait.
 
 ## Reviewer agents
 
-Codex, Claude and reviewers the user defined review when you wait, and their reviews wake you
-like the user's. Some review only the title, description and commit messages, again whenever
-you change them. One loop is one review from each and your answer. A reviewer agent's approval
+Codex, Claude and reviewers the user defined review when you wait, until the pull request is
+published, and their reviews wake you like the user's. Some review only the title, description
+and commit messages, again whenever you change them. One loop is one review from each and your answer. A reviewer agent's approval
 is not the user's: wait for the user all the same. The settings decide whether they review,
 unless the user says otherwise when asking you to stage. Add to `laatsux pr create`:
 
