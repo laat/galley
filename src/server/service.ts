@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Repo, run, githubSlug, type Commit, type RawCommit, type RunResult } from './git.ts';
@@ -242,6 +243,15 @@ export const FOLLOW_IDLE_MS = 60_000;
 
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
+
+/**
+ * Where laatsux keeps refs in the repositories it stages from. Each server has a namespace of its
+ * own under it (Db.instance), so servers staging from one repository never touch each other's.
+ * A database pins its revisions in its namespace when it gets its id (Service.pinRevisions). Refs
+ * from before namespaces (`refs/laatsux/pull/<n>/...`) stay where they are, since a copy of the
+ * database from before may count on them.
+ */
+export const REFS = 'refs/laatsux';
 
 export interface ServiceOptions {
   db: Db;
@@ -709,7 +719,50 @@ export class Service {
 
   /** Keep every reviewed head reachable, so old revisions survive the agent rewriting history. */
   private async pin(git: Repo, pull: PullRow, seq: number, sha: string): Promise<void> {
-    await git.updateRef(`refs/laatsux/pull/${pull.number}/${seq}`, sha).catch(() => {});
+    await this.moveRef(git, this.ref(pull, seq), null, sha);
+  }
+
+  /**
+   * Pin every revision, and the signed copies each pull request was last published as, in this
+   * server's namespace, once for each instance id: a copy of the database, or one from before
+   * namespaces, must not count on refs that another server may delete. Until every pin is in
+   * place, each start tries again.
+   */
+  async pinRevisions(): Promise<void> {
+    if (this.db.getMeta('pinned_instance') === this.db.instance) return;
+    let done = true;
+    for (const repo of this.repos()) {
+      if (!existsSync(repo.git_dir)) continue; // Repository moved or deleted: nothing to pin.
+      const git = this.git(repo);
+      // A pin that failed is tried again while the ref is missing and the commit is there (a stale
+      // lock, say). A ref pointing elsewhere stays as it is, and a commit that is gone needs no pin.
+      const pin = async (ref: string, sha: string) => {
+        if (!(await this.moveRef(git, ref, null, sha)) && !(await git.resolve(ref)) && (await git.exists(sha))) done = false;
+      };
+      for (const pull of this.db.all<PullRow>('SELECT * FROM pulls WHERE repo_id = ?', repo.id)) {
+        for (const rev of this.revisions(pull)) await pin(this.ref(pull, rev.seq), rev.head_sha);
+        if (pull.published_head_sha && pull.published_source_sha && pull.published_head_sha !== pull.published_source_sha) {
+          await pin(this.ref(pull, 'published'), pull.published_head_sha);
+        }
+      }
+    }
+    if (done) this.db.setMeta('pinned_instance', this.db.instance);
+  }
+
+  /** One of this server's refs for a pull request: a revision's, or the signed copies it was last published as. */
+  private ref(pull: PullRow, name: number | 'published'): string {
+    return `${REFS}/${this.db.instance}/pull/${pull.number}/${name}`;
+  }
+
+  /**
+   * Create, move or delete (`to` null) one of this server's refs. A ref that is not where this
+   * server left it (`from`, null for none) is not this server's to change: it is left alone, and logged.
+   * Returns whether the ref ended up at `to`.
+   */
+  private async moveRef(git: Repo, ref: string, from: string | null, to: string | null): Promise<boolean> {
+    const refused = await git.moveRef(ref, from, to);
+    if (refused) console.error(`left ${ref} alone in ${git.gitDir}:`, refused);
+    return !refused;
   }
 
   /** Detect pushes to the head branch (and moves of the merge base) and record them as revisions. */
@@ -846,9 +899,7 @@ export class Service {
   async deletePull(ctx: Ctx, actor: Actor): Promise<void> {
     const { pull, git } = ctx;
     if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can delete a staged pull request; close it instead');
-    for (const rev of this.revisions(pull)) {
-      await git.run(['update-ref', '-d', `refs/laatsux/pull/${pull.number}/${rev.seq}`], { allowFail: true });
-    }
+    for (const rev of this.revisions(pull)) await this.moveRef(git, this.ref(pull, rev.seq), rev.head_sha, null);
     this.db.run('DELETE FROM pulls WHERE id = ?', pull.id);
     this.emit(null, 'deleted', actor);
   }
@@ -1847,7 +1898,13 @@ export class Service {
     if (opts.sign ?? (await this.signsByDefault(ctx))) {
       ({ head: pushed, signed } = await this.signCommits(ctx, pull, timeoutMs));
       // The signed copies exist only here and on GitHub; keep them from being garbage collected.
-      if (pushed !== pull.head_sha) await git.updateRef(`refs/laatsux/pull/${pull.number}/published`, pushed);
+      if (pushed !== pull.head_sha) {
+        const ref = this.ref(pull, 'published');
+        const at = await git.resolve(ref);
+        // It holds the copies an earlier publish pushed, if any: commits this server signed.
+        if (!at || this.db.get('SELECT 1 FROM signed_commits WHERE repo_id = ? AND signed_sha = ?', repo.id, at)) await this.moveRef(git, ref, at, pushed);
+        else console.error(`left ${ref} alone in ${git.gitDir}: it points at ${at}, which laatsux did not sign`);
+      }
     }
 
     // Force is decided on the commit actually pushed, signed copies and all, and used only when allowed.

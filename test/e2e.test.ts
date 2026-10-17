@@ -329,7 +329,8 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(reviewThreads[0].originalLine, 6);
     assert.equal(reviewThreads[0].isOutdated, false);
     // The old head is kept reachable for the revision history.
-    assert.match(git('for-each-ref', 'refs/laatsux/'), /refs\/laatsux\/pull\/1\/1\n.*refs\/laatsux\/pull\/1\/2/);
+    const pins = git('for-each-ref', '--format=%(refname)', `refs/laatsux/${server.service.db.instance}/pull/1/`);
+    assert.deepEqual(pins.split('\n'), [1, 2].map((seq) => `refs/laatsux/${server.service.db.instance}/pull/1/${seq}`));
     const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
     assert.ok(timeline.some((e: any) => e.event === 'pushed' && e.forced === true));
   });
@@ -458,6 +459,8 @@ test('the agent loop, from staging to publishing', async (t) => {
     await human('POST', '/api/repos/acme/widgets/pulls/1/publish', {});
     const after = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
     assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${after}^`], { encoding: 'utf8' }).trim(), before);
+    // The signed copies are kept from garbage collection: the ref moves from the earlier ones.
+    assert.equal(git('rev-parse', `refs/laatsux/${server.service.db.instance}/pull/1/published`), after);
     const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
     assert.equal(timeline.filter((e: any) => e.event === 'published').at(-1).signed, 1);
     // The signed copies count as the staged commits: nothing is left to publish.
@@ -468,8 +471,21 @@ test('the agent loop, from staging to publishing', async (t) => {
   await t.test('a rewritten branch needs force to publish again', async () => {
     git('commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Reworded.');
     await assert.rejects(human('POST', '/api/repos/acme/widgets/pulls/1/publish', {}), /409|rejected|git push failed/);
-    await human('POST', '/api/repos/acme/widgets/pulls/1/publish', { force: true });
+    // A published ref at a commit laatsux did not sign is not its to move.
+    const published = `refs/laatsux/${server.service.db.instance}/pull/1/published`;
+    const unsigned = git('rev-parse', 'main');
+    git('update-ref', published, unsigned);
+    const errors = mock.method(console, 'error', () => {});
+    try {
+      await human('POST', '/api/repos/acme/widgets/pulls/1/publish', { force: true });
+    } finally {
+      errors.mock.restore();
+    }
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr edit https:\/\/github\.com\/acme\/widgets\/pull\/7 --title/m);
+    assert.equal(git('rev-parse', published), unsigned);
+    const logged = errors.mock.calls.map((c) => c.arguments.join(' '));
+    assert.ok(logged.some((line) => line.startsWith(`left ${published} alone in `) && line.endsWith(`it points at ${unsigned}, which laatsux did not sign`)), logged.join('\n'));
+    git('update-ref', published, execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim());
   });
 
   await t.test('force-publishing never overwrites commits added on GitHub', async () => {
@@ -1638,7 +1654,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
   await t.test('checks again after signing, which can wait for a prompt', async () => {
     const pr = await stage('feature/auto-sign', 'sign.js');
     const signing = gateSigning();
-    const signedCopy = () => git('for-each-ref', '--format=%(objectname)', `refs/laatsux/pull/${pr.number}/published`);
+    const signedCopy = () => git('for-each-ref', '--format=%(objectname)', `refs/laatsux/${server.service.db.instance}/pull/${pr.number}/published`);
     try {
       // Cancelled while signing waits: nothing is pushed.
       await human('PUT', `${pr.base}/auto-publish`, {});

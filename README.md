@@ -238,8 +238,12 @@ staged pull requests.
 - **Diffs** compare the head branch with its merge base against `origin/<base>`, falling
   back to the local `<base>`. That is what GitHub will show after publishing.
 - **Revisions**: the server polls branch refs every two seconds. Each new head is recorded
-  and pinned as `refs/laatsux/pull/<n>/<revision>` in your repository, so old revisions
-  survive rebases and garbage collection.
+  and pinned as `refs/laatsux/<instance>/pull/<n>/<revision>` in your repository, so old
+  revisions survive rebases and garbage collection. `<instance>` is a random id of the server's
+  database (a new one when the database is opened from another directory, as a copy is, which
+  then pins the revisions it came with under its own id), so two servers staging from one
+  repository keep to their own refs. A ref that is not where the server left it is left alone
+  and logged. Refs from before namespaces, `refs/laatsux/pull/<n>/*`, stay where they are.
 - **Comments** are anchored to the commit and line they were made on. To place them on the
   current head, the server maps the line through `git diff -U0`; if the line itself
   changed, the comment is outdated. Besides the lines of the diff, a comment can sit on an
@@ -267,7 +271,7 @@ staged pull requests.
   turn, and the merge or close is recorded on the pull request and in its timeline. Nothing is
   published over a merge; publishing one closed on GitHub again updates it there and follows it
   again. Following is read-only, and commits added on GitHub are not followed. The pinned
-  `refs/laatsux/pull/<n>/*` stay after a merge, since comments are anchored to those commits.
+  `refs/laatsux/<instance>/pull/<n>/*` stay after a merge, since comments are anchored to those commits.
 - **Signing**: agents commit unsigned; the commits are yours once you publish. Publishing
   can sign them: laatsux makes a signed copy of each commit with `git commit-tree -S`, with
   the same tree, message and author and you as committer (GitHub only verifies a signature

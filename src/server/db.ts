@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 
 export type ActorType = 'User' | 'Bot';
@@ -311,6 +314,12 @@ const ADDED_COLUMNS: [string, string, string][] = [
 
 export class Db {
   sql: DatabaseSync;
+  /**
+   * This database's id among the servers that stage from the same repositories: it names the
+   * server's namespace for refs there. A database opened from another directory than before is
+   * a copy, and gets an id of its own, so the copy and the original keep to their own refs.
+   */
+  instance: string;
 
   constructor(file: string) {
     this.sql = new DatabaseSync(file);
@@ -322,6 +331,14 @@ export class Db {
     }
     // A staged pull request was stored as open, GitHub's word for what others can see.
     this.sql.exec("UPDATE pulls SET state = 'staged' WHERE state = 'open'");
+    const dir = file === ':memory:' ? file : dirname(realpathSync(file));
+    let instance = this.getMeta('instance_id');
+    if (!instance || this.getMeta('data_dir') !== dir) {
+      instance = randomBytes(4).toString('hex');
+      this.setMeta('instance_id', instance);
+      this.setMeta('data_dir', dir);
+    }
+    this.instance = instance;
   }
 
   get<T>(query: string, ...params: SQLInputValue[]): T | undefined {
