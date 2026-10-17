@@ -261,7 +261,7 @@ function ghTurn(t: Turn) {
   return { whose: t.whose.toUpperCase(), reasons: t.reasons.map(reasonText) };
 }
 
-/** A reason in words, with how long it has been so: "codex is reviewing 8c64534, 3 min". */
+/** A reason in words, with how long it has been so: "codex-review is reviewing 8c64534, 3 min". */
 export function reasonText(r: TurnReason): string {
   return r.since ? `${r.text}, ${duration(r.since)}` : r.text;
 }

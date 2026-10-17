@@ -41,7 +41,7 @@ function atWork(r: any, pr: GhPull): { what: string; since: string | null } {
   return { what: `reviewing ${sha}${earlier}`, since: r.startedAt ? `started ${ago(r.startedAt)}` : null };
 }
 
-/** One line per reviewer at work: "codex is reviewing 35ef70b (started 2 minutes ago)". */
+/** One line per reviewer at work: "codex-review is reviewing 35ef70b (started 2 minutes ago)". */
 export function reviewersAtWork(pr: GhPull): string[] {
   return (pr.reviewRequests ?? []).map((r: any) => {
     const w = atWork(r, pr);
@@ -49,7 +49,7 @@ export function reviewersAtWork(pr: GhPull): string[] {
   });
 }
 
-/** "codex is still reviewing", or "codex is about to review" when it has not started yet. */
+/** "codex-review is still reviewing", or "codex-review is about to review" when it has not started yet. */
 export function stillReviewing(pr: GhPull): string {
   const requests = pr.reviewRequests ?? [];
   const who = requests.map((r: any) => r.login).join(' and ');
@@ -80,7 +80,7 @@ const WHOSE: Record<string, string> = {
   NONE: 'nothing waiting',
 };
 
-/** Whose move it is and why: "the reviewer's turn: claude is waiting for review, 3 min; codex found nothing in 8c64534". */
+/** Whose move it is and why: "the reviewer's turn: claude is waiting for review, 3 min; codex-review found nothing in 8c64534". */
 export function turnLine(turn: { whose: string; reasons: string[] }): string {
   return `${WHOSE[turn.whose] ?? turn.whose.toLowerCase()}${turn.reasons.length ? `: ${turn.reasons.join('; ')}` : ''}`;
 }

@@ -119,7 +119,7 @@ export interface WaitResult {
 /** The reviewer agents are done with the head: what `pr wait` tells the author once per commit. */
 export interface AgentsDone {
   sha: string;
-  /** What each reviewer agent made of the commit ("codex found nothing in 8c64534"); none for those turned off. */
+  /** What each reviewer agent made of the commit ("codex-review found nothing in 8c64534"); none for those turned off. */
   reviewers: string[];
 }
 

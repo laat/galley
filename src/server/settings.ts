@@ -40,7 +40,8 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  codex: { enabled: false, name: 'codex', model: '', effort: '', maxIterations: 3, runTests: true, skipOwnKind: false },
+  // "codex" until it became "codex-review", beside "claude-review" (see CodexReviewer.leaveFormerDefault).
+  codex: { enabled: false, name: 'codex-review', model: '', effort: '', maxIterations: 3, runTests: true, skipOwnKind: false },
   // Not "claude": that is what the CLI calls an author agent running in Claude Code.
   claude: { enabled: false, name: 'claude-review', model: '', effort: '', maxIterations: 3, runTests: true, skipOwnKind: false },
   publish: { mergeMethod: 'squash' },

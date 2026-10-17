@@ -1,5 +1,6 @@
 // Codex as a reviewer agent: `codex exec` in the review's checkout, in Codex's own sandbox,
-// answering in the reviewer's JSON schema. Its bot is named "codex" unless renamed in settings.
+// answering in the reviewer's JSON schema. Its bot is named "codex-review" unless renamed in
+// settings; `--reviewer codex` finds it by its kind whatever its name.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +8,7 @@ import { run, type RunResult } from '../git.ts';
 import { now, type Actor, type CommentRow } from '../db.ts';
 import { splitPriorityPrefix, type Service } from '../service.ts';
 import { lastLines, outsideTheDiff, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo } from './reviewer.ts';
-import { REVIEWER_KINDS } from '../settings.ts';
+import { DEFAULT_SETTINGS, readSettings, REVIEWER_KINDS, saveSettings } from '../settings.ts';
 
 /**
  * Codex's workspace-write sandbox: it writes only to the checkout and the TMPDIR it is given
@@ -44,6 +45,8 @@ function untrusted(checkout: string): string[] {
 
 /** What the CLI calls an author agent running in Codex (see cliActor in src/config.ts). */
 const CODEX_AUTHOR = 'codex-agent';
+/** The reviewer's default name before "codex-review". */
+const FORMER_DEFAULT = 'codex';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 
 export class CodexEngine implements Engine {
@@ -145,7 +148,7 @@ export class CodexReviewer extends Reviewer {
    * name exists too, both are the same kind of author and become one.
    */
   protected takeOver(taken: Actor, name: string): boolean {
-    if (taken.id === this.s.viewer().id || name !== 'codex') return false;
+    if (taken.id === this.s.viewer().id || name !== FORMER_DEFAULT) return false;
     const current = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', CODEX_AUTHOR);
     if (current) this.s.db.transaction(() => this.absorb(taken, current));
     else this.s.db.run('UPDATE actors SET login = ? WHERE id = ?', CODEX_AUTHOR, taken.id);
@@ -153,6 +156,7 @@ export class CodexReviewer extends Reviewer {
   }
 
   protected migrate(): void {
+    this.leaveFormerDefault();
     // Earlier versions recorded the reviewer's login in review_runs; fold those identities into
     // one. Runs from before laatsux knew another engine are all Codex's, also under a login that
     // is another engine's kind now (the bot could be called "claude").
@@ -181,6 +185,49 @@ export class CodexReviewer extends Reviewer {
     for (const c of this.s.db.all<Pick<CommentRow, 'id' | 'body'>>('SELECT id, body FROM comments WHERE author_id = ? AND priority IS NULL', me.id)) {
       const split = splitPriorityPrefix(c.body);
       if (split.priority) this.s.db.update('comments', c.id, { priority: split.priority, body: split.body });
+    }
+  }
+
+  /**
+   * The reviewer was "codex" by default until it became "codex-review", beside "claude-review".
+   * An install on the former default moves to the new one, earlier reviews and all, as renaming
+   * it in settings does; one that chose a name of its own keeps it. The name stays when someone
+   * else has the new one. Once: "codex" chosen later stays.
+   */
+  private leaveFormerDefault(): void {
+    if (this.s.db.getMeta('codex_left_former_default')) return;
+    this.s.db.setMeta('codex_left_former_default', '1');
+    let stored: unknown;
+    try {
+      stored = JSON.parse(this.s.db.getMeta('settings') ?? '{}').codex?.name;
+    } catch {}
+    if (stored !== undefined && stored !== FORMER_DEFAULT) return;
+    const id = Number(this.s.db.getMeta('codex_actor_id'));
+    let me = id ? this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id) : undefined;
+    if (!me) {
+      // From before its id was kept: the actor that only ever posted its reviews.
+      const old = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', FORMER_DEFAULT);
+      if (old && this.onlyReviewedForUs(old)) {
+        this.s.db.setMeta('codex_actor_id', String(old.id));
+        me = old;
+      }
+    }
+    // Older CLIs called author agents running in Codex "codex". Taking that name, the reviewer
+    // moved such an author to the name the CLI uses now (takeOver). On the new default it never
+    // takes the name, so the author moves here, or its agent could not wait on its pull requests.
+    const author = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', FORMER_DEFAULT);
+    if (author && author.id !== me?.id) this.takeOver(author, FORMER_DEFAULT);
+    let name = DEFAULT_SETTINGS.codex.name;
+    if (me?.login === FORMER_DEFAULT) {
+      try {
+        this.rename(name);
+      } catch {
+        name = FORMER_DEFAULT;
+      }
+    }
+    if (stored !== undefined || name !== DEFAULT_SETTINGS.codex.name) {
+      const settings = readSettings(this.s.db);
+      saveSettings(this.s.db, { ...settings, codex: { ...settings.codex, name } });
     }
   }
 }

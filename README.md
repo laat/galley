@@ -79,7 +79,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr comment [<n>]` | `--body`, `--body-file`, `--edit-last`, and `--reply-to <thread>` to answer a review thread, with `--resolve` to resolve it too |
 | `laatsux pr review [<n>]` | `--approve`, `--comment`, `--request-changes`, `--body` |
 | `laatsux pr checkout`, `status`, `ready`, `close`, `reopen` | as in gh |
-| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Reviews from [reviewer agents](#reviewer-agents) come together, once all of them are done with the commit. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
+| `laatsux pr wait [<n>...]` | Block until someone other than the author responds, then print the new feedback. Reviews from [reviewer agents](#reviewer-agents) come together, once all of them are done with the commit. Once per commit, it also returns when the reviewer agents are done with the head and it is your turn, to have the agent ask you to review it ("The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the reviewer to review it"), unless auto-publish is on. Once published, until it is merged or closed on GitHub too ("Merged on GitHub as e468a4e by laat"). Given several numbers, it returns the first with news and says which. Only the author can wait: waiting tells reviewer agents and auto-publish it is ready. `--timeout 10m` gives up after 10 minutes with exit code 124. `--download-images <dir>` saves the images in it as files |
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
@@ -219,7 +219,7 @@ published `github_state` (`open`, `merged` or `closed` on GitHub; null until laa
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
 `{"login": "codex", "max_iterations": 3}` for a limit of its own. A login matches a reviewer
-agent by its kind (`codex`, `claude`) or its name in settings; others are ignored and listed in the
+agent by its kind (`codex`, `claude`) or its name in settings (`codex-review`); others are ignored and listed in the
 response's `ignored_reviewers`. `"automatic_reviews": false` turns all of them off (`true`
 turns all of them on), and is refused together with a reviewer agent in `reviewers`. Left
 out, the settings decide.
@@ -311,7 +311,7 @@ them on under **Settings** (the gear in the header), where each has a section:
 | Setting | |
 |---|---|
 | Review automatically | It reviews when the author agent runs `laatsux pr wait`, before you look |
-| Name | Who its reviews are from: `codex` and `claude-review` by default |
+| Name | Who its reviews are from: `codex-review` and `claude-review` by default. An install that had Codex's former default, `codex`, moves to `codex-review` with its earlier reviews |
 | Model | Codex: any model from `codex debug models`. Claude: Fable, Opus, Sonnet or Haiku (the latest of each). Or the tool's own default |
 | Reasoning effort | The levels the chosen model supports, or the tool's default |
 | Max iterations | Automatic reviews per pull request, so the reviewer and the author agent do not go back and forth forever |

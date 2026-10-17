@@ -118,7 +118,7 @@ feedback, and the loop repeats until the user publishes it.
    they are done with your latest commit:
 
    ```
-   The reviewer agents are done with 3f2a1c9 (codex found nothing in 3f2a1c9); ask the reviewer to review it: <url>
+   The reviewer agents are done with 3f2a1c9 (codex-review found nothing in 3f2a1c9); ask the reviewer to review it: <url>
    ```
 
    It says so once per commit, when none of them reviews it or is about to: their review was
@@ -205,5 +205,5 @@ they review is the user's setting, unless they say otherwise when they ask you t
 comments, with `-f`, `-F`, `-X`, `--input` and `--jq`. GraphQL is not supported.
 
 Comments you make are attributed to your agent name: `claude` in Claude Code (`claude-review`
-is the Claude reviewer), `codex-agent` in Codex (`codex` is the Codex reviewer), `opencode` in
+is the Claude reviewer), `codex-agent` in Codex (`codex-review` is the Codex reviewer), `opencode` in
 opencode. Set `LAATSUX_ACTOR` to use another name, for example when acting as a reviewer agent.
