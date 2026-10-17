@@ -1,7 +1,8 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, RevisionRow } from '../db.ts';
-import { publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { githubStatus, publishFingerprint, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
@@ -10,6 +11,7 @@ import { renderMarkdown } from './markdown.ts';
 import { closingIssues, pullReferences, type ReferenceContext } from './references.ts';
 import {
   authorLink,
+  checksIndicator,
   copyButton,
   layout,
   markdownEditor,
@@ -59,10 +61,13 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   const heading = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
     return html`${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
-    <a class="pr-row-title" href="${href(p)}">${p.title}</a>`;
+    <a class="pr-row-title" href="${href(p)}">${p.title}</a> ${checksIndicator(p)}`;
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
+  /** Merged or closed on GitHub, once published. */
+  const onGithub = (p: PullRow) =>
+    p.github_state === 'merged' ? html`<span class="Label Label--merged">Merged</span>` : p.github_state === 'closed' && p.state !== 'closed' ? html`<span class="Label">Closed on GitHub</span>` : '';
 
   /** A pull request with what it waits for: whose turn it is and why, the decision, and what GitHub does not have yet. */
   const row = (p: PullRow) => {
@@ -78,6 +83,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${t.reasons.some((r) => r.kind === 'approved') ? html`<span class="Label Label--success">${icon('check')} Approved</span>` : ''}
     ${t.reasons.some((r) => r.kind === 'changes_requested') ? html`<span class="Label Label--danger">${icon('file-diff')} Changes requested</span>` : ''}
     ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
+    ${onGithub(p)}
     ${turnReasons(t, apiBase(p))}
     <div class="pr-row-meta">#${p.number} opened ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
@@ -93,7 +99,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
   <div class="pr-row-main">
     <span class="pr-row-heading">${heading(p)} <span class="pr-row-number">#${p.number}</span></span>
-    ${t.whose === 'none' ? html`<span class="pr-row-turn">${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
+    ${t.whose === 'none' ? html`<span class="pr-row-turn">${onGithub(p)} ${published(p)}</span>` : turnReasons(t, apiBase(p), ['author', 'reviewer_agent', 'unpublished'])}
   </div>
 </div>`;
   };
@@ -144,24 +150,32 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
  * The reasons of a Turn as a line of the list, those of the given kinds (by default all but the
  * labels). A failed reviewer agent gets a Retry button, which asks it to review at `apiBase`.
  */
-function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads']): Safe {
+function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'github']): Safe {
   const shown = t.reasons.filter((r) => kinds.includes(r.kind));
   if (!shown.length) return raw('');
   return html`<div class="pr-row-turn">${shown.map((r) => {
     const cls = reasonClass(r);
     const mark =
-      cls === 'failed' ? icon('x-circle-fill') : cls === 'running' || cls === 'waiting' ? icon('dot-fill', { cls: 'turn-pulse' }) : cls === 'working' ? icon('dot-fill') : '';
+      cls === 'failed'
+        ? icon('x-circle-fill')
+        : cls === 'running' || cls === 'waiting'
+          ? icon('dot-fill', { cls: 'turn-pulse' })
+          : cls === 'working'
+            ? icon('dot-fill')
+            : cls === 'github'
+              ? icon('mark-github')
+              : '';
     return html`<span class="turn-reason${cls ? ` turn-reason--${cls}` : ''}">${mark}${r.text}${r.since ? html`<span class="turn-since">, ${since(r.since)}</span>` : ''}${
       cls === 'failed' && r.engine ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.engine}">Retry</button>` : ''
     }</span>`;
   })}</div>`;
 }
 
-/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, or unresolved threads. */
+/** How a reason looks: an agent at work or waiting, an author working on feedback, a failure, unresolved threads, or something on GitHub. */
 function reasonClass(r: TurnReason): string {
   if (r.kind === 'author') return r.state === 'waiting' ? 'waiting' : r.state === 'stopped' ? '' : 'working';
   if (r.kind === 'reviewer_agent') return r.state === 'reviewing' || r.state === 'queued' ? 'running' : r.state === 'failed' ? 'failed' : '';
-  return r.kind === 'threads' ? 'threads' : '';
+  return r.kind === 'threads' ? 'threads' : r.kind === 'github' ? 'github' : '';
 }
 
 function capitalize(text: string): string {
@@ -240,7 +254,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
     <div class="gh-header-meta">
       ${stateBadge(pull, 'md', unpublished)}
       <div class="gh-header-meta-text">
-        ${authorLink(s, author)} ${pull.state === 'published' && !unpublished ? 'published' : 'wants to merge'} ${plural(commits.length, 'commit')} into
+        ${pull.github_state === 'merged' ? html`${githubUser(pull.github_closed_by)} merged` : html`${authorLink(s, author)} ${pull.state === 'published' && !unpublished ? 'published' : 'wants to merge'}`} ${plural(commits.length, 'commit')} into
         <span class="branch-name">${pull.base_ref}</span> from <span class="branch-name">${pull.head_ref}</span> ${copyButton(pull.head_ref, 'Copy head branch name')}
       </div>
     </div>
@@ -289,6 +303,13 @@ function commitList(p: PullPage, commits: Commit[]): Safe {
 /** A pull request on GitHub, as owner/repo#7. */
 function githubPull(url: string): Safe {
   return html`<a href="${url}" target="_blank" rel="noopener">${url.replace('https://github.com/', '').replace('/pull/', '#')}</a>`;
+}
+
+/** Someone on GitHub, known by login only: whoever merged or closed a published pull request there. */
+function githubUser(login: string | null, withAvatar = false): Safe {
+  if (!login) return html`Someone`;
+  const link = html`<a class="author" href="https://github.com/${login}" target="_blank" rel="noopener">${login}</a>`;
+  return withAvatar ? html`${avatar(`https://github.com/${login}.png?size=40`, login, 20, 'avatar-circle avatar-small')} ${link}` : link;
 }
 
 const AUTO_PUBLISH_OFF: Record<string, string> = {
@@ -354,6 +375,9 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         { cls: 'timeline-badge--danger' },
       );
     case 'auto_publish_disabled':
+      if (data.reason === 'merged' || data.reason === 'closed_on_github') {
+        return timelineBadge('clock', html`Auto-publish turned itself off when the pull request was ${data.reason === 'merged' ? 'merged' : 'closed'} on GitHub ${when}`);
+      }
       return timelineBadge('clock', html`${who} disabled auto-publish${AUTO_PUBLISH_OFF[data.reason] ?? ''} ${when}`);
     case 'auto_publish_failed':
       return timelineBadge(
@@ -362,6 +386,15 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
+    case 'merged': {
+      // `at` is when GitHub merged it; the event is from when laatsux learned of it.
+      const commit = data.commit
+        ? html`commit <a class="commit-link" href="${String(data.url).replace(/\/pull\/\d+$/, '')}/commit/${data.commit}" target="_blank" rel="noopener"><code>${shortSha(data.commit)}</code></a>`
+        : 'this pull request';
+      return timelineBadge('git-merge', html`${githubUser(data.by, true)} merged ${commit} into <span class="branch-name branch-name-sm">${p.pull.base_ref}</span> on GitHub ${relTime(data.at)}`, { cls: 'timeline-badge--done' });
+    }
+    case 'closed_on_github':
+      return timelineBadge('git-pull-request-closed', html`${githubUser(data.by, true)} closed this pull request on GitHub ${relTime(data.at)}`, { cls: 'timeline-badge--closed' });
     case 'convert_to_draft':
       return timelineBadge('git-pull-request-draft', html`${who} marked this pull request as draft ${when}`);
     case 'ready_for_review':
@@ -398,6 +431,15 @@ function lineDiff(a: string, b: string): Safe {
 
 async function mergeBox(p: PullPage): Promise<Safe> {
   const { s, pull, repo, viewer } = p;
+  if (pull.github_state === 'merged') {
+    const sha = pull.github_merge_sha ? html` as <code>${shortSha(pull.github_merge_sha)}</code>` : '';
+    return html`<div class="merge-box merge-box--merged">
+      <span class="merge-box-icon">${icon('git-merge', { size: 24 })}</span>
+      <div class="Box"><div class="merge-row merge-actions">${icon('git-merge', { cls: 'color-fg-done' })}<div class="flex-auto"><strong>Merged on GitHub</strong>
+        <div class="color-fg-muted">${githubUser(pull.github_closed_by)} merged it${sha} ${relTime(pull.github_closed_at)}. Conversations stay in laatsux.</div></div>
+        <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div></div>
+    </div>`;
+  }
   const submitted = p.reviews.filter((r) => r.state !== 'PENDING');
   const decision = submitted.length ? reviewDecision(submitted) : null;
   const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
@@ -425,6 +467,11 @@ async function mergeBox(p: PullPage): Promise<Safe> {
       <div class="Box">${rows}<div class="merge-row merge-actions"><div><strong>This staged pull request is closed.</strong></div>
         <button type="button" class="btn js-set-state" data-state="open">Reopen pull request</button></div></div>
     </div>`;
+  }
+
+  rows.push(...githubRows(p));
+  if (pull.github_state === 'closed') {
+    rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and laatsux follows it again in case it was reopened.</div></div></div>`);
   }
 
   const changed = s.unpublishedChanges(pull);
@@ -486,7 +533,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
       <div class="merge-buttons">
-        ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above">${icon('clock')} Publish when reviews are done</button>`}
+        ${auto ? '' : html`<button type="submit" class="btn" data-api="${p.apiBase}/auto-publish" data-method="PUT" data-toast="Auto-publish is on" title="Publish on its own once the reviewer agents are done with the latest commit and ${p.author.login} has answered them, with the options above, and keep publishing updates that way until the pull request is merged">${icon('clock')} Publish when reviews are done</button>`}
         <button type="submit" class="btn btn-primary btn-publish"${work ? raw(' data-confirm="Click again to publish anyway"') : ''}>${icon('mark-github')} ${verb}</button>
       </div>
     </form>`;
@@ -512,8 +559,9 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     }
   }
   if (merge) rows.push(autoMergeRow(p, merge));
-  return html`<div class="merge-box${pull.state === 'published' ? ' merge-box--published' : ''}">
-    <span class="merge-box-icon">${pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
+  const closedOnGithub = pull.github_state === 'closed';
+  return html`<div class="merge-box${closedOnGithub ? ' merge-box--closed' : pull.state === 'published' ? ' merge-box--published' : ''}">
+    <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : pull.state === 'published' ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
 }
@@ -538,15 +586,71 @@ function autoMergeRow(p: PullPage, merge: AutoMerge): Safe {
     <div class="color-fg-muted">${by.login} enabled it ${relTime(merge.at)}. GitHub merges it (${merge.method}) once its requirements are met, such as required checks, with whatever the branch has then: a push by someone with write access, such as an update published from here, keeps auto-merge on, and one by someone without turns it off.</div></div></div>`;
 }
 
+const CHECK_ICON: Record<GithubCheck['result'], [string, string]> = {
+  passed: ['check', 'color-fg-success'],
+  failed: ['x', 'color-fg-danger'],
+  pending: ['dot-fill', 'color-fg-attention'],
+  skipped: ['skip', 'color-fg-muted'],
+};
+
+/** How the published pull request stands on GitHub, as merge box rows: review, checks, threads, conflicts. */
+function githubRows(p: PullPage): Safe[] {
+  const g = githubStatus(p.pull);
+  if (!g) return [];
+  const base = p.pull.base_ref;
+  const row = (iconName: string, cls: string, title: Safe | string, text: Safe | string = '', more: Safe | string = '') =>
+    html`<div class="merge-row">${icon(iconName, { cls })}<div class="flex-auto"><strong>${title}</strong>${text ? html`<div class="color-fg-muted">${text}</div>` : ''}${more}</div></div>`;
+  const rows: Safe[] = [];
+  if (g.reviewDecision === 'CHANGES_REQUESTED') rows.push(row('x-circle-fill', 'color-fg-danger', 'Changes requested on GitHub'));
+  else if (g.reviewDecision === 'APPROVED') rows.push(row('check-circle-fill', 'color-fg-success', 'Approved on GitHub'));
+  const s = checksSummary(g);
+  const running = [g.runs.length ? `${plural(g.runs.length, 'workflow run')} still running` : null, g.copilotPending ? 'Copilot is reviewing' : null].filter(Boolean);
+  if (s.result || running.length) {
+    const counts = [s.failed ? `${s.failed} failing` : null, s.pending ? `${s.pending} in progress` : null, s.passed ? `${s.passed} successful` : null, s.skipped ? `${s.skipped} skipped` : null];
+    const [iconName, cls, title] =
+      s.result === 'failed'
+        ? ['x-circle-fill', 'color-fg-danger', 'Some checks were not successful']
+        : s.result === 'pending'
+          ? ['dot-fill', 'color-fg-attention', "Some checks haven't completed yet"]
+          : running.length
+            ? ['dot-fill', 'color-fg-attention', 'Still running on GitHub']
+            : ['check-circle-fill', 'color-fg-success', 'All checks have passed'];
+    const list = g.checks.length
+      ? html`<details class="github-checks"><summary class="btn-link">Show checks</summary><ul class="merge-checks">${g.checks.map((c) => {
+          const [name, color] = CHECK_ICON[c.result];
+          return html`<li>${icon(name, { cls: color })} <span class="flex-auto">${checkName(c)}</span>${c.url ? html` <a href="${c.url}" target="_blank" rel="noopener">Details</a>` : ''}</li>`;
+        })}</ul></details>`
+      : '';
+    // More checks than one page: the counts are of those shown, the result is GitHub's for all.
+    const partial = s.total > s.shown ? `of the first ${s.shown} of ${s.total} checks` : null;
+    const text = [[counts.filter(Boolean).join(', '), partial].filter(Boolean).join(' '), running.join(', ')].filter(Boolean).join('; ');
+    rows.push(row(iconName, cls, title, html`${text}. Checked on GitHub ${relTime(g.checkedAt)}.`, list));
+  }
+  if (g.threads.length) {
+    const items = g.threads.map((t) => {
+      const last = t.comments.at(-1);
+      const line = t.line ?? t.originalLine;
+      const said = last ? `${last.author}: ${last.body.replace(/\s+/g, ' ').slice(0, 120)}` : '';
+      return html`<li>${icon('comment', { cls: 'color-fg-muted' })} <span><a href="${t.url}" target="_blank" rel="noopener"><code>${t.path}${line ? `:${line}` : ''}</code></a> ${said}</span></li>`;
+    });
+    rows.push(row('comment-discussion', 'color-fg-attention', `${plural(g.threads.length, 'unresolved conversation')} on GitHub`, '', html`<ul class="merge-checks">${items}</ul>`));
+  }
+  if (g.conflicting) rows.push(row('alert', 'color-fg-danger', html`This branch has conflicts with <span class="branch-name branch-name-sm">${base}</span> on GitHub`, `The agent rebases it; publishing that update force-pushes.`));
+  else if (g.mergeStateStatus === 'BEHIND') rows.push(row('alert', 'color-fg-attention', html`This branch is behind <span class="branch-name branch-name-sm">${base}</span> on GitHub`));
+  return rows;
+}
+
 /** Auto-publish while it is on: what it is waiting for, and a way to turn it off. */
 function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const { s, pull, author } = p;
   const r = s.readiness(pull);
   const by = s.db.actorById(auto.by);
   const options = [auto.sign ? 'signed' : null, auto.draft && !pull.published_url ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
+  const upToDate = !!pull.published_url && !s.unpublishedChanges(pull).length;
   const item = (state: 'done' | 'waiting' | 'failed', text: Safe | string) =>
     html`<li>${state === 'done' ? icon('check', { cls: 'color-fg-success' }) : state === 'failed' ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' })} <span>${text}</span></li>`;
-  const items = r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
+  const items = upToDate ? [item('waiting', `GitHub has the latest commit: the next one pushed to ${pull.head_ref} is published once the agents are done with it`)] : [];
+  items.push(...r.reviewers.map(({ login, status }) => item(status.done ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author))));
   items.push(
     r.authorWaiting && !r.unseen
       ? item('done', `${author.login} is waiting for review, with all feedback seen`)
@@ -559,8 +663,8 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   if (merging && !merging.autoMerge) items.push(item('failed', `${p.repo.github_slug} does not allow auto-merge, so publishing will fail`));
   else if (merging && method && !merging.methods.includes(method)) items.push(item('failed', `${p.repo.github_slug} does not allow ${method} merges, so publishing will fail`));
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-done' })}<div class="flex-auto">
-    <strong>Auto-publish is on</strong>
-    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the latest commit${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them.${auto.autoMerge ? ` Then it enables auto-merge on GitHub (${method}).` : ''}</div>
+    <strong>Auto-publish is on until the pull request is merged</strong>
+    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes each update${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with it and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method}) after each` : ''}. Publishing by hand leaves it on.</div>
     <ul class="merge-checks">${items}</ul>
   </div>
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;

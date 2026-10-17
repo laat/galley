@@ -189,12 +189,14 @@
     codex_started: 'started reviewing',
     codex_failed: 'could not finish its review',
   };
-  // What laatsux did on its own on the viewer's behalf: their page has not heard of it.
+  // What laatsux did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
   const AUTOMATIC = {
     auto_published: 'Published to GitHub with auto-publish',
     auto_publish_failed: 'Auto-publish failed',
     auto_merge_enabled: 'Auto-merge enabled on GitHub',
     auto_merge_failed: 'Enabling auto-merge on GitHub failed',
+    merged: 'Merged on GitHub',
+    closed_on_github: 'Closed on GitHub',
   };
 
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);

@@ -56,7 +56,18 @@ export interface PullRow {
   author_waited_at: string | null;
   /** When the author was last handed feedback that asks something of it (`pr wait`, `pr view --comments`); its turn until its next action. */
   author_handed_at: string | null;
+  /** The published pull request on GitHub, as last seen there; null until laatsux has asked. */
+  github_state: GithubState | null;
+  /** When it was merged or closed on GitHub, and by whom (a GitHub login). */
+  github_closed_at: string | null;
+  github_closed_by: string | null;
+  /** The commit GitHub merged it as. */
+  github_merge_sha: string | null;
+  /** How it stands on GitHub while open there: a GithubStatus as JSON (see Service.githubStatus). */
+  github_status: string | null;
 }
+
+export type GithubState = 'open' | 'merged' | 'closed';
 
 export interface RevisionRow {
   id: number;
@@ -276,6 +287,11 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['review_runs', 'findings', 'INTEGER'],
   ['pulls', 'author_waited_at', 'TEXT'],
   ['pulls', 'author_handed_at', 'TEXT'],
+  ['pulls', 'github_state', 'TEXT'],
+  ['pulls', 'github_closed_at', 'TEXT'],
+  ['pulls', 'github_closed_by', 'TEXT'],
+  ['pulls', 'github_merge_sha', 'TEXT'],
+  ['pulls', 'github_status', 'TEXT'],
 ];
 
 export class Db {

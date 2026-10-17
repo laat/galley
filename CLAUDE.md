@@ -20,6 +20,7 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 ## Layout
 
 - `src/server/service.ts`: domain logic: repos, pulls, revisions (push detection), reviews, comments, line placement, wait, publish.
+- `src/server/github-follow.ts`: what laatsux reads about a published pull request on GitHub (merge, checks, review decision, threads, conflicts) to show the reviewer; `Service.followGithub` asks GitHub on a timer. The author agent hears only of a merge or close.
 - `src/server/diff.ts`: unified diff parser, `mapLine` for carrying comments across revisions.
 - `src/server/git.ts`: git plumbing, cached when all inputs are full SHAs.
 - `src/server/api.ts`: REST routes under `/api`.

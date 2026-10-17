@@ -5,7 +5,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve, type ServerType } from '@hono/node-server';
 import { Db } from './db.ts';
-import { Service, type ChangeEvent } from './service.ts';
+import { FOLLOW_BUSY_MS, Service, type ChangeEvent } from './service.ts';
 import { api } from './api.ts';
 import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
@@ -86,6 +86,8 @@ export interface StartOptions {
   codexBin?: string;
   viewerLogin?: string;
   pollMs?: number;
+  /** How often to see which repositories are due to be asked about their published pull requests (Service.followGithub). */
+  followMs?: number;
 }
 
 export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; close: () => Promise<void> }> {
@@ -138,12 +140,23 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   }, opts.pollMs ?? 2000);
   timer.unref();
 
+  // Published pull requests are followed on GitHub until they are merged or closed there.
+  let following: Promise<void> | null = null;
+  const followDue = () => {
+    following ??= service.followGithub({ due: true }).finally(() => (following = null));
+  };
+  followDue();
+  const follow = setInterval(followDue, opts.followMs ?? FOLLOW_BUSY_MS);
+  follow.unref();
+
   return {
     url,
     port,
     service,
     close: async () => {
       clearInterval(timer);
+      clearInterval(follow);
+      await following;
       // Running reviews and publishes write to the database when they end, so they go first.
       await autoPublisher.stop();
       await service.codex?.stop();

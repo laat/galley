@@ -329,6 +329,8 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .State--draft { background: var(--neutral-emphasis); }
 .State--closed { background: var(--danger-emphasis); }
 .State--published { background: var(--done-emphasis); }
+.State--merged { background: var(--done-emphasis); }
+.Label--merged { color: var(--done); border-color: var(--done); }
 
 .branch-name {
   display: inline-block;
@@ -458,6 +460,7 @@ kbd {
 .turn-reason--working { color: var(--attention); }
 .turn-reason--failed { color: var(--danger); font-weight: 600; }
 .turn-reason--threads { color: var(--attention); }
+.turn-reason--github { color: var(--danger); }
 .turn-since { color: var(--fg-muted); font-weight: 400; white-space: nowrap; }
 .turn-pulse { animation: pulse 1.6s ease-in-out infinite; }
 .blankslate { padding: 48px 32px; text-align: center; color: var(--fg-muted); }
@@ -661,8 +664,9 @@ kbd {
 }
 .merge-box--published .merge-box-icon { background: var(--done-emphasis); }
 .merge-box--closed .merge-box-icon { background: var(--danger-emphasis); }
+.merge-box--merged .merge-box-icon { background: var(--done-emphasis); }
 .merge-box .Box { flex: 1; min-width: 0; }
-.merge-box--published .Box { border-color: var(--done-emphasis); }
+.merge-box--published .Box, .merge-box--merged .Box { border-color: var(--done-emphasis); }
 .merge-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border-muted); }
 .merge-row:first-child { border-top: 0; }
 .merge-row > .octicon { margin-top: 3px; }
@@ -674,6 +678,9 @@ kbd {
 .merge-buttons .btn { justify-content: center; }
 .merge-checks { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; }
 .merge-checks li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.github-checks { margin-top: 4px; font-size: 13px; }
+.checks-indicator { margin-left: 2px; }
+.checks-indicator .octicon { vertical-align: text-bottom; }
 .merge-error { margin: 8px 0 0; max-height: 200px; overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
 .btn-publish { background: var(--done-emphasis); }
 .btn-publish:hover { background: #7b47d8; }

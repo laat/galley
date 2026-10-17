@@ -94,15 +94,15 @@ export class Client {
     }
   }
 
-  async json<T = any>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.raw(method, path, { body });
+  async json<T = any>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const res = await this.raw(method, path, { body, signal });
     const text = await res.text();
     if (!res.ok) throw new ApiError(res.status, text);
     return (text ? JSON.parse(text) : null) as T;
   }
 
-  get<T = any>(path: string): Promise<T> {
-    return this.json<T>('GET', path);
+  get<T = any>(path: string, signal?: AbortSignal): Promise<T> {
+    return this.json<T>('GET', path, undefined, signal);
   }
 
   /** Register the repository at `cwd` with the server and return its owner/name. */

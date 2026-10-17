@@ -10,8 +10,9 @@ type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
   'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
-  'createdAt', 'deletions', 'files', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'number', 'publishedUrl',
-  'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
+  'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'latestReviews', 'mergeCommit', 'mergeStateStatus',
+  'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'statusCheckRollup',
+  'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
 ];
 
 // gh flags that have no meaning here. They are accepted so habitual invocations keep working.
@@ -87,7 +88,7 @@ async function resolvePull(client: Client, cwd: string, repoFlag: string | undef
   const branch = arg ?? currentBranch(cwd);
   if (!branch) throw new CliError('could not determine the current branch; pass a pull request number');
   const list = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=all&head=${encodeURIComponent(branch)}&fields=number,state`);
-  const pick = list.find((p) => p.state !== 'CLOSED') ?? list[0];
+  const pick = list.find((p) => p.state !== 'CLOSED' && p.state !== 'MERGED') ?? list[0];
   if (!pick) throw new CliError(`no pull requests found for branch "${branch}"`);
   return { repo, number: pick.number };
 }
@@ -215,7 +216,7 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
     openBrowser(client.base + `/${repo.owner}/${repo.name}`);
     return 0;
   }
-  const state = v.state === 'merged' ? 'published' : String(v.state);
+  const state = String(v.state);
   const fields = v.json !== undefined ? checkFields(String(v.json), GH_FIELDS) : ['number', 'title', 'headRefName', 'state', 'createdAt', 'isDraft', 'author'];
   const q = new URLSearchParams({ state, limit: String(v.limit), fields: [...new Set([...fields, 'isDraft', 'author', 'unpublishedChanges'])].join(',') });
   if (v.head) q.set('head', String(v.head));
@@ -236,7 +237,7 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
     const w = Math.max(...pulls.map((p) => p.title.length));
     for (const p of pulls) {
       // A published pull request with an update not on GitHub yet shows as open, as in the web UI.
-      const published = p.state === 'PUBLISHED' && !p.unpublishedChanges?.length;
+      const published = (p.state === 'PUBLISHED' && !p.unpublishedChanges?.length) || p.state === 'MERGED';
       const num = p.state === 'CLOSED' ? c.red(`#${p.number}`) : published ? c.magenta(`#${p.number}`) : p.isDraft ? c.gray(`#${p.number}`) : c.green(`#${p.number}`);
       out(`${num}\t${p.title.padEnd(w)}  ${c.cyan(p.headRefName)}  ${c.gray(p.createdAt.slice(0, 10))}`);
     }
@@ -458,7 +459,9 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
   out(mine ? `  #${mine.number}  ${mine.title} [${mine.headRefName}]\n    - ${mine.reviewDecision.toLowerCase().replace('_', ' ')}${mine.turn ? `\n    - ${turnLine(mine.turn)}` : ''}` : `  There is no pull request associated with [${branch}]`);
   out('\n' + c.bold('Open staged pull requests'));
   if (!pulls.length) out('  You have no open pull requests');
-  for (const p of pulls) out(`  #${p.number}  ${p.title} [${p.headRefName}]${p.state === 'PUBLISHED' ? (p.unpublishedChanges?.length ? ' (update not published)' : ' (published)') : ''}`);
+  const label = (p: any) =>
+    p.state === 'PUBLISHED' ? (p.unpublishedChanges?.length ? ' (update not published)' : ' (published)') : p.state === 'MERGED' ? ' (merged on GitHub)' : p.state === 'CLOSED' ? ' (closed on GitHub)' : '';
+  for (const p of pulls) out(`  #${p.number}  ${p.title} [${p.headRefName}]${label(p)}`);
   out('');
   return 0;
 }
@@ -540,30 +543,38 @@ function transient(e: unknown): boolean {
 
 async function wait(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v, positionals } = parse(args, { timeout: { type: 'string' }, 'download-images': { type: 'string' } });
-  const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  const repoFlag = v.repo as string | undefined;
+  // Several pull requests, for an agent that orchestrates others: whichever has news first.
+  const targets = positionals.length
+    ? await Promise.all(positionals.map((arg) => resolvePull(client, cwd, repoFlag, arg)))
+    : [await resolvePull(client, cwd, repoFlag, undefined)];
+  const names = targets.map((t) => `${t.repo.owner}/${t.repo.name}#${t.number}`).join(', ');
+  const all = targets.length > 1 ? positionals.join(' ') : String(targets[0].number);
   const deadline = v.timeout ? Date.now() + parseDuration(String(v.timeout)) : Infinity;
-  if (isTTY) err(`Waiting for feedback on ${t.repo.owner}/${t.repo.name}#${t.number}…`);
+  if (isTTY) err(`Waiting for feedback on ${names}…`);
   while (true) {
     const left = Math.ceil((deadline - Date.now()) / 1000);
     if (left <= 0) {
-      err(`No feedback yet on ${t.repo.owner}/${t.repo.name}#${t.number} (timed out). Run \`laatsux pr wait ${t.number}\` again to keep waiting.`);
+      err(`No feedback yet on ${names} (timed out). Run \`laatsux pr wait ${all}\` again to keep waiting.`);
       return 124;
     }
-    let r: any;
-    try {
-      r = await client.get(`${pullPath(t)}/wait?timeout=${Math.min(left, 240)}`);
-    } catch (e) {
+    const first = await firstNews(client, targets, Math.min(left, 240));
+    if (!first) continue;
+    if ('error' in first) {
       // The server went away (refused) or restarted under us (the open request was dropped):
       // give it a moment and keep waiting.
-      if (transient(e)) {
+      if (transient(first.error)) {
         await new Promise((res) => setTimeout(res, 3000));
         continue;
       }
-      throw e;
+      throw first.error;
     }
-    if (r.status === 'timeout') continue;
+    const { t, r } = first;
+    const others = positionals.filter((_, i) => targets[i] !== t);
     const url = `${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`;
     const pr = r.pr;
+    // Waiting on several: say which one this is about.
+    if (others.length) out(`${c.bold(`${t.repo.owner}/${t.repo.name}#${t.number}`)} (${pr.headRefName}): ${url}\n`);
     const fresh = {
       reviews: new Set<number>(r.reviews),
       comments: new Set<number>(r.comments.filter((cm: any) => cm.kind === 'issue').map((cm: any) => cm.id)),
@@ -580,7 +591,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
-    const getIt = `run \`laatsux pr wait ${t.number}\` to get ${atWork.length > 1 ? 'their reviews' : 'its review'}.`;
+    const getIt = `run \`laatsux pr wait ${all}\` to get ${atWork.length > 1 ? 'their reviews' : 'its review'}.`;
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
@@ -594,14 +605,35 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         await new Promise((res) => setTimeout(res, 3000));
       }
     }
+    // Done with, here or on GitHub: every wait on it says so, so leave it out of the next one.
+    const rest = others.length ? ` Wait on the others with \`laatsux pr wait ${others.join(' ')}\`.` : '';
+    if (r.status === 'merged') {
+      const sha = pr.mergeCommit?.oid ? ` as ${String(pr.mergeCommit.oid).slice(0, 7)}` : '';
+      out(`Merged on GitHub${sha}${r.github_closed_by ? ` by ${r.github_closed_by}` : ''}: ${r.published_url}`);
+      out(
+        c.gray(
+          `Next: fast-forward your ${pr.baseRefName} to the merge, remove the worktree and the branch ${pr.headRefName}, ` +
+            `and rebase the other open pull requests that touch the same files.${rest}`,
+        ),
+      );
+      return 0;
+    }
+    if (r.status === 'closed_on_github') {
+      out(`Closed on GitHub without merging${r.github_closed_by ? ` by ${r.github_closed_by}` : ''}: ${r.published_url}`);
+      if (rest) out(c.gray(rest.trim()));
+      return 0;
+    }
     if (r.status === 'published') {
       out(`Published to GitHub: ${r.published_url}`);
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
       else out(text ? 'Published, but read the feedback above: the reviewer may still want changes.' : 'The reviewer is done with this pull request.');
+      out(c.gray(`Run \`laatsux pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      if (pr.autoPublishRequest) out(c.gray('Auto-publish stays on until the merge: it publishes each update once the reviewer agents are done with it and you are waiting.'));
       return 0;
     }
     if (r.status === 'closed') {
       out(`The reviewer closed ${url} without publishing it.`);
+      if (rest) out(c.gray(rest.trim()));
       return 0;
     }
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
@@ -609,13 +641,13 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (pr.reviewDecision === 'APPROVED' && !unresolved.length && atWork.length) {
       out(c.gray(`${stillReviewing(pr)}; ${getIt}`));
     } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
-      out(c.gray(`Approved with nothing left open. Run \`laatsux pr wait ${t.number}\` to wait until the reviewer publishes it.`));
+      out(c.gray(`Approved with nothing left open. Run \`laatsux pr wait ${all}\` to wait until the reviewer publishes it.`));
     } else {
       out(
         c.gray(
           `Address the feedback. Reply to each thread and resolve the ones you fixed with ` +
             `\`laatsux pr comment ${t.number} --reply-to <thread> --resolve -b "…"\` ` +
-            `(leave out --resolve to keep a thread open for the reviewer), then run \`laatsux pr wait ${t.number}\` again.`,
+            `(leave out --resolve to keep a thread open for the reviewer), then run \`laatsux pr wait ${all}\` again.`,
         ),
       );
     }
@@ -625,12 +657,34 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(
         c.gray(
           `Auto-publish is on (${auto.enabledBy.login} turned it on): laatsux publishes this pull request once the reviewer agents are done with ` +
-            `your latest commit and you are waiting in \`laatsux pr wait ${t.number}\` with the feedback addressed` +
-            `${auto.autoMerge ? ', and turns on auto-merge on GitHub' : ''}.`,
+            `your latest commit and you are waiting in \`laatsux pr wait ${all}\` with the feedback addressed, and each update after that until it is merged` +
+            `${auto.autoMerge ? ', turning on auto-merge on GitHub each time' : ''}.`,
         ),
       );
     }
     return 0;
+  }
+}
+
+/**
+ * One long poll per pull request. The first answer with news (or an error) wins, and the other
+ * polls are dropped: news they had is not confirmed as seen, so the next wait brings it again.
+ * Null when every poll timed out.
+ */
+async function firstNews(client: Client, targets: Target[], seconds: number): Promise<{ t: Target; r: any } | { t: Target; error: unknown } | null> {
+  const stop = new AbortController();
+  try {
+    return await new Promise((resolve) => {
+      let pending = targets.length;
+      for (const t of targets) {
+        client.get(`${pullPath(t)}/wait?timeout=${seconds}`, stop.signal).then(
+          (r) => (r.status !== 'timeout' ? resolve({ t, r }) : --pending === 0 && resolve(null)),
+          (error) => resolve({ t, error }),
+        );
+      }
+    });
+  } finally {
+    stop.abort();
   }
 }
 
@@ -657,7 +711,8 @@ COMMANDS (same flags as gh)
   status:      Show the pull request for the current branch
 
 LAATSUX COMMANDS
-  wait:        Block until the reviewer responds, then print the feedback
+  wait:        Block until the reviewer responds, then print the feedback. After publishing,
+               until it is merged or closed on GitHub. Several numbers: whichever is first
   publish:     Push the branch and open the pull request on GitHub (--auto: once the
                reviews are done; --auto-merge: and turn on auto-merge there)
 
