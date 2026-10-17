@@ -166,11 +166,12 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     </div>
     ${rows.length ? rows : empty}
   </div>`;
-  // The front page has your repositories beside the list.
+  // The front page has your repositories at the left of the page and the list in the rest, like GitHub's dashboard.
+  // A repository's list, and the front page without repositories, are centered like the pull request pages.
   const sidebar = opts.repo ? null : repoSidebar(s, all, yours);
   const body = sidebar
-    ? html`<div class="container container-xl dashboard">${sidebar}<div class="dashboard-main">${list}</div></div>`
-    : html`<div class="container container-lg">${list}</div>`;
+    ? html`<div class="container container-full dashboard">${sidebar}<div class="dashboard-main">${list}</div></div>`
+    : html`<div class="container container-xl">${list}</div>`;
   // The tab's title counts the pull requests waiting for you, as a mail client counts unread mail.
   const title = opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux';
   return layout(s, {

@@ -437,8 +437,9 @@ kbd {
 .pr-row--compact .pr-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
 .pr-row--compact .pr-row-title, .pr-row--compact .pr-row-repo { font-size: 14px; }
 .pr-row--compact .pr-row-turn { margin-top: 0; }
-/* The front page: your repositories beside the list, above it on narrow screens. */
-.dashboard { display: grid; grid-template-columns: 256px minmax(0, 1fr); gap: 32px; align-items: start; }
+/* The front page: your repositories at the left of the page, in line with the header's logo, and
+   the list in the rest; above it on narrow screens. */
+.dashboard { display: grid; grid-template-columns: 256px minmax(0, 1fr); gap: 24px; align-items: start; }
 .dashboard-sidebar { padding-top: 24px; min-width: 0; }
 .dashboard-sidebar-title { margin: 6px 0 8px; font-size: 14px; font-weight: 600; line-height: 24px; }
 .repo-filter { margin-bottom: 8px; padding: 3px 8px; font-size: 12px; }
