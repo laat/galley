@@ -42,6 +42,8 @@ export function api(s: Service): Hono {
     // A reviewer agent posts from inside the server; anyone else using its name would be mistaken for it.
     const reviewer = s.reviewerAgents().find((r) => r.actor().login === login);
     if (reviewer) throw new HttpError(409, `"${login}" is the name of the ${reviewer.label} reviewer. Set LAATSUX_ACTOR to another name.`);
+    // So would a custom reviewer's bot while it does not run (its file deleted, or wrong), and its approvals would count as yours.
+    if (s.custom?.heldBy(login)) throw new HttpError(409, `"${login}" is the name of a custom reviewer. Set LAATSUX_ACTOR to another name.`);
     const type = (c.req.header('x-laatsux-actor-type') as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
     return s.db.actor(login, type === 'User' ? 'User' : 'Bot');
   };
@@ -79,17 +81,18 @@ export function api(s: Service): Hono {
     return a;
   };
 
-  /** The reviewer agent of a kind (`codex`, `claude`) in the path. */
-  const reviewerOf = (c: Context) => {
-    const kind = c.req.param('kind');
-    const reviewer = s.reviewerAgents().find((r) => r.engine === kind);
+  /** The reviewer agent in the path: of a kind (`codex`, `claude`), or a custom reviewer by name; given a repository, one that reviews it. */
+  const reviewerOf = (c: Context, repo?: RepoRow) => {
+    const kind = c.req.param('kind')!;
+    const reviewer = s.reviewerAgents().find((r) => r.key === kind);
     if (!reviewer) throw new HttpError(REVIEWER_KINDS.includes(kind as ReviewerKind) ? 501 : 404, `this server has no ${kind} reviewer`);
+    if (repo && !reviewer.appliesTo(repo)) throw new HttpError(404, `${kind} does not review ${repo.github_slug ?? 'repositories without a GitHub remote'}`);
     return reviewer;
   };
 
   app.get('/settings', async (c) => {
     const catalogs: Record<string, unknown> = {};
-    for (const r of s.reviewerAgents()) Object.assign(catalogs, { [`${r.engine}Models`]: await r.models(), [`${r.engine}Defaults`]: r.defaults() });
+    for (const r of [s.codex, s.claude]) if (r) Object.assign(catalogs, { [`${r.engine}Models`]: await r.models(), [`${r.engine}Defaults`]: r.defaults() });
     return c.json({ ...readSettings(s.db), ...catalogs });
   });
 
@@ -112,6 +115,33 @@ export function api(s: Service): Hono {
     // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
     for (const id of s.waiters.keys()) reviewer.consider(id);
     return c.json(settings);
+  });
+
+  // Custom reviewers (an extension): one definition file each, as GET gives it (with its `path`,
+  // its bot's `login`, and the `error` that keeps it from running). The keys are the file's.
+  const custom = () => {
+    if (!s.custom) throw new HttpError(501, 'this server has no custom reviewers');
+    return s.custom;
+  };
+  app.get('/settings/reviewers', (c) => c.json(custom().entries().map((f) => custom().json(f))));
+  app.get('/settings/reviewers/:name', (c) => {
+    const f = custom().entry(c.req.param('name'));
+    if (!f) throw new HttpError(404, `no reviewer called ${c.req.param('name')}`);
+    return c.json(custom().json(f));
+  });
+  app.post('/settings/reviewers', async (c) => {
+    human(c);
+    return c.json(custom().json(await custom().create(await body(c))), 201);
+  });
+  // Fields left out stay as they are; a reviewer keeps its name.
+  app.patch('/settings/reviewers/:name', async (c) => {
+    human(c);
+    return c.json(custom().json(await custom().update(c.req.param('name'), await body(c))));
+  });
+  app.delete('/settings/reviewers/:name', (c) => {
+    human(c);
+    custom().remove(c.req.param('name'));
+    return c.body(null, 204);
   });
 
   app.put('/settings/publish', async (c) => {
@@ -211,7 +241,7 @@ export function api(s: Service): Hono {
     const repo = s.repo(c.req.param('owner'), c.req.param('repo'));
     const b = await body(c);
     // laatsux extension: `reviewers` and `automatic_reviews` decide the reviewer agents for this pull request.
-    const review = s.reviewRequest(b.reviewers, b.automatic_reviews);
+    const review = s.reviewRequest(repo, b.reviewers, b.automatic_reviews);
     const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns }, actor(c));
     return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}) }, 201);
   });
@@ -366,18 +396,18 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
-  // laatsux extension: ask a reviewer agent (`codex`, `claude`) to review now, and list its runs.
+  // laatsux extension: ask a reviewer agent (`codex`, `claude`, or a custom reviewer by name) to review now, and list its runs.
   app.post('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     human(c);
-    const reviewer = reviewerOf(c);
     const x = await ctx(c);
+    const reviewer = reviewerOf(c, x.repo);
     return c.json({ run_id: reviewer.request(x) }, 202);
   });
   // laatsux extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
   app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     human(c);
-    const reviewer = reviewerOf(c);
     const x = await ctx(c);
+    const reviewer = reviewerOf(c, x.repo);
     const b = await body(c);
     return c.json(reviewer.configure(x, { enabled: b.enabled, max_iterations: b.max_iterations }));
   });
@@ -395,8 +425,10 @@ export function api(s: Service): Hono {
   });
   app.get('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
     const x = await ctx(c, { sync: false });
-    const reviewer = s.reviewerAgents().find((r) => r.engine === c.req.param('kind'));
+    const reviewer = s.reviewerAgents().find((r) => r.key === c.req.param('kind'));
     if (!reviewer) return c.json({ running: false, runs: [] });
+    // One that does not review the repository has nothing here, as for POST and PATCH.
+    reviewerOf(c, x.repo);
     // `usage`, what a run cost as its tool reported it (Claude does), is JSON in the database.
     const runs = reviewer.runs(x.pull).map((r) => ({ ...r, usage: r.usage ? JSON.parse(r.usage) : null }));
     return c.json({ running: reviewer.isRunning(x.pull.id), runs, ...reviewer.config(x.pull) });

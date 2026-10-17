@@ -11,6 +11,8 @@ import { web } from './web/routes.ts';
 import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
 import { ClaudeReviewer } from './reviewers/claude.ts';
+import { CustomReviewers } from './reviewers/custom.ts';
+import { configDir } from '../config.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
@@ -96,6 +98,8 @@ export interface StartOptions {
   claudeBin?: string;
   /** Stands in for sandbox-exec, which installs dependencies for the Claude reviewer (in tests). */
   sandboxExec?: string;
+  /** Where the custom reviewers' definitions are: by default reviewers/ in configDir(). */
+  reviewersDir?: string;
   viewerLogin?: string;
   pollMs?: number;
   /** How often to see which repositories are due to be asked about their published pull requests (Service.followGithub), or to have their base branches fetched (Service.fetchAllBases). */
@@ -139,7 +143,11 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
   service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
   service.claude = new ClaudeReviewer(service, opts.claudeBin ?? process.env.LAATSUX_CLAUDE ?? 'claude', opts.sandboxExec);
+  // Custom reviewers run with Codex's and Claude's tools.
+  service.custom = new CustomReviewers(service, opts.reviewersDir ?? join(configDir(), 'reviewers'), { codex: service.codex.tool, claude: service.claude.tool });
+  service.custom.load();
   for (const reviewer of service.reviewerAgents()) reviewer.start();
+  service.custom.start();
   const autoPublisher = new AutoPublisher(service);
   autoPublisher.start();
   app = createApp(service, { allowedHosts, uploadsDir: join(opts.dataDir, 'uploads') });
@@ -188,6 +196,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
       service.stopping = true;
       service.bus.emit('change', { pullId: null, type: 'stopping', actor: 'laatsux' } satisfies ChangeEvent);
     }
+    // Changes to the definitions start and stop no more reviewers.
+    service.custom?.stop();
     await Promise.all(service.reviewerAgents().map((r) => r.stop(graceMs)));
     clearInterval(timer);
     clearInterval(follow);

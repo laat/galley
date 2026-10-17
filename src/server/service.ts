@@ -7,6 +7,7 @@ import { Repo, run, githubSlug, type Commit, type RawCommit, type RunResult } fr
 import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
 import type { ClaudeReviewer } from './reviewers/claude.ts';
+import type { CustomReviewers } from './reviewers/custom.ts';
 import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
@@ -85,7 +86,7 @@ export interface Thread {
 export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
 
 /** A pull request's own reviewer agent settings, as stored; left out, a column follows the setting. */
-export type ReviewColumns = Partial<Pick<PullRow, 'codex_enabled' | 'codex_max_iterations' | 'claude_enabled' | 'claude_max_iterations'>>;
+export type ReviewColumns = Partial<Pick<PullRow, 'codex_enabled' | 'codex_max_iterations' | 'claude_enabled' | 'claude_max_iterations' | 'reviewer_overrides'>>;
 
 const EVENT_STATE: Record<ReviewEvent, ReviewState> = {
   COMMENT: 'COMMENTED',
@@ -162,7 +163,8 @@ export interface AgentsDone {
 
 /** Where a reviewer agent stands with a pull request's head commit. */
 export interface HeadStatus {
-  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'failed' | 'cancelled' | 'clean' | 'capped' | 'off';
+  /** `approved`: it found nothing and approved (custom reviewers that may), which counts as done like `clean`, and for nobody's decision. */
+  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'failed' | 'cancelled' | 'clean' | 'approved' | 'capped' | 'off';
   /** Nothing more is coming from the reviewer for this commit. */
   done: boolean;
   /** The commit this is about: the head, or the earlier commit a running review started on. */
@@ -175,6 +177,8 @@ export interface HeadStatus {
   cancelled?: CancelReason | null;
   /** Automatic reviews of the pull request so far, and how many it gets. */
   automatic?: { used: number; limit: number };
+  /** It reviews the title, description and commit messages the head has, not the commit's code. */
+  description?: boolean;
 }
 
 /**
@@ -187,7 +191,8 @@ const TO_REVIEW: HeadStatus['state'][] = ['reviewing', 'queued', 'interrupted', 
 
 /** Whether the agents are done with a pull request, so the reviewer can take it from here. */
 export interface Readiness {
-  reviewers: { login: string; engine: string; status: HeadStatus }[];
+  /** `reviewer`: what the API calls it (Reviewer.key). */
+  reviewers: { login: string; engine: string; reviewer: string; status: HeadStatus }[];
   /** The author is running `pr wait`. */
   authorWaiting: boolean;
   /** Reviews and comments the author has not been shown. */
@@ -221,8 +226,10 @@ export interface TurnReason {
   since?: string | null;
   /** The author's AuthorState, or a reviewer agent's HeadStatus state. */
   state?: AuthorState | HeadStatus['state'];
-  /** A reviewer agent's engine, for asking it to review again. */
+  /** A reviewer agent's engine. */
   engine?: string;
+  /** A reviewer agent as the API calls it (`…/reviewers/{reviewer}`), for asking it to review again. */
+  reviewer?: string;
 }
 
 /**
@@ -347,6 +354,8 @@ export class Service {
   /** Codex and Claude as reviewer agents, when the server runs them. */
   codex: CodexReviewer | null = null;
   claude: ClaudeReviewer | null = null;
+  /** The user's own reviewer agents, from their definition files. */
+  custom: CustomReviewers | null = null;
   /** The server is stopping, once the reviews running now have posted (see startServer's close). */
   stopping = false;
   /** Number of `pr wait` calls currently blocked, per pull id. */
@@ -378,11 +387,14 @@ export class Service {
     this.viewerLogin = login;
     this.db.setMeta('viewer_login', login);
     this.claimViewerLogin();
+    // A custom reviewer by the human's name can not have it now.
+    this.custom?.load();
   }
 
   /** The human's login belongs to the human: a reviewer bot holding it moves to another name. */
   claimViewerLogin(): void {
     for (const r of this.reviewerAgents()) r.releaseName(this.viewerLogin);
+    this.custom?.releaseName(this.viewerLogin);
     this.viewer();
   }
 
@@ -717,12 +729,13 @@ export class Service {
    * when one is given; `automatic_reviews` turns all of them on or off. Logins that no reviewer
    * agent answers to are ignored, like gh's other reviewers, and returned so the caller can say so.
    */
-  reviewRequest(reviewers: unknown, automatic: unknown): { columns: ReviewColumns; ignored: string[] } {
+  reviewRequest(repo: RepoRow, reviewers: unknown, automatic: unknown): { columns: ReviewColumns; ignored: string[] } {
     if (automatic !== undefined && typeof automatic !== 'boolean') throw new HttpError(422, 'automatic_reviews must be true or false');
     if (reviewers !== undefined && !Array.isArray(reviewers)) throw new HttpError(422, 'reviewers must be an array');
-    const agents = this.reviewerAgents();
+    // Those that review the repository; a custom reviewer of other repositories is no reviewer here.
+    const agents = this.reviewerAgents().filter((a) => a.appliesTo(repo));
     const columns: ReviewColumns = {};
-    if (automatic !== undefined) for (const agent of agents) Object.assign(columns, agent.columns({ enabled: automatic }));
+    if (automatic !== undefined) for (const agent of agents) Object.assign(columns, agent.columns({ enabled: automatic }, columns));
     const ignored: string[] = [];
     for (const r of reviewers ?? []) {
       // A login, as in GitHub's requested reviewers, or { login, max_iterations }.
@@ -735,7 +748,7 @@ export class Service {
         continue;
       }
       if (automatic === false) throw new HttpError(422, `${name} was asked to review, but automatic reviews are turned off`);
-      Object.assign(columns, agent.columns({ enabled: true, max_iterations }));
+      Object.assign(columns, agent.columns({ enabled: true, max_iterations }, columns));
     }
     return { columns, ignored };
   }
@@ -795,6 +808,7 @@ export class Service {
         created_at: ts,
         updated_at: ts,
         author_seen_at: ts,
+        messages_sha: messagesSha(commits),
         ...input.reviews,
       });
       this.db.insert('revisions', { pull_id: id, seq: 1, head_sha: headSha, base_sha: mergeBase, before_sha: null, forced: 0, actor_id: actor.id, created_at: ts });
@@ -875,10 +889,15 @@ export class Service {
     const baseTip = await this.baseCommit(repo, pull.base_ref);
     this.observeBase(pull.id, baseTip);
     const mergeBase = (baseTip && (await git.mergeBase(baseTip, head))) ?? pull.base_sha;
-    if (head === pull.head_sha && mergeBase === pull.base_sha) return current();
+    if (head === pull.head_sha && mergeBase === pull.base_sha) {
+      // Hashed once for a pull request staged before laatsux hashed them.
+      if (pull.messages_sha === null) this.db.update('pulls', pull.id, { messages_sha: messagesSha(await git.log(mergeBase, head)) });
+      return current();
+    }
 
     const forced = !(await git.isAncestor(pull.head_sha, head));
     const newCommits = forced ? [] : (await git.log(pull.head_sha, head)).map((c) => c.sha);
+    const messages = messagesSha(await git.log(mergeBase, head));
     const author = this.db.actorById(pull.author_id);
     const ts = now();
     const seq = this.db.transaction(() => {
@@ -886,12 +905,16 @@ export class Service {
       if (current().github_state === 'merged') return null;
       const seq = this.db.get<{ n: number }>('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM revisions WHERE pull_id = ?', pull.id)!.n;
       this.db.insert('revisions', { pull_id: pull.id, seq, head_sha: head, base_sha: mergeBase, before_sha: pull.head_sha, forced: forced ? 1 : 0, actor_id: author.id, created_at: ts });
-      this.db.update('pulls', pull.id, { head_sha: head, base_sha: mergeBase, updated_at: ts });
+      this.db.update('pulls', pull.id, { head_sha: head, base_sha: mergeBase, messages_sha: messages, updated_at: ts });
       this.addEvent(pull, author, 'pushed', { before: pull.head_sha, after: head, forced, commits: newCommits, base_before: pull.base_sha, base_after: mergeBase }, ts);
       return seq;
     });
     if (seq === null) return current();
+    // A review of what changed: the code, or (reviewers of the description) its commit messages,
+    // which a base that moved changes too, when it takes in some of the commits or is another.
     if (head !== pull.head_sha) this.cancelReviews(current(), 'pushed');
+    else if (messages !== pull.messages_sha) this.cancelReviews(current(), 'base_moved');
+    if (messages !== pull.messages_sha) this.reconsiderDescription(current());
     await this.pin(git, pull, seq, head);
     // Whether the new head merges cleanly: a waiting author hears of it when it is known, since it
     // does not wake for its own push.
@@ -1197,6 +1220,11 @@ export class Service {
     let updated = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
     if (Object.keys(changes).length) {
       if (changes.state === 'closed') this.cancelReviews(updated, 'closed');
+      else if (changes.title !== undefined || changes.body !== undefined) {
+        // A review of the title and description that were (Reviewer.cancel).
+        this.cancelReviews(updated, 'edited');
+        this.reconsiderDescription(updated);
+      }
       if (changes.base_ref || changes.state) updated = await this.sync(updated);
       this.emit(pull.id, 'updated', actor);
     }
@@ -1777,14 +1805,27 @@ export class Service {
     if (working) this.emit(pull.id, 'waiting', author);
   }
 
-  /** The reviewer agents this server runs: each one actor that reviews on its own. */
+  /** The reviewer agents this server runs, Codex, Claude and the custom ones: each one actor that reviews on its own. */
   reviewerAgents(): Reviewer[] {
-    return [this.codex, this.claude].filter((r) => r !== null);
+    return [this.codex, this.claude, ...(this.custom?.list() ?? [])].filter((r) => r !== null);
+  }
+
+  /** The reviewer agents that review the pull request: custom reviewers review the repositories they name. */
+  reviewersFor(pull: PullRow): Reviewer[] {
+    return this.reviewerAgents().filter((r) => r.appliesToPull(pull));
   }
 
   /** How many reviews the reviewer agents are running, on all pull requests. */
   reviewsRunning(): number {
     return this.reviewerAgents().reduce((n, r) => n + r.runningCount(), 0);
+  }
+
+  /**
+   * The reviewers of the description have a new version of it to review: an author waiting now
+   * need not wait again for them. (Those of the code review what a push brings when the author waits.)
+   */
+  private reconsiderDescription(pull: PullRow): void {
+    if ((this.waiters.get(pull.id) ?? 0) > 0) for (const r of this.reviewersFor(pull)) if (r.reviews === 'description') r.consider(pull.id);
   }
 
   /** Cancel the reviewer agents' reviews of the pull request, for what just happened to it (see Reviewer.cancel). Before the change is announced, so nobody hears they are still at work. */
@@ -1825,7 +1866,7 @@ export class Service {
     if (pull.state === 'closed' || pull.auto_publish || pull.agents_done_sha === pull.head_sha) return null;
     if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
-    const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
+    const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
     if (reviewers.some((r) => TO_REVIEW.includes(r.status.state))) return null;
     const stopped = this.stoppedText(pull);
     const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
@@ -1839,7 +1880,7 @@ export class Service {
    * the threads the reviewer started to be open.
    */
   readiness(pull: PullRow): Readiness {
-    const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, engine: r.engine, status: r.headStatus(pull) }));
+    const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engine, reviewer: r.key, status: r.headStatus(pull) }));
     const authorWaiting = (this.waiters.get(pull.id) ?? 0) > 0;
     const fb = this.unseenFeedback(pull);
     const unseen = fb.reviews.length + fb.comments.length;
@@ -1851,6 +1892,21 @@ export class Service {
     )!.n;
     const agentsDone = reviewers.every((r) => r.status.done) && authorWaiting && unseen === 0;
     return { reviewers, authorWaiting, unseen, openThreads, agentsDone };
+  }
+
+  /**
+   * The review decision, as GitHub's reviewDecision: from the reviews of anyone but the reviewer
+   * agents, whose approvals are theirs and stand in for nobody's (also once a custom reviewer's
+   * file is gone).
+   */
+  reviewDecision(pull: PullRow, reviews: ReviewRow[]): string {
+    const agents = this.agentReviews(pull);
+    return reviewDecision(reviews.filter((r) => !agents.has(r.id)));
+  }
+
+  /** The reviews the reviewer agents posted on the pull request (by their runs), which stand in for nobody's decision. */
+  agentReviews(pull: PullRow): Set<number> {
+    return new Set(this.db.all<{ id: number }>('SELECT review_id AS id FROM review_runs WHERE pull_id = ? AND review_id IS NOT NULL', pull.id).map((r) => r.id));
   }
 
   /** Whose move the pull request waits for, and why (see Turn). */
@@ -1913,9 +1969,9 @@ export class Service {
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
     const stopped = this.stoppedText(pull);
-    for (const { login, engine, status } of r.reviewers) {
+    for (const { login, engine, reviewer, status } of r.reviewers) {
       const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
-      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine });
+      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine, reviewer });
     }
     // Once, whatever each reviewer agent is at.
     if (stopped) reasons.push({ kind: 'reviewer_agent', state: 'capped', text: stopped });
@@ -1923,7 +1979,7 @@ export class Service {
     if (whose === 'reviewer_agents') reasons.sort((a, b) => Number(b.kind === 'reviewer_agent') - Number(a.kind === 'reviewer_agent'));
 
     const reviews = this.db.all<ReviewRow>("SELECT * FROM reviews WHERE pull_id = ? AND state != 'PENDING' ORDER BY id", pull.id);
-    const decision = reviewDecision(reviews);
+    const decision = this.reviewDecision(pull, reviews);
     if (decision === 'APPROVED') reasons.push({ kind: 'approved', text: 'approved' });
     if (decision === 'CHANGES_REQUESTED') reasons.push({ kind: 'changes_requested', text: 'changes requested' });
     const unresolved = this.db.get<{ n: number }>(
@@ -2123,7 +2179,7 @@ export class Service {
 
   /** The automatic review round a pull request is in or done with: the most automatic reviews any reviewer agent has done or is running. */
   automaticRound(pull: PullRow): number {
-    return Math.max(0, ...this.reviewerAgents().map((r) => r.automaticReviewsStarted(pull)));
+    return Math.max(0, ...this.reviewersFor(pull).map((r) => r.automaticReviewsStarted(pull)));
   }
 
   /**
@@ -2157,7 +2213,7 @@ export class Service {
     });
     if (!resumed) return false;
     this.emit(pull.id, 'updated', actor);
-    if ((this.waiters.get(pull.id) ?? 0) > 0) for (const r of this.reviewerAgents()) r.consider(pull.id);
+    if ((this.waiters.get(pull.id) ?? 0) > 0) for (const r of this.reviewersFor(pull)) r.consider(pull.id);
     return true;
   }
 
@@ -2534,6 +2590,8 @@ export const CANCELLED: Record<CancelReason, string> = {
   closed_on_github: 'closed on GitHub',
   published: 'published',
   pushed: 'new commits pushed',
+  edited: 'title or description edited',
+  base_moved: 'the base moved',
 };
 
 /**
@@ -2543,29 +2601,38 @@ export const CANCELLED: Record<CancelReason, string> = {
  */
 function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, author: string, authorWaiting: boolean, stopped: boolean): string | null {
   const sha = status.commit.slice(0, 7);
+  // A reviewer of the description reviews the title, description and commit messages the head has.
+  const what = status.description ? 'the description' : sha;
   switch (status.state) {
     case 'reviewing':
-      return status.commit === pull.head_sha ? `${login} is reviewing ${sha}` : `${login} is reviewing an earlier commit, ${sha}`;
+      return status.description || status.commit === pull.head_sha ? `${login} is reviewing ${what}` : `${login} is reviewing an earlier commit, ${sha}`;
     case 'queued':
-      return `${login} is about to review ${sha}`;
+      return `${login} is about to review ${what}`;
     case 'interrupted':
-      return `${login}'s review of ${sha} was interrupted by a restart; it will run again`;
+      return `${login}'s review of ${what} was interrupted by a restart; it will run again`;
     case 'unreviewed':
-      return authorWaiting ? `${login} is about to review ${sha}` : `${login} reviews ${sha} when ${author} waits for review`;
+      return authorWaiting ? `${login} is about to review ${what}` : `${login} reviews ${what} when ${author} waits for review`;
     case 'findings':
-      return `${login} commented on ${sha}`;
+      return `${login} commented on ${what}`;
     case 'failed':
-      return `${login}'s review of ${sha} failed`;
+      return `${login}'s review of ${what} failed`;
     case 'cancelled':
-      return `${login}'s review of ${sha} was cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
+      return `${login}'s review of ${what} was cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
     case 'clean':
-      return `${login} found nothing in ${sha}`;
+      return `${login} found nothing in ${what}`;
+    case 'approved':
+      return `${login} approved ${what}`;
     case 'capped':
       if (stopped) return null;
       return status.automatic ? `${login} used ${status.automatic.used} of ${status.automatic.limit} automatic reviews` : `${login} has used up its automatic reviews`;
     case 'off':
       return null;
   }
+}
+
+/** The commit messages of a pull request, oldest first, hashed (PullRow.messages_sha). */
+function messagesSha(commits: Commit[]): string {
+  return createHash('sha256').update(commits.map((c) => c.message).join('\0')).digest('hex');
 }
 
 /** The round automatic reviews stopped after, in words. */

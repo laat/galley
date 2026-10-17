@@ -115,7 +115,7 @@ function transcriptPage() {
 }
 
 const progress = { type: 'progress', event: { pullId: 1, runId: 5 } };
-const finished = { type: 'change', event: { pullId: 1, type: 'codex_finished', actor: 'codex-review' } };
+const finished = { type: 'change', event: { pullId: 1, type: 'reviewer_finished', actor: 'codex-review' } };
 
 test('a refresh asked for while one is under way runs once more after it, so the page ends up current', async () => {
   const p = transcriptPage();

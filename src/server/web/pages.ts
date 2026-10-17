@@ -2,10 +2,10 @@ import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
 import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
-import { outsideTheDiff, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
+import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
-import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
+import { avatarUrl, reasonText } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
 import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, since, type Safe } from './html.ts';
@@ -231,7 +231,7 @@ function turnReasons(t: Turn, apiBase: string, kinds: TurnReason['kind'][] = ['a
                 ? icon('alert')
                 : '';
     return html`<span class="turn-reason${cls ? ` turn-reason--${cls}` : ''}">${mark}${r.text}${r.since ? html`<span class="turn-since">, ${since(r.since)}</span>` : ''}${
-      cls === 'failed' && r.engine ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.engine}">Retry</button>` : ''
+      cls === 'failed' && r.reviewer ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${r.reviewer}">Retry</button>` : ''
     }</span>`;
   })}</div>`;
 }
@@ -528,7 +528,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     </div>`;
   }
   const submitted = p.reviews.filter((r) => r.state !== 'PENDING');
-  const decision = submitted.length ? reviewDecision(submitted) : null;
+  const decision = submitted.length ? s.reviewDecision(pull, submitted) : null;
   const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
   const waiting = (s.waiters.get(pull.id) ?? 0) > 0;
   // A review still to come may ask for changes, so publishing before it takes a second click.
@@ -679,7 +679,7 @@ function iterationsRows(p: PullPage): Safe[] {
     ];
   }
   // Shown while a reviewer agent may still review on its own; the round is the one stopping records.
-  if (!s.reviewerAgents().some((r) => r.enabled(pull) && r.automaticReviews(pull) < r.limit(pull))) return [];
+  if (!s.reviewersFor(pull).some((r) => r.enabled(pull) && r.automaticReviews(pull) < r.limit(pull))) return [];
   return [
     html`<div class="merge-row">${icon('iterations', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${plural(s.automaticRound(pull), 'automatic review round')} so far</strong>${lastRound(p)}
       <div class="color-fg-muted">The reviewer agents review each commit ${author.login} waits with. Good enough, or going in circles? Stop iterating: a review in progress still finishes, and no new one starts.</div></div>
@@ -703,7 +703,10 @@ function lastRound(p: PullPage): Safe {
     const last = runs.findLast((r) => r.status === 'done' && r.review_id !== null);
     const review = last && p.reviews.find((r) => r.id === last.review_id);
     if (!review) continue;
-    const pills = priorityCounts([...p.threads.filter((t) => t.root.review_id === review.id).map((t) => t.root.priority), ...outsideTheDiff(review.body)]);
+    const found = [...p.threads.filter((t) => t.root.review_id === review.id).map((t) => t.root.priority), ...outsideTheDiff(review.body), ...onTheDescription(review.body)];
+    // A custom reviewer that did not approve, with nothing to point at, has its summary for a finding (Reviewer.post).
+    while (last.findings !== null && found.length < last.findings) found.push(null);
+    const pills = priorityCounts(found);
     const login = reviewer.actor().login;
     parts.push(
       html`${parts.length ? ' · ' : ''}<a class="iterations-review" href="#pullrequestreview-${review.id}" title="${login}'s latest review, of ${shortSha(last.head_sha)}">${login} ${pills.length ? pills.map((pill, i) => html`${i ? ' ' : ''}${pill}`) : html`<span class="color-fg-muted">nothing</span>`}</a>`,
@@ -867,23 +870,29 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
 /** A reviewer agent's progress with the head, for the auto-publish checklist. */
 function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: Actor): Safe {
   const sha = html`<code>${shortSha(status.commit)}</code>`;
+  // A reviewer of the description reviews the title, description and commit messages the head has.
+  const what = status.description ? html`the description` : sha;
   switch (status.state) {
     case 'reviewing':
-      return status.commit === pull.head_sha ? html`${login} is reviewing ${sha}` : html`${login} is reviewing an earlier commit, ${sha}`;
+      return status.description || status.commit === pull.head_sha ? html`${login} is reviewing ${what}` : html`${login} is reviewing an earlier commit, ${sha}`;
     case 'queued':
-      return html`${login} is about to review ${sha}`;
+      return html`${login} is about to review ${what}`;
     case 'interrupted':
-      return html`${login}'s review of ${sha} was interrupted by a restart; it will run again`;
+      return html`${login}'s review of ${what} was interrupted by a restart; it will run again`;
     case 'unreviewed':
-      return html`${login} reviews ${sha} when ${author.login} waits for review`;
+      return html`${login} reviews ${what} when ${author.login} waits for review`;
     case 'findings':
-      return html`${login} found problems in ${sha}, and reviews the commit that addresses them`;
+      return status.description
+        ? html`${login} found problems in the description, and reviews it again once it changes`
+        : html`${login} found problems in ${sha}, and reviews the commit that addresses them`;
     case 'failed':
-      return html`${login}'s review of ${sha} failed. Ask it to review again, or publish by hand.`;
+      return html`${login}'s review of ${what} failed. Ask it to review again, or publish by hand.`;
     case 'cancelled':
-      return html`${login}'s review of ${sha} was cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
+      return html`${login}'s review of ${what} was cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
     case 'clean':
-      return html`${login} found nothing in ${sha}`;
+      return html`${login} found nothing in ${what}`;
+    case 'approved':
+      return html`${login} approved ${what}`;
     case 'capped':
       return pull.iterations_stopped ? html`Automatic reviews are stopped, so ${login} starts no more` : html`${login} has used up its automatic reviews`;
     case 'off':
@@ -920,7 +929,7 @@ function sidebar(p: PullPage): Safe {
   const revisions = s.revisions(pull);
   return html`<aside class="layout-sidebar">
   <div class="sidebar-item"><h3 class="sidebar-heading">Reviewers</h3><ul class="sidebar-list">${reviewers}</ul></div>
-  ${s.reviewerAgents().map((r) => reviewerSidebar(p, r))}
+  ${s.reviewersFor(pull).map((r) => reviewerSidebar(p, r))}
   <div class="sidebar-item"><h3 class="sidebar-heading">Author</h3>
     <ul class="sidebar-list"><li class="sidebar-person">${avatar(avatarUrl(s, p.author), p.author.login, 20, p.author.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${p.author.login}</span></li></ul>
     <p class="agent-status ${waiting ? 'agent-status--waiting' : ''}">${icon('dot-fill')} ${waiting ? 'Waiting for your review' : 'Not waiting (working, or done)'}</p>
@@ -959,7 +968,9 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   } else if (work) {
     status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} About to review <code>${shortSha(work.head_sha)}</code></p>`;
   } else if (last?.status === 'done') {
-    status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">Reviewed <code>${shortSha(last.head_sha)}</code></a> ${relTime(last.finished_at)}${transcriptLink(last)}</p>`;
+    const approved = p.reviews.find((r) => r.id === last.review_id)?.state === 'APPROVED';
+    const what = reviewer.reviews === 'description' ? html`the description at <code>${shortSha(last.head_sha)}</code>` : html`<code>${shortSha(last.head_sha)}</code>`;
+    status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">${approved ? 'Approved' : 'Reviewed'} ${what}</a> ${relTime(last.finished_at)}${transcriptLink(last)}</p>`;
   } else if (last?.status === 'failed') {
     status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}${transcriptLink(last)}
       <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${last.error ?? ''}</pre></details></div>`;
@@ -968,7 +979,7 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   } else if (last?.status === 'interrupted') {
     // An interrupted automatic review of the head runs when the author waits, one asked for by hand when the server starts.
     const state = reviewer.headStatus(p.pull).state;
-    const again = stagingState(p.pull) !== 'done' && last.head_sha === p.pull.head_sha && (state === 'unreviewed' || state === 'interrupted');
+    const again = stagingState(p.pull) !== 'done' && runSubject(last) === reviewer.subject(p.pull) && (state === 'unreviewed' || state === 'interrupted');
     status = html`<p class="codex-status">${icon('sync', { cls: 'color-fg-attention' })} Review of <code>${shortSha(last.head_sha)}</code> interrupted by a restart${again ? '; it will run again' : ''}${transcriptLink(last)}</p>`;
   } else {
     status = html`<p class="codex-status color-fg-muted">Has not reviewed this pull request.</p>`;
@@ -977,7 +988,7 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   const limit = reviewer.limit(p.pull);
   const enabled = reviewer.enabled(p.pull);
   const own = reviewer.own(p.pull);
-  const api = `${p.apiBase}/reviewers/${reviewer.engine}`;
+  const api = `${p.apiBase}/reviewers/${reviewer.key}`;
   // The limit is changed in place: −/+ after the number, saved shortly after the last click.
   const auto = enabled
     ? html`Automatic reviews: ${used} of <span class="codex-limit" data-api="${api}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><strong class="js-codex-limit">${limit}</strong><button type="button" class="codex-step js-codex-step" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><button type="button" class="codex-step js-codex-step" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>${
@@ -994,8 +1005,10 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
         ? html`<p class="sidebar-text codex-scope">${icon('skip')} Settings leave pull requests by agents in ${reviewer.authorTool} to other reviewers</p>`
         : ''
       : html`<p class="sidebar-text codex-scope">${icon('pin')} Turned ${onOff(enabled)} for this pull request${bySettings !== enabled ? ` (${onOff(bySettings)} in Settings)` : ''} <button type="button" class="btn-link js-codex-reset" data-api="${api}" data-field="enabled" title="Follow Settings (automatic reviews ${onOff(bySettings)})">reset</button></p>`;
+  const about = reviewer.describe();
   return html`<div class="sidebar-item"><h3 class="sidebar-heading">${reviewer.label}</h3>
     <a class="sidebar-person" href="${reviewer.settingsUrl()}" title="Settings for ${actor.login}">${avatar(avatarUrl(p.s, actor), actor.login, 20, 'avatar-bot')} <span class="flex-auto">${actor.login}</span></a>
+    ${about ? html`<p class="sidebar-text color-fg-muted">${about}</p>` : ''}
     ${status}
     ${runUsage(runs)}
     <p class="sidebar-text color-fg-muted">${auto} · ${toggle} · <a href="${reviewer.settingsUrl()}">Settings</a></p>
@@ -1024,21 +1037,29 @@ function runUsage(runs: ReviewRunRow[]): Safe {
 
 const runBase = (p: PullPage) => ({ htmlBase: p.htmlBase, repoBase: `/${p.repo.owner}/${p.repo.name}` });
 
-/** A reviewer agent's run on this pull request, and the reviewer. */
-function findRun(p: PullPage, runId: number): { run: ReviewRunRow; reviewer: Reviewer } {
-  for (const reviewer of p.s.reviewerAgents()) {
-    const run = reviewer.runs(p.pull).find((r) => r.id === runId);
-    if (run) return { run, reviewer };
-  }
-  throw new HttpError(404, 'No such review run on this pull request');
+/**
+ * A reviewer agent's run on this pull request, and its reviewer; none for a custom reviewer that
+ * no longer runs (its file deleted, or wrong), whose runs stay with their transcripts.
+ */
+function findRun(p: PullPage, runId: number): { run: ReviewRunRow; reviewer: Reviewer | null } {
+  const run = p.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ? AND pull_id = ?', runId, p.pull.id);
+  if (!run) throw new HttpError(404, 'No such review run on this pull request');
+  return { run, reviewer: p.s.reviewerAgents().find((r) => r.key === run.reviewer) ?? null };
+}
+
+/** A run's reviewer's bot, when the reviewer no longer runs: the custom reviewer's, by its name. */
+function formerLogin(s: Service, run: ReviewRunRow): string {
+  const id = Number(s.db.getMeta(customActorKey(run.reviewer)));
+  return (id && s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || run.reviewer;
 }
 
 /** A run's transcript, on a page of its own (an extension). While the run goes on, the page follows it. */
 export function transcriptPage(p: PullPage, runId: number): string {
   const { run, reviewer } = findRun(p, runId);
-  const live = reviewer.live(p.pull);
+  const live = reviewer?.live(p.pull);
   const progress = live?.run.id === run.id ? live.progress : null;
-  const content = transcriptContent(runBase(p), { run, login: reviewer.actor().login, label: reviewer.label, entries: transcript(p.s.db, run.id), live: progress });
+  const login = reviewer?.actor().login ?? formerLogin(p.s, run);
+  const content = transcriptContent(runBase(p), { run, login, label: reviewer?.label ?? run.reviewer, entries: transcript(p.s.db, run.id), live: progress });
   return pullLayout(p, null, content, progress ? { 'run-live': run.id } : {});
 }
 
@@ -1088,14 +1109,24 @@ export async function conversationPage(p: PullPage): Promise<string> {
   }
   const opts = threadOpts(p, true);
   // The reviewer agents' reviews link to the transcript of the run that wrote them.
-  const runs = new Map(s.reviewerAgents().flatMap((reviewer) => reviewer.runs(pull).flatMap((run) => (run.review_id && hasTranscript(s.db, run.id) ? [[run.review_id, run] as const] : []))));
+  // Also those of a custom reviewer that no longer runs.
+  const posted = s.db.all<ReviewRunRow>('SELECT * FROM review_runs WHERE pull_id = ? AND review_id IS NOT NULL', pull.id);
+  const runs = new Map(posted.flatMap((run) => (hasTranscript(s.db, run.id) ? [[run.review_id!, run] as const] : [])));
+  // Reviews of the title, description and commit messages, which a custom reviewer approves as such.
+  const ofDescription = new Set(s.db.all<{ id: number }>("SELECT review_id AS id FROM review_runs WHERE pull_id = ? AND review_id IS NOT NULL AND subject LIKE 'description:%'", pull.id).map((r) => r.id));
   for (const r of p.reviews) {
     if (r.state === 'PENDING' || !r.submitted_at) continue;
     const a = s.db.actorById(r.author_id);
     const threads = p.threads.filter((t) => t.root.review_id === r.id);
     const meta = REVIEW_TEXT[r.state] ?? REVIEW_TEXT.COMMENTED;
     const single = r.state === 'COMMENTED' && !r.body.trim() && threads.length === 1;
-    const text = single ? (threads[0].root.subject_type === 'commit' ? 'commented on a commit' : html`commented on <code>${threads[0].root.path}</code>`) : meta.text;
+    const text = single
+      ? threads[0].root.subject_type === 'commit'
+        ? 'commented on a commit'
+        : html`commented on <code>${threads[0].root.path}</code>`
+      : r.state === 'APPROVED' && ofDescription.has(r.id)
+        ? 'approved the description'
+        : meta.text;
     const who = html`${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(s, a)}`;
     items.push({
       at: r.submitted_at,

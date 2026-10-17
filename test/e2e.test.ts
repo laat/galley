@@ -4032,7 +4032,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const { turn } = await human('GET', base);
       assert.equal(turn.whose, 'reviewer_agents');
       const { since, ...reviewing } = turn.reasons[0];
-      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', text: `codex-review is reviewing ${sha()}`, engine: 'codex' });
+      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', text: `codex-review is reviewing ${sha()}`, engine: 'codex', reviewer: 'codex' });
       assert.ok(Date.now() - Date.parse(since) < 20_000);
       assert.equal(turn.reasons[1].text, 'agent is waiting for review');
       // gh JSON says it in words, with how long it has been so.
@@ -4119,7 +4119,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await server.service.codex!.settle(id);
       delete process.env.FAKE_CODEX_FAIL;
       const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
-      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex-review's review of ${sha()} failed`, engine: 'codex' });
+      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex-review's review of ${sha()} failed`, engine: 'codex', reviewer: 'codex' });
       assert.match(await page('/'), new RegExp(`codex-review&#39;s review of ${sha()} failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
       // Also while the author waits: nothing more is coming from Codex for this commit. The author
       // was told so when Codex found nothing in it, and is not told again.

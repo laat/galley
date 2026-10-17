@@ -187,7 +187,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
     reviewers,
     automatic_reviews: v['no-review'] ? false : undefined,
   });
-  for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: laatsux has no reviewer agent by that name.`);
+  for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: laatsux has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
   if (v.web) openBrowser(pr.html_url);
   err(c.gray(`Review happens in the browser. Run \`laatsux pr wait ${pr.number}\` to block until the reviewer responds.`));
@@ -537,7 +537,8 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
 function approvedBefore(pr: any, fresh: Set<number>): string[] {
   if (pr.reviewDecision !== 'APPROVED') return [];
   const decisions = new Map<string, any>();
-  for (const rv of pr.reviews) if (rv.state === 'APPROVED' || rv.state === 'CHANGES_REQUESTED') decisions.set(rv.author.login, rv);
+  // A reviewer agent's approval is its own, not part of the decision (byReviewerAgent, a laatsux extension).
+  for (const rv of pr.reviews) if (!rv.byReviewerAgent && (rv.state === 'APPROVED' || rv.state === 'CHANGES_REQUESTED')) decisions.set(rv.author.login, rv);
   const lines: string[] = [];
   for (const approval of [...decisions.values()].filter((rv) => rv.state === 'APPROVED')) {
     const later = pr.reviews.filter((rv: any) => fresh.has(rv.databaseId) && rv.author.login !== approval.author.login && rv.submittedAt > approval.submittedAt);
