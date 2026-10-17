@@ -142,7 +142,7 @@ before(async () => {
     `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
       `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
-      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"issues":{"totalCount":4},"pullRequests":{"totalCount":2},"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
+      `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
 
@@ -571,36 +571,28 @@ test('the agent loop, from staging to publishing', async (t) => {
     await human('PATCH', '/api/repos/acme/widgets/pulls/1', { state: 'open' });
   });
 
-  await t.test('repo pages link to the repository, its pull requests and its issues on GitHub', async () => {
+  await t.test('the repository page links to the repository on GitHub', async () => {
     await server.service.refreshGithubRepo('acme/widgets');
-    // When counts arrive in the background, open pages are told so they can show them.
-    const events: string[] = [];
-    const listen = (e: { type: string }) => events.push(e.type);
-    server.service.bus.on('change', listen);
-    await server.service.refreshGithubRepo('acme/fresh');
-    server.service.bus.off('change', listen);
-    assert.ok(events.includes('github_repo'), 'a change event when the counts change');
     // Owner and name go as strings (-f): -F would make a repository called "123" a number.
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^api graphql -f query=.* -f owner=acme -f name=widgets$/m);
-    for (const path of ['/acme/widgets', '/acme/widgets/pull/1']) {
+    const link = (slug: string) => new RegExp(`<h1 class="page-title">[^<]*</h1><a class="page-title-github" href="https://github\\.com/${slug}" target="_blank" rel="noopener" title="${slug} on GitHub"><svg class="octicon octicon-mark-github"[^]*?</svg> ${slug} <svg class="octicon octicon-link-external"`);
+    assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), link('acme/widgets'));
+    // No tabs for the repository under the header; the breadcrumbs lead back to its page.
+    const { head } = await human('GET', '/api/repos/acme/widgets/pulls/1');
+    for (const path of ['/acme/widgets', '/acme/widgets/pull/1', `/acme/widgets/tree/${head.sha}`]) {
       const page = await (await fetch(server.url + path)).text();
-      assert.match(page, /<a class="UnderlineNav-item selected" href="\/acme\/widgets">[^]*?<span data-content="Staged">Staged<\/span> <span class="Counter">\d+<\/span><\/a>/, path);
-      assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/pulls" target="_blank"[^]*?Pull requests <span class="Counter">2<\/span>/, path);
-      assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/issues" target="_blank"[^]*?Issues <span class="Counter">4<\/span>/, path);
-      // Repo ↗ · Staged · Pull requests ↗ · Issues ↗, and only Repo has the GitHub mark.
-      const tabs = [...page.match(/<nav class="UnderlineNav" aria-label="Repository">[^]*?<\/nav>/)![0].matchAll(/<a [^>]*href="([^"]*)"[^>]*><svg class="octicon octicon-([\w-]+)/g)].map((m) => [m[1], m[2]]);
-      const github = 'https://github.com/acme/widgets';
-      assert.deepEqual(tabs, [[github, 'mark-github'], ['/acme/widgets', 'git-pull-request'], [`${github}/pulls`, 'git-pull-request'], [`${github}/issues`, 'issue-opened']], path);
-      assert.match(page, /<a class="UnderlineNav-item" href="https:\/\/github\.com\/acme\/widgets" target="_blank" rel="noopener" title="acme\/widgets on GitHub">[^]*? Repo <svg class="octicon octicon-link-external /, path);
+      assert.doesNotMatch(page, /UnderlineNav|github\.com\/acme\/widgets\/(pulls|issues)/, path);
+      assert.match(page, /<nav class="app-header-context">[^]*?<a href="\/acme\/widgets"><strong>acme\/widgets<\/strong><\/a>/, path);
     }
-    // Without a GitHub remote, only the staged pull requests.
+    // Without a GitHub remote, no link; with one added later, it names the repository there.
     const elsewhere = join(dir, 'elsewhere');
     execFileSync('git', ['init', '-q', '-b', 'main', elsewhere]);
     execFileSync('git', ['-C', elsewhere, 'remote', 'add', 'origin', 'https://gitlab.com/acme/elsewhere.git']);
     const local = await human('POST', '/api/repos', { path: elsewhere });
-    const nav = (await (await fetch(`${server.url}/${local.full_name}`)).text()).match(/<nav class="UnderlineNav" aria-label="Repository">[^]*?<\/nav>/)![0];
-    assert.doesNotMatch(nav, /github\.com/);
-    assert.match(nav, /Staged/);
+    assert.doesNotMatch(await (await fetch(`${server.url}/${local.full_name}`)).text(), /page-title-github/);
+    execFileSync('git', ['-C', elsewhere, 'remote', 'set-url', 'origin', 'https://github.com/acme/moved.git']);
+    assert.equal((await human('POST', '/api/repos', { path: elsewhere })).full_name, local.full_name);
+    assert.match(await (await fetch(`${server.url}/${local.full_name}`)).text(), link('acme/moved'));
   });
 
   await t.test('web pages render', async () => {
@@ -2942,11 +2934,9 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       assert.equal(refused.status, 422);
       assert.match((await refused.json()).message, /acme\/widgets does not allow squash merges, the merge method in laatsux's settings \(it allows merge, rebase\)\. Change it under Settings → Publishing\./);
 
-      // Not knowing, because gh failed, hides it too; the counts on the tabs stay.
+      // Not knowing, because gh failed, hides it too.
       await refresh({ FAKE_GH_API_FAIL: 'HTTP 502' });
-      const page = await pr.page();
-      assert.doesNotMatch(page, /name="auto_merge"/);
-      assert.match(page, /Pull requests <span class="Counter">2<\/span>/);
+      assert.doesNotMatch(await pr.page(), /name="auto_merge"/);
     } finally {
       await refresh({});
     }
@@ -5000,8 +4990,6 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   const front = await page('/acme/tabs');
   // Each pull request is in one tab; Staged is the first, and shown unless another is asked for.
   assert.deepEqual(counts(front), { staged: 1, published: 1, done: 3 });
-  // The repository's Staged counts the same: the staged one, not the published one.
-  assert.match(front, /<a class="UnderlineNav-item selected" href="\/acme\/tabs">[^]*?Staged<\/span> <span class="Counter">1<\/span><\/a>/);
   assert.match(front, /<a class="list-tab selected" href="\/acme\/tabs\?state=staged">/);
   // Each label carries its bold copy (data-content), so it is as wide whether selected or not and selecting a tab moves no other.
   assert.match(front, /href="\/acme\/tabs\?state=published"><svg [^>]*>[^]*?<\/svg> <span data-content="1 Published">1 Published<\/span><\/a>/);

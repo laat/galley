@@ -283,16 +283,13 @@ export interface AutoMerge {
 
 export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed' | 'merged' | 'closed_on_github';
 
-/** A repository on GitHub, as laatsux shows it: the counts on the repo tabs, and what merging there allows. */
+/** A repository on GitHub, as laatsux shows it: what merging there allows. */
 export interface GithubRepo {
-  issues: number;
-  pulls: number;
-  /** Null when the last attempt to ask GitHub failed: the counts may be old, but what merging allows is unknown. */
   merging: {
     /** "Allow auto-merge" in the repository's settings. */
     autoMerge: boolean;
     methods: MergeMethod[];
-  } | null;
+  };
 }
 
 /** Whether publishing can turn on auto-merge in a repository: GitHub allows auto-merge there, and maybe not the method from settings. */
@@ -419,9 +416,9 @@ export class Service {
   private githubRepoCache = new Map<string, { at: number; value: GithubRepo | null; loading?: Promise<void> }>();
 
   /**
-   * The repository on GitHub: open issues and pull requests for the repo tabs, and what merging
-   * allows. Never waits on the network: it answers from the cache (or with nothing) and
-   * refreshes it in the background.
+   * The repository on GitHub: what merging allows. Null when the last attempt to ask GitHub
+   * failed. Never waits on the network: it answers from the cache (or with nothing) and refreshes
+   * it in the background.
    */
   githubRepo(slug: string): GithubRepo | null {
     const hit = this.githubRepoCache.get(slug);
@@ -433,25 +430,19 @@ export class Service {
     const current = this.githubRepoCache.get(slug);
     if (current?.loading) return current.loading;
     const [owner, name] = slug.split('/');
-    const query =
-      'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount} ' +
-      'autoMergeAllowed squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed}}';
+    const query = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){autoMergeAllowed squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed}}';
     // -f, not -F: -F would turn a repository named "123" or "true" into a number or boolean.
     const loading = run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
       .then((r): GithubRepo => {
         const repo = JSON.parse(r.stdout).data.repository;
         const allowed = { squash: repo.squashMergeAllowed, merge: repo.mergeCommitAllowed, rebase: repo.rebaseMergeAllowed };
-        return {
-          issues: repo.issues.totalCount,
-          pulls: repo.pullRequests.totalCount,
-          merging: { autoMerge: repo.autoMergeAllowed === true, methods: MERGE_METHODS.filter((m) => allowed[m] === true) },
-        };
+        return { merging: { autoMerge: repo.autoMergeAllowed === true, methods: MERGE_METHODS.filter((m) => allowed[m] === true) } };
       })
-      // Old counts are better than none, but what merging allows is not known now.
-      .catch(() => (current?.value ? { ...current.value, merging: null } : null))
+      // What merging allows is not known now.
+      .catch(() => null)
       .then((value) => {
         this.githubRepoCache.set(slug, { at: Date.now(), value });
-        // Pages rendered before this answer came show old or no counts and options; let them refresh.
+        // Pages rendered before this answer came show old or no options; let them refresh.
         if (JSON.stringify(value) !== JSON.stringify(current?.value ?? null)) {
           this.bus.emit('change', { pullId: null, type: 'github_repo', actor: 'github' } satisfies ChangeEvent);
         }
@@ -571,7 +562,7 @@ export class Service {
       const same = previous && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
       return pull.github_state === 'open' && same ? null : 'github_status';
     });
-    // From GitHub, like the counts: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
+    // From GitHub, like what merging allows: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
     if (type) this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
   }
 
