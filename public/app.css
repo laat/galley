@@ -962,6 +962,7 @@ body.selecting { user-select: none; cursor: ns-resize; }
 .markdown-body code { padding: 0.2em 0.4em; margin: 0; font-size: 85%; white-space: break-spaces; background: var(--neutral-muted); border-radius: 6px; }
 .markdown-body pre { padding: 16px; overflow: auto; font-size: 85%; line-height: 1.45; background: var(--bg-subtle); border-radius: 6px; }
 .markdown-body pre code { padding: 0; font-size: 100%; background: transparent; border: 0; white-space: pre; }
+.markdown-body pre.markdown-text { white-space: pre-wrap; }
 .markdown-body table { display: block; width: max-content; max-width: 100%; overflow: auto; border-spacing: 0; border-collapse: collapse; }
 .markdown-body table th { font-weight: 600; }
 .markdown-body table th, .markdown-body table td { padding: 6px 13px; border: 1px solid var(--border); }

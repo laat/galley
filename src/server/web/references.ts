@@ -8,6 +8,7 @@ import { Marked, type MarkedExtension, type Token, type Tokens } from 'marked';
 import type { Commit } from '../git.ts';
 import type { Ctx, IssueSummary, Service } from '../service.ts';
 import { esc, shortSha } from './html.ts';
+import { tooMuchEmphasis } from './emphasis.ts';
 
 /** What references in one pull request's Markdown link to. */
 export interface ReferenceContext {
@@ -203,8 +204,13 @@ async function commitLinks(ctx: Ctx, commits: Commit[], texts: string[]): Promis
 // "Fixes #12", "closes: owner/repo#3": GitHub's closing keywords, right before the reference.
 const CLOSING = /(?:^|\W)(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+$/i;
 
-/** The issues a description closes once GitHub merges the pull request, as links (deduplicated). */
+/**
+ * The issues a description closes once GitHub merges the pull request, as links (deduplicated). None for a
+ * description with too much emphasis for marked, rather than counting the references in its code, which
+ * close nothing.
+ */
 export function closingIssues(text: string, refs: ReferenceContext): { text: string; href: string; title?: string }[] {
+  if (tooMuchEmphasis(text)) return [];
   const marked = new Marked({ gfm: true, breaks: true });
   const tokens = marked.lexer(text);
   linkReferences(tokens, refs);
