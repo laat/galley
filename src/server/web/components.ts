@@ -301,13 +301,14 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     const dir = root.path!.slice(0, slash);
     title = html`<span class="review-thread-title" title="${root.path}">${icon('file')} <span class="review-thread-path is-file">${dir ? html`<span class="review-thread-dir"><bdi dir="ltr">${dir}</bdi></span>` : ''}<span class="review-thread-file">${root.path!.slice(slash)}</span></span>${range && o.standalone ? html` <span class="review-thread-range">${range}</span>` : ''}</span>`;
   }
-  const badges = html`${t.placement.outdated ? html`<span class="Label Label--attention">Outdated</span>` : ''}${priorityPill(root.priority)}${t.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}`;
+  const badges = html`${t.placement.outdated ? html`<span class="Label Label--attention">Outdated</span>` : ''}${t.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}`;
   const resolvedBy = root.resolved_by_id ? s.db.actorById(root.resolved_by_id).login : null;
   return html`<details class="review-thread${t.resolved ? ' is-resolved' : ''}${t.placement.outdated ? ' is-outdated' : ''}" id="thread-${root.id}" data-thread="${root.id}"${root.subject_type === 'line' ? html` data-suggestion="${JSON.stringify(suggestionLines)}"` : ''}${t.resolved ? '' : raw(' open')}>
   <summary class="review-thread-header">
     ${o.standalone || t.resolved ? title : participants(s, comments)}
     ${badges}
     ${t.resolved ? html`<span class="review-thread-resolved-note"><span>Resolved${resolvedBy ? ` by ${resolvedBy}` : ''}</span></span>` : html`<span class="flex-auto"></span>`}
+    ${priorityPill(root.priority)}
     <span class="review-thread-toggle">${icon('fold', { cls: 'when-open' })}${icon('unfold', { cls: 'when-closed' })}</span>
   </summary>
   ${o.standalone && root.subject_type === 'line' ? hunkSnippet(root.diff_hunk, root.path, root.start_line ?? root.line, root.line) : ''}

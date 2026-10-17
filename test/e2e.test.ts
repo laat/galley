@@ -347,9 +347,9 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /reviewer reviewed: changes requested/);
     assert.match(r.stdout, /thread \d+ on math\.js:6 \[unresolved\] \(high priority\)/);
-    // The priority is the thread's: it shows once, on the thread's header.
+    // The priority is the thread's: it shows once, at the right end of the thread's header.
     const files = await (await fetch(`${server.url}/acme/widgets/pull/1/files`)).text();
-    assert.match(files, /<summary class="review-thread-header">[^]*?<span class="Label Label--priority Label--priority-high" title="Priority">High<\/span>[^]*?<\/summary>/);
+    assert.match(files, /<summary class="review-thread-header">[^]*?<span class="Label Label--priority Label--priority-high" title="Priority">High<\/span>\s*<span class="review-thread-toggle">[^]*?<\/summary>/);
     assert.equal(files.match(/Label--priority-high/g)?.length, 1);
     assert.match(r.stdout, /Add a doc comment\./);
     // Seen feedback is not returned twice.
