@@ -9,6 +9,7 @@ import type { CodexReviewer } from './reviewers/codex.ts';
 import type { ClaudeReviewer } from './reviewers/claude.ts';
 import type { CustomReviewers } from './reviewers/custom.ts';
 import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
+import { busy, doneForAutoPublish, doneForHandover, toReview, type HeadState, type HeadStatus } from './reviewers/head-status.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
 import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
@@ -192,38 +193,6 @@ export interface AgentsDone {
   reviewers: string[];
 }
 
-/** Where a reviewer agent stands with a pull request's head commit. */
-export interface HeadStatus {
-  /**
-   * `approved`: it found nothing and approved (custom reviewers that may), which counts as done like `clean`, and for nobody's decision.
-   * `answered`: it found problems in the code, and the author answered them without a new commit (Reviewer.answered), which counts as done too.
-   * A reviewer of the description stays at `findings` until it reviews a new version of it.
-   */
-  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'answered' | 'failed' | 'cancelled' | 'clean' | 'approved' | 'capped' | 'off';
-  /** Nothing more is coming from the reviewer for this commit. */
-  done: boolean;
-  /** The commit this is about: the head, or the earlier commit a running review started on. */
-  commit: string;
-  /** When the running review started. */
-  startedAt?: string | null;
-  /** When the failed review ended. */
-  failedAt?: string | null;
-  /** Why the review of the head was cancelled. */
-  cancelled?: CancelReason | null;
-  /** Automatic reviews of the pull request so far, and how many it gets. */
-  automatic?: { used: number; limit: number };
-  /** It reviews the title, description and commit messages the head has, not the commit's code. */
-  description?: boolean;
-}
-
-/**
- * The states in which a reviewer agent still has the head to review: at it, about to, to run it
- * again after a restart, or when the author waits. The reviewer agents are done with the head once
- * none of them is in one, nor has findings in it the author has not answered (Service.agentsDone);
- * until then it is their turn, or the author's to start them (Service.turn).
- */
-export const TO_REVIEW: HeadStatus['state'][] = ['reviewing', 'queued', 'interrupted', 'unreviewed'];
-
 /** Whether the agents are done with a pull request, so the reviewer can take it from here. */
 export interface Readiness {
   /** `reviewer`: what the API calls it (Reviewer.key). */
@@ -234,7 +203,7 @@ export interface Readiness {
   unseen: number;
   /** Unresolved threads a person started (agents' threads do not count). */
   openThreads: number;
-  /** Every reviewer agent is done with the head, and the author is waiting with all feedback seen. */
+  /** Every reviewer agent is done with the head for auto-publish (doneForAutoPublish), and the author is waiting with all feedback seen. */
   agentsDone: boolean;
 }
 
@@ -260,8 +229,10 @@ export interface TurnReason {
   text: string;
   /** Since when it has been so: waiting, reviewing, working on feedback, or stopped. */
   since?: string | null;
-  /** The author's AuthorState, or a reviewer agent's HeadStatus state. */
-  state?: AuthorState | HeadStatus['state'];
+  /** The author's AuthorState, or a reviewer agent's HeadState. */
+  state?: AuthorState | HeadState;
+  /** A reviewer agent's: it still has the head to review (toReview). An API extension, so the CLI need not know the states. */
+  to_review?: boolean;
   /** A reviewer agent's engine. */
   engine?: string;
   /** A reviewer agent as the API calls it (`…/reviewers/{reviewer}`), for asking it to review again. */
@@ -2056,8 +2027,8 @@ export class Service {
     if (pull.state !== 'staged' || pull.auto_publish || pull.agents_done_sha === pull.head_sha || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
-    // Findings the author has not answered hold them up too (Reviewer.answered).
-    if (reviewers.some((r) => TO_REVIEW.includes(r.status.state) || r.status.state === 'findings')) return null;
+    // Findings the author has not answered hold them up too (Reviewer.answered); a failed review does not.
+    if (!reviewers.every((r) => doneForHandover(r.status.state))) return null;
     const stopped = this.stoppedText(pull);
     const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
     // Once, whatever each reviewer agent made of the commit.
@@ -2067,7 +2038,8 @@ export class Service {
   /**
    * Whether the agents are done with the pull request: every reviewer agent is done with the
    * head, and the author is waiting with all feedback seen. Auto-publish also needs none of
-   * the threads the reviewer started to be open.
+   * the threads the reviewer started to be open. Unlike agentsDone, a failed review holds it up
+   * (doneForAutoPublish).
    */
   readiness(pull: PullRow): Readiness {
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engine, reviewer: r.key, status: r.headStatus(pull) }));
@@ -2080,7 +2052,7 @@ export class Service {
          AND (c.review_id IS NULL OR c.review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`,
       pull.id,
     )!.n;
-    const agentsDone = reviewers.every((r) => r.status.done) && authorWaiting && unseen === 0;
+    const agentsDone = reviewers.every((r) => doneForAutoPublish(r.status.state)) && authorWaiting && unseen === 0;
     return { reviewers, authorWaiting, unseen, openThreads, agentsDone };
   }
 
@@ -2144,7 +2116,7 @@ export class Service {
     }
 
     // At work, about to be, or to run again after a restart, whether the author waits or not.
-    const atWork = r.reviewers.some((x) => TO_REVIEW.includes(x.status.state) && x.status.state !== 'unreviewed');
+    const atWork = r.reviewers.some((x) => busy(x.status.state));
     // A waiting author starts the reviewer agents that have not reviewed its head.
     const next = state === 'waiting' && r.reviewers.some((x) => x.status.state === 'unreviewed');
     const unpublished = this.unpublishedChanges(pull);
@@ -2182,10 +2154,10 @@ export class Service {
     const stopped = pull.state === 'staged' ? this.stoppedText(pull) : null;
     for (const { login, engine, reviewer, status } of r.reviewers) {
       const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
-      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, text, since: status.startedAt, engine, reviewer, ...(status.description ? { description: true } : {}) });
+      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, to_review: toReview(status.state), text, since: status.startedAt, engine, reviewer, ...(status.description ? { description: true } : {}) });
     }
     // Once, whatever each reviewer agent is at.
-    if (stopped) reasons.push({ kind: 'reviewer_agent', state: 'capped', text: stopped });
+    if (stopped) reasons.push({ kind: 'reviewer_agent', state: 'capped', to_review: false, text: stopped });
     // The agents at work come first, since that is whose turn it is.
     if (whose === 'reviewer_agents') reasons.sort((a, b) => Number(b.kind === 'reviewer_agent') - Number(a.kind === 'reviewer_agent'));
 

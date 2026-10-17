@@ -17,6 +17,7 @@ import { readSettings, saveSettings } from '../src/server/settings.ts';
 import { AUTHOR_STALL_MS, Service, type ChangeEvent } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
 import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
+import { doneForAutoPublish } from '../src/server/reviewers/head-status.ts';
 import { Repo } from '../src/server/git.ts';
 
 const BIN = join(import.meta.dirname, '..', 'bin', 'galley.ts');
@@ -1508,7 +1509,7 @@ test('stop iterating: a running review finishes, no new one starts, the author h
     const handed = await handedOver(number);
     assert.match(handed, new RegExp(`^The reviewer agents are done with ${sha} \\(reviewer stopped automatic reviews after round 1\\); ask the user to review it: `, 'm'));
     assert.deepEqual([await runs('codex'), await runs('claude')], [['done'], ['done']]);
-    assert.ok(server.service.readiness(row()).reviewers.every((r) => r.status.done));
+    assert.ok(server.service.readiness(row()).reviewers.every((r) => doneForAutoPublish(r.status.state)));
     const { turn } = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
     assert.deepEqual(turn.reasons.filter((r: string) => r.includes('stopped')), ['reviewer stopped automatic reviews after round 1']);
 
@@ -1560,7 +1561,7 @@ test('a review that fails after iterations stop holds nothing up, and the next c
     for (let i = 0; i < 400 && codex.atWork(row())?.status !== 'IN_PROGRESS'; i++) await new Promise((r) => setTimeout(r, 25));
     assert.equal((await human('PUT', `${base}/stop-iterating`)).iterations_stopped.round, 1);
     // Still running, it holds things up.
-    assert.deepEqual([codexStatus().state, codexStatus().done], ['reviewing', false]);
+    assert.equal(codexStatus().state, 'reviewing');
     // The review fails, as one cut short by a server restart does, so no automatic review counts as done.
     writeFileSync(gate, '');
     const failed = await waiting;
@@ -1570,7 +1571,7 @@ test('a review that fails after iterations stop holds nothing up, and the next c
     // On the same commit, the failure holds nothing up: Codex is done, the author hands over, and
     // a waiting author with nothing unseen is all auto-publish waits for. The sidebar still shows the failure.
     assert.match(failed.stdout, /\(reviewer stopped automatic reviews after round 1\); ask the user to review it: /);
-    assert.deepEqual([codexStatus().state, codexStatus().done], ['capped', true]);
+    assert.equal(codexStatus().state, 'capped');
     const again = cli(['pr', 'wait', String(number), '--timeout', '2s']);
     for (let i = 0; i < 200 && !server.service.waiters.get(id); i++) await new Promise((r) => setTimeout(r, 25));
     assert.equal(server.service.readiness(row()).agentsDone, true);
@@ -1585,7 +1586,7 @@ test('a review that fails after iterations stop holds nothing up, and the next c
     const handed = await handedOver(number);
     assert.match(handed, /\(reviewer stopped automatic reviews after round 1\); ask the user to review it: /);
     assert.deepEqual((await human('GET', `${base}/reviewers/codex`)).runs.map((r: any) => r.status), ['failed']);
-    assert.ok(server.service.readiness(row()).reviewers.every((r) => r.status.done));
+    assert.ok(server.service.readiness(row()).reviewers.every((r) => doneForAutoPublish(r.status.state)));
   } finally {
     delete process.env.FAKE_CODEX_GATE;
     delete process.env.FAKE_CODEX_FAIL;
@@ -1936,7 +1937,7 @@ test('a running review is cancelled when the pull request is published, closed, 
       assert.deepEqual(await runs(pr, 'claude'), [['cancelled', 'published']]);
       // Done with the head: nothing waits for them.
       const { reviewers } = server.service.readiness(row(pr));
-      assert.deepEqual(reviewers.map((x) => [x.status.state, x.status.done, x.status.cancelled]), [['cancelled', true, 'published'], ['cancelled', true, 'published']]);
+      assert.deepEqual(reviewers.map((x) => [x.status.state, x.status.cancelled]), [['cancelled', 'published'], ['cancelled', 'published']]);
       const page = await pr.page();
       assert.match(page, /title="Review of [0-9a-f]{7} cancelled">[^]*?<span class="agent-chunk">Published<\/span>/);
       assert.match(page, /codex-review<\/a><span class="Label Label--bot">bot<\/span> stopped reviewing <code>[0-9a-f]{7}<\/code> .*?: published/);
@@ -3344,7 +3345,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
       const service = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
       service.codex = new CodexReviewer(service, join(dir, 'codex'));
       const status = service.codex.headStatus(pull);
-      assert.deepEqual([status.state, status.done], ['interrupted', false]);
+      assert.equal(status.state, 'interrupted');
       // It runs again without the author: the reviewer agents' turn, though the author does not wait.
       const { whose, reasons } = service.turn(pull);
       assert.deepEqual([whose, reasons[0].text], ['reviewer_agents', `codex-review's review of ${pull.head_sha.slice(0, 7)} was interrupted by a restart; it will run again`]);
@@ -4363,7 +4364,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       const { turn } = await human('GET', base);
       assert.equal(turn.whose, 'reviewer_agents');
       const { since, ...reviewing } = turn.reasons[0];
-      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', text: `codex-review is reviewing ${sha()}`, engine: 'codex', reviewer: 'codex' });
+      assert.deepEqual(reviewing, { kind: 'reviewer_agent', state: 'reviewing', to_review: true, text: `codex-review is reviewing ${sha()}`, engine: 'codex', reviewer: 'codex' });
       assert.ok(Date.now() - Date.parse(since) < 20_000);
       assert.equal(turn.reasons[1].text, 'agent is waiting for review');
       // gh JSON says it in words, with how long it has been so.
@@ -4453,7 +4454,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await server.service.codex!.settle(id);
       delete process.env.FAKE_CODEX_FAIL;
       const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
-      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', text: `codex-review's review of ${sha()} failed`, engine: 'codex', reviewer: 'codex' });
+      assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', to_review: false, text: `codex-review's review of ${sha()} failed`, engine: 'codex', reviewer: 'codex' });
       assert.match(await page('/'), new RegExp(`codex-review&#39;s review failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
       // Also while the author waits: nothing more is coming from Codex for this commit. The author
       // was told so when Codex found nothing in it, and is not told again.

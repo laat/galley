@@ -758,8 +758,7 @@ async function nothingToAddress(client: Client, t: Target): Promise<string[] | n
   if (!pull) return null;
   const reasons: any[] = pull.turn.reasons;
   if (reasons.some((x) => (x.kind === 'author' && x.state === 'unseen') || (x.kind === 'reviewer_agent' && x.state === 'findings'))) return null;
-  // The server's TO_REVIEW.
-  return reasons.filter((x) => x.kind === 'reviewer_agent' && ['reviewing', 'queued', 'interrupted', 'unreviewed'].includes(x.state)).map((x) => x.text);
+  return reasons.filter((x) => x.to_review).map((x) => x.text);
 }
 
 /** The server is down or restarting: worth asking again shortly. */
