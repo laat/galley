@@ -13,7 +13,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../src/server/server.ts';
 import { Db, now } from '../src/server/db.ts';
 import { readSettings, saveSettings } from '../src/server/settings.ts';
-import { AUTHOR_STALL_MS, Service } from '../src/server/service.ts';
+import { AUTHOR_STALL_MS, Service, type ChangeEvent } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
 import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { Repo } from '../src/server/git.ts';
@@ -3218,15 +3218,21 @@ test('a review the server stops under is interrupted, runs again when it starts,
     const failed = s.service.turn(row());
     assert.deepEqual([failed.whose, failed.reasons.find((x) => x.kind === 'reviewer_agent')?.text], ['reviewer', `codex-review's review of ${row().head_sha.slice(0, 7)} failed`]);
 
-    // Given time, stopping waits for a running review to post, and pages say so meanwhile, where
-    // live updates reach them.
+    // Given time, stopping waits for a running review to post, and pages say so meanwhile in the
+    // header, which live updates refresh along with #main.
     rmSync(gate);
     await ask();
     const finishing = s.close({ graceMs: 60_000 });
-    assert.match(await page(), /<div id="main"[^>]*><div class="container container-xl"><div class="flash flash-warn">.*?Waiting for 1 running review to finish before the server stops\./);
+    const stopping = await page();
+    assert.match(stopping, /<header[^]*<span id="server-stopping" class="stopping-indicator" role="status" title="Waiting for 1 running review to finish before the server stops\."[^>]*>.*?Stopping · 1 review running.*?<\/span><\/span>[^]*<\/header>/);
+    assert.doesNotMatch(stopping.slice(stopping.indexOf('<div id="main"')), /Waiting for/);
     assert.equal((await fetch(`${s.url}${base}/reviewers/codex`, { method: 'POST' })).status, 503);
+    // Pages of other pull requests hear when the count changes.
+    const heard: ChangeEvent[] = [];
+    s.service.bus.on('change', (e: ChangeEvent) => e.type === 'stopping' && heard.push(e));
     writeFileSync(gate, '');
     await finishing;
+    assert.deepEqual(heard, [{ pullId: null, type: 'stopping', actor: 'laatsux' }]);
     s = await start();
     assert.deepEqual((await runs()).slice(9), [['manual', 'done', null]]);
 

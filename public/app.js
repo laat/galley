@@ -149,6 +149,10 @@
       // Steps of a transcript the reviewer opened stay open while the run goes on.
       const open = $$('details.js-keep-open[open]').map((d) => d.id);
       main().replaceWith(document.adoptNode(next));
+      // The header says whether the server is stopping, and for how many reviews.
+      const stopping = doc.getElementById('server-stopping');
+      const shown = document.getElementById('server-stopping');
+      if (stopping && shown) shown.replaceWith(document.adoptNode(stopping));
       for (const id of open) {
         const d = document.getElementById(id);
         if (d) d.open = true;
