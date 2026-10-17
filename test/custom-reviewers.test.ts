@@ -309,7 +309,7 @@ test('a reviewer of the description reads no code, and approves what follows its
   // The page: its row in the sidebar, and its approval in the timeline as its own.
   const html = await page(`/acme/widgets/pull/${number}`);
   assert.match(html, /<a class="agent-name" href="\/settings\/reviewers\/house-rules" title="Claude · reviews the title, description and commit messages, and approves when it finds nothing">house-rules<\/a>/);
-  assert.match(html, /title="Approved the description at [0-9a-f]{7}"/);
+  assert.match(html, /title="Approved the description at [0-9a-f]{7}"><svg class="octicon octicon-check color-fg-success"[^>]*>[^]*?<\/svg><span>Approved · <code>[0-9a-f]{7}<\/code><\/span>/);
   assert.match(html, /house-rules<\/a><span class="Label Label--bot">bot<\/span> approved the description/);
   assert.match(html, /Ask house-rules to review/);
   // In the merge box's last round too, its approval reads as one.

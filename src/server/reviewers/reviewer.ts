@@ -676,7 +676,7 @@ export class Reviewer {
    * review opened is resolved or has a reply from the author. Findings in the review's body (on
    * lines outside the diff) have no thread to reply in, so seeing them is enough.
    */
-  private answered(pull: PullRow, run: ReviewRunRow): boolean {
+  answered(pull: PullRow, run: ReviewRunRow): boolean {
     const review = run.review_id === null ? undefined : this.s.db.get<{ submitted_at: string }>('SELECT submitted_at FROM reviews WHERE id = ?', run.review_id);
     if (!review || review.submitted_at > pull.author_seen_at) return false;
     const open = this.s.db.get<{ n: number }>(
