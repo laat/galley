@@ -5180,21 +5180,23 @@ test('the reviewer pins pull requests to the top of the front page, until they u
   }
 });
 
-test('the front page lists the repositories with pull requests, latest activity first, with your turn in each', async () => {
+test('the front page and a repository\'s list the repositories with pull requests, latest activity first, with your turn in each', async () => {
   const page = async (path: string) => (await fetch(server.url + path)).text();
-  /** The front page's repositories: name, link, avatar, how many are your turn, and whether shown. */
+  /** The repositories beside the list: name, link, avatar, how many are your turn, whether shown, and which is selected. */
   const sidebar = async (path = '/') => {
     const html = await page(path);
-    const aside = html.match(/<aside class="dashboard-sidebar"[^]*?<\/aside>/)?.[0] ?? '';
-    const repos = [...aside.matchAll(/<li class="repo-list-item" data-name="([^"]+)"( hidden)?>\s*<img class="avatar " src="([^"]+)"[^>]*>\s*<a class="repo-list-name" href="([^"]+)"[^>]*>[^<]*<\/a>\s*(?:<span class="list-tab-turn" title="([^"]+)">[^]*?<\/svg> (\d+)<\/span>)?/g)].map((m) => ({
-      name: m[1],
-      shown: !m[2],
-      avatar: m[3],
-      href: m[4],
-      turn: m[6] ? Number(m[6]) : 0,
-      title: m[5],
+    const aside = html.match(/<div class="container container-full dashboard"><aside class="dashboard-sidebar"[^]*?<\/aside>/)?.[0] ?? '';
+    const all = [...aside.matchAll(/<li class="repo-list-item( selected)?" data-name="([^"]+)"( hidden)?>\s*<img class="avatar " src="([^"]+)"[^>]*>\s*<a class="repo-list-name" href="([^"]+)" title="[^"]+"( aria-current="page")?>[^<]*<\/a>\s*(?:<span class="list-tab-turn" title="([^"]+)">[^]*?<\/svg> (\d+)<\/span>)?/g)];
+    const selected = all.filter((m) => m[1] && m[6]).map((m) => m[2]);
+    const repos = all.map((m) => ({
+      name: m[2],
+      shown: !m[3],
+      avatar: m[4],
+      href: m[5],
+      turn: m[8] ? Number(m[8]) : 0,
+      title: m[7],
     }));
-    return { aside, repos };
+    return { aside, repos, selected };
   };
   const north = await scratchRepo('north');
   const south = await scratchRepo('south');
@@ -5223,8 +5225,17 @@ test('the front page lists the repositories with pull requests, latest activity 
   await human('PATCH', `${north.api}/${n1.number}`, { state: 'closed' });
   ({ repos } = await sidebar('/?state=done'));
   assert.deepEqual(repos[0], { name: 'acme/north', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/north', turn: 0, title: undefined });
-  // Only on the front page.
-  assert.doesNotMatch(await page('/acme/north'), /dashboard-sidebar/);
+  // A repository's page has the same, with that one selected; the front page has none selected.
+  const front = await sidebar('/');
+  assert.doesNotMatch(front.aside, /selected|aria-current/);
+  const onNorth = await sidebar('/acme/north');
+  assert.deepEqual(onNorth.repos, front.repos);
+  assert.deepEqual(onNorth.selected, ['acme/north']);
+  // A repository without pull requests has the same, with none selected.
+  const empty = await scratchRepo('sidebar-empty');
+  const onEmpty = await sidebar(`/${empty.fullName}`);
+  assert.deepEqual(onEmpty.repos, front.repos);
+  assert.deepEqual(onEmpty.selected, []);
 
   // Ten at most, then a filter and "Show more".
   for (let i = repos.length; i < 10; i++) await (await scratchRepo(`more-${i}`)).stage('more');
@@ -5240,6 +5251,11 @@ test('the front page lists the repositories with pull requests, latest activity 
   assert.match(aside, /<input type="search" class="form-control repo-filter js-repo-filter" placeholder="Find a repository…"/);
   assert.match(aside, /<ul class="repo-list js-repo-list" data-shown="10">/);
   assert.match(aside, /<button type="button" class="btn-link repo-list-more js-repo-more">Show more<\/button>/);
+  // One past the first ten is shown on its page in place of the tenth, so as many are shown.
+  const past = await sidebar(`/${repos[10].name}`);
+  assert.deepEqual(past.selected, [repos[10].name]);
+  assert.deepEqual(past.repos.map((r) => r.shown), [...Array(9).fill(true), false, true]);
+  assert.match(past.aside, /js-repo-more/);
 });
 
 test('a pull request that conflicts with its base: the reviewer sees it, the author is told to rebase, and auto-publish waits', async (t) => {

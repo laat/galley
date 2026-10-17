@@ -33,9 +33,12 @@ import type { Span } from '../diff.ts';
 // ------------------------------------------------------------------ lists
 
 export function pullList(s: Service, opts: { repo: RepoRow | null; state: string }): string {
-  const all = s.pulls(opts.repo, { state: 'all' });
+  // Every repository's, for the sidebar and notifications; a repository's page lists its own.
+  const everywhere = s.pulls(null, { state: 'all' });
+  const current = opts.repo;
+  const all = current ? everywhere.filter((p) => p.repo_id === current.id) : everywhere;
   // A tab per state, each pull request in one of them (stagingState), so the counts do not overlap.
-  const staging = new Map(all.map((p) => [p.id, stagingState(p)]));
+  const staging = new Map(everywhere.map((p) => [p.id, stagingState(p)]));
   const state = ['staged', 'published', 'done', 'all'].includes(opts.state) ? opts.state : 'staged';
   // The front page has the pinned ones at the top, whatever their state, most recently pinned first, and not again below.
   const pinned = opts.repo ? [] : all.filter((p) => p.pinned_at).sort((a, b) => b.pinned_at!.localeCompare(a.pinned_at!));
@@ -43,10 +46,11 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   const shown = state === 'all' ? listed : listed.filter((p) => staging.get(p.id) === state);
   const base = opts.repo ? `/${opts.repo.owner}/${opts.repo.name}` : '/';
   // What the reviewer agents are at, which decides whose turn it is and which the rows say.
-  const ready = new Map(all.filter((p) => staging.get(p.id) !== 'done').map((p) => [p.id, s.readiness(p)]));
-  const turns = new Map(all.map((p) => [p.id, s.turn(p, ready.get(p.id))]));
+  const ready = new Map(everywhere.filter((p) => staging.get(p.id) !== 'done').map((p) => [p.id, s.readiness(p)]));
+  const turns = new Map(everywhere.map((p) => [p.id, s.turn(p, ready.get(p.id))]));
   const turn = (p: PullRow) => turns.get(p.id)!;
-  const yours = all.filter((p) => turn(p).whose === 'reviewer');
+  const yoursEverywhere = everywhere.filter((p) => turn(p).whose === 'reviewer');
+  const yours = current ? yoursEverywhere.filter((p) => p.repo_id === current.id) : yoursEverywhere;
   /** A tab with its count, and how many of them wait for you, also when another tab is shown. */
   const tab = (key: string, iconName: string, label: string) => {
     const n = all.filter((p) => staging.get(p.id) === key).length;
@@ -63,10 +67,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     return `/api/repos/${repo.owner}/${repo.name}/pulls/${p.number}`;
   };
   // What notifications follow (notifyTurns in app.js): your turn in every repository, whatever this page lists.
-  const notify = (opts.repo ? s.pulls(null, { state: 'open' }) : all)
-    .map((p) => ({ p, t: turns.get(p.id) ?? s.turn(p) }))
-    .filter(({ t }) => t.whose === 'reviewer')
-    .map(({ p, t }) => ({ id: p.id, title: p.title, url: href(p), reasons: t.reasons.map(reasonText).join(' · ') }));
+  const notify = yoursEverywhere.map((p) => ({ id: p.id, title: p.title, url: href(p), reasons: turn(p).reasons.map(reasonText).join(' · ') }));
   const pinMark = html`<span class="pin-mark" title="Pinned to the top of the front page">${icon('pin-fill', { label: 'Pinned' })}</span>`;
   const heading = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
@@ -177,9 +178,10 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     </div>
     ${rows.length ? rows : empty}
   </div>`;
-  // The front page has your repositories at the left of the page and the list in the rest, like GitHub's dashboard.
-  // A repository's list, and the front page without repositories, are centered like the pull request pages.
-  const sidebar = opts.repo ? null : repoSidebar(s, all, yours);
+  // The front page and a repository's have your repositories at the left of the page and the list in the rest, like
+  // GitHub's dashboard, so that going from one to another moves neither. Without repositories, the front page's list
+  // is centered like the pull request pages.
+  const sidebar = repoSidebar(s, everywhere, yoursEverywhere, current);
   const body = sidebar
     ? html`<div class="container container-full dashboard">${sidebar}<div class="dashboard-main">${list}</div></div>`
     : html`<div class="container container-xl">${list}</div>`;
@@ -193,26 +195,35 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   });
 }
 
-/** How many repositories the front page's sidebar shows before "Show more". */
+/** How many repositories the sidebar shows before "Show more". */
 const SIDEBAR_REPOS = 10;
 
 /**
- * The front page's repositories: those with pull requests, latest activity first (the latest
- * update of a pull request in each), with how many of them are your turn. With more than
- * SIDEBAR_REPOS, a filter and "Show more" (public/app.js). Null when there are none.
+ * The repositories beside the list: those with pull requests, latest activity first (the latest
+ * update of a pull request in each), with how many of them are your turn. On a repository's page,
+ * that one is selected. With more than SIDEBAR_REPOS, a filter and "Show more" (public/app.js).
+ * Null when there are none.
  */
-function repoSidebar(s: Service, all: PullRow[], yours: PullRow[]): Safe | null {
+function repoSidebar(s: Service, all: PullRow[], yours: PullRow[], current: RepoRow | null): Safe | null {
   // Newest first, so a repository's first pull request is its latest activity.
   const repos = [...new Set(all.map((p) => p.repo_id))].map((id) => s.repoById(id));
   if (!repos.length) return null;
   const many = repos.length > SIDEBAR_REPOS;
-  const items = repos.map((repo, i) => {
+  // As many shown on every page, so that the list below them on narrow screens stays put: the selected one among
+  // them, in place of the last when it is further down.
+  const shown = new Set(repos.slice(0, SIDEBAR_REPOS).map((r) => r.id));
+  if (current && repos.some((r) => r.id === current.id) && !shown.has(current.id)) {
+    shown.delete(repos[SIDEBAR_REPOS - 1].id);
+    shown.add(current.id);
+  }
+  const items = repos.map((repo) => {
     const name = `${repo.owner}/${repo.name}`;
     const owner = repo.github_slug?.split('/')[0];
     const mine = yours.filter((p) => p.repo_id === repo.id).length;
-    return html`<li class="repo-list-item" data-name="${name}"${i >= SIDEBAR_REPOS ? raw(' hidden') : ''}>
+    const selected = repo.id === current?.id;
+    return html`<li class="repo-list-item${selected ? ' selected' : ''}" data-name="${name}"${shown.has(repo.id) ? '' : raw(' hidden')}>
       ${avatar(owner ? `https://github.com/${owner}.png?size=40` : `/avatars/${encodeURIComponent(repo.owner)}.svg`, owner ?? repo.owner, 20)}
-      <a class="repo-list-name" href="/${name}" title="${name}">${name}</a>
+      <a class="repo-list-name" href="/${name}" title="${name}"${selected ? raw(' aria-current="page"') : ''}>${name}</a>
       ${mine ? html`<span class="list-tab-turn" title="${plural(mine, 'pull request')} waiting for you">${icon('inbox')} ${mine}</span>` : ''}
     </li>`;
   });

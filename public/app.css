@@ -437,8 +437,8 @@ kbd {
 .pr-row--compact { padding: 6px 16px; }
 .pr-row--compact .pr-row-title, .pr-row--compact .pr-row-repo { font-size: 14px; }
 .pr-row--compact .pr-row-turn { margin-top: 2px; }
-/* The front page: your repositories at the left of the page, in line with the header's logo, and
-   the list in the rest; above it on narrow screens. */
+/* The front page and a repository's: your repositories at the left of the page, in line with the
+   header's logo, and the list in the rest; above it on narrow screens. */
 .dashboard { display: grid; grid-template-columns: 256px minmax(0, 1fr); gap: 24px; align-items: start; }
 .dashboard-sidebar { padding-top: 24px; min-width: 0; }
 .dashboard-sidebar-title { margin: 6px 0 8px; font-size: 14px; font-weight: 600; line-height: 24px; }
@@ -446,6 +446,9 @@ kbd {
 .repo-list { margin: 0; padding: 0; list-style: none; }
 .repo-list-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }
 .repo-list-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-weight: 600; }
+/* The repository whose page this is, as the settings' navigation marks its page; its padding takes no room from the others. */
+.repo-list-item.selected { position: relative; margin: 0 -8px; padding: 4px 8px; background: var(--neutral-muted); border-radius: 6px; }
+.repo-list-item.selected::before { content: ""; position: absolute; left: -8px; top: 6px; bottom: 6px; width: 4px; border-radius: 6px; background: var(--accent-emphasis); }
 .repo-list-item .list-tab-turn { margin-left: auto; }
 .repo-list-none { margin: 4px 0; font-size: 12px; color: var(--fg-muted); }
 .repo-list-more { margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--fg-muted); }
