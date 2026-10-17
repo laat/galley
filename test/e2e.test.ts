@@ -133,7 +133,10 @@ before(async () => {
   // it runs (failing with FAKE_INSTALL_FAIL), and `exec` answering with FAKE_CODEX_REVIEW (or
   // failing, with FAKE_CODEX_FAIL), after FAKE_CODEX_SLEEP milliseconds or once the file
   // FAKE_CODEX_GATE exists. Where it may run the
-  // tests, it leaves a read-only directory behind, as Go's module cache does.
+  // tests, it leaves a read-only directory behind, as Go's module cache does. With --json it
+  // prints what it does as `codex exec --json` does: it thinks, says something, reads math.js and
+  // starts a git diff before it waits, and the diff ends when it answers. FAKE_CODEX_BIG makes the
+  // read print 100 kB.
   const codex = join(dir, 'codex');
   process.env.FAKE_CODEX_LOG = join(dir, 'codex.log');
   process.env.FAKE_CODEX_SANDBOX_LOG = join(dir, 'codex-sandbox.log');
@@ -163,8 +166,21 @@ if (args.includes('workspace-write')) {
   fs.chmodSync('.cache/mod', 0o555);
   fs.chmodSync('.cache', 0o555);
 }
+const say = (e) => args.includes('--json') && console.log(JSON.stringify(e));
+const command = (id, cmd, status, output, exit_code) => say({ type: status === 'in_progress' ? 'item.started' : 'item.completed', item: { id, type: 'command_execution', command: cmd, aggregated_output: output, exit_code, status } });
+say({ type: 'thread.started', thread_id: 'thread-1' });
+say({ type: 'turn.started' });
+say({ type: 'item.completed', item: { id: 'item_0', type: 'reasoning', text: '**Reading the change**' } });
+say({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: 'I will read math.js and the diff.' } });
+const read = "/bin/zsh -lc \\"sed -n '2,20p' math.js\\"";
+command('item_2', read, 'in_progress', '', null);
+command('item_2', read, 'completed', process.env.FAKE_CODEX_BIG ? 'a'.repeat(50000) + 'x'.repeat(50000) : fs.readFileSync('math.js', 'utf8'), 0);
+command('item_3', "/bin/zsh -lc 'git diff HEAD~1 HEAD'", 'in_progress', '', null);
 const answer = () => {
   if (process.env.FAKE_CODEX_FAIL) { console.error('model overloaded'); process.exit(3); }
+  command('item_3', "/bin/zsh -lc 'git diff HEAD~1 HEAD'", 'completed', '+export const answer = 41;\\n', 0);
+  say({ type: 'item.completed', item: { id: 'item_4', type: 'agent_message', text: process.env.FAKE_CODEX_REVIEW } });
+  say({ type: 'turn.completed', usage: { input_tokens: 12000, cached_input_tokens: 8000, cache_write_input_tokens: 0, output_tokens: 300, reasoning_output_tokens: 100 } });
   fs.writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_CODEX_REVIEW);
 };
 const gate = process.env.FAKE_CODEX_GATE;
@@ -177,7 +193,9 @@ if (gate) {
 
   // A stand-in for Claude Code: `claude -p` answering with FAKE_CLAUDE_REVIEW and what the run
   // cost, after FAKE_CLAUDE_SLEEP milliseconds or once the file FAKE_CLAUDE_GATE exists; with
-  // FAKE_CLAUDE_FAIL, the error result Claude Code gives. Every server in this file uses it.
+  // FAKE_CLAUDE_FAIL, the error result Claude Code gives. Every server in this file uses it. As
+  // `--output-format stream-json` does, it prints its messages first: it reads math.js (by its
+  // full path) and says something before it waits, and gives its answer with StructuredOutput.
   const claude = join(dir, 'claude');
   process.env.LAATSUX_CLAUDE = claude;
   process.env.FAKE_CLAUDE_LOG = join(dir, 'claude.log');
@@ -195,11 +213,20 @@ fs.mkdirSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', { recursive: true });
 fs.writeFileSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache/file', 'x');
 fs.chmodSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', 0o555);
 fs.chmodSync(env.CLAUDE_CODE_TMPDIR + '/mod', 0o555);
+const say = (e) => console.log(JSON.stringify({ ...e, parent_tool_use_id: null, session_id: 'session-1' }));
+const usage = (output_tokens) => ({ input_tokens: 2, cache_creation_input_tokens: 7000, cache_read_input_tokens: 0, output_tokens });
+say({ type: 'system', subtype: 'init', cwd: process.cwd(), tools: ['Bash', 'Glob', 'Grep', 'Read', 'StructuredOutput'], model: 'claude-haiku-5-5' });
+say({ type: 'assistant', message: { id: 'msg_1', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: process.cwd() + '/math.js', offset: 2 } }], usage: usage(20) } });
+say({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '2\\t  return a + b;' }] } });
+say({ type: 'assistant', message: { id: 'msg_2', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'text', text: 'The answer is off by one.' }], usage: usage(10) } });
 if (env.FAKE_CLAUDE_FAIL) {
   console.log(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded', num_turns: 2, total_cost_usd: 0.004, usage: { input_tokens: 5, output_tokens: 300 } }));
   process.exit(1);
 }
-const answer = () => console.log(JSON.stringify({
+const answer = () => console.log(
+  JSON.stringify({ type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_3', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_2', name: 'StructuredOutput', input: JSON.parse(env.FAKE_CLAUDE_REVIEW) }], usage: usage(200) } }) + '\\n' +
+  JSON.stringify({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: 'Structured output provided successfully' }] } }) + '\\n' +
+  JSON.stringify({
   type: 'result', subtype: 'success', is_error: false, result: 'Done.', num_turns: 7, duration_ms: 4200, total_cost_usd: 0.0123,
   usage: { input_tokens: 12, cache_creation_input_tokens: 15000, cache_read_input_tokens: 30000, output_tokens: 2100 },
   modelUsage: { 'claude-haiku-5-5': { costUSD: 0.0123 } },
@@ -856,7 +883,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(call.prompt, /Title: Add the answer/);
   assert.equal(flag('--model'), 'haiku');
   assert.equal(flag('--effort'), 'low');
-  assert.equal(flag('--output-format'), 'json');
+  assert.equal(flag('--output-format'), 'stream-json');
+  assert.ok(call.args.includes('--verbose'), 'stream-json needs --verbose');
   assert.deepEqual(JSON.parse(flag('--json-schema')).required, ['summary', 'comments']);
   // The checkout is untrusted: none of its settings (hooks), MCP servers, CLAUDE.md, skills or agents.
   for (const f of ['--restricted', '--safe-mode', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) assert.ok(call.args.includes(f), f);

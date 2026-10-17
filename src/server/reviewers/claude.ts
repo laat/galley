@@ -8,6 +8,7 @@ import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
 import { EngineError, lastLines, makeWritable, removeDir, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
 import { sandboxed } from './sandbox.ts';
+import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCall } from './transcript.ts';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -77,8 +78,10 @@ export class ClaudeEngine implements Engine {
     try {
       const args = [
         '-p',
+        // Every message as it comes, the result last; stream-json needs --verbose.
         '--output-format',
-        'json',
+        'stream-json',
+        '--verbose',
         '--json-schema',
         JSON.stringify(SCHEMA),
         '--no-session-persistence',
@@ -107,18 +110,22 @@ export class ClaudeEngine implements Engine {
       if (settings.effort) args.push('--effort', settings.effort);
       const env: NodeJS.ProcessEnv = { ...job.env, CLAUDE_CODE_TMPDIR: own, DISABLE_AUTOUPDATER: '1' };
       for (const name of SESSION_VARIABLES) env[name] = undefined;
-      const r = await run(this.bin, args, { cwd: checkout, env, input: job.prompt, allowFail: true, timeoutMs, signal: job.signal }).catch((e: Error) => {
+      const events = new ClaudeEvents(checkout);
+      const stdout = jsonLines((e) => {
+        for (const u of events.read(e)) job.onUpdate(u);
+      });
+      const r = await run(this.bin, args, { cwd: checkout, env, input: job.prompt, allowFail: true, timeoutMs, signal: job.signal, onLine: stdout.onLine }).catch((e: Error) => {
         throw new Error(`could not run ${this.bin}: ${e.message}`);
       });
-      const out = result(r.stdout);
+      const out = events.result;
       // A run that fails after some turns (error_max_structured_output_retries, an API error) has cost something too.
       const cost = out && (typeof out.total_cost_usd === 'number' || out.usage) ? usage(out) : null;
       if (r.code !== 0 || !out || out.is_error) {
         const why = r.timedOut ? `timed out after ${timeoutMs / 60000} minutes` : r.code === null ? 'was killed' : out?.subtype && out.subtype !== 'success' ? `stopped (${out.subtype})` : `exited with ${r.code}`;
-        throw new EngineError(`claude ${why}:\n${lastLines(String(out?.result ?? '') || r.stderr || r.stdout, 15)}`, cost);
+        throw new EngineError(`claude ${why}:\n${lastLines(String(out?.result ?? '') || r.stderr || stdout.other.join('\n'), 15)}`, cost);
       }
       if (!out.structured_output || typeof out.structured_output !== 'object') {
-        throw new EngineError(`claude did not answer in the review's schema:\n${lastLines(String(out.result ?? r.stdout), 15)}`, cost);
+        throw new EngineError(`claude did not answer in the review's schema:\n${lastLines(String(out.result ?? ''), 15)}`, cost);
       }
       return { answer: out.structured_output, usage: cost };
     } finally {
@@ -172,18 +179,116 @@ export class ClaudeEngine implements Engine {
   }
 }
 
-/** The result `claude -p --output-format json` prints, the last line of its output when something printed before it. */
-function result(stdout: string): any {
-  for (const line of [stdout, ...stdout.trim().split('\n').reverse()]) {
-    try {
-      const out = JSON.parse(line);
-      if (out?.type === 'result') return out;
-    } catch {}
+/**
+ * Reads `claude -p --output-format stream-json` messages into session updates: what Claude
+ * says and thinks, and its tool calls with their results. Its answer (the StructuredOutput
+ * tool) is its last message. The tokens add up per message as they come; the result has the
+ * exact count and the cost.
+ */
+export class ClaudeEvents {
+  /** The result message, last. */
+  result: any = null;
+  private checkout: string;
+  /** Each message's usage; a message comes once per content block, with the same usage. */
+  private messages = new Map<string, any>();
+  private models = new Set<string>();
+  private answers = new Set<string>();
+
+  constructor(checkout: string) {
+    this.checkout = checkout;
   }
-  return null;
+
+  read(e: any): SessionUpdate[] {
+    // Subagents' messages (Claude has none to start) would come with the tool call that started them.
+    if (e.parent_tool_use_id) return [];
+    const blocks: any[] = Array.isArray(e.message?.content) ? e.message.content : [];
+    switch (e.type) {
+      case 'assistant': {
+        const id = String(e.message.id ?? '');
+        const out: SessionUpdate[] = [];
+        for (const b of blocks) {
+          if (b.type === 'text' && b.text) out.push({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: b.text }, messageId: id });
+          else if (b.type === 'thinking' && b.thinking) out.push({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: b.thinking }, messageId: id });
+          else if (b.type === 'tool_use' && b.name === 'StructuredOutput') {
+            this.answers.add(b.id);
+            out.push({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(b.input, null, 2) }, messageId: b.id });
+          } else if (b.type === 'tool_use') out.push(this.toolCall(b));
+        }
+        if (id && e.message.usage) {
+          this.messages.set(id, e.message.usage);
+          if (e.message.model) this.models.add(String(e.message.model));
+          out.push({ sessionUpdate: 'usage', usage: this.soFar() });
+        }
+        return out;
+      }
+      case 'user':
+        return blocks
+          .filter((b) => b.type === 'tool_result' && !this.answers.has(b.tool_use_id))
+          .map((b) => ({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: String(b.tool_use_id),
+            status: b.is_error ? 'failed' : 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: resultText(b.content) } }],
+          }));
+      case 'result': {
+        this.result = e;
+        const out: SessionUpdate[] = [{ sessionUpdate: 'usage', usage: usage(e) }];
+        if (e.is_error) out.push({ sessionUpdate: 'error', message: String(e.result || e.subtype || 'error') });
+        return out;
+      }
+      default:
+        return [];
+    }
+  }
+
+  private toolCall(b: any): ToolCall {
+    const input = b.input && typeof b.input === 'object' ? b.input : {};
+    const path = (p: unknown) => inCheckout(this.checkout, String(p));
+    const call = { sessionUpdate: 'tool_call' as const, toolCallId: String(b.id), status: 'in_progress' as const, rawInput: input };
+    switch (b.name) {
+      case 'Read': {
+        const line = typeof input.offset === 'number' && input.offset > 1 ? input.offset : undefined;
+        return { ...call, title: `Read ${path(input.file_path)}`, kind: 'read', locations: [{ path: path(input.file_path), ...(line ? { line } : {}) }] };
+      }
+      case 'Grep':
+        return { ...call, title: `Search for ${JSON.stringify(String(input.pattern ?? ''))}${input.path ? ` in ${path(input.path)}` : ''}${input.glob ? ` (${input.glob})` : ''}`, kind: 'search', locations: [] };
+      case 'Glob':
+        return { ...call, title: `Find ${input.pattern}${input.path ? ` in ${path(input.path)}` : ''}`, kind: 'search', locations: [] };
+      case 'Bash': {
+        // Its commands name the checkout by its full path; the repository's own paths read better.
+        const command = String(input.command ?? '').replaceAll(`${this.checkout}/`, '').replaceAll(this.checkout, '.');
+        return { ...call, title: command, ...commandKind(command, this.checkout) };
+      }
+      default:
+        return { ...call, title: String(b.name), kind: 'other', locations: [] };
+    }
+  }
+
+  /** The tokens so far: each message's input, and its output as far as it was counted when it came. */
+  private soFar(): RunUsage {
+    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    const sum = (key: string) => [...this.messages.values()].reduce((total, u) => total + n(u[key]), 0);
+    return {
+      cost_usd: null,
+      input_tokens: sum('input_tokens'),
+      cache_creation_input_tokens: sum('cache_creation_input_tokens'),
+      cache_read_input_tokens: sum('cache_read_input_tokens'),
+      output_tokens: sum('output_tokens'),
+      turns: this.messages.size,
+      duration_ms: null,
+      models: [...this.models],
+    };
+  }
 }
 
-/** What `claude -p --output-format json` reports a run cost. */
+/** A tool result's text: a string, or text blocks. */
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((c) => (c?.type === 'text' ? String(c.text ?? '') : `[${c?.type ?? 'content'}]`)).join('\n');
+  return '';
+}
+
+/** What `claude -p` reports a run cost, in its result. */
 function usage(out: any): RunUsage {
   const u = out.usage ?? {};
   const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);

@@ -960,13 +960,14 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   </div>`;
 }
 
-/** What the latest run cost, and all of them together, when the tool reports it (Claude does). */
+/** What the latest run cost, and all of them together, when the tool reports it (Claude the cost, Codex the tokens). */
 function runUsage(runs: ReviewRunRow[]): Safe {
   const reported = runs.flatMap((r) => (r.usage ? [JSON.parse(r.usage) as RunUsage] : []));
   if (!reported.length) return raw('');
   const last = runs.at(-1)?.usage ? reported.at(-1)! : null;
-  const total = reported.length > 1 ? `${reported.length} runs: ${dollars(reported.reduce((sum, u) => sum + (u.cost_usd ?? 0), 0))}` : null;
-  if (!last) return html`<p class="sidebar-text color-fg-muted">${total}</p>`;
+  const costs = reported.flatMap((u) => (u.cost_usd === null ? [] : [u.cost_usd]));
+  const total = costs.length > 1 ? `${costs.length} runs: ${dollars(costs.reduce((sum, n) => sum + n, 0))}` : null;
+  if (!last) return total ? html`<p class="sidebar-text color-fg-muted">${total}</p>` : raw('');
   const tokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
   const input = last.input_tokens + last.cache_creation_input_tokens + last.cache_read_input_tokens;
   const parts = [last.cost_usd !== null ? dollars(last.cost_usd) : null, `${tokens(input)} tokens in, ${tokens(last.output_tokens)} out`, last.turns !== null ? plural(last.turns, 'turn') : null];

@@ -7,8 +7,9 @@ import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import { now, type Actor, type CommentRow } from '../db.ts';
 import { splitPriorityPrefix, type Service } from '../service.ts';
-import { lastLines, outsideTheDiff, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo } from './reviewer.ts';
+import { EngineError, lastLines, outsideTheDiff, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
 import { DEFAULT_SETTINGS, readSettings, REVIEWER_KINDS, saveSettings } from '../settings.ts';
+import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCallLocation, type ToolCallStatus, type ToolKind } from './transcript.ts';
 
 /**
  * Codex's workspace-write sandbox: it writes only to the checkout and the TMPDIR it is given
@@ -73,21 +74,28 @@ export class CodexEngine implements Engine {
     const outFile = join(job.dir, 'review.json');
     writeFileSync(schemaFile, JSON.stringify(SCHEMA));
     const sandbox = settings.runTests ? ['-s', 'workspace-write', ...workspaceWrite(false)] : ['-s', 'read-only'];
-    const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), '-C', checkout, '--color', 'never', '--output-schema', schemaFile, '-o', outFile];
+    // --json prints what Codex does as it goes; the answer still goes to the -o file.
+    const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), '-C', checkout, '--color', 'never', '--json', '--output-schema', schemaFile, '-o', outFile];
     if (settings.model) args.push('-m', settings.model);
     if (settings.effort) args.push('-c', `model_reasoning_effort="${settings.effort}"`);
     args.push('-');
-    const r = await run(this.bin, args, { cwd: checkout, env: job.env, input: job.prompt, allowFail: true, timeoutMs, signal: job.signal }).catch((e: Error) => {
+    const events = new CodexEvents(checkout);
+    const stdout = jsonLines((e) => {
+      for (const u of events.read(e)) job.onUpdate(u);
+    });
+    const r = await run(this.bin, args, { cwd: checkout, env: job.env, input: job.prompt, allowFail: true, timeoutMs, signal: job.signal, onLine: stdout.onLine }).catch((e: Error) => {
       throw new Error(`could not run ${this.bin}: ${e.message}`);
     });
+    // Its errors come as events; stderr has its log.
+    const output = () => lastLines([r.stderr || stdout.other.join('\n'), ...events.errors].join('\n'), 15);
     if (r.code !== 0) {
       const why = r.timedOut ? `timed out after ${timeoutMs / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
-      throw new Error(`codex ${why}:\n${lastLines(r.stderr || r.stdout, 15)}`);
+      throw new EngineError(`codex ${why}:\n${output()}`, events.usage);
     }
     try {
-      return { answer: JSON.parse(readFileSync(outFile, 'utf8')), usage: null };
+      return { answer: JSON.parse(readFileSync(outFile, 'utf8')), usage: events.usage };
     } catch {
-      throw new Error(`codex did not write a review:\n${lastLines(r.stderr || r.stdout, 15)}`);
+      throw new EngineError(`codex did not write a review:\n${output()}`, events.usage);
     }
   }
 
@@ -134,6 +142,119 @@ export class CodexEngine implements Engine {
     const get = (key: string) => top.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, 'm'))?.[1];
     return { model: get('model'), effort: get('model_reasoning_effort') };
   }
+}
+
+/**
+ * Reads `codex exec --json` events into session updates: its messages and reasoning, the
+ * commands it runs (and the files they read), its file changes and to-do list. It adds up the
+ * tokens each turn used, which Codex reports when the turn ends.
+ */
+export class CodexEvents {
+  usage: RunUsage | null = null;
+  /** The errors it reported, for saying why a run failed. */
+  errors: string[] = [];
+  private checkout: string;
+  private started = new Set<string>();
+
+  constructor(checkout: string) {
+    this.checkout = checkout;
+  }
+
+  read(e: any): SessionUpdate[] {
+    switch (e.type) {
+      case 'item.started':
+      case 'item.updated':
+      case 'item.completed':
+        return e.item && typeof e.item === 'object' ? this.item(e.item, e.type === 'item.completed') : [];
+      case 'turn.completed':
+        return e.usage ? [{ sessionUpdate: 'usage', usage: this.add(e.usage) }] : [];
+      case 'turn.failed':
+      case 'error': {
+        const message = String(e.error?.message ?? e.message ?? 'error');
+        this.errors.push(message);
+        return [{ sessionUpdate: 'error', message }];
+      }
+      default:
+        return [];
+    }
+  }
+
+  private item(item: any, done: boolean): SessionUpdate[] {
+    const id = String(item.id);
+    const text = (t: unknown) => ({ type: 'text' as const, text: String(t ?? '') });
+    // A tool call starts once; what follows updates it. One that only completes starts completed.
+    const call = (title: string, kind: ToolKind, status: ToolCallStatus, rest: { locations?: ToolCallLocation[]; output?: string; rawInput?: unknown; rawOutput?: unknown }): SessionUpdate[] => {
+      const content = rest.output ? [{ type: 'content' as const, content: text(rest.output) }] : undefined;
+      const fields = { status, content, ...(rest.rawOutput === undefined ? {} : { rawOutput: rest.rawOutput }) };
+      if (this.started.has(id)) return [{ sessionUpdate: 'tool_call_update', toolCallId: id, ...fields, ...(rest.locations ? { locations: rest.locations } : {}) }];
+      this.started.add(id);
+      return [{ sessionUpdate: 'tool_call', toolCallId: id, title, kind, locations: rest.locations ?? [], rawInput: rest.rawInput, ...fields }];
+    };
+    const status = (): ToolCallStatus => (item.status === 'in_progress' || (!done && !item.status) ? 'in_progress' : item.status === 'completed' ? 'completed' : 'failed');
+    switch (item.type) {
+      case 'agent_message':
+        return done && item.text ? [{ sessionUpdate: 'agent_message_chunk', content: text(item.text), messageId: id }] : [];
+      case 'reasoning':
+        return done && item.text ? [{ sessionUpdate: 'agent_thought_chunk', content: text(item.text), messageId: id }] : [];
+      case 'command_execution': {
+        const command = unwrapShell(String(item.command ?? ''));
+        const { kind, locations } = commandKind(command, this.checkout);
+        const failed = typeof item.exit_code === 'number' && item.exit_code !== 0;
+        return call(command, kind, failed ? 'failed' : status(), {
+          locations,
+          output: item.aggregated_output || undefined,
+          rawInput: { command },
+          rawOutput: item.exit_code === null || item.exit_code === undefined ? undefined : { exit_code: item.exit_code },
+        });
+      }
+      case 'file_change': {
+        const changes: any[] = Array.isArray(item.changes) ? item.changes : [];
+        const locations = changes.map((c) => ({ path: inCheckout(this.checkout, String(c.path)) }));
+        const title = `Edit ${locations.map((l) => l.path).join(', ')}`;
+        return call(title, 'edit', status(), { locations, rawInput: changes });
+      }
+      case 'mcp_tool_call': {
+        const output = item.error?.message ?? (Array.isArray(item.result?.content) ? item.result.content.map((c: any) => c.text ?? '').join('\n') : undefined);
+        return call(`${item.server}: ${item.tool}`, 'other', status(), { output, rawInput: item.arguments });
+      }
+      case 'web_search':
+        return call(`Search the web for ${JSON.stringify(String(item.query ?? ''))}`, 'fetch', done ? 'completed' : 'in_progress', {});
+      case 'todo_list': {
+        const items: any[] = Array.isArray(item.items) ? item.items : [];
+        return [{ sessionUpdate: 'plan', entries: items.map((i) => ({ content: String(i.text ?? ''), priority: 'medium', status: i.completed ? 'completed' : 'pending' })) }];
+      }
+      case 'error':
+        return [{ sessionUpdate: 'error', message: String(item.message ?? 'error') }];
+      default:
+        return [];
+    }
+  }
+
+  /** Add a turn's tokens. Codex counts cached input tokens in its input tokens. */
+  private add(u: any): RunUsage {
+    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    const total = this.usage ?? { cost_usd: null, input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0, turns: null, duration_ms: null, models: [] };
+    const cached = n(u.cached_input_tokens);
+    const written = n(u.cache_write_input_tokens);
+    this.usage = {
+      ...total,
+      input_tokens: total.input_tokens + Math.max(0, n(u.input_tokens) - cached - written),
+      cache_creation_input_tokens: total.cache_creation_input_tokens + written,
+      cache_read_input_tokens: total.cache_read_input_tokens + cached,
+      output_tokens: total.output_tokens + n(u.output_tokens),
+    };
+    return this.usage;
+  }
+}
+
+/** The command Codex ran, without the shell it wraps it in (`/bin/zsh -lc 'git diff'`). */
+export function unwrapShell(command: string): string {
+  const m = command.match(/^(?:\S*\/)?(?:ba|z|da)?sh -l?c (.+)$/s);
+  if (!m) return command;
+  const arg = m[1];
+  if (arg.length > 1 && arg.startsWith("'") && arg.endsWith("'")) return arg.slice(1, -1).replace(/'\\''/g, "'");
+  if (arg.length > 1 && arg.startsWith('"') && arg.endsWith('"')) return arg.slice(1, -1).replace(/\\([\\"$`])/g, '$1');
+  return arg;
 }
 
 /** The Codex reviewer, with what earlier versions stored about it brought up to date. */
