@@ -2487,31 +2487,190 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
   });
 });
 
-test('closing the server stops a running review and records why', async () => {
+test('a review the server stops under is interrupted, runs again when it starts, and does not count', async () => {
+  const checkedOut = git('rev-parse', '--abbrev-ref', 'HEAD');
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/restart-review');
+  writeFileSync(join(repo, 'restart.js'), 'export {};\n');
+  git('add', 'restart.js');
+  git('commit', '-qm', 'Add restart.js');
   const data = mkdtempSync(join(tmpdir(), 'laatsux-stop-'));
-  const second = await startServer({ port: 0, dataDir: data, ghBin: 'false', codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  const start = ({ port = 0, gh = 'false' } = {}) => startServer({ port, dataDir: data, ghBin: gh, codexBin: join(dir, 'codex'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  let s = await start();
+  const port = s.port;
+  // Later restarts take a new port: fetch would send its first request to one on the same port over a connection the old server closed.
   const json = { 'content-type': 'application/json' };
-  const registered = await (await fetch(`${second.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
-  const api = `${second.url}/api/repos/${registered.full_name}`;
+  const registered = await (await fetch(`${s.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const pulls = `/api/repos/${registered.full_name}/pulls`;
+  // Codex gets one automatic review.
   const pr = await (
-    await fetch(`${api}/pulls`, { method: 'POST', headers: { ...json, 'x-laatsux-actor': 'agent' }, body: JSON.stringify({ title: 'Slow review', head: 'feature/by-codex', base: 'main' }) })
+    await fetch(`${s.url}${pulls}`, {
+      method: 'POST',
+      headers: { ...json, 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: 'Slow review', head: 'feature/restart-review', base: 'main', reviewers: [{ login: 'codex', max_iterations: 1 }] }),
+    })
   ).json();
-  process.env.FAKE_CODEX_SLEEP = '10000';
+  const base = `${pulls}/${pr.number}`;
+  const runs = async () => (await (await fetch(`${s.url}${base}/reviewers/codex`)).json()).runs.map((r: any) => [r.trigger, r.status, r.error]);
+  const page = async () => (await fetch(`${s.url}/${registered.full_name}/pull/${pr.number}`)).text();
+  const ask = async () => assert.equal((await fetch(`${s.url}${base}/reviewers/codex`, { method: 'POST' })).status, 202);
+  // The fake Codex answers once the gate exists; until then its review runs.
+  const gate = join(dir, 'stop-gate');
+  process.env.FAKE_CODEX_GATE = gate;
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({
+    summary: 'One thing.',
+    comments: [{ path: 'restart.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Export something.' }],
+  });
   try {
-    assert.equal((await fetch(`${api}/pulls/${pr.number}/reviewers/codex`, { method: 'POST' })).status, 202);
+    // The author waits, which starts the automatic review, and the server stops under it.
+    const env = { ...process.env, LAATSUX_URL: s.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1', NO_COLOR: '1' };
+    const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env });
+    for (let i = 0; i < 200 && !s.service.codex!.isRunning(pr.id); i++) await new Promise((r) => setTimeout(r, 25));
     const started = Date.now();
-    await second.close();
+    await s.close();
     assert.ok(Date.now() - started < 5000, `close took ${Date.now() - started} ms`);
+    assert.doesNotMatch(git('worktree', 'list'), /laatsux-review-/);
+
+    // Interrupted, not failed: it runs again once the author's wait is back (on the same port), and the wait gets its review.
+    writeFileSync(gate, '');
+    s = await start({ port });
+    assert.deepEqual(await runs(), [['auto', 'interrupted', null]]);
+    assert.match(await page(), /Review of <code>[0-9a-f]{7}<\/code> interrupted by a restart; it will run again/);
+    const r = await waiting;
+    assert.match(r.stdout, /codex-review reviewed: commented/);
+    await s.service.codex!.settle(pr.id);
+    assert.deepEqual(await runs(), [['auto', 'interrupted', null], ['auto', 'done', null]]);
+    const reviews = await (await fetch(`${s.url}${base}/reviews`)).json();
+    assert.match(reviews.at(-1).body, /automatic review 1 of 1\./);
+
+    // Asked for by hand, it runs again as soon as the server starts.
+    rmSync(gate);
+    await ask();
+    await s.close();
+    writeFileSync(gate, '');
+    s = await start();
+    const row = () => s.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', pr.id);
+    assert.ok(s.service.codex!.atWork(row()), 'about to review from the start');
+    await s.service.codex!.settle(pr.id);
+    assert.deepEqual((await runs()).slice(2), [['manual', 'interrupted', null], ['manual', 'done', null]]);
+
+    // Until it has run again, it holds things up: auto-publish does not publish while the server
+    // stops, with the author waiting and nothing unseen, nor is the author told the agents are done.
+    const asAgent = { 'x-laatsux-actor': 'agent' };
+    const shown = await (await fetch(`${s.url}${base}/wait?timeout=5`, { headers: asAgent })).json();
+    assert.equal((await fetch(`${s.url}${base}/seen`, { method: 'PUT', headers: { ...asAgent, ...json }, body: JSON.stringify({ at: shown.seen_at }) })).status, 204);
+    assert.equal((await fetch(`${s.url}${base}/auto-publish`, { method: 'PUT', headers: json, body: JSON.stringify({ sign: false }) })).status, 200);
+    rmSync(gate);
+    await ask();
+    const authorWaits = fetch(`${s.url}${base}/wait?timeout=30`, { headers: asAgent })
+      .then((res) => res.json())
+      .catch(() => null);
+    for (let i = 0; i < 100 && !(await (await fetch(`${s.url}${base}`)).json()).author_waiting; i++) await new Promise((r) => setTimeout(r, 50));
+    await s.close();
+    assert.notEqual((await authorWaits)?.status, 'agents_done');
+    {
+      const db = new Db(join(data, 'laatsux.db'));
+      const pull = db.get<any>('SELECT * FROM pulls WHERE id = ?', pr.id);
+      const status = new CodexReviewer(new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' }), join(dir, 'codex')).headStatus(pull);
+      assert.deepEqual([status.state, status.done], ['interrupted', false]);
+      assert.deepEqual(db.all('SELECT type FROM events WHERE pull_id = ? AND type IN (?, ?)', pr.id, 'published', 'auto_publish_failed'), []);
+      db.sql.close();
+    }
+    writeFileSync(gate, '');
+    s = await start();
+    await s.service.codex!.settle(pr.id);
+    assert.deepEqual((await runs()).slice(4), [['manual', 'interrupted', null], ['manual', 'done', null]]);
+    assert.ok(row().auto_publish, 'auto-publish is still on, never having tried');
+    assert.equal((await fetch(`${s.url}${base}/auto-publish`, { method: 'DELETE' })).status, 204);
+
+    // Not when the branch moved on while the server was down.
+    rmSync(gate);
+    await ask();
+    await s.close();
+    writeFileSync(join(repo, 'restart.js'), 'export const moved = true;\n');
+    git('commit', '-qam', 'Change restart.js');
+    writeFileSync(gate, '');
+    s = await start();
+    await s.service.codex!.settle(pr.id);
+    assert.equal(row().head_sha, git('rev-parse', 'HEAD'));
+    assert.deepEqual((await runs()).slice(6), [['manual', 'interrupted', null]]);
+
+    // Nor when following GitHub, which starts with the server, finds it merged meanwhile.
+    rmSync(gate);
+    await ask();
+    await s.close();
+    writeFileSync(gate, '');
+    const ctx = Service.prototype.ctx;
+    Service.prototype.ctx = async function (this: Service, ...args: Parameters<Service['ctx']>) {
+      if (this !== server.service) {
+        Service.prototype.ctx = ctx;
+        this.db.run("UPDATE pulls SET github_state = 'merged' WHERE id = ?", pr.id);
+      }
+      return ctx.apply(this, args);
+    };
+    try {
+      s = await start();
+      await s.service.codex!.settle(pr.id);
+    } finally {
+      Service.prototype.ctx = ctx;
+    }
+    assert.deepEqual((await runs()).slice(7), [['manual', 'interrupted', null]]);
+    s.service.db.run('UPDATE pulls SET github_state = NULL WHERE id = ?', pr.id);
+
+    // Given time, stopping waits for a running review to post, and pages say so meanwhile, where
+    // live updates reach them.
+    rmSync(gate);
+    await ask();
+    const finishing = s.close({ graceMs: 60_000 });
+    assert.match(await page(), /<div id="main"[^>]*><div class="container container-xl"><div class="flash flash-warn">.*?Waiting for 1 running review to finish before the server stops\./);
+    assert.equal((await fetch(`${s.url}${base}/reviewers/codex`, { method: 'POST' })).status, 503);
+    writeFileSync(gate, '');
+    await finishing;
+    s = await start();
+    assert.deepEqual((await runs()).slice(8), [['manual', 'done', null]]);
+
+    // Stopping again while it waits interrupts at once.
+    rmSync(gate);
+    await ask();
+    const waitingToStop = s.close({ graceMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const again = Date.now();
+    await s.close();
+    await waitingToStop;
+    assert.ok(Date.now() - again < 5000, `the second close took ${Date.now() - again} ms`);
+    writeFileSync(gate, '');
+    s = await start();
+    await s.service.codex!.settle(pr.id);
+    assert.deepEqual((await runs()).slice(9), [['manual', 'interrupted', null], ['manual', 'done', null]]);
+
+    // Published, it is not run again when GitHub says it was merged meanwhile, even when GitHub answers late.
+    rmSync(gate);
+    await ask();
+    await s.close();
+    {
+      const db = new Db(join(data, 'laatsux.db'));
+      db.run("UPDATE pulls SET state = 'published', published_url = ?, published_head_sha = head_sha, published_source_sha = head_sha WHERE id = ?", 'https://github.com/acme/widgets/pull/7', pr.id);
+      db.sql.close();
+    }
+    // A gh that tells what GitHub says about pull requests a second late, and fails at anything else.
+    const lateGh = join(dir, 'gh-late');
+    const merged = { state: 'MERGED', mergedAt: '2026-10-17T09:00:00Z', closedAt: '2026-10-17T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: null, timelineItems: { nodes: [] } };
+    writeFileSync(join(dir, 'gh-late.json'), JSON.stringify({ data: { repository: { [`p${pr.id}`]: merged } } }));
+    writeFileSync(lateGh, `#!/bin/sh\ncase "$*" in\n  *"pullRequest("*) sleep 1; cat "${join(dir, 'gh-late.json')}" ;;\n  *) exit 1 ;;\nesac\n`);
+    chmodSync(lateGh, 0o755);
+    writeFileSync(gate, '');
+    s = await start({ gh: lateGh });
+    await s.service.codex!.settle(pr.id);
+    for (let i = 0; i < 100 && row().github_state !== 'merged'; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(row().github_state, 'merged');
+    assert.deepEqual((await runs()).slice(11), [['manual', 'interrupted', null]]);
   } finally {
-    delete process.env.FAKE_CODEX_SLEEP;
+    delete process.env.FAKE_CODEX_GATE;
+    rmSync(gate, { force: true });
+    await s.close();
+    rmSync(data, { recursive: true, force: true });
+    git('checkout', '-q', checkedOut);
   }
-  const db = new Db(join(data, 'laatsux.db'));
-  const run = db.get<{ status: string; error: string }>('SELECT status, error FROM review_runs');
-  db.sql.close();
-  assert.equal(run?.status, 'failed');
-  assert.match(run!.error, /stopped during the review/);
-  assert.doesNotMatch(git('worktree', 'list'), /laatsux-review-/);
-  rmSync(data, { recursive: true, force: true });
 });
 
 test('closing the server waits for a running poll before it closes the database', async () => {

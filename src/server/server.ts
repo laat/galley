@@ -94,7 +94,12 @@ export interface StartOptions {
   followMs?: number;
 }
 
-export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; close: () => Promise<void> }> {
+export interface CloseOptions {
+  /** How long running reviews may take to post before they are interrupted (they run again on the next start). */
+  graceMs?: number;
+}
+
+export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; close: (o?: CloseOptions) => Promise<void> }> {
   mkdirSync(opts.dataDir, { recursive: true });
   const db = new Db(join(opts.dataDir, 'laatsux.db'));
   const host = opts.host ?? '127.0.0.1';
@@ -156,35 +161,50 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const follow = setInterval(followDue, opts.followMs ?? FOLLOW_BUSY_MS);
   follow.unref();
 
+  let closing: Promise<void> | null = null;
+  const close = async ({ graceMs = 0 }: CloseOptions = {}) => {
+    // Auto-publish starts nothing from here on: a review the stop cuts off must not look done to it.
+    const publishing = autoPublisher.stop();
+    // Running reviews post first, while everything else carries on: pages say what the server
+    // waits for, pushes and merges are still noticed, and the author's `pr wait` gets the review.
+    if (graceMs > 0 && service.reviewsRunning()) {
+      service.stopping = true;
+      service.bus.emit('change', { pullId: null, type: 'stopping', actor: 'laatsux' } satisfies ChangeEvent);
+    }
+    await Promise.all(service.reviewerAgents().map((r) => r.stop(graceMs)));
+    clearInterval(timer);
+    clearInterval(follow);
+    await polling;
+    await following;
+    // Publishes write to the database when they end, so they go first.
+    await publishing;
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+    });
+    // Dropped requests (an open `pr wait`) still finish their handlers; give them a moment.
+    if (inflight > 0) {
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 5000);
+        drained.once('idle', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    }
+    // Checks for conflicts with the base read the database too.
+    await service.conflictChecks;
+    db.sql.close();
+  };
+
   return {
     url,
     port,
     service,
-    close: async () => {
-      clearInterval(timer);
-      clearInterval(follow);
-      await polling;
-      await following;
-      // Running reviews and publishes write to the database when they end, so they go first.
-      await autoPublisher.stop();
-      await Promise.all(service.reviewerAgents().map((r) => r.stop()));
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
-      });
-      // Dropped requests (an open `pr wait`) still finish their handlers; give them a moment.
-      if (inflight > 0) {
-        await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, 5000);
-          drained.once('idle', () => {
-            clearTimeout(t);
-            resolve();
-          });
-        });
-      }
-      // Checks for conflicts with the base read the database too.
-      await service.conflictChecks;
-      db.sql.close();
+    // Closing again while running reviews have time to post interrupts them.
+    close: (o?: CloseOptions) => {
+      if (closing) for (const r of service.reviewerAgents()) r.interrupt();
+      return (closing ??= close(o));
     },
   };
 }

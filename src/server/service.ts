@@ -156,7 +156,7 @@ export interface AgentsDone {
 
 /** Where a reviewer agent stands with a pull request's head commit. */
 export interface HeadStatus {
-  state: 'reviewing' | 'queued' | 'unreviewed' | 'findings' | 'failed' | 'clean' | 'capped' | 'off';
+  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'failed' | 'clean' | 'capped' | 'off';
   /** Nothing more is coming from the reviewer for this commit. */
   done: boolean;
   /** The commit this is about: the head, or the earlier commit a running review started on. */
@@ -308,6 +308,8 @@ export class Service {
   /** Codex and Claude as reviewer agents, when the server runs them. */
   codex: CodexReviewer | null = null;
   claude: ClaudeReviewer | null = null;
+  /** The server is stopping, once the reviews running now have posted (see startServer's close). */
+  stopping = false;
   /** Number of `pr wait` calls currently blocked, per pull id. */
   waiters = new Map<number, number>();
   private syncing = new Map<number, Promise<PullRow>>();
@@ -1620,6 +1622,11 @@ export class Service {
     return [this.codex, this.claude].filter((r) => r !== null);
   }
 
+  /** How many reviews the reviewer agents are running, on all pull requests. */
+  reviewsRunning(): number {
+    return this.reviewerAgents().reduce((n, r) => n + r.runningCount(), 0);
+  }
+
   /**
    * Whether the feedback waits for more of its kind: it is all reviews from reviewer agents, and
    * another reviewer agent is still at work on the pull request. The author then gets the
@@ -1654,7 +1661,7 @@ export class Service {
     if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
-    if (reviewers.some((r) => r.status.state === 'reviewing' || r.status.state === 'queued' || r.status.state === 'unreviewed')) return null;
+    if (reviewers.some((r) => ['reviewing', 'queued', 'interrupted', 'unreviewed'].includes(r.status.state))) return null;
     const stopped = this.stoppedText(pull);
     const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
     // Once, whatever each reviewer agent made of the commit.
@@ -2325,6 +2332,8 @@ function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, aut
       return status.commit === pull.head_sha ? `${login} is reviewing ${sha}` : `${login} is reviewing an earlier commit, ${sha}`;
     case 'queued':
       return `${login} is about to review ${sha}`;
+    case 'interrupted':
+      return `${login}'s review of ${sha} was interrupted by a restart; it will run again`;
     case 'unreviewed':
       return authorWaiting ? `${login} is about to review ${sha}` : `${login} reviews ${sha} when ${author} waits for review`;
     case 'findings':

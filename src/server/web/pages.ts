@@ -830,6 +830,8 @@ function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: 
       return status.commit === pull.head_sha ? html`${login} is reviewing ${sha}` : html`${login} is reviewing an earlier commit, ${sha}`;
     case 'queued':
       return html`${login} is about to review ${sha}`;
+    case 'interrupted':
+      return html`${login}'s review of ${sha} was interrupted by a restart; it will run again`;
     case 'unreviewed':
       return html`${login} reviews ${sha} when ${author.login} waits for review`;
     case 'findings':
@@ -913,6 +915,11 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   } else if (last?.status === 'failed') {
     status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}
       <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${last.error ?? ''}</pre></details></div>`;
+  } else if (last?.status === 'interrupted') {
+    // An interrupted automatic review of the head runs when the author waits, one asked for by hand when the server starts.
+    const state = reviewer.headStatus(p.pull).state;
+    const again = stagingState(p.pull) !== 'done' && last.head_sha === p.pull.head_sha && (state === 'unreviewed' || state === 'interrupted');
+    status = html`<p class="codex-status">${icon('sync', { cls: 'color-fg-attention' })} Review of <code>${shortSha(last.head_sha)}</code> interrupted by a restart${again ? '; it will run again' : ''}</p>`;
   } else {
     status = html`<p class="codex-status color-fg-muted">Has not reviewed this pull request.</p>`;
   }

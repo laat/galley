@@ -281,7 +281,8 @@ export interface ReviewRunRow {
   reviewer: string;
   head_sha: string;
   trigger: 'auto' | 'manual';
-  status: 'running' | 'done' | 'failed';
+  /** `interrupted`: cut off by the server stopping; it runs again (Reviewer.resume), and does not count as an attempt. */
+  status: 'running' | 'done' | 'failed' | 'interrupted';
   model: string | null;
   effort: string | null;
   error: string | null;
