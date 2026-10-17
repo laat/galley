@@ -7,7 +7,7 @@ import { Db, now } from '../src/server/db.ts';
 
 test('pull requests stored as open, before staged had a name of its own, are staged', () => {
   const data = mkdtempSync(join(tmpdir(), 'galley-staged-'));
-  const file = join(data, 'laatsux.db');
+  const file = join(data, 'galley.db');
   try {
     const old = new Db(file);
     const repo = old.insert('repos', { git_dir: join(data, '.git'), owner: 'acme', name: 'widgets', created_at: now() });
@@ -46,7 +46,7 @@ test('pull requests stored as open, before staged had a name of its own, are sta
 test('a database opened from another directory, a copy, gets an instance id of its own', () => {
   const data = mkdtempSync(join(tmpdir(), 'galley-instance-'));
   const open = (dir: string) => {
-    const db = new Db(join(data, dir, 'laatsux.db'));
+    const db = new Db(join(data, dir, 'galley.db'));
     db.sql.close();
     return db.instance;
   };
@@ -56,7 +56,7 @@ test('a database opened from another directory, a copy, gets an instance id of i
     const original = open('original');
     assert.match(original, /^[0-9a-f]{8}$/);
     assert.equal(open('original'), original);
-    copyFileSync(join(data, 'original', 'laatsux.db'), join(data, 'copy', 'laatsux.db'));
+    copyFileSync(join(data, 'original', 'galley.db'), join(data, 'copy', 'galley.db'));
     const copy = open('copy');
     assert.notEqual(copy, original);
     assert.equal(open('copy'), copy);

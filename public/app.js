@@ -32,10 +32,31 @@
     return json;
   }
 
+  // -------------------------------------------------------------- storage
+  // Keys were named laatsux: before the rename (#9). Unsent drafts and the reviewer's choices move
+  // to galley: when a page loads.
+
+  function renameKeys(store) {
+    const keys = [];
+    for (let i = 0; i < store.length; i++) keys.push(store.key(i));
+    for (const key of keys) {
+      if (!key || !key.startsWith('laatsux:')) continue;
+      const renamed = `galley:${key.slice('laatsux:'.length)}`;
+      if (store.getItem(renamed) === null) store.setItem(renamed, store.getItem(key));
+      store.removeItem(key);
+    }
+  }
+  try {
+    renameKeys(localStorage);
+  } catch {}
+  try {
+    renameKeys(sessionStorage);
+  } catch {}
+
   // --------------------------------------------------------------- drafts
   // Unsent text survives live refreshes and reloads (per tab, per pull request).
 
-  const draftPrefix = () => `laatsux:draft:${ds().pullId || 'global'}:`;
+  const draftPrefix = () => `galley:draft:${ds().pullId || 'global'}:`;
 
   function saveDraft(key, value, meta, priority) {
     try {
@@ -331,7 +352,7 @@
         const join = () => {
           // One worker for every tab with this version of it. The name changes when the worker
           // changes what it sends, or a tab could join an older one still open in another tab.
-          const worker = new SharedWorker('/static/live-worker.js', { name: 'laatsux-live-2' });
+          const worker = new SharedWorker('/static/live-worker.js', { name: 'galley-live-2' });
           worker.port.onmessage = (m) => hear(m.data);
           worker.port.start();
           return worker.port;
@@ -1158,7 +1179,7 @@
   /** `at` is where the link clicked was in the tree, for the next page to show its entry there. */
   function saveTreeState(at) {
     try {
-      sessionStorage.setItem('laatsux:browse-tree-open', JSON.stringify({ sha: treeState.sha, open: [...treeState.open], at }));
+      sessionStorage.setItem('galley:browse-tree-open', JSON.stringify({ sha: treeState.sha, open: [...treeState.open], at }));
     } catch {}
   }
 
@@ -1222,7 +1243,7 @@
     if (!tree) return;
     let saved = null;
     try {
-      saved = JSON.parse(sessionStorage.getItem('laatsux:browse-tree-open'));
+      saved = JSON.parse(sessionStorage.getItem('galley:browse-tree-open'));
     } catch {}
     const same = saved && saved.sha === tree.dataset.sha && Array.isArray(saved.open);
     treeState = { sha: tree.dataset.sha, open: new Set(same ? saved.open : []) };
@@ -1243,7 +1264,7 @@
     document.body.classList.toggle('browse-tree-hidden', hide);
     document.body.classList.toggle('browse-tree-shown', !hide);
     try {
-      localStorage.setItem('laatsux:browse-tree', hide ? 'hidden' : 'shown');
+      localStorage.setItem('galley:browse-tree', hide ? 'hidden' : 'shown');
     } catch {}
   }
 
@@ -1458,7 +1479,7 @@
     } else if ((el = on('.js-tree-toggle'))) {
       document.body.classList.toggle('tree-hidden');
       try {
-        localStorage.setItem('laatsux:tree-hidden', document.body.classList.contains('tree-hidden') ? '1' : '');
+        localStorage.setItem('galley:tree-hidden', document.body.classList.contains('tree-hidden') ? '1' : '');
       } catch {}
     } else if ((el = on('.js-copy'))) {
       try {
@@ -1600,7 +1621,7 @@
 
   function notifying() {
     try {
-      return !!window.Notification && Notification.permission === 'granted' && localStorage.getItem('laatsux:notify') === '1';
+      return !!window.Notification && Notification.permission === 'granted' && localStorage.getItem('galley:notify') === '1';
     } catch {
       return false;
     }
@@ -1618,7 +1639,7 @@
     if (yourTurn && notifying()) {
       for (const t of turns.filter((t) => !yourTurn.has(t.id))) {
         // The tag keeps other tabs showing a list from notifying twice.
-        const n = new Notification(`Your turn: ${t.title}`, { body: t.reasons, tag: `laatsux-turn-${t.id}`, icon: '/static/favicon.svg' });
+        const n = new Notification(`Your turn: ${t.title}`, { body: t.reasons, tag: `galley-turn-${t.id}`, icon: '/static/favicon.svg' });
         n.onclick = () => {
           window.focus();
           location.href = t.url;
@@ -1632,8 +1653,8 @@
     const button = e.target.closest && e.target.closest('.js-notify');
     if (!button) return;
     try {
-      if (notifying()) localStorage.removeItem('laatsux:notify');
-      else if ((await Notification.requestPermission()) === 'granted') localStorage.setItem('laatsux:notify', '1');
+      if (notifying()) localStorage.removeItem('galley:notify');
+      else if ((await Notification.requestPermission()) === 'granted') localStorage.setItem('galley:notify', '1');
     } catch {}
     notifyTurns();
   });
@@ -1682,8 +1703,8 @@
   // ---------------------------------------------------------------- boot
 
   try {
-    if (localStorage.getItem('laatsux:tree-hidden')) document.body.classList.add('tree-hidden');
-    const browseTreeShown = localStorage.getItem('laatsux:browse-tree');
+    if (localStorage.getItem('galley:tree-hidden')) document.body.classList.add('tree-hidden');
+    const browseTreeShown = localStorage.getItem('galley:browse-tree');
     if (browseTreeShown === 'hidden' || browseTreeShown === 'shown') document.body.classList.add(`browse-tree-${browseTreeShown}`);
   } catch {}
   // Avatars that failed before this script ran.

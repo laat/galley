@@ -126,7 +126,7 @@ Unless the user wants to keep something:
 3. Rebase your other pull requests that touch the merged files onto `origin/<base>` (compare
    `galley pr diff <n> --name-only`).
 
-Leave the `refs/laatsux/...` refs alone.
+Leave the `refs/galley/...` and `refs/laatsux/...` refs alone.
 
 ## Several pull requests
 

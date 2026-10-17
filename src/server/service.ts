@@ -390,7 +390,9 @@ interface FetchRound {
  * from before namespaces (`refs/laatsux/pull/<n>/...`) stay where they are, since a copy of the
  * database from before may count on them.
  */
-export const REFS = 'refs/laatsux';
+export const REFS = 'refs/galley';
+/** Where the namespaces were before the rename (#9). A server moves its own from there (Service.pinRevisions). */
+export const REFS_BEFORE = 'refs/laatsux';
 
 /** The key a repository gets in URLs: the GitHub owner/name of its remote, or local/<dir> without one. */
 function repoKey(slug: string | null, gitDir: string, workDir: string | null): [string, string] {
@@ -954,34 +956,49 @@ export class Service {
 
   /**
    * Pin every revision, and the signed copies each pull request was last published as, in this
-   * server's namespace, once for each instance id: a copy of the database, or one from before
+   * server's namespace, once for each namespace: a copy of the database, or one from before
    * namespaces, must not count on refs that another server may delete. Until every pin is in
-   * place, each start tries again.
+   * place, each start tries again. The server also deletes its namespace's refs from before the
+   * rename (#9) that are where it left them, each once its new ref holds the commit, and tries
+   * again on the next start while one could not be deleted.
    */
   async pinRevisions(): Promise<void> {
-    if (this.db.getMeta('pinned_instance') === this.db.instance) return;
+    const namespace = `${REFS}/${this.db.instance}`;
+    if (this.db.getMeta('pinned_namespace') === namespace) return;
     let done = true;
+    const before: [Repo, Map<string, string>][] = [];
     for (const repo of this.repos()) {
       if (!existsSync(repo.git_dir)) continue; // Repository moved or deleted: nothing to pin.
       const git = this.git(repo);
+      // Its refs from before the rename, and the commits they should be at.
+      const left = new Map<string, string>();
+      before.push([git, left]);
       // A pin that failed is tried again while the ref is missing and the commit is there (a stale
       // lock, say). A ref pointing elsewhere stays as it is, and a commit that is gone needs no pin.
-      const pin = async (ref: string, sha: string) => {
-        if (!(await this.moveRef(git, ref, null, sha)) && !(await git.resolve(ref)) && (await git.exists(sha))) done = false;
+      // The ref from before the rename may go only once the new one holds its commit.
+      const pin = async (pull: PullRow, name: number | 'published', sha: string) => {
+        const ref = this.ref(pull, name);
+        if (await this.moveRef(git, ref, null, sha)) left.set(this.ref(pull, name, REFS_BEFORE), sha);
+        else if (!(await git.resolve(ref)) && (await git.exists(sha))) done = false;
       };
       for (const pull of this.db.all<PullRow>('SELECT * FROM pulls WHERE repo_id = ?', repo.id)) {
-        for (const rev of this.revisions(pull)) await pin(this.ref(pull, rev.seq), rev.head_sha);
+        for (const rev of this.revisions(pull)) await pin(pull, rev.seq, rev.head_sha);
         if (pull.published_head_sha && pull.published_source_sha && pull.published_head_sha !== pull.published_source_sha) {
-          await pin(this.ref(pull, 'published'), pull.published_head_sha);
+          await pin(pull, 'published', pull.published_head_sha);
         }
       }
     }
-    if (done) this.db.setMeta('pinned_instance', this.db.instance);
+    for (const [git, left] of before) {
+      for (const [ref, sha] of await git.refs([`${REFS_BEFORE}/${this.db.instance}/`])) {
+        if (left.get(ref) === sha && !(await this.moveRef(git, ref, sha, null))) done = false;
+      }
+    }
+    if (done) this.db.setMeta('pinned_namespace', namespace);
   }
 
   /** One of this server's refs for a pull request: a revision's, or the signed copies it was last published as. */
-  private ref(pull: PullRow, name: number | 'published'): string {
-    return `${REFS}/${this.db.instance}/pull/${pull.number}/${name}`;
+  private ref(pull: PullRow, name: number | 'published', refs = REFS): string {
+    return `${refs}/${this.db.instance}/pull/${pull.number}/${name}`;
   }
 
   /**

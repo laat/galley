@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,19 +16,31 @@ export function serverUrl(): string {
   return `http://localhost:${fromEnv('PORT') ?? DEFAULT_PORT}`;
 }
 
+export function dataHome(): string {
+  return process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+}
+
+export function configHome(): string {
+  return process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+}
+
+/**
+ * galley's directory in `home`: galley/, or laatsux/ while only that one exists. A server moves
+ * laatsux/ there when it starts (server/rename.ts).
+ */
+export function ownDir(home: string): string {
+  const dir = join(home, 'galley');
+  const before = join(home, 'laatsux');
+  return !existsSync(dir) && existsSync(before) ? before : dir;
+}
+
 export function dataDir(): string {
-  const home = fromEnv('HOME');
-  if (home) return home;
-  const xdg = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
-  return join(xdg, 'laatsux');
+  return fromEnv('HOME') || ownDir(dataHome());
 }
 
 /** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
 export function configDir(): string {
-  const dir = fromEnv('CONFIG_DIR');
-  if (dir) return dir;
-  const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
-  return join(xdg, 'laatsux');
+  return fromEnv('CONFIG_DIR') || ownDir(configHome());
 }
 
 /**

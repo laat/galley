@@ -42,7 +42,7 @@ async function serve(args: string[]): Promise<number> {
   });
   const { startServer } = await import('../server/server.ts');
   const port = Number(v.port ?? fromEnv('PORT') ?? DEFAULT_PORT);
-  const server = await startServer({ port, host: String(v.host), dataDir: dataDir() });
+  const server = await startServer({ port, host: String(v.host), dataDir: dataDir(), moveFromLaatsux: true });
   out(`galley is serving ${server.url} (data in ${dataDir()})`);
   if (v.open) (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore' });
   await new Promise<void>((resolve) => {
