@@ -563,7 +563,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^api graphql -f query=.* -f owner=acme -f name=widgets$/m);
     for (const path of ['/acme/widgets', '/acme/widgets/pull/1']) {
       const page = await (await fetch(server.url + path)).text();
-      assert.match(page, /<a class="UnderlineNav-item selected" href="\/acme\/widgets">[^]*?Staged <span class="Counter">\d+<\/span><\/a>/, path);
+      assert.match(page, /<a class="UnderlineNav-item selected" href="\/acme\/widgets">[^]*?<span data-content="Staged">Staged<\/span> <span class="Counter">\d+<\/span><\/a>/, path);
       assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/pulls" target="_blank"[^]*?Pull requests <span class="Counter">2<\/span>/, path);
       assert.match(page, /href="https:\/\/github\.com\/acme\/widgets\/issues" target="_blank"[^]*?Issues <span class="Counter">4<\/span>/, path);
       // Repo ↗ · Staged · Pull requests ↗ · Issues ↗, and only Repo has the GitHub mark.
@@ -4654,15 +4654,17 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
 
   const page = async (path: string) => (await fetch(server.url + path)).text();
   /** The tabs and their counts. */
-  const counts = (html: string) => Object.fromEntries([...html.matchAll(/<a class="list-tab[^"]*" href="\/acme\/tabs\?state=(\w+)">[^]*?<\/svg> (\d+) /g)].map((m) => [m[1], Number(m[2])]));
+  const counts = (html: string) => Object.fromEntries([...html.matchAll(/<a class="list-tab[^"]*" href="\/acme\/tabs\?state=(\w+)">[^]*?<\/svg> <span data-content="[^"]*">(\d+) /g)].map((m) => [m[1], Number(m[2])]));
   /** The pull requests a page lists, by number. */
   const listed = (html: string) => [...html.matchAll(/<a class="pr-row-title" href="\/acme\/tabs\/pull\/(\d+)">/g)].map((m) => Number(m[1])).sort();
   const front = await page('/acme/tabs');
   // Each pull request is in one tab; Staged is the first, and shown unless another is asked for.
   assert.deepEqual(counts(front), { staged: 1, published: 1, done: 3 });
   // The repository's Staged counts the same: the staged one, not the published one.
-  assert.match(front, /<a class="UnderlineNav-item selected" href="\/acme\/tabs">[^]*?Staged <span class="Counter">1<\/span><\/a>/);
+  assert.match(front, /<a class="UnderlineNav-item selected" href="\/acme\/tabs">[^]*?Staged<\/span> <span class="Counter">1<\/span><\/a>/);
   assert.match(front, /<a class="list-tab selected" href="\/acme\/tabs\?state=staged">/);
+  // Each label carries its bold copy (data-content), so it is as wide whether selected or not and selecting a tab moves no other.
+  assert.match(front, /href="\/acme\/tabs\?state=published"><svg [^>]*>[^]*?<\/svg> <span data-content="1 Published">1 Published<\/span><\/a>/);
   assert.deepEqual(listed(front), [staged.number]);
   const publishedTab = await page('/acme/tabs?state=published');
   assert.deepEqual(listed(publishedTab), [published.number]);
@@ -4675,7 +4677,7 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   assert.match(row(done, closedHere.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed<\/span>/);
   assert.match(row(publishedTab, published.number), /octicon-mark-github color-fg-open/);
   // The staged one waits for the reviewer: its tab says so, whichever tab is shown. The published one waits on GitHub.
-  assert.match(done, /href="\/acme\/tabs\?state=staged">[^]*? 1 Staged <span class="list-tab-turn" title="1 pull request waiting for you">/);
+  assert.match(done, /href="\/acme\/tabs\?state=staged">[^]*?>1 Staged<\/span> <span class="list-tab-turn" title="1 pull request waiting for you">/);
   assert.match(front, /<h2 class="turn-group-title">Your turn<\/h2>[^]*?href="\/acme\/tabs\/pull\/1">/);
   assert.match(publishedTab, /<h2 class="turn-group-title">Waiting on GitHub<\/h2>/);
   // Staged in a colour of its own, and said in words: staged, not asking to merge.
