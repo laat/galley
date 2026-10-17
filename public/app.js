@@ -177,6 +177,7 @@
     showRepos();
     markActiveTreeItem();
     markLines(false);
+    observeToolbar();
     restoreExpanded().then(restoreDrafts);
   }
 
@@ -904,6 +905,19 @@
   }
 
   // ---------------------------------------------------------------- files
+
+  // The file headers stick right under the toolbar (app.css), so nothing scrolls by between them.
+  let toolbarHeight = null;
+
+  function observeToolbar() {
+    toolbarHeight?.disconnect();
+    const toolbar = $('.files-toolbar');
+    if (!toolbar) return;
+    toolbarHeight ??= new ResizeObserver((entries) => {
+      document.documentElement.style.setProperty('--files-toolbar-height', `${entries.at(-1).borderBoxSize[0].blockSize}px`);
+    });
+    toolbarHeight.observe(toolbar, { box: 'border-box' });
+  }
 
   function setCollapsed(file, collapsed) {
     const body = $('.file-body', file);
