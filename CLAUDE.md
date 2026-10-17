@@ -4,7 +4,7 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 
 ## Commands
 
-- `pnpm test`: node:test, `test/*.test.ts`. `test/e2e.test.ts` runs the whole agent loop against a temp repo, a bare remote and a fake `gh`.
+- `pnpm test`: node:test, `test/*.test.ts`. `test/e2e.test.ts` runs the whole agent loop against a temp repo, a bare remote and a fake `gh`. In a reviewer agent's sandbox the end-to-end tests need the setting "Let Claude's tests listen on localhost", and the `sandbox-exec` tests skip themselves, since macOS does not nest sandboxes.
 - `pnpm typecheck`: `tsc --noEmit` (TypeScript 7).
 - `pnpm dev`: server on :7171 with `--watch`. Use `LAATSUX_HOME=<tmp> node bin/laatsux.ts serve --port <p>` for a throwaway instance, and stage against a scratch repository or a mirror, not the one you work in.
 
@@ -16,6 +16,7 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 - HTML is built with the `html` tagged template (`src/server/web/html.ts`), which escapes every interpolation unless it is `Safe`. Use `raw()` only for markup we produced (sanitized markdown, highlight.js output, octicons).
 - Every state change goes through `Service` and calls `emit()`, which drives live UI updates and wakes `pr wait`.
 - Live updates reach the browser through one SharedWorker (`public/live-worker.js`) shared by all tabs. Never open an EventSource or other long-lived request per tab: browsers allow six HTTP/1.1 connections per host, and the seventh tab hangs.
+- Each document has one reader. README.md is for users: what they can see and do, a sentence or two per feature. Implementation details and edge cases go in code comments where they apply, agent instructions in `skills/stage-pr/SKILL.md`, and API extensions in `docs/api.md`.
 
 ## Layout
 

@@ -624,6 +624,10 @@ export class Service {
 
   // ----------------------------------------------------------------- repos
 
+  /**
+   * Register the repository at `path`, keyed by its common git dir so its worktrees share one
+   * entry. Its name in URLs is the GitHub owner/name of its remote, or local/<dir> without one.
+   */
   async registerRepo(path: string): Promise<RepoRow> {
     const r = await run('git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { allowFail: true });
     if (r.code !== 0) throw new HttpError(422, `not a git repository: ${path}`);
