@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
-import { now, type Actor, type CancelReason, type Db, type CommentRow, type Priority, type PullRow, type RepoRow, type ReviewRunRow, type Side } from '../db.ts';
-import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type ChangeEvent, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
+import { now, type Actor, type CancelReason, type Db, type CommentRow, type Priority, type PullRow, type RepoRow, type ReviewRow, type ReviewRunRow, type Side } from '../db.ts';
+import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type ChangeEvent, type Ctx, type HeadStatus, type ReviewColumns, type Service, type Thread } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
 import type { Reviews, Verdict } from './definition.ts';
 import { cacheEnv, installCommand } from './install.ts';
@@ -1087,8 +1087,7 @@ export class Reviewer {
       '',
       'Each comment is about lines of the diff: changed lines or the three lines of context around them. Use side RIGHT and new line numbers, or side LEFT and old line numbers for removed lines. `line` is the last line; `start_line` is the first line of a range, or null. To propose a replacement, put a ```suggestion block in the body; it replaces lines start_line..line exactly.',
       ...verdictText(plan),
-      ...(await this.threadsText(ctx)),
-      ...this.roundText(pull, trigger, 'what changed since the earlier reviews'),
+      ...(await this.historyText(ctx, trigger, plan.reads)),
     ];
     return out.join('\n') + '\n';
   }
@@ -1114,23 +1113,47 @@ export class Reviewer {
       '',
       'Give each comment a priority: high for what must be fixed before merging; medium for what should be fixed; low for minor improvements. Do not write the priority into the comment text.',
       ...verdictText(plan),
-      ...(await this.threadsText(ctx)),
-      ...this.roundText(pull, trigger, 'what changed since the earlier reviews'),
+      ...(await this.historyText(ctx, trigger, plan.reads)),
     ];
     return out.join('\n') + '\n';
   }
 
-  /** The open review threads, which the reviewer should not repeat. */
-  private async threadsText(ctx: Ctx): Promise<string[]> {
-    const threads = (await this.s.threads(ctx, this.actor())).filter((t) => !t.pending && !t.resolved);
-    if (!threads.length) return [];
-    const out = ['', 'Open review threads (do not repeat them; mention in the summary if one is still not addressed):'];
-    for (const t of threads) {
-      const where = t.root.subject_type === 'commit' ? `commit ${t.root.commit_id?.slice(0, 7)} message` : `${t.root.path}${t.root.line ? `:${t.root.line}` : ''}${t.placement.outdated ? ' (outdated)' : ''}`;
-      out.push(`- ${where}`);
-      for (const c of [t.root, ...t.replies]) out.push(`  ${this.s.db.actorById(c.author_id).login}: ${c.body.trim().replace(/\n/g, '\n    ')}`);
+  /**
+   * What the reviewer is told of the reviews so far: the others' open threads, which it should not
+   * repeat, which automatic review this is, and what its own earlier reviews of the pull request
+   * found, resolved or not, and where it left off (earlierText).
+   */
+  private async historyText(ctx: Ctx, trigger: 'auto' | 'manual', reads: Reviews): Promise<string[]> {
+    const { pull, git } = ctx;
+    const login = (id: number) => this.s.db.actorById(id).login;
+    const reviews = this.s.db.all<ReviewRow>(
+      "SELECT * FROM reviews WHERE id IN (SELECT review_id FROM review_runs WHERE pull_id = ? AND reviewer = ? AND status = 'done') ORDER BY id",
+      pull.id,
+      this.key,
+    );
+    const mine = (t: Thread) => reviews.some((r) => r.id === t.root.review_id);
+    const threads = (await this.s.threads(ctx, this.actor())).filter((t) => !t.pending);
+    const theirs = threads.filter((t) => !t.resolved && !mine(t));
+    const out: string[] = [];
+    if (theirs.length) out.push('', 'Open review threads (do not repeat them; mention in the summary if one is still not addressed):');
+    for (const t of theirs) {
+      out.push(`- ${threadPlace(t)}`);
+      for (const c of [t.root, ...t.replies]) out.push(`  ${login(c.author_id)}: ${c.body.trim().replace(/\n/g, '\n    ')}`);
     }
-    return out;
+    out.push(...this.roundText(pull, trigger, 'what changed since the earlier reviews'));
+    const earlier = reviews.map((r) => ({
+      commit: r.commit_id,
+      body: r.body,
+      threads: threads
+        .filter((t) => t.root.review_id === r.id)
+        .map((t) => ({
+          where: threadPlace(t),
+          resolvedBy: t.root.resolved_by_id === null ? null : login(t.root.resolved_by_id),
+          comments: [t.root, ...t.replies].map((c) => ({ login: login(c.author_id), body: c.body })),
+        })),
+    }));
+    const last = reviews.at(-1)?.commit_id;
+    return [...out, ...earlierText(earlier, reads === 'code' && last ? await leftOff(git, pull, last) : null)];
   }
 
   /** Which automatic review this is, after the first. */
@@ -1208,6 +1231,121 @@ export function onTheDescription(body: string): (Priority | null)[] {
     .split('\n')
     .filter((l) => /^- (Title|Description|Commit)\b/.test(l))
     .map((l) => (/^- [^(:]*\((high|medium|low) priority\):/.exec(l)?.[1] as Priority | undefined) ?? null);
+}
+
+/** A review a reviewer posted earlier on the pull request, as its next review is told of it (earlierText). */
+export interface EarlierReview {
+  /** The commit it reviewed. */
+  commit: string;
+  /** Its body as posted (Reviewer.post): the summary, the findings outside threads under their heading, and a footer. */
+  body: string;
+  /** The threads it opened. */
+  threads: EarlierThread[];
+}
+
+/** A thread a reviewer opened in an earlier review. */
+export interface EarlierThread {
+  /** What it is about (threadPlace). */
+  where: string;
+  /** Who resolved it; null while it is open. */
+  resolvedBy: string | null;
+  /** The reviewer's comment and the replies, oldest first. */
+  comments: { login: string; body: string }[];
+}
+
+/**
+ * Where a reviewer of the code left off: the commit it last reviewed, and what a diff from it to
+ * the head shows. `head`: it is the head. `changes`: what changed since, and nothing else.
+ * `rebased`: the branch was rebased onto a newer base since, whose changes it shows too. `gone`:
+ * the commit is no longer in the repository.
+ */
+export interface LeftOff {
+  commit: string;
+  diff: 'head' | 'changes' | 'rebased' | 'gone';
+}
+
+/** How many comments of the reviews before the last one a reviewer is told of, a line each. */
+const OLDER_COMMENTS = 20;
+
+/**
+ * What a reviewer is told of its earlier reviews of the pull request, so that it checks what it
+ * found was fixed without repeating it: the last review's summary and comments in full, with the
+ * answers and who resolved each thread, the older reviews' comments a line each, and for a
+ * reviewer of the code, where it left off. Nothing before its first review.
+ */
+export function earlierText(reviews: EarlierReview[], leftOff: LeftOff | null): string[] {
+  const last = reviews.at(-1);
+  if (!last) return [];
+  const short = (sha: string) => sha.slice(0, 7);
+  const status = (t: EarlierThread) => (t.resolvedBy === null ? '[open]' : `[resolved by ${t.resolvedBy}]`);
+  const { summary, loose } = reviewParts(last.body);
+  const out = [''];
+  if (reviews.some((r) => r.threads.length || reviewParts(r.body).loose.length)) {
+    out.push(
+      'Your earlier reviews of this pull request follow, with the answers to their comments. Check that each resolved comment was really fixed, and comment again only on one that was not, saying so. Do not repeat the open ones; mention in the summary any that is still not addressed.',
+      '',
+    );
+  }
+  out.push(`Your last review, of ${short(last.commit)}, said: ${summary.replace(/\n/g, '\n  ')}`);
+  for (const t of last.threads) {
+    out.push(`- ${t.where} ${status(t)}`);
+    for (const c of t.comments) out.push(`  ${c.login}: ${c.body.trim().replace(/\n/g, '\n    ')}`);
+  }
+  if (loose.length) out.push('Its comments outside threads, which nobody resolves:', ...loose);
+  const older = reviews.slice(0, -1).flatMap((r) => [
+    ...r.threads.map((t) => `- ${short(r.commit)} ${t.where} ${status(t)}: ${oneLine(t.comments[0]?.body ?? '')}`),
+    ...reviewParts(r.body).loose.map((l) => `- ${short(r.commit)} ${oneLine(l.slice(2))}`),
+  ]);
+  if (older.length) {
+    out.push('', 'Comments of your reviews before that, a line each:');
+    if (older.length > OLDER_COMMENTS) out.push(`- (${older.length - OLDER_COMMENTS} older ones left out)`);
+    out.push(...older.slice(-OLDER_COMMENTS));
+  }
+  if (leftOff) {
+    const { commit } = leftOff;
+    out.push(
+      '',
+      {
+        head: 'Your last review was of this same commit, HEAD.',
+        changes: `You last reviewed ${commit}. Run \`git diff ${commit} HEAD\` to see what changed since.`,
+        rebased: `You last reviewed ${commit}, but the branch has been rebased onto a newer base since, so a diff from it would show the base's changes too: review the whole change.`,
+        gone: `You last reviewed ${commit}, which is no longer in the repository: review the whole change.`,
+      }[leftOff.diff],
+    );
+  }
+  return out;
+}
+
+/** Where a reviewer of the code left off, having last reviewed `commit` (LeftOff). */
+async function leftOff(git: Repo, pull: PullRow, commit: string): Promise<LeftOff> {
+  if (commit === pull.head_sha) return { commit, diff: 'head' };
+  // On the base as it is now, the commit has the base's changes the head has: a diff shows the author's alone.
+  if (await git.isAncestor(pull.base_sha, commit)) return { commit, diff: 'changes' };
+  return { commit, diff: (await git.exists(commit)) ? 'rebased' : 'gone' };
+}
+
+/** A review's summary, and the findings its body lists outside threads (Reviewer.post), one item each. */
+function reviewParts(body: string): { summary: string; loose: string[] } {
+  // The footer that says who reviewed what ends the body.
+  const footer = body.lastIndexOf('\n\n<sub>');
+  const text = footer < 0 ? body : body.slice(0, footer);
+  const at = [OUTSIDE_THE_DIFF, ON_THE_DESCRIPTION].map((h) => text.indexOf(h)).find((i) => i >= 0);
+  if (at === undefined) return { summary: text.trim(), loose: [] };
+  // The list is the paragraph after the heading; a finding's own lines are indented.
+  const list = text.slice(at).split('\n\n')[1] ?? '';
+  return { summary: text.slice(0, at).trim(), loose: list.split(/\n(?=- )/).filter((l) => l.startsWith('- ')) };
+}
+
+/** What a review thread is about, for a prompt: lines of a file, or a commit's message; outdated once they changed. */
+function threadPlace(t: Thread): string {
+  const where = t.root.subject_type === 'commit' ? `commit ${t.root.commit_id?.slice(0, 7)} message` : `${t.root.path}${t.root.line ? `:${t.root.line}` : ''}`;
+  return `${where}${t.placement.outdated ? ' (outdated)' : ''}`;
+}
+
+/** Text on one line, cut to `max` characters. */
+function oneLine(text: string, max = 120): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 /** What the reviewer is told about the installed dependencies and running the tests. */
