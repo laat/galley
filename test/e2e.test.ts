@@ -3332,3 +3332,123 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   assert.equal(wrong.code, 1);
   assert.match(wrong.stderr, /state must be one of staged, published, done/);
 });
+
+/** A repository of its own, acme/<name> on GitHub (pushing to a bare repository), where `stage` stages a branch with a commit of its own as the agent. */
+async function scratchRepo(name: string) {
+  const path = join(dir, name);
+  const bare = join(dir, `${name}.git`);
+  execFileSync('git', ['init', '-q', '--bare', bare]);
+  execFileSync('git', ['init', '-q', '-b', 'main', path]);
+  const g = (...args: string[]) => execFileSync('git', ['-C', path, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
+  g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
+  g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
+  writeFileSync(join(path, 'a.js'), 'export {};\n');
+  g('add', '.');
+  g('commit', '-qm', 'Initial commit');
+  g('push', '-q', 'origin', 'main');
+  g('update-ref', 'refs/remotes/origin/main', 'main');
+  const { full_name } = await human('POST', '/api/repos', { path });
+  const api = `/api/repos/${full_name}/pulls`;
+  const stage = async (branch: string): Promise<{ id: number; number: number }> => {
+    g('checkout', '-q', 'main');
+    g('checkout', '-qb', branch);
+    writeFileSync(join(path, `${branch}.js`), 'export {};\n');
+    g('add', '.');
+    g('commit', '-qm', `Add ${branch}`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Add ${branch}`, head: branch, base: 'main', automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    return res.json();
+  };
+  return { fullName: full_name as string, api, stage };
+}
+
+test('the reviewer pins pull requests to the top of the front page, until they unpin them', async () => {
+  const { api, stage } = await scratchRepo('pins');
+  const [a, b, c] = [await stage('pin-a'), await stage('pin-b'), await stage('pin-c')];
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  const titles = (html: string) => [...html.matchAll(/<a class="pr-row-title" href="\/acme\/pins\/pull\/(\d+)">/g)].map((m) => Number(m[1]));
+  /** The front page's Pinned section, and the list under it. */
+  const front = async (path = '/') => {
+    const [top, list] = (await page(path)).split('<div class="Box pr-list"');
+    return { pinned: titles(top.split('<div class="Box pinned-list">')[1] ?? ''), list: titles(list) };
+  };
+  /** What open pages hear of pinning. */
+  const events: string[] = [];
+  const listen = (e: { pullId: number | null; type: string }) => e.type.endsWith('pinned') && events.push(`${e.type} ${e.pullId}`);
+  server.service.bus.on('change', listen);
+  try {
+    // The front page is the reviewer's: agents can not pin, or unpin.
+    for (const method of ['PUT', 'DELETE']) {
+      const res = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-laatsux-actor': 'agent' } });
+      assert.equal(res.status, 403);
+      assert.match((await res.json()).message, /only the reviewer can pin/);
+    }
+
+    const updated = (await human('GET', `${api}/${a.number}`)).updated_at;
+    await human('PUT', `${api}/${a.number}/pinned`);
+    await human('PUT', `${api}/${c.number}/pinned`);
+    // Pinned again, it keeps its place: no news.
+    await human('PUT', `${api}/${a.number}/pinned`);
+    assert.deepEqual(events, [`pinned ${a.id}`, `pinned ${c.id}`]);
+    const rest = await human('GET', `${api}/${a.number}`);
+    // Pinning is not activity.
+    assert.equal(rest.updated_at, updated);
+    assert.ok(rest.pinned_at < (await human('GET', `${api}/${c.number}`)).pinned_at);
+    assert.equal((await human('GET', `${api}/${b.number}`)).pinned_at, null);
+    for (const [n, isPinned] of [[a.number, true], [b.number, false]] as const) {
+      const view = await cli(['pr', 'view', String(n), '-R', 'acme/pins', '--json', 'isPinned']);
+      assert.equal(view.code, 0, view.stderr);
+      assert.deepEqual(JSON.parse(view.stdout), { isPinned });
+    }
+
+    // At the top of the front page, most recently pinned first, and not again under the tabs.
+    let shown = await front();
+    assert.deepEqual(shown, { pinned: [c.number, a.number], list: [b.number] });
+    assert.match(await page('/'), /<div class="Box-header turn-group">[^]*?<h2 class="turn-group-title">Pinned<\/h2> <span class="Counter">2<\/span> <span class="turn-group-note">most recently pinned first<\/span>/);
+    // With their turn, as elsewhere.
+    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="turn-reason">agent is not waiting/);
+    // A repository's list has them in their place, with a pin.
+    const list = await page('/acme/pins');
+    assert.doesNotMatch(list, /pinned-list/);
+    const row = (html: string, n: number) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/pins/pull/${n}"`))!;
+    for (const n of [a.number, c.number]) assert.match(row(list, n), /<span class="pin-mark" title="Pinned to the top of the front page"><svg class="octicon octicon-pin-fill" [^>]*aria-label="Pinned"/);
+    assert.doesNotMatch(row(list, b.number), /pin-mark/);
+    // The pull request's pin is filled while it is pinned, and unpins.
+    assert.match(await page(`/acme/pins/pull/${a.number}`), new RegExp(`<button type="button" class="btn btn-sm btn-pin js-pin selected" data-api="${api}/${a.number}/pinned" data-method="DELETE" title="Unpin" aria-label="Unpin" aria-pressed="true"><svg class="octicon octicon-pin-fill"`));
+    assert.match(await page(`/acme/pins/pull/${b.number}`), new RegExp(`<button type="button" class="btn btn-sm btn-pin js-pin" data-api="${api}/${b.number}/pinned" data-method="PUT" title="Pin to the top of the front page" aria-label="Pin to the top of the front page" aria-pressed="false"><svg class="octicon octicon-pin"`));
+
+    // Pinned through publishing, the merge, and a close here.
+    await human('POST', `${api}/${a.number}/publish`, { sign: false });
+    const merged = { state: 'MERGED', mergedAt: '2026-10-16T09:00:00Z', closedAt: '2026-10-16T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: 'e468a4e' + '1'.repeat(33) }, timelineItems: { nodes: [{ __typename: 'ClosedEvent', actor: { login: 'laat' } }] } };
+    writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${a.id}`]: merged } } }));
+    try {
+      await server.service.followGithub();
+    } finally {
+      rmSync(join(dir, 'gh-pulls.json'), { force: true });
+    }
+    await human('PATCH', `${api}/${c.number}`, { state: 'closed' });
+    const done = await human('GET', `${api}/${a.number}`);
+    assert.deepEqual([done.github_state, done.pinned_at], ['merged', rest.pinned_at]);
+    for (const path of ['/', '/?state=done', '/?state=published']) {
+      shown = await front(path);
+      assert.deepEqual(shown.pinned, [c.number, a.number], path);
+      assert.ok(!shown.list.includes(a.number) && !shown.list.includes(c.number), path);
+    }
+    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="Label Label--merged">Merged<\/span>/);
+
+    // Unpinned, it is back in its tab.
+    await human('DELETE', `${api}/${a.number}/pinned`);
+    await human('DELETE', `${api}/${a.number}/pinned`);
+    assert.equal((await human('GET', `${api}/${a.number}`)).pinned_at, null);
+    assert.deepEqual(await front('/?state=done'), { pinned: [c.number], list: [a.number] });
+    await human('DELETE', `${api}/${c.number}/pinned`);
+    assert.doesNotMatch(await page('/'), /pinned-list/);
+    assert.deepEqual(events, [`pinned ${a.id}`, `pinned ${c.id}`, `unpinned ${a.id}`, `unpinned ${c.id}`]);
+  } finally {
+    server.service.bus.off('change', listen);
+  }
+});

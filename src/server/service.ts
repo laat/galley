@@ -1221,6 +1221,22 @@ export class Service {
     else this.db.run('DELETE FROM viewed WHERE pull_id = ? AND path = ?', pull.id, path);
   }
 
+  // ---------------------------------------------------------------- pinning
+
+  /**
+   * Pin a pull request to the top of the front page, or unpin it. It stays pinned through
+   * publishing, the merge and a close, until the reviewer unpins it. The front page is the
+   * reviewer's, so agents can not pin. Pinning is not activity: updated_at stays.
+   */
+  setPinned(pull: PullRow, pinned: boolean, actor: Actor): void {
+    if (actor.type === 'Bot') throw new HttpError(403, 'only the reviewer can pin a pull request to the top of their front page');
+    // Pinned again, it keeps its place.
+    const changed = pinned
+      ? this.db.run('UPDATE pulls SET pinned_at = ? WHERE id = ? AND pinned_at IS NULL', now(), pull.id).changes
+      : this.db.run('UPDATE pulls SET pinned_at = NULL WHERE id = ? AND pinned_at IS NOT NULL', pull.id).changes;
+    if (changed) this.emit(pull.id, pinned ? 'pinned' : 'unpinned', actor);
+  }
+
   // ------------------------------------------------------------ the agent loop
 
   /** Feedback from anyone but the author that the author has not been shown yet. */

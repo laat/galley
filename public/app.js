@@ -199,12 +199,17 @@
     closed_on_github: 'Closed on GitHub',
   };
 
+  // The viewer's own changes that its other tabs show too: a pin moves the pull request on every front page.
+  const EVERY_TAB = { pinned: true, unpinned: true };
+
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);
 
   let pending = null;
   function onChange(ev) {
     const own = ev.actor === viewer();
-    if (own && ev.type !== 'waiting' && !AUTOMATIC[ev.type]) return; // our own actions refresh after the request
+    // Our own actions refresh after the request. Those every tab shows refresh here as well, in
+    // the tab they were made in a second time, since nothing tells which tab that was.
+    if (own && ev.type !== 'waiting' && !AUTOMATIC[ev.type] && !EVERY_TAB[ev.type]) return;
     if (ev.type === 'waiting' && dirty()) return;
     const msg = AUTOMATIC[ev.type] || (DESCRIBE[ev.type] ? `${ev.actor} ${DESCRIBE[ev.type]}` : null);
     clearTimeout(pending);
@@ -1072,6 +1077,10 @@
       el.disabled = true;
       await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       userState.threads.delete(el.closest('.review-thread').dataset.thread);
+      refresh();
+    } else if ((el = on('.js-pin'))) {
+      el.disabled = true;
+      await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       refresh();
     } else if ((el = on('.js-codex-step'))) {
       stepCodexLimit(el);

@@ -66,6 +66,8 @@ export interface PullRow {
   github_merge_sha: string | null;
   /** How it stands on GitHub while open there: a GithubStatus as JSON (see Service.githubStatus). */
   github_status: string | null;
+  /** When the reviewer pinned it to the top of the front page; null when it is not pinned. */
+  pinned_at: string | null;
 }
 
 export type GithubState = 'open' | 'merged' | 'closed';
@@ -293,6 +295,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'github_closed_by', 'TEXT'],
   ['pulls', 'github_merge_sha', 'TEXT'],
   ['pulls', 'github_status', 'TEXT'],
+  ['pulls', 'pinned_at', 'TEXT'],
 ];
 
 export class Db {

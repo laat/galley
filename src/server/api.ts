@@ -296,6 +296,16 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
+  // laatsux extension: pin a pull request to the top of the reviewer's front page, and unpin it.
+  app.put('/repos/:owner/:repo/pulls/:n/pinned', async (c) => {
+    s.setPinned((await ctx(c, { sync: false })).pull, true, actor(c));
+    return c.body(null, 204);
+  });
+  app.delete('/repos/:owner/:repo/pulls/:n/pinned', async (c) => {
+    s.setPinned((await ctx(c, { sync: false })).pull, false, actor(c));
+    return c.body(null, 204);
+  });
+
   app.get('/repos/:owner/:repo/pulls/:n/reviews', async (c) => {
     const x = await ctx(c);
     return c.json(s.reviews(x.pull, actor(c)).map((r) => reviewJson(s, x.repo, x.pull, r)));

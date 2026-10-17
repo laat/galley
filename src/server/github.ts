@@ -116,6 +116,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     turn: s.turn(pull),
     // What a published pull request has that GitHub does not yet: commits, title, description.
     unpublished_changes: s.unpublishedChanges(pull),
+    // When the reviewer pinned it to the top of the front page; null when it is not pinned.
+    pinned_at: pull.pinned_at,
   };
   if (extra.files) {
     json.additions = extra.files.reduce((n, f) => n + f.additions, 0);
@@ -304,6 +306,7 @@ export const GH_FIELDS = [
   'headRefOid',
   'id',
   'isDraft',
+  'isPinned',
   'githubStatus',
   'latestReviews',
   'mergeCommit',
@@ -349,6 +352,8 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('closed', () => stagingState(pull) === 'done');
   set('url', () => s.pullUrl(repo, pull));
   set('isDraft', () => !!pull.draft);
+  // laatsux extension, named as gh names it for issues: pinned to the top of the reviewer's front page.
+  set('isPinned', () => !!pull.pinned_at);
   set('createdAt', () => pull.created_at);
   set('updatedAt', () => pull.updated_at);
   set('closedAt', () => closedAt(pull));
