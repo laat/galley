@@ -1,4 +1,4 @@
-import type { Actor, CommentRow, Priority, PullRow, RepoRow } from '../db.ts';
+import { PRIORITIES, type Actor, type CommentRow, type Priority, type PullRow, type RepoRow } from '../db.ts';
 import { githubStatus, type Service, type Thread } from '../service.ts';
 import { checksSummary } from '../github-follow.ts';
 import { avatarUrl } from '../github.ts';
@@ -147,6 +147,14 @@ const PRIORITY_TEXT = { high: 'High', medium: 'Medium', low: 'Low' } as const;
 
 export function priorityPill(priority: Priority | null): Safe {
   return priority ? html`<span class="Label Label--priority Label--priority-${priority}" title="Priority">${PRIORITY_TEXT[priority]}</span>` : raw('');
+}
+
+/** How many findings there are of each priority, highest first, as pills: "2 High", "1 unprioritized". */
+export function priorityCounts(found: (Priority | null)[]): Safe[] {
+  return [...PRIORITIES, null].flatMap((priority) => {
+    const n = found.filter((f) => f === priority).length;
+    return n ? [html`<span class="Label Label--priority${priority ? ` Label--priority-${priority}` : ''}">${n} ${priority ? PRIORITY_TEXT[priority] : 'unprioritized'}</span>`] : [];
+  });
 }
 
 /** A full-width comment with avatar, as used in the conversation timeline. */

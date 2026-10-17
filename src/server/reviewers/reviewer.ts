@@ -878,13 +878,16 @@ export class Reviewer {
   }
 }
 
-/** How many findings a review's body lists under OUTSIDE_THE_DIFF, one "- `path:line`" item each. */
-export function outsideTheDiff(body: string): number {
+/** The findings a review's body lists under OUTSIDE_THE_DIFF, one "- `path:line` (high priority): …" item each, as their priorities (null for none). */
+export function outsideTheDiff(body: string): (Priority | null)[] {
   const at = body.indexOf(OUTSIDE_THE_DIFF);
-  if (at < 0) return 0;
+  if (at < 0) return [];
   // The list is the paragraph after the heading; a finding's own lines are indented.
   const list = body.slice(at).split('\n\n')[1] ?? '';
-  return list.split('\n').filter((l) => l.startsWith('- `')).length;
+  return list
+    .split('\n')
+    .filter((l) => l.startsWith('- `'))
+    .map((l) => (/^- `[^`]*` \((high|medium|low) priority\):/.exec(l)?.[1] as Priority | undefined) ?? null);
 }
 
 /** What the reviewer is told about the installed dependencies and running the tests. */
