@@ -16,6 +16,7 @@ import {
   now,
   PRIORITIES,
   type Actor,
+  type CancelReason,
   type Priority,
   type CommentRow,
   type EventRow,
@@ -156,7 +157,7 @@ export interface AgentsDone {
 
 /** Where a reviewer agent stands with a pull request's head commit. */
 export interface HeadStatus {
-  state: 'reviewing' | 'queued' | 'unreviewed' | 'findings' | 'failed' | 'clean' | 'capped' | 'off';
+  state: 'reviewing' | 'queued' | 'interrupted' | 'unreviewed' | 'findings' | 'failed' | 'cancelled' | 'clean' | 'capped' | 'off';
   /** Nothing more is coming from the reviewer for this commit. */
   done: boolean;
   /** The commit this is about: the head, or the earlier commit a running review started on. */
@@ -165,6 +166,8 @@ export interface HeadStatus {
   startedAt?: string | null;
   /** When the failed review ended. */
   failedAt?: string | null;
+  /** Why the review of the head was cancelled. */
+  cancelled?: CancelReason | null;
   /** Automatic reviews of the pull request so far, and how many it gets. */
   automatic?: { used: number; limit: number };
 }
@@ -308,6 +311,8 @@ export class Service {
   /** Codex and Claude as reviewer agents, when the server runs them. */
   codex: CodexReviewer | null = null;
   claude: ClaudeReviewer | null = null;
+  /** The server is stopping, once the reviews running now have posted (see startServer's close). */
+  stopping = false;
   /** Number of `pr wait` calls currently blocked, per pull id. */
   waiters = new Map<number, number>();
   private syncing = new Map<number, Promise<PullRow>>();
@@ -559,7 +564,9 @@ export class Service {
       this.addEvent(pull, viewer, merged ? 'merged' : 'closed_on_github', { url: pull.published_url, by, at, commit }, ts);
       return merged ? 'merged' : 'closed_on_github';
     });
-    if (type) this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
+    if (!type) return;
+    this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId)!, state === 'merged' ? 'merged' : 'closed_on_github');
+    this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
   }
 
   // ----------------------------------------------------------------- repos
@@ -843,6 +850,7 @@ export class Service {
       return seq;
     });
     if (seq === null) return current();
+    if (head !== pull.head_sha) this.cancelReviews(current(), 'pushed');
     await this.pin(git, pull, seq, head);
     // Whether the new head merges cleanly: a waiting author hears of it when it is known, since it
     // does not wake for its own push.
@@ -1038,6 +1046,7 @@ export class Service {
     });
     let updated = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
     if (Object.keys(changes).length) {
+      if (changes.state === 'closed') this.cancelReviews(updated, 'closed');
       if (changes.base_ref || changes.state) updated = await this.sync(updated);
       this.emit(pull.id, 'updated', actor);
     }
@@ -1283,10 +1292,12 @@ export class Service {
 
   // --------------------------------------------------------------- reviews
 
+  /** `stored`, given, runs in the transaction that stores the review, and can refuse it by throwing. */
   async createReview(
     ctx: Ctx,
     input: { body?: string; event?: ReviewEvent | ''; commit_id?: string; comments?: CommentInput[] },
     actor: Actor,
+    stored?: (reviewId: number) => void,
   ): Promise<ReviewRow> {
     const { pull } = ctx;
     const event = input.event || undefined;
@@ -1314,6 +1325,7 @@ export class Service {
       });
       for (const a of anchors) this.insertReviewComment(pull, actor, reviewId, a.body, a.anchor);
       if (event === 'REQUEST_CHANGES' && actor.type === 'User') this.autoPublishOff(pull, actor, 'changes_requested', ts);
+      stored?.(reviewId);
       return reviewId;
     });
     if (event) this.touch(pull);
@@ -1620,6 +1632,16 @@ export class Service {
     return [this.codex, this.claude].filter((r) => r !== null);
   }
 
+  /** How many reviews the reviewer agents are running, on all pull requests. */
+  reviewsRunning(): number {
+    return this.reviewerAgents().reduce((n, r) => n + r.runningCount(), 0);
+  }
+
+  /** Cancel the reviewer agents' reviews of the pull request, for what just happened to it (see Reviewer.cancel). Before the change is announced, so nobody hears they are still at work. */
+  private cancelReviews(pull: PullRow, reason: CancelReason): void {
+    for (const r of this.reviewerAgents()) r.cancel(pull, reason);
+  }
+
   /**
    * Whether the feedback waits for more of its kind: it is all reviews from reviewer agents, and
    * another reviewer agent is still at work on the pull request. The author then gets the
@@ -1654,7 +1676,7 @@ export class Service {
     if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
-    if (reviewers.some((r) => r.status.state === 'reviewing' || r.status.state === 'queued' || r.status.state === 'unreviewed')) return null;
+    if (reviewers.some((r) => ['reviewing', 'queued', 'interrupted', 'unreviewed'].includes(r.status.state))) return null;
     const stopped = this.stoppedText(pull);
     const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
     // Once, whatever each reviewer agent made of the commit.
@@ -2120,7 +2142,7 @@ export class Service {
     if (busy.length && !opts.duringReview) {
       const what = (sha: string) => (sha === pull.head_sha ? 'this commit' : `an earlier commit (${sha.slice(0, 7)})`);
       const doing = busy.map(({ reviewer, work }) => `${reviewer.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what(work.head_sha)}`);
-      throw new HttpError(428, `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes.`);
+      throw new HttpError(428, `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes. Publishing now cancels ${busy.length > 1 ? 'them' : 'it'}.`);
     }
     // Refused before anything is pushed, rather than published without the auto-merge asked for.
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
@@ -2219,6 +2241,8 @@ export class Service {
       // Auto-publish stays on, whoever published: it publishes the next update too, until the merge.
       this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, first, force, auto }, ts);
     });
+    // Published during a review (a second click): its findings would come too late.
+    this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!, 'published');
     this.emit(pull.id, auto ? 'auto_published' : 'published', actor);
     if (mergeMethod) await this.enableAutoMerge(ctx, url!, pushed, mergeMethod, actor, timeoutMs);
     return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
@@ -2313,6 +2337,15 @@ export class Service {
 /** Environment for git and gh when nobody can answer a prompt. */
 const UNPROMPTED = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
 
+/** Why a reviewer agent's review was cancelled, as the sidebar and timeline say it: "cancelled: merged on GitHub". */
+export const CANCELLED: Record<CancelReason, string> = {
+  closed: 'closed here',
+  merged: 'merged on GitHub',
+  closed_on_github: 'closed on GitHub',
+  published: 'published',
+  pushed: 'new commits pushed',
+};
+
 /**
  * A reviewer agent's progress with the head, as a reason in Turn; null when it has nothing to do
  * with the pull request, or no automatic reviews left because the reviewer stopped them (`stopped`),
@@ -2325,12 +2358,16 @@ function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, aut
       return status.commit === pull.head_sha ? `${login} is reviewing ${sha}` : `${login} is reviewing an earlier commit, ${sha}`;
     case 'queued':
       return `${login} is about to review ${sha}`;
+    case 'interrupted':
+      return `${login}'s review of ${sha} was interrupted by a restart; it will run again`;
     case 'unreviewed':
       return authorWaiting ? `${login} is about to review ${sha}` : `${login} reviews ${sha} when ${author} waits for review`;
     case 'findings':
       return `${login} commented on ${sha}`;
     case 'failed':
       return `${login}'s review of ${sha} failed`;
+    case 'cancelled':
+      return `${login}'s review of ${sha} was cancelled${status.cancelled ? ` (${CANCELLED[status.cancelled]})` : ''}`;
     case 'clean':
       return `${login} found nothing in ${sha}`;
     case 'capped':

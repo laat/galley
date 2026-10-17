@@ -26,6 +26,9 @@ ENVIRONMENT
   LAATSUX_HOME    Data directory for the server (default ${dataDir()})
 `;
 
+/** How long a stopping server lets running reviews finish before it interrupts them. */
+const STOP_GRACE_MS = 10 * 60 * 1000;
+
 async function serve(args: string[]): Promise<number> {
   const { values: v } = parseArgs({
     args,
@@ -33,6 +36,8 @@ async function serve(args: string[]): Promise<number> {
       port: { type: 'string', short: 'p' },
       host: { type: 'string', default: '127.0.0.1' },
       open: { type: 'boolean' },
+      // Stop at the first signal, interrupting running reviews.
+      now: { type: 'boolean' },
     },
   });
   const { startServer } = await import('../server/server.ts');
@@ -41,10 +46,21 @@ async function serve(args: string[]): Promise<number> {
   out(`laatsux is serving ${server.url} (data in ${dataDir()})`);
   if (v.open) (await import('node:child_process')).spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [server.url], { stdio: 'ignore' });
   await new Promise<void>((resolve) => {
-    // Exit once closed; open live-update streams would otherwise keep timers alive for a while.
-    const stop = () => server.close().then(() => process.exit(0), resolve);
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
+    // The first signal lets running reviews finish; a second one, or --now, interrupts them, and
+    // they run again on the next start.
+    let stopping = false;
+    const stop = () => {
+      const now = stopping || !!v.now;
+      stopping = true;
+      const running = server.service.reviewsRunning();
+      const reviews = running === 1 ? '1 review' : `${running} reviews`;
+      if (running && now) out(`Interrupting ${reviews}; ${running === 1 ? 'it runs' : 'they run'} again on the next start.`);
+      else if (running) out(`Waiting up to ${STOP_GRACE_MS / 60000} minutes for ${reviews} to finish before stopping. Press Ctrl-C (or send SIGTERM) again to stop now.`);
+      // Exit once closed; open live-update streams would otherwise keep timers alive for a while.
+      server.close({ graceMs: now ? 0 : STOP_GRACE_MS }).then(() => process.exit(0), resolve);
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
   });
   return 0;
 }

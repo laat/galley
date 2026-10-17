@@ -2,13 +2,15 @@ import type { Actor, CommentRow, Priority, PullRow, RepoRow } from '../db.ts';
 import { githubStatus, type Service, type Thread } from '../service.ts';
 import { checksSummary } from '../github-follow.ts';
 import { avatarUrl } from '../github.ts';
-import { avatar, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
+import { avatar, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 import type { ReferenceContext } from './references.ts';
 
 export function layout(s: Service, opts: { title: string; crumbs?: Safe; subnav?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
   const data = Object.entries(opts.data ?? {}).map(([k, v]) => html` data-${raw(k)}="${v}"`);
+  // The server was asked to stop, and lets the running reviews post first. In #main, which live updates refresh.
+  const running = s.stopping ? s.reviewsRunning() : 0;
   return (
     '<!doctype html>' +
     html`<html lang="en">
@@ -32,7 +34,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; subnav?
 </div>
 ${opts.subnav ?? ''}
 </header>
-<div id="main"${data}>${opts.body}</div>
+<div id="main"${data}>${running ? html`<div class="container container-xl"><div class="flash flash-warn">${icon('alert')}<span>Waiting for ${plural(running, 'running review')} to finish before the server stops.</span></div></div>` : ''}${opts.body}</div>
 <div id="toast" class="toast" hidden></div>
 </body>
 </html>`.value

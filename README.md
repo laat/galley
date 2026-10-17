@@ -83,7 +83,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 | `laatsux pr publish [<n>]` | Push and open the pull request on GitHub, like the Publish button. `--sign`, `--no-sign`, `--draft`, `--force`, `--during-review`; `--auto` and `--disable-auto` for [auto-publish](#auto-publish); `--auto-merge` for [auto-merge on GitHub](#auto-merge), with or without `--auto`. Refused for agents |
 | `laatsux api <endpoint>` | GitHub REST paths, `{owner}`/`{repo}` placeholders, `-f`, `-F`, `-X`, `--input`, `--jq` |
 | `laatsux browse [<number> \| <path>[:<line>[-<line>]] \| <sha>]` | Print the web UI's URL for a pull request, a file (at a line or lines) or a directory, and open it when run at a terminal. `-c, --commit` (default: HEAD), `-b, --branch`, `-n, --no-browser`, `-R, --repo` (commits and paths are then looked up in that repository, through the server). The URL names the commit, so it keeps pointing at the code you meant. A number is a pull request; when no pull request has it, a commit SHA |
-| `laatsux serve` | Run the server and web UI |
+| `laatsux serve` | Run the server and web UI. Stopping it lets running reviews finish first; `--now` stops at once (see [Reviewer agents](#reviewer-agents)) |
 
 A pull request is found the way gh finds it: by number, URL, branch name, or the current branch.
 
@@ -377,11 +377,20 @@ How they run:
   way, a reviewer reviews pull requests by its own kind of agent too.
 - "Ask Codex to review" (or Claude) in a pull request's sidebar runs a review at any time,
   regardless of the cap. The sidebar also shows a running review and the error of a failed one.
+- Stopping the server (Ctrl-C or SIGTERM) gives running reviews up to 10 minutes to post, while
+  pages say what it waits for. A second signal, or `laatsux serve --now`, stops at once. A review
+  cut off by a stop is interrupted, not failed: it does not count toward the cap, and it runs
+  again when the server starts, at once if it was asked for by hand, or when the author waits.
 - While a reviewer works, `pr view` and `pr wait` say so, an approval no longer tells the agent
   that nothing is left open, and publishing takes a second click on the Publish button (or
   `pr publish --during-review`). The server decides, so a page loaded before the review
   started asks too: `POST …/pulls/{n}/publish` answers 428 unless the body has
   `"during_review": true`.
+- A running review is cancelled when the pull request is closed here, or merged or closed on
+  GitHub, when the commit it reviews is published, and when the agent pushes a newer commit (if
+  the agent is waiting, the new commit is reviewed then). A cancelled review does not count toward
+  the cap and does not run again; the sidebar and the timeline say why. "Ask Codex to review"
+  still works on a published pull request, until it is merged.
 - The tools must be installed and logged in where the server runs. They use your own login.
 
 ### Codex

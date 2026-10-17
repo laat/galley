@@ -197,8 +197,10 @@
     comment_edited: 'edited a comment',
     codex_started: 'started reviewing',
     codex_failed: 'could not finish its review',
+    codex_cancelled: 'stopped reviewing',
     claude_started: 'started reviewing',
     claude_failed: 'could not finish its review',
+    claude_cancelled: 'stopped reviewing',
   };
   // What laatsux did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
   const AUTOMATIC = {
