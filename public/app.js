@@ -32,27 +32,6 @@
     return json;
   }
 
-  // -------------------------------------------------------------- storage
-  // Keys were named laatsux: before the rename (#9). Unsent drafts and the reviewer's choices move
-  // to galley: when a page loads.
-
-  function renameKeys(store) {
-    const keys = [];
-    for (let i = 0; i < store.length; i++) keys.push(store.key(i));
-    for (const key of keys) {
-      if (!key || !key.startsWith('laatsux:')) continue;
-      const renamed = `galley:${key.slice('laatsux:'.length)}`;
-      if (store.getItem(renamed) === null) store.setItem(renamed, store.getItem(key));
-      store.removeItem(key);
-    }
-  }
-  try {
-    renameKeys(localStorage);
-  } catch {}
-  try {
-    renameKeys(sessionStorage);
-  } catch {}
-
   // --------------------------------------------------------------- drafts
   // Unsent text survives live refreshes and reloads (per tab, per pull request).
 

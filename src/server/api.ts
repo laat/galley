@@ -37,20 +37,16 @@ export function api(s: Service): Hono {
   });
   app.notFound((c) => c.json({ message: 'Not Found', status: '404' }, 404));
 
-  /**
-   * CLI callers name themselves; requests from the web UI act as the human viewer. The headers'
-   * names from before the rename (#9), X-Laatsux-Actor and X-Laatsux-Actor-Type, still work.
-   */
+  /** CLI callers name themselves; requests from the web UI act as the human viewer. */
   const actor = (c: Context): Actor => {
-    const prefix = c.req.header('x-galley-actor') ? 'x-galley' : 'x-laatsux';
-    const login = c.req.header(`${prefix}-actor`);
+    const login = c.req.header('x-galley-actor');
     if (!login) return s.viewer();
     // A reviewer agent posts from inside the server; anyone else using its name would be mistaken for it.
     const reviewer = s.reviewerAgents().find((r) => r.actor().login === login);
     if (reviewer) throw new HttpError(409, `"${login}" is the name of the ${reviewer.label} reviewer. Set GALLEY_ACTOR to another name.`);
     // So would a custom reviewer's bot while it does not run (its file deleted, or wrong), and its approvals would count as yours.
     if (s.custom?.heldBy(login)) throw new HttpError(409, `"${login}" is the name of a custom reviewer. Set GALLEY_ACTOR to another name.`);
-    const type = (c.req.header(`${prefix}-actor-type`) as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
+    const type = (c.req.header('x-galley-actor-type') as ActorType) ?? (login === s.viewer().login ? 'User' : 'Bot');
     return s.db.actor(login, type === 'User' ? 'User' : 'Bot');
   };
   const body = async (c: Context): Promise<Record<string, any>> => {

@@ -44,7 +44,7 @@ async function serve(args: string[]): Promise<number> {
   });
   const { startServer } = await import('../server/server.ts');
   const port = Number(v.port ?? fromEnv('PORT') ?? DEFAULT_PORT);
-  const server = await startServer({ port, host: String(v.host), dataDir: dataDir(), moveFromLaatsux: true }).catch(async (e) => {
+  const server = await startServer({ port, host: String(v.host), dataDir: dataDir() }).catch(async (e) => {
     if ((e as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw e;
     const url = `http://localhost:${port}`;
     const found = await identify(url).catch(() => 'other');

@@ -5,8 +5,7 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "galley": "./bin/galley.ts",
-    "laatsux": "./bin/laatsux.ts"
+    "galley": "./bin/galley.ts"
   },
   "engines": {
     "node": ">=24"

@@ -1,9 +1,7 @@
-import { mock, test, type TestContext } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
-import { join } from 'node:path';
 import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { parseReviewers } from '../src/cli/pr.ts';
@@ -68,7 +66,7 @@ test('fillFromCommits mirrors gh pr create --fill', () => {
 function actorWith(env: Record<string, string>) {
   const saved = { ...process.env };
   try {
-    for (const k of ['GALLEY_ACTOR', 'GALLEY_ACTOR_TYPE', 'LAATSUX_ACTOR', 'LAATSUX_ACTOR_TYPE', 'CLAUDECODE', 'AI_AGENT', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_MANAGED_BY_NPM', 'OPENCODE']) {
+    for (const k of ['GALLEY_ACTOR', 'GALLEY_ACTOR_TYPE', 'CLAUDECODE', 'AI_AGENT', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_MANAGED_BY_NPM', 'OPENCODE']) {
       delete process.env[k];
     }
     Object.assign(process.env, env);
@@ -93,11 +91,7 @@ test('the CLI detects the agent running it, also when Claude Code started that a
   assert.deepEqual(actorWith({ OPENCODE: '1', GALLEY_ACTOR: 'reviewer' }), { login: 'reviewer', type: 'Bot' });
 });
 
-test('the names from before the rename still work: the laatsux command, LAATSUX_ variables and X-Laatsux- headers', async () => {
-  assert.equal(execFileSync(process.execPath, [join(import.meta.dirname, '..', 'bin', 'laatsux.ts'), '--version'], { encoding: 'utf8' }), 'galley version 0.1.0\n');
-  assert.deepEqual(actorWith({ LAATSUX_ACTOR: 'reviewer', LAATSUX_ACTOR_TYPE: 'User' }), { login: 'reviewer', type: 'User' });
-  assert.deepEqual(actorWith({ LAATSUX_ACTOR: 'before', GALLEY_ACTOR: 'after' }), { login: 'after', type: 'Bot' });
-  // The CLI names its caller with both headers, so a server that has not restarted since knows it too.
+test('the CLI names its caller in X-Galley-Actor and X-Galley-Actor-Type', async () => {
   let heard: IncomingHttpHeaders = {};
   const server = createServer((req, res) => {
     heard = req.headers;
@@ -112,10 +106,8 @@ test('the names from before the rename still work: the laatsux command, LAATSUX_
     process.env = saved;
     server.close();
   }
-  for (const name of ['galley', 'laatsux']) {
-    assert.equal(heard[`x-${name}-actor`], 'agent');
-    assert.equal(heard[`x-${name}-actor-type`], 'Bot');
-  }
+  assert.equal(heard['x-galley-actor'], 'agent');
+  assert.equal(heard['x-galley-actor-type'], 'Bot');
 });
 
 /** A server on a free local port that answers each path as `answer` says (404 for null), and notes the paths asked for. */
@@ -134,16 +126,16 @@ async function fake(t: TestContext, answer: (path: string) => [number, unknown] 
 test('the CLI makes sure galley answers before its first request', async (t) => {
   // Another program on the port hears only the question.
   const other = await fake(t, () => [200, { name: 'something else' }]);
-  await assert.rejects(new Client(other.url, null).get('/api/repos'), /something other than galley answers at http:\/\/127\.0\.0\.1:\d+\. Stop it, or run galley on another port with GALLEY_PORT/);
+  await assert.rejects(new Client(other.url).get('/api/repos'), /something other than galley answers at http:\/\/127\.0\.0\.1:\d+\. Stop it, or run galley on another port with GALLEY_PORT/);
   assert.deepEqual(other.paths, ['/api/meta']);
-  // galley from before /api/meta is known by its /api/health.
-  const older = await fake(t, (path) => (path === '/api/health' ? [200, { ok: true, pid: 1, viewer: 'laat' }] : path === '/api/repos' ? [200, []] : null));
-  assert.deepEqual(await new Client(older.url, null).get('/api/repos'), []);
   // galley that is still starting is waited for.
   let starting = 2;
   const later = await fake(t, (path) => (path === '/api/meta' ? [starting-- > 0 ? 503 : 200, META] : [200, []]));
-  assert.deepEqual(await new Client(later.url, null).get('/api/repos'), []);
+  assert.deepEqual(await new Client(later.url).get('/api/repos'), []);
   assert.deepEqual(later.paths, ['/api/meta', '/api/meta', '/api/meta', '/api/repos']);
+  // Links are checked too, with no request of their own.
+  assert.equal(await new Client(later.url).url('/settings'), `${later.url}/settings`);
+  assert.deepEqual(later.paths.slice(4), ['/api/meta']);
   // A program that takes the connection and never answers: galley stuck, or another one.
   const sockets: Socket[] = [];
   const silent = createTcpServer((socket) => sockets.push(socket));
@@ -152,32 +144,7 @@ test('the CLI makes sure galley answers before its first request', async (t) => 
     for (const socket of sockets) socket.destroy();
     silent.close();
   });
-  await assert.rejects(new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`, null).get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 5 seconds: galley may be stuck there, or another program holds the port/);
-
-  // Nothing on the port, and galley on its port from before #41: the CLI goes there, also to
-  // one still starting, and says so. Links lead there too, without a request first.
-  const free = await new Promise<number>((resolve) => {
-    const probe = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = probe.address() as AddressInfo;
-      probe.close(() => resolve(port));
-    });
-  });
-  const said = mock.method(process.stderr, 'write', () => true);
-  const saved = { ...process.env };
-  // Were it to start a server instead, it would fail.
-  process.env.GALLEY_NO_AUTOSTART = '1';
-  try {
-    let booting = 1;
-    const old = await fake(t, (path) => (path === '/api/meta' ? [booting-- > 0 ? 503 : 200, META] : [200, []]));
-    const client = new Client(`http://127.0.0.1:${free}`, old.url);
-    assert.equal(await client.url('/settings'), `${old.url}/settings`);
-    assert.deepEqual(await client.get('/api/repos'), []);
-    assert.equal(client.base, old.url);
-    assert.match(String(said.mock.calls[0].arguments[0]), new RegExp(`galley answers at ${old.url}, its port before 24823\\. Restart it without --port to move it\\.`));
-  } finally {
-    process.env = saved;
-    said.mock.restore();
-  }
+  await assert.rejects(new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`).get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 5 seconds: galley may be stuck there, or another program holds the port/);
 });
 
 test('pr create --reviewer takes repeats and commas like gh, and a number of reviews', () => {

@@ -1,18 +1,15 @@
-import { existsSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 export const VERSION = '0.1.0';
 /** Unassigned with IANA, below the ports macOS and Linux hand out for outgoing connections, and no dev server's default (#41). */
 export const DEFAULT_PORT = 24823;
-/** galley's port before #41: the CLI looks for a server there when none answers on DEFAULT_PORT. */
-export const PORT_BEFORE = 7171;
 /** What GET /api/meta answers (an extension), so the CLI knows galley from another program on its port. */
 export const META = { name: 'galley', version: VERSION };
 
-/** A setting from the environment: GALLEY_<name>, or LAATSUX_<name> as it was called before the rename (#9). */
+/** A setting from the environment: GALLEY_<name>, unset when empty. */
 export function fromEnv(name: string): string | undefined {
-  return process.env[`GALLEY_${name}`] || process.env[`LAATSUX_${name}`];
+  return process.env[`GALLEY_${name}`] || undefined;
 }
 
 export function serverUrl(): string {
@@ -21,31 +18,13 @@ export function serverUrl(): string {
   return `http://localhost:${fromEnv('PORT') ?? DEFAULT_PORT}`;
 }
 
-export function dataHome(): string {
-  return process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
-}
-
-export function configHome(): string {
-  return process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
-}
-
-/**
- * galley's directory in `home`: galley/, or laatsux/ while only that one exists. A server moves
- * laatsux/ there when it starts (server/rename.ts).
- */
-export function ownDir(home: string): string {
-  const dir = join(home, 'galley');
-  const before = join(home, 'laatsux');
-  return !existsSync(dir) && existsSync(before) ? before : dir;
-}
-
 export function dataDir(): string {
-  return fromEnv('HOME') || ownDir(dataHome());
+  return fromEnv('HOME') || join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'galley');
 }
 
 /** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
 export function configDir(): string {
-  return fromEnv('CONFIG_DIR') || ownDir(configHome());
+  return fromEnv('CONFIG_DIR') || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'galley');
 }
 
 /**
