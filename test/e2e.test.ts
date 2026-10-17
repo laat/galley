@@ -129,8 +129,9 @@ before(async () => {
   chmodSync(gh, 0o755);
 
   // A stand-in for the Codex CLI: a model catalog, `sandbox` standing in for the package manager
-  // it runs (failing with FAKE_INSTALL_FAIL), and `exec` answering with FAKE_CODEX_REVIEW, after
-  // FAKE_CODEX_SLEEP milliseconds or once the file FAKE_CODEX_GATE exists. Where it may run the
+  // it runs (failing with FAKE_INSTALL_FAIL), and `exec` answering with FAKE_CODEX_REVIEW (or
+  // failing, with FAKE_CODEX_FAIL), after FAKE_CODEX_SLEEP milliseconds or once the file
+  // FAKE_CODEX_GATE exists. Where it may run the
   // tests, it leaves a read-only directory behind, as Go's module cache does.
   const codex = join(dir, 'codex');
   process.env.FAKE_CODEX_LOG = join(dir, 'codex.log');
@@ -161,8 +162,10 @@ if (args.includes('workspace-write')) {
   fs.chmodSync('.cache/mod', 0o555);
   fs.chmodSync('.cache', 0o555);
 }
-if (process.env.FAKE_CODEX_FAIL) { console.error('model overloaded'); process.exit(3); }
-const answer = () => fs.writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_CODEX_REVIEW);
+const answer = () => {
+  if (process.env.FAKE_CODEX_FAIL) { console.error('model overloaded'); process.exit(3); }
+  fs.writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_CODEX_REVIEW);
+};
 const gate = process.env.FAKE_CODEX_GATE;
 if (gate) {
   const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t), answer()), 20);
@@ -1154,6 +1157,247 @@ test('with two reviewer agents, pr wait hands the author both reviews of a commi
   } finally {
     delete process.env.FAKE_CLAUDE_GATE;
     rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
+  }
+});
+
+test('stop iterating: a running review finishes, no new one starts, the author hands over, and Resume lets them go on', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/stop-iterating');
+  writeFileSync(join(repo, 'stop.js'), 'export const stop = 1;\n');
+  git('add', 'stop.js');
+  git('commit', '-qm', 'Add stop.js');
+  const created = await cli(['pr', 'create', '--title', 'Add stop.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  const { id } = await human('GET', base);
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  const until = async (ok: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400; i++) {
+      if (await ok()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(`timed out waiting until ${what}`);
+  };
+  const runs = async (kind: string) => (await human('GET', `${base}/reviewers/${kind}`)).runs.map((r: any) => r.status);
+  const ownLimits = async () => Promise.all(['codex', 'claude'].map(async (kind) => (await human('GET', `${base}/reviewers/${kind}`)).overrides.max_iterations));
+  const comment = (body: string) => ({ path: 'stop.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body });
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Codex has one thing.', comments: [comment('From Codex.')] });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Claude has another.', comments: [comment('From Claude.')] });
+  const gate = join(dir, 'claude-gate');
+  process.env.FAKE_CLAUDE_GATE = gate;
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 3 });
+  try {
+    // Codex has reviewed the first commit and Claude is still at it when the reviewer stops iterating.
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    await until(async () => (await runs('codex'))[0] === 'done', 'Codex has reviewed');
+    await until(() => server.service.claude!.atWork(row())?.status === 'IN_PROGRESS', 'Claude reviews');
+    assert.match(await page(), /<strong>1 automatic review round so far<\/strong>[^]*>Stop iterating<\/button>/);
+    const agent = await fetch(`${server.url}${base}/stop-iterating`, { method: 'PUT', headers: { 'x-laatsux-actor': 'agent' } });
+    assert.equal(agent.status, 403);
+    const stopped = await human('PUT', `${base}/stop-iterating`);
+    assert.equal(stopped.iterations_stopped.stopped_by.login, 'reviewer');
+    assert.equal(stopped.iterations_stopped.round, 1);
+    // The stop is the gate; the limits stay as they were.
+    assert.deepEqual(await ownLimits(), [null, null]);
+
+    // Nothing running is cut short: Claude's review reaches the author.
+    assert.equal(server.service.claude!.atWork(row())?.status, 'IN_PROGRESS');
+    writeFileSync(gate, '');
+    const both = await waiting;
+    assert.equal(both.code, 0, both.stderr);
+    assert.match(both.stdout, /codex-review reviewed: commented/);
+    assert.match(both.stdout, /claude-review reviewed: commented/);
+    await server.service.claude!.settle(id);
+    const box = await page();
+    assert.match(box, /<strong>Iterations stopped by reviewer after round 1<\/strong>[^]*>Resume<\/button>/);
+    assert.match(box, /stopped automatic reviews after round 1/);
+    assert.doesNotMatch(box, />Stop iterating<\/button>/);
+
+    // The author's next commit gets no automatic review: pr wait hands it to the reviewer, saying why.
+    writeFileSync(join(repo, 'stop.js'), 'export const stop = 2;\n');
+    git('commit', '-qam', 'Answer both');
+    const sha = git('rev-parse', '--short=7', 'HEAD');
+    const handed = await handedOver(number);
+    assert.match(handed, new RegExp(`^The reviewer agents are done with ${sha} \\(reviewer stopped automatic reviews after round 1\\); ask the reviewer to review it: `, 'm'));
+    assert.deepEqual([await runs('codex'), await runs('claude')], [['done'], ['done']]);
+    assert.ok(server.service.readiness(row()).reviewers.every((r) => r.status.done));
+    const { turn } = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
+    assert.deepEqual(turn.reasons.filter((r: string) => r.includes('stopped')), ['reviewer stopped automatic reviews after round 1']);
+
+    // Resume lets them go on, and the waiting author's commit is reviewed at once.
+    delete process.env.FAKE_CLAUDE_GATE;
+    const again = cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    await until(() => (server.service.waiters.get(id) ?? 0) > 0, 'the author waits');
+    await human('DELETE', `${base}/stop-iterating`);
+    assert.equal((await human('GET', base)).iterations_stopped, null);
+    const reviewed = await again;
+    assert.equal(reviewed.code, 0, reviewed.stderr);
+    assert.match(reviewed.stdout, /codex-review reviewed: commented/);
+    assert.match(reviewed.stdout, /claude-review reviewed: commented/);
+    await server.service.claude!.settle(id);
+    assert.match(await page(), /resumed automatic reviews/);
+
+    // A limit set by hand resumes them, as Resume does.
+    await human('PUT', `${base}/stop-iterating`);
+    await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 3 });
+    assert.equal((await human('GET', base)).iterations_stopped, null);
+  } finally {
+    delete process.env.FAKE_CLAUDE_GATE;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
+  }
+});
+
+test('a review that fails after iterations stop holds nothing up, and the next commit gets no automatic review', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/stop-then-fail');
+  writeFileSync(join(repo, 'stop-fail.js'), 'export const fail = 1;\n');
+  git('add', 'stop-fail.js');
+  git('commit', '-qm', 'Add stop-fail.js');
+  const created = await cli(['pr', 'create', '--title', 'Add stop-fail.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const codex = server.service.codex!;
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  const codexStatus = () => server.service.readiness(row()).reviewers.find((r) => r.engine === 'codex')!.status;
+  const gate = join(dir, 'codex-gate');
+  process.env.FAKE_CODEX_GATE = gate;
+  process.env.FAKE_CODEX_FAIL = '1';
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  try {
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '30s']);
+    for (let i = 0; i < 400 && codex.atWork(row())?.status !== 'IN_PROGRESS'; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal((await human('PUT', `${base}/stop-iterating`)).iterations_stopped.round, 1);
+    // Still running, it holds things up.
+    assert.deepEqual([codexStatus().state, codexStatus().done], ['reviewing', false]);
+    // The review fails, as one cut short by a server restart does, so no automatic review counts as done.
+    writeFileSync(gate, '');
+    const failed = await waiting;
+    assert.equal(failed.code, 0, failed.stderr);
+    await codex.settle(id);
+
+    // On the same commit, the failure holds nothing up: Codex is done, the author hands over, and
+    // a waiting author with nothing unseen is all auto-publish waits for. The sidebar still shows the failure.
+    assert.match(failed.stdout, /\(reviewer stopped automatic reviews after round 1\); ask the reviewer to review it: /);
+    assert.deepEqual([codexStatus().state, codexStatus().done], ['capped', true]);
+    const again = cli(['pr', 'wait', String(number), '--timeout', '2s']);
+    for (let i = 0; i < 200 && !server.service.waiters.get(id); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(server.service.readiness(row()).agentsDone, true);
+    assert.equal((await again).code, 124);
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /Review of <code>[0-9a-f]{7}<\/code> failed/);
+
+    // The next commit still gets no automatic review: pr wait hands it to the reviewer.
+    writeFileSync(join(repo, 'stop-fail.js'), 'export const fail = 2;\n');
+    git('commit', '-qam', 'Change stop-fail.js');
+    const handed = await handedOver(number);
+    assert.match(handed, /\(reviewer stopped automatic reviews after round 1\); ask the reviewer to review it: /);
+    assert.deepEqual((await human('GET', `${base}/reviewers/codex`)).runs.map((r: any) => r.status), ['failed']);
+    assert.ok(server.service.readiness(row()).reviewers.every((r) => r.status.done));
+  } finally {
+    delete process.env.FAKE_CODEX_GATE;
+    delete process.env.FAKE_CODEX_FAIL;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { enabled: false });
+  }
+});
+
+test('setting a limit by hand while iterations are stopped resumes every reviewer agent', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/stop-then-limit');
+  writeFileSync(join(repo, 'stop-limit.js'), 'export const limit = 1;\n');
+  git('add', 'stop-limit.js');
+  git('commit', '-qm', 'Add stop-limit.js');
+  const created = await cli(['pr', 'create', '--title', 'Add stop-limit.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const pull = await human('GET', base);
+  const runs = async (kind: string) => (await human('GET', `${base}/reviewers/${kind}`)).runs.length;
+  // Codex has reviewed the head once; Claude, below its limit, has not reviewed it.
+  server.service.db.insert('review_runs', { pull_id: pull.id, reviewer: 'codex', head_sha: pull.head.sha, trigger: 'auto', status: 'done', findings: 1, started_at: now(), finished_at: now() });
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Claude has a look.', comments: [] });
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 3 });
+  try {
+    await human('PUT', `${base}/stop-iterating`);
+    await handedOver(number);
+    assert.equal(await runs('claude'), 0);
+
+    // With the author waiting, Codex's limit set to the reviews it has done ends the stop, as Resume
+    // does: Claude reviews at once, and the timeline says the reviews were resumed.
+    const waiting = cli(['pr', 'wait', String(number), '--timeout', '10s']);
+    for (let i = 0; i < 200 && !server.service.waiters.get(pull.id); i++) await new Promise((r) => setTimeout(r, 25));
+    await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 1 });
+    assert.equal((await human('GET', base)).iterations_stopped, null);
+    const reviewed = await waiting;
+    assert.equal(reviewed.code, 0, reviewed.stderr);
+    assert.match(reviewed.stdout, /claude-review reviewed: commented/);
+    assert.deepEqual([await runs('codex'), await runs('claude')], [1, 1]);
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /resumed automatic reviews/);
+    await server.service.claude!.settle(pull.id);
+  } finally {
+    await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
+    await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
+  }
+});
+
+test('after a stop, the handoff and the turn say so once, also when every reviewer agent found nothing or is off', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/stop-clean');
+  writeFileSync(join(repo, 'stop-clean.js'), 'export const clean = 1;\n');
+  git('add', 'stop-clean.js');
+  git('commit', '-qm', 'Add stop-clean.js');
+  const created = await cli(['pr', 'create', '--title', 'Add stop-clean.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const pull = await human('GET', base);
+  const sha = pull.head.sha.slice(0, 7);
+  // Codex found nothing in the head, with reviews to spare; Claude is off.
+  server.service.db.insert('review_runs', { pull_id: pull.id, reviewer: 'codex', head_sha: pull.head.sha, trigger: 'auto', status: 'done', findings: 0, started_at: now(), finished_at: now() });
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  try {
+    await human('PUT', `${base}/stop-iterating`);
+    const handed = await handedOver(number);
+    assert.match(handed, new RegExp(`^The reviewer agents are done with ${sha} \\(codex-review found nothing in ${sha}; reviewer stopped automatic reviews after round 1\\); ask the reviewer`, 'm'));
+    const { turn } = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'turn'])).stdout);
+    assert.deepEqual(turn.reasons.filter((r: string) => r.includes('stopped')), ['reviewer stopped automatic reviews after round 1']);
+  } finally {
+    await human('PUT', '/api/settings/codex', { enabled: false });
+  }
+});
+
+test('Stop iterating shows the round it records, also when a reviewer ahead of the others has used up its reviews', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/stop-round');
+  writeFileSync(join(repo, 'stop-round.js'), 'export const round = 1;\n');
+  git('add', 'stop-round.js');
+  git('commit', '-qm', 'Add stop-round.js');
+  const created = await cli(['pr', 'create', '--title', 'Add stop-round.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+  const pull = await human('GET', base);
+  // Codex has used up its two automatic reviews; Claude, with three, has done one.
+  for (const reviewer of ['codex', 'codex', 'claude']) {
+    server.service.db.insert('review_runs', { pull_id: pull.id, reviewer, head_sha: pull.head.sha, trigger: 'auto', status: 'done', findings: 1, started_at: now(), finished_at: now() });
+  }
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 2 });
+  await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 3 });
+  try {
+    assert.match(await page(), /<strong>2 automatic review rounds so far<\/strong>[^]*>Stop iterating<\/button>/);
+    assert.equal((await human('PUT', `${base}/stop-iterating`)).iterations_stopped.round, 2);
+    assert.match(await page(), /<strong>Iterations stopped by reviewer after round 2<\/strong>/);
+  } finally {
     await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
     await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
   }

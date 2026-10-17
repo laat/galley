@@ -56,6 +56,8 @@ export interface PullRow {
   claude_enabled: number | null;
   /** Auto-publish, when it is on: an AutoPublish as JSON (see Service.autoPublish). */
   auto_publish: string | null;
+  /** Automatic reviews, when the reviewer stopped them: an IterationsStopped as JSON (see Service.stopIterating). */
+  iterations_stopped: string | null;
   published_title: string | null;
   published_body: string | null;
   author_seen_at: string;
@@ -310,6 +312,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'claude_max_iterations', 'INTEGER'],
   ['pulls', 'claude_enabled', 'INTEGER'],
   ['review_runs', 'usage', 'TEXT'],
+  ['pulls', 'iterations_stopped', 'TEXT'],
 ];
 
 export class Db {

@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { Reviewer, RunUsage } from '../reviewers/reviewer.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
@@ -460,6 +460,10 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
+    case 'iterations_stopped':
+      return timelineBadge('circle-slash', html`${who} stopped automatic reviews ${afterRound(data.round)} ${when}`);
+    case 'iterations_resumed':
+      return timelineBadge('iterations', html`${who} resumed automatic reviews ${when}`);
     case 'merged': {
       // `at` is when GitHub merged it; the event is from when laatsux learned of it.
       const commit = data.commit
@@ -628,6 +632,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const note = html`${work.started_at ? html`Started ${relTime(work.started_at)}. ` : ''}Its review will show up here.${publishable ? ' Publishing before it arrives takes a second click.' : ''}`;
     rows.push(html`<div class="merge-row">${icon('dot-fill', { cls: 'color-fg-attention' })}<div><strong>${what}</strong><div class="color-fg-muted">${note}</div></div></div>`);
   }
+  rows.push(...iterationsRows(p));
   if (auto) rows.push(autoPublishRow(p, auto));
   else if (publishable) {
     // Auto-publish turns itself off when publishing fails; say so until it is on again or the pull request is published.
@@ -646,6 +651,27 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : published ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
+}
+
+/** Stop iterating, while a reviewer agent may still review on its own; Resume once stopped. */
+function iterationsRows(p: PullPage): Safe[] {
+  const { s, pull, author } = p;
+  const api = `${p.apiBase}/stop-iterating`;
+  const stop = s.iterationsStopped(pull);
+  if (stop) {
+    return [
+      html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Iterations stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>
+        <div class="color-fg-muted">No reviewer agent starts another automatic review, so ${author.login} hands its next commit to you. Asking one to review still works, and Resume lets them go on up to their limits.</div></div>
+        <button type="button" class="btn btn-sm js-iterations" data-method="DELETE" data-api="${api}">Resume</button></div>`,
+    ];
+  }
+  // Shown while a reviewer agent may still review on its own; the round is the one stopping records.
+  if (!s.reviewerAgents().some((r) => r.enabled(pull) && r.automaticReviews(pull) < r.limit(pull))) return [];
+  return [
+    html`<div class="merge-row">${icon('iterations', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${plural(s.automaticRound(pull), 'automatic review round')} so far</strong>
+      <div class="color-fg-muted">The reviewer agents review each commit ${author.login} waits with. Good enough, or going in circles? Stop iterating: a review in progress still finishes, and no new one starts.</div></div>
+      <button type="button" class="btn btn-sm js-iterations" data-method="PUT" data-api="${api}">Stop iterating</button></div>`,
+  ];
 }
 
 /** What came of the last time laatsux turned on auto-merge on GitHub. */
@@ -769,7 +795,7 @@ function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: 
     case 'clean':
       return html`${login} found nothing in ${sha}`;
     case 'capped':
-      return html`${login} has used up its automatic reviews`;
+      return pull.iterations_stopped ? html`Automatic reviews are stopped, so ${login} starts no more` : html`${login} has used up its automatic reviews`;
     case 'off':
       return html`${login} does not review this pull request automatically`;
   }

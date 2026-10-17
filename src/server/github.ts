@@ -115,6 +115,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     github_closed_by: pull.github_closed_by,
     author_waiting: (s.waiters.get(pull.id) ?? 0) > 0,
     auto_publish: autoPublishJson(s, pull),
+    // Once the reviewer stopped automatic reviews: who did, when, and after which round; null while they go on.
+    iterations_stopped: iterationsStoppedJson(s, pull),
     // Whose move it is (author, reviewer_agents, reviewer or none), and why.
     turn: s.turn(pull),
     // What a published pull request has that GitHub does not yet: commits, title, description.
@@ -135,6 +137,11 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
 function autoPublishJson(s: Service, pull: PullRow) {
   const auto = s.autoPublish(pull);
   return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge };
+}
+
+function iterationsStoppedJson(s: Service, pull: PullRow) {
+  const stop = s.iterationsStopped(pull);
+  return stop && { stopped_by: userJson(s, s.db.actorById(stop.by)), stopped_at: stop.at, round: stop.round };
 }
 
 function autoMergeJson(s: Service, pull: PullRow) {
