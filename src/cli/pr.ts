@@ -553,6 +553,22 @@ function approvedBefore(pr: any, fresh: Set<number>): string[] {
   return lines;
 }
 
+/**
+ * After reviews from reviewer agents alone, nothing to address: what the reviewer agents still to
+ * review the head are at ("claude-review is about to review 8c64534"), none when they are all done
+ * with it. Null when the reviews ask something of the author, a reviewer agent has findings the
+ * author has not answered, or the server can not say. Asked before the reviews count as seen:
+ * once seen, findings with no thread to reply in count as answered.
+ */
+async function nothingToAddress(client: Client, t: Target): Promise<string[] | null> {
+  const pull = await client.get<any>(pullPath(t)).catch(() => null);
+  if (!pull) return null;
+  const reasons: any[] = pull.turn.reasons;
+  if (reasons.some((x) => (x.kind === 'author' && x.state === 'unseen') || (x.kind === 'reviewer_agent' && x.state === 'findings'))) return null;
+  // The server's TO_REVIEW.
+  return reasons.filter((x) => x.kind === 'reviewer_agent' && ['reviewing', 'queued', 'interrupted', 'unreviewed'].includes(x.state)).map((x) => x.text);
+}
+
 /** The server is down or restarting: worth asking again shortly. */
 function transient(e: unknown): boolean {
   return (e instanceof TypeError && e.message === 'fetch failed') || (e instanceof CliError && /not running/.test(e.message));
@@ -636,6 +652,12 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
     const getIt = `run \`galley pr wait ${all}\` to get ${atWork.length > 1 ? 'their reviews' : 'its review'}.`;
+    // Reviews from reviewer agents alone may ask nothing of the author, unless an open thread ends with
+    // someone else's comment, still to be answered (also one by a reviewer agent with no reviews left):
+    // asked before they count as seen.
+    const answered = unresolved.every((th: any) => th.comments.at(-1).author.login === pr.author.login);
+    const agentsOnly = r.status === 'feedback' && answered && !fresh.comments.size && !fresh.replies.size && pr.reviews.every((rv: any) => !fresh.reviews.has(rv.databaseId) || rv.byReviewerAgent);
+    const toCome = agentsOnly ? await nothingToAddress(client, t) : null;
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
@@ -707,6 +729,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
       // Approved, but it conflicts with its base: the rebase is left.
       out(c.gray(rebase ?? `Approved with nothing left open. Run \`galley pr wait ${all}\` to wait until the reviewer publishes it.`));
+    } else if (toCome) {
+      const still = toCome.length ? ` for the ${toCome.length > 1 ? 'reviews' : 'review'} still to come (${toCome.join('; ')})` : '';
+      out(c.gray(rebase ?? `Nothing to address. Run \`galley pr wait ${all}\` again${still}.`));
     } else {
       out(
         c.gray(
