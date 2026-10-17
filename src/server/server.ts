@@ -140,6 +140,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? process.env.LAATSUX_GH, viewerLogin: opts.viewerLogin ?? process.env.LAATSUX_USER, fetchEveryMs: opts.fetchMs });
   // A new instance id (a copied database, or one from before namespaces) pins what it has first.
   await service.pinRevisions();
+  // A repository whose remote names another GitHub repository now (renamed there) takes its name before the first page.
+  await service.followRemotes();
   const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
   service.codex = new CodexReviewer(service, opts.codexBin ?? process.env.LAATSUX_CODEX ?? 'codex');
   service.claude = new ClaudeReviewer(service, opts.claudeBin ?? process.env.LAATSUX_CLAUDE ?? 'claude', opts.sandboxExec);

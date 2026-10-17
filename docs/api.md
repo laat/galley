@@ -49,7 +49,7 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 ## Other
 
 - `GET /api/settings`, `PUT /api/settings/{codex|claude}`, `PUT /api/settings/publish` (`mergeMethod`).
-- `POST /api/repos` `{path}`: register the repository at that path.
+- `POST /api/repos` `{path}`: register the repository at that path. Its `full_name` is the GitHub owner/name of its remote, and follows the remote when it names another (a repository renamed on GitHub); the old name still works under `/api/repos`, and its pages redirect.
 - `POST /api/markdown`: also takes `pull` (a pull request's API path), to link references as its pages do.
 - `POST /api/uploads`: an image's bytes; answers with its `path`, `/uploads/<sha256>.<ext>`, served by `GET /uploads/<sha256>.<ext>`.
 - `GET /api/health`, and `GET /events` (server-sent events).

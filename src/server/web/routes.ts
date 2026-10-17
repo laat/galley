@@ -15,6 +15,16 @@ export function web(s: Service): Hono {
     return c.html(notFoundPage(s, `Something went wrong: ${(err as Error).message}`), 500);
   });
 
+  // A repository whose key followed its GitHub slug (Service.followSlug): its old URLs lead to the
+  // new ones. Browsers do not keep the redirect, since the key may change back.
+  app.use('/:owner/:repo/*', async (c, next) => {
+    const moved = s.movedRepo(c.req.param('owner'), c.req.param('repo'));
+    if (!moved) return next();
+    const url = new URL(c.req.url);
+    c.header('cache-control', 'no-store');
+    return c.redirect(['', moved.owner, moved.name, ...url.pathname.split('/').slice(3)].join('/') + url.search, 301);
+  });
+
   const load = (c: Context) => {
     const n = Number(c.req.param('n'));
     if (!Number.isInteger(n)) throw new HttpError(404, 'Not found');
