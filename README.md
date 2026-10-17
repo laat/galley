@@ -75,11 +75,12 @@ turn.
 
 Codex and Claude can review a pull request before you do. Turn them on in **Settings**. Each
 reviews every new commit in a sandboxed checkout, with the dependencies installed so it can run
-the tests, until it finds nothing or uses up its automatic reviews. They only comment; the
-review decision is yours. A pull request's sidebar shows what each is doing and its transcript,
-and lets you turn it on or off, change its limit, or ask for a review now. **Stop iterating** in
-the merge box ends the automatic reviews. You can also name reviewers when you ask an agent to
-stage.
+the tests, until it finds nothing or uses up its automatic reviews. It is also done with a
+commit once the author has seen its review and replied to or resolved each thread the review
+opened. They only comment; the review decision is yours. A pull request's sidebar shows what
+each is doing and its transcript, and lets you turn it on or off, change its limit, or ask for a
+review now. **Stop iterating** in the merge box ends the automatic reviews. You can also name
+reviewers when you ask an agent to stage.
 
 You can add reviewer agents of your own, each with its own instructions, in
 `~/.config/laatsux/reviewers/<name>.md` or under **Settings** → Custom reviewers (saving there

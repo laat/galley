@@ -631,10 +631,11 @@ export class Reviewer {
 
   /**
    * Whether the reviewer is done with the pull request's head: its latest review of the commit
-   * found nothing, approved it or was cancelled, it has used up its automatic reviews (or the
-   * reviewer stopped them), or it is off for the pull request. A failed review of the commit holds
-   * things up until someone asks for another one, unless automatic reviews are stopped: then only a
-   * running review does, or one asked for by hand that a stop interrupted, until it has run again.
+   * found nothing, approved it or was cancelled, the author answered what it found (answered), it
+   * has used up its automatic reviews (or the reviewer stopped them), or it is off for the pull
+   * request. A failed review of the commit holds things up until someone asks for another one,
+   * unless automatic reviews are stopped: then only a running review does, or one asked for by
+   * hand that a stop interrupted, until it has run again.
    * For a reviewer of the description, it is about the version of the title, description and
    * commit messages the head has (see subject).
    */
@@ -661,8 +662,28 @@ export class Reviewer {
     const automatic = { used: this.automaticReviews(pull), limit: this.limit(pull) };
     // Stopped (Service.stopIterating), it has no automatic review left, whatever the counts say.
     if (automatic.used >= automatic.limit || pull.iterations_stopped) return { state: 'capped', done: true, commit, automatic };
-    // It found something in this commit and reviews the author's next one, or it reviews this one when the author waits.
-    return { state: last ? 'findings' : 'unreviewed', done: false, commit, automatic };
+    // It reviews this commit when the author waits.
+    if (!last) return { state: 'unreviewed', done: false, commit, automatic };
+    // It found something in this commit and reviews the author's next one, unless the author answers it without one.
+    if (this.answered(pull, last)) return { state: 'answered', done: true, commit, automatic };
+    return { state: 'findings', done: false, commit, automatic };
+  }
+
+  /**
+   * Whether the author answered a review's findings: it has seen the review, and each thread the
+   * review opened is resolved or has a reply from the author. Findings in the review's body (on
+   * lines outside the diff) have no thread to reply in, so seeing them is enough.
+   */
+  private answered(pull: PullRow, run: ReviewRunRow): boolean {
+    const review = run.review_id === null ? undefined : this.s.db.get<{ submitted_at: string }>('SELECT submitted_at FROM reviews WHERE id = ?', run.review_id);
+    if (!review || review.submitted_at > pull.author_seen_at) return false;
+    const open = this.s.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM comments c WHERE c.review_id = ? AND c.in_reply_to_id IS NULL AND c.resolved_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM comments r WHERE r.in_reply_to_id = c.id AND r.author_id = ?)`,
+      run.review_id,
+      pull.author_id,
+    )!.n;
+    return open === 0;
   }
 
   /** This pull request's own values, from its columns for this reviewer; null follows the setting. */

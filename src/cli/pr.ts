@@ -568,6 +568,14 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const left = Math.ceil((deadline - Date.now()) / 1000);
     if (left <= 0) {
       err(`No feedback yet on ${names} (timed out). Run \`laatsux pr wait ${all}\` again to keep waiting.`);
+      // Findings the author has not answered hold up the reviewer agents, which no wait would say.
+      for (const t of targets) {
+        const pull = await client.get<any>(pullPath(t)).catch(() => null);
+        const which = targets.length > 1 ? `${t.repo.owner}/${t.repo.name}#${t.number}: ` : '';
+        for (const r of pull?.turn.reasons ?? []) {
+          if (r.state === 'findings') err(`${which}${r.text}: reply to or resolve each of its threads, or push a commit. The reviewer agents are not done with it until then.`);
+        }
+      }
       return 124;
     }
     const first = await firstNews(client, targets, Math.min(left, 240));

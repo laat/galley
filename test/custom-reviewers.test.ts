@@ -344,6 +344,10 @@ test('it reviews again when the title, description or commit messages change, no
   // The merge box's last round counts them: the thread on the commit, and those in the body.
   assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 Medium 2 Low');
   assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
+  // Answered without a change: the thread has a reply, and the findings in the body were seen.
+  assert.equal((await cli(acme, ['pr', 'comment', String(number), '--reply-to', String(thread.id), '-b', 'The description says why.'])).code, 0);
+  assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules's findings in the description are answered/);
+  assert.match(await page('/'), /house-rules&#39;s findings in the description answered/);
 
   // A reworded commit: a verdict that is not approve, with nothing to point at, is a finding; one it may not give is a comment.
   process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'The message does not say why.', verdict: 'request_changes', comments: [] });

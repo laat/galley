@@ -2155,6 +2155,50 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
   });
 });
 
+test('findings the author answers without a new commit: the reviewer agents are done with it, and the reviewer has it', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/answered');
+  writeFileSync(join(repo, 'answered.js'), 'export const value = 1;\n');
+  git('add', 'answered.js');
+  git('commit', '-qm', 'Add answered.js');
+  const created = await cli(['pr', 'create', '--title', 'Add answered.js', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const sha = () => git('rev-parse', '--short=7', 'HEAD');
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'answered.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name it.' }] });
+  await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+  try {
+    assert.match((await cli(['pr', 'wait', String(number), '--timeout', '20s'])).stdout, /codex-review reviewed: commented/);
+    await server.service.codex!.settle(id);
+    // Unanswered, the finding holds the reviewer agents up: no wait says they are done, and one that times out says why.
+    const held = await cli(['pr', 'wait', String(number), '--timeout', '2s']);
+    assert.equal(held.code, 124);
+    assert.match(held.stderr, new RegExp(`^codex-review commented on ${sha()}: reply to or resolve each of its threads, or push a commit\\. The reviewer agents are not done with it until then\\.$`, 'm'));
+
+    // Answered without a new commit: Codex reviews each commit once, so it has nothing more to say.
+    const [thread] = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewThreads'])).stdout).reviewThreads;
+    assert.equal((await cli(['pr', 'comment', String(number), '--reply-to', String(thread.databaseId), '--resolve', '-b', 'The name says what it is.'])).code, 0);
+    const answered = `codex-review's findings in ${sha()} are answered`;
+    assert.match(await handedOver(number), new RegExp(`^The reviewer agents are done with ${sha()} \\(${answered}\\); ask the reviewer to review it: `, 'm'));
+    const { turn } = await human('GET', base);
+    assert.equal(turn.whose, 'reviewer');
+    assert.ok(turn.reasons.some((r: any) => r.kind === 'reviewer_agent' && r.state === 'answered' && r.text === answered), JSON.stringify(turn.reasons));
+    // The list says it shorter, in full as its tooltip.
+    assert.match(await (await fetch(`${server.url}/`)).text(), new RegExp(`<span class="turn-reason" title="${answered.replace("'", '&#39;')}">codex-review&#39;s findings answered</span>`));
+
+    // A new commit still gets a review of its own.
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine now.', comments: [] });
+    writeFileSync(join(repo, 'answered.js'), 'export const answer = 1;\n');
+    git('commit', '-qam', 'Rename the value');
+    assert.match((await cli(['pr', 'wait', String(number), '--timeout', '20s'])).stdout, /Fine now\./);
+    assert.equal((await human('GET', `${base}/reviewers/codex`)).runs.length, 2);
+  } finally {
+    await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
+  }
+});
+
 test('auto-publish publishes once the agents are done', async (t) => {
   /** Stage a branch with one commit, as the agent. */
   const stage = async (branch: string, file: string, ...args: string[]) => {
@@ -2266,6 +2310,59 @@ test('auto-publish publishes once the agents are done', async (t) => {
       assert.match(after, /published this pull request to <a [^>]*>acme\/widgets#7<\/a> at <code>[0-9a-f]{7}<\/code> \(signed 2 commits\) with auto-publish/);
       assert.match(after, /GitHub has the latest commit: the next one pushed to feature\/auto is published once the agents are done with it/);
       assert.match(second.stdout, /Auto-publish stays on until the merge/);
+    } finally {
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+  });
+
+  await t.test('after the agent answers every thread without a new commit, which Codex would wait for', async () => {
+    const pr = await stage('feature/auto-answered', 'answered-auto.js');
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({
+      summary: 'Two things.',
+      comments: [
+        { path: 'answered-auto.js', line: 1, start_line: null, side: 'RIGHT', priority: 'medium', body: 'Name it after what it is.' },
+        { path: 'answered-auto.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Export a function.' },
+      ],
+    });
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /codex-review reviewed: commented/);
+      const sha = git('rev-parse', '--short=7', 'HEAD');
+      const [first, second] = JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'reviewThreads'])).stdout).reviewThreads.map((th: any) => th.databaseId);
+
+      // One thread answered and resolved, the other not: it waits for the other.
+      assert.equal((await cli(['pr', 'comment', String(pr.number), '--reply-to', String(first), '--resolve', '-b', 'It is named after what it is.'])).code, 0);
+      assert.equal((await cli(['pr', 'wait', String(pr.number), '--timeout', '2s'])).code, 124);
+      assert.equal(pr.created(), false);
+      assert.match(await pr.page(), new RegExp(`codex-review found problems in <code>${sha}</code>, and reviews the commit that addresses them`));
+
+      // A reply answers a thread left open too.
+      assert.equal((await cli(['pr', 'comment', String(pr.number), '--reply-to', String(second), '-b', 'Out of scope: a constant is what callers need.'])).code, 0);
+      assert.match(await pr.page(), new RegExp(`<svg [^>]*octicon-check[^>]*>.*?</svg> <span>codex-review's findings in <code>${sha}</code> are answered</span>`));
+      const done = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.equal(done.code, 0, done.stderr);
+      assert.match(done.stdout, /Published to GitHub/);
+      assert.equal(pr.created(), true);
+      assert.equal((await human('GET', `${pr.base}/reviewers/codex`)).runs.length, 1);
+    } finally {
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+  });
+
+  await t.test('after the agent has seen findings that are all outside the diff, which have no thread to answer in', async () => {
+    const pr = await stage('feature/auto-outside', 'outside.js');
+    process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'math.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Not in this diff.' }] });
+    await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const first = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.match(first.stdout, /Not in this diff\./);
+      assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs.map((r: any) => r.findings), [1]);
+      const done = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      assert.equal(done.code, 0, done.stderr);
+      assert.match(done.stdout, /Published to GitHub/);
+      assert.equal(pr.created(), true);
     } finally {
       await human('PUT', '/api/settings/codex', defaults);
     }
@@ -4059,7 +4156,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       assert.equal(reply.code, 0, reply.stderr);
       assert.deepEqual(await turn(), {
         whose: 'reviewer',
-        reasons: ['agent is not waiting', 'no review from reviewer yet', 'agent answered 1 thread', `codex-review commented on ${sha()}`, '1 unresolved thread'],
+        reasons: ['agent is not waiting', 'no review from reviewer yet', 'agent answered 1 thread', `codex-review's findings in ${sha()} are answered`, '1 unresolved thread'],
       });
       const front = await page('/');
       assert.equal(await group(), 'staged: Your turn');
@@ -4067,7 +4164,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         id,
         title: 'Take turns',
         url: `/acme/widgets/pull/${number}`,
-        reasons: `agent is not waiting, 1 min · no review from reviewer yet · agent answered 1 thread · codex-review commented on ${sha()} · 1 unresolved thread`,
+        reasons: `agent is not waiting, 1 min · no review from reviewer yet · agent answered 1 thread · codex-review's findings in ${sha()} are answered · 1 unresolved thread`,
       });
       // The tab's title counts the pull requests waiting for the reviewer.
       assert.match(front, new RegExp(`<title>\\(${yourTurn(front).length}\\) Staged pull requests · laatsux</title>`));
@@ -4078,7 +4175,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       await human('POST', `${base}/reviews`, { event: 'REQUEST_CHANGES', body: 'Count something else.' });
       assert.deepEqual(await turn(), {
         whose: 'reviewer',
-        reasons: ['agent has not seen the latest feedback', 'agent is not waiting', `codex-review commented on ${sha()}`, 'changes requested', '1 unresolved thread'],
+        reasons: ['agent has not seen the latest feedback', 'agent is not waiting', `codex-review's findings in ${sha()} are answered`, 'changes requested', '1 unresolved thread'],
       });
       // While a wait hands it over, it is the author's.
       server.service.waiters.set(id, 1);
@@ -4089,7 +4186,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
       }
       // Reading it is being handed it.
       await cli(['pr', 'view', String(number), '--comments']);
-      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex-review commented on ${sha()}`, 'changes requested', '1 unresolved thread'] });
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent is working on the feedback', `codex-review's findings in ${sha()} are answered`, 'changes requested', '1 unresolved thread'] });
     });
 
     await t.test("a push, and a review from Codex that finds nothing: the reviewer's", async () => {
