@@ -34,6 +34,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** How long a killed process gets after SIGTERM before SIGKILL. */
   graceMs?: number;
+  /** Hears each line of stdout as it is printed, instead of keeping stdout for the result. */
+  onLine?: (line: string) => void;
 }
 
 export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
@@ -48,7 +50,26 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
     });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
-    child.stdout.on('data', (d: Buffer) => out.push(d));
+    // A line can arrive in pieces, and a piece can end inside a character: split the bytes.
+    let partial = Buffer.alloc(0);
+    // A listener that throws must not take the server down from inside a stream handler.
+    const hear = (line: Buffer) => {
+      try {
+        opts.onLine!(line.toString('utf8'));
+      } catch (e) {
+        console.error(`${cmd}: reading its output:`, e);
+      }
+    };
+    const lines = (d: Buffer) => {
+      if (settled) return;
+      let rest = partial.length ? Buffer.concat([partial, d]) : d;
+      for (let nl = rest.indexOf(10); nl >= 0; nl = rest.indexOf(10)) {
+        hear(rest.subarray(0, nl));
+        rest = rest.subarray(nl + 1);
+      }
+      partial = Buffer.from(rest);
+    };
+    child.stdout.on('data', (d: Buffer) => (opts.onLine ? lines(d) : out.push(d)));
     child.stderr.on('data', (d: Buffer) => err.push(d));
 
     let timedOut = false;
@@ -77,6 +98,7 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
     const onAbort = () => kill();
     const finish = (code: number | null) => {
       if (settled) return;
+      if (opts.onLine && partial.length) hear(partial);
       settled = true;
       clearTimeout(deadline);
       opts.signal?.removeEventListener('abort', onAbort);

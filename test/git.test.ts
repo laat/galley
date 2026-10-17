@@ -50,3 +50,12 @@ test('a timeout still applies when the command exited but a child keeps its outp
   assert.equal(r.code, null, 'a timed-out run is not a success');
   assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
 });
+
+test('run hears stdout line by line, also lines split inside a character', async () => {
+  const lines: string[] = [];
+  // "æ" is two bytes; the first chunk ends between them.
+  const script = "process.stdout.write(Buffer.from([0x61, 0xc3])); setTimeout(() => process.stdout.write(Buffer.from([0xa6, 0x0a, 0x62, 0x0a, 0x63])), 50);";
+  const r = await run(process.execPath, ['-e', script], { onLine: (l) => lines.push(l) });
+  assert.deepEqual(lines, ['aæ', 'b', 'c']);
+  assert.equal(r.stdout, '', 'kept nowhere else');
+});

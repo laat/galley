@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import { HttpError, type Service } from '../service.ts';
-import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, pullList } from './pages.ts';
+import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, progressPart, pullList, transcriptPage } from './pages.ts';
 import { publishingSettingsPage, settingsPage } from './settings.ts';
 import { browseUrl, type DiffMode } from './diffview.ts';
 import { blobPage, excerpt, locate, rawFile, treeItemsHtml, treePage } from './browse.ts';
@@ -34,6 +34,12 @@ export function web(s: Service): Hono {
     if (mode === 'split' || mode === 'unified') setCookie(c, 'diff', mode, { path: '/', maxAge: 60 * 60 * 24 * 365, sameSite: 'Lax' });
     else mode = getCookie(c, 'diff') === 'split' ? 'split' : 'unified';
     return c.html(await filesPage(await load(c), { commit: c.req.query('commit'), range: c.req.query('range') }, mode));
+  });
+  // A reviewer agent's run (an extension): its transcript, and its progress while it runs.
+  app.get('/:owner/:repo/pull/:n/runs/:id', async (c) => c.html(transcriptPage(await load(c), Number(c.req.param('id')))));
+  app.get('/:owner/:repo/pull/:n/runs/:id/progress', async (c) => {
+    const part = await progressPart(s, c.req.param('owner'), c.req.param('repo'), Number(c.req.param('n')), Number(c.req.param('id')));
+    return part === null ? c.body(null, 204) : c.html(part);
   });
   app.get('/:owner/:repo/pull/:n/commits/:sha', (c) => c.redirect(`/${c.req.param('owner')}/${c.req.param('repo')}/pull/${c.req.param('n')}/files?commit=${c.req.param('sha')}`));
 

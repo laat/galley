@@ -111,9 +111,21 @@
 
   const userState = { collapsed: new Map(), threads: new Map(), expanded: new Map() };
   let refreshing = null;
+  let refreshAgain = null;
 
   async function refresh() {
-    if (refreshing) return refreshing;
+    // What asks for this may have changed after the page in flight was rendered: fetch it once
+    // more after that one, for everyone who asks meanwhile.
+    if (refreshing) {
+      // Also after one that failed (the server was away): the one queued tries again.
+      refreshAgain ??= refreshing
+        .catch(() => {})
+        .then(() => {
+          refreshAgain = null;
+          return refresh();
+        });
+      return refreshAgain;
+    }
     refreshing = (async () => {
       const res = await fetch(location.href, { headers: { accept: 'text/html' } });
       if (!res.ok) return;
@@ -123,7 +135,13 @@
       // The repository filter keeps its focus and caret.
       const active = document.activeElement;
       const filtering = active && active.matches('.js-repo-filter') ? [active.selectionStart, active.selectionEnd] : null;
+      // Steps of a transcript the reviewer opened stay open while the run goes on.
+      const open = $$('details.js-keep-open[open]').map((d) => d.id);
       main().replaceWith(document.adoptNode(next));
+      for (const id of open) {
+        const d = document.getElementById(id);
+        if (d) d.open = true;
+      }
       // The repo tabs live in the header, outside #main, and their counts change too.
       const tabs = $('.app-header-wrap .UnderlineNav');
       const nextTabs = doc.querySelector('.app-header-wrap .UnderlineNav');
@@ -224,14 +242,57 @@
     // the tab they were made in a second time, since nothing tells which tab that was.
     if (own && ev.type !== 'waiting' && !AUTOMATIC[ev.type] && !EVERY_TAB[ev.type]) return;
     if (ev.type === 'waiting' && dirty()) return;
-    const msg = AUTOMATIC[ev.type] || (DESCRIBE[ev.type] ? `${ev.actor} ${DESCRIBE[ev.type]}` : null);
+    refreshSoon(AUTOMATIC[ev.type] || (DESCRIBE[ev.type] ? `${ev.actor} ${DESCRIBE[ev.type]}` : null));
+  }
+
+  // Refresh in a moment, once for a burst of events, saying `msg` after. While the reviewer types
+  // in a field, which a refresh would replace, a toast offers it instead.
+  let pendingMsg = null;
+  function refreshSoon(msg) {
+    // What the burst has to say, if anything does.
+    pendingMsg = msg || pendingMsg;
     clearTimeout(pending);
     pending = setTimeout(() => {
+      const said = pendingMsg;
+      pendingMsg = null;
       const active = document.activeElement;
       const typing = active && (active.tagName === 'TEXTAREA' || (active.tagName === 'INPUT' && active.type === 'text')) && active.value;
-      if (typing) toast(msg || 'There are updates', { label: 'Refresh', run: refresh });
-      else refresh().then(() => msg && toast(msg));
+      if (typing) toast(said || 'There are updates', { label: 'Refresh', run: refresh });
+      // One that fails (the server is away) leaves the page as it is, until the next event.
+      else refresh().then(() => said && toast(said), () => {});
     }, 250);
+  }
+
+  // A reviewer agent made progress (the server says so at most every few seconds). The sidebar
+  // fetches its view of the run again; a transcript page of the run refreshes, as for a change.
+  const progressing = new Map();
+  function onProgress(ev) {
+    if (document.querySelector(`#main[data-run-live="${ev.runId}"]`)) refreshSoon(null);
+    for (const box of $$(`.js-run-progress[data-run="${ev.runId}"]`)) refreshProgress(box.dataset.src);
+  }
+  async function refreshProgress(src) {
+    // One request at a time; progress during it fetches once more after it.
+    if (progressing.has(src)) {
+      progressing.set(src, true);
+      return;
+    }
+    progressing.set(src, false);
+    try {
+      const res = await fetch(src, { headers: { accept: 'text/html' } });
+      // 204: the run is over, and the page hears so on its own.
+      if (res.status !== 200) return;
+      const t = document.createElement('template');
+      t.innerHTML = await res.text();
+      const next = t.content.firstElementChild;
+      const box = $$('.js-run-progress').find((b) => b.dataset.src === src);
+      if (next && box) box.replaceWith(next);
+    } catch {
+      // The next progress tries again.
+    } finally {
+      const again = progressing.get(src);
+      progressing.delete(src);
+      if (again) refreshProgress(src);
+    }
   }
 
   // Live updates. All tabs share one connection through a SharedWorker, since each open
@@ -240,15 +301,20 @@
     const live = document.body.dataset.live;
     if (!live) return;
     const mine = (ev) => live === 'all' || ev.pullId === null || String(ev.pullId) === live;
+    // What the server sends: { type, event }, passed on by the worker as it is.
+    const hear = (message) => {
+      if (message.type === 'reconnected') refresh();
+      else if (message.type === 'change' && mine(message.event)) onChange(message.event);
+      else if (message.type === 'progress' && mine(message.event)) onProgress(message.event);
+    };
 
     if (window.SharedWorker) {
       try {
         const join = () => {
-          const worker = new SharedWorker('/static/live-worker.js', { name: 'laatsux-live' });
-          worker.port.onmessage = (m) => {
-            if (m.data.type === 'reconnected') refresh();
-            else if (m.data.type === 'change' && mine(m.data.event)) onChange(m.data.event);
-          };
+          // One worker for every tab with this version of it. The name changes when the worker
+          // changes what it sends, or a tab could join an older one still open in another tab.
+          const worker = new SharedWorker('/static/live-worker.js', { name: 'laatsux-live-2' });
+          worker.port.onmessage = (m) => hear(m.data);
           worker.port.start();
           return worker.port;
         };
@@ -274,10 +340,7 @@
     const open = () => {
       if (es) return;
       es = new EventSource(live === 'all' ? '/events' : `/events?pull=${live}`);
-      es.addEventListener('change', (e) => {
-        const ev = JSON.parse(e.data);
-        if (mine(ev)) onChange(ev);
-      });
+      es.addEventListener('message', (e) => hear(JSON.parse(e.data)));
     };
     const close = () => {
       if (es) es.close();

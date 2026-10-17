@@ -15,7 +15,9 @@ function broadcast(message) {
 
 function connect() {
   source = new EventSource('/events');
-  source.addEventListener('change', (e) => broadcast({ type: 'change', event: JSON.parse(e.data) }));
+  // Every message the server sends ({ type, event }) goes to the tabs as it is, so a new kind
+  // of message needs no new worker.
+  source.addEventListener('message', (e) => broadcast(JSON.parse(e.data)));
   source.addEventListener('open', () => {
     // Events sent while the server was away are gone; let the tabs catch up.
     if (lost) broadcast({ type: 'reconnected' });

@@ -1,8 +1,9 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, CommentRow, EventRow, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type HeadStatus, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { Reviewer, RunUsage } from '../reviewers/reviewer.ts';
+import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { avatarUrl, reasonText, reviewDecision } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
@@ -26,6 +27,7 @@ import {
 } from './components.ts';
 import { browseUrl, diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
 import { withThreadContext } from './browse.ts';
+import { dollars, runProgress, runUrl, transcriptContent, usageParts } from './runs.ts';
 import type { Span } from '../diff.ts';
 
 // ------------------------------------------------------------------ lists
@@ -291,7 +293,7 @@ export async function loadPull(s: Service, owner: string, name: string, number: 
   };
 }
 
-function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', content: Safe, extraData: Record<string, string | number> = {}): string {
+function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files' | null, content: Safe, extraData: Record<string, string | number> = {}): string {
   const { s, repo, pull, author, files, commits } = p;
   const additions = files.reduce((n, f) => n + f.additions, 0);
   const deletions = files.reduce((n, f) => n + f.deletions, 0);
@@ -908,24 +910,28 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   const last = runs[runs.length - 1];
   const running = reviewer.isRunning(p.pull.id);
   const work = reviewer.atWork(p.pull);
+  const live = reviewer.live(p.pull);
   const actor = reviewer.actor();
+  const transcriptLink = (run: ReviewRunRow) => (hasTranscript(p.s.db, run.id) ? html` · <a href="${runUrl(runBase(p), run)}">Transcript</a>` : '');
   let status: Safe;
-  if (work?.status === 'IN_PROGRESS') {
+  if (live) {
+    status = runProgress(runBase(p), live.run, live.progress);
+  } else if (work?.status === 'IN_PROGRESS') {
     status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} Reviewing <code>${shortSha(work.head_sha)}</code>, started ${relTime(work.started_at)}</p>`;
   } else if (work) {
     status = html`<p class="codex-status codex-status--running">${icon('dot-fill')} About to review <code>${shortSha(work.head_sha)}</code></p>`;
   } else if (last?.status === 'done') {
-    status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">Reviewed <code>${shortSha(last.head_sha)}</code></a> ${relTime(last.finished_at)}</p>`;
+    status = html`<p class="codex-status">${icon('check', { cls: 'color-fg-success' })} <a href="#pullrequestreview-${last.review_id}">Reviewed <code>${shortSha(last.head_sha)}</code></a> ${relTime(last.finished_at)}${transcriptLink(last)}</p>`;
   } else if (last?.status === 'failed') {
-    status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}
+    status = html`<div class="codex-status">${icon('x-circle-fill', { cls: 'color-fg-danger' })} Review of <code>${shortSha(last.head_sha)}</code> failed ${relTime(last.finished_at)}${transcriptLink(last)}
       <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${last.error ?? ''}</pre></details></div>`;
   } else if (last?.status === 'cancelled') {
-    status = html`<p class="codex-status">${icon('circle-slash', { cls: 'color-fg-muted' })} Review of <code>${shortSha(last.head_sha)}</code> cancelled ${relTime(last.finished_at)}${last.reason ? `: ${CANCELLED[last.reason]}` : ''}</p>`;
+    status = html`<p class="codex-status">${icon('circle-slash', { cls: 'color-fg-muted' })} Review of <code>${shortSha(last.head_sha)}</code> cancelled ${relTime(last.finished_at)}${last.reason ? `: ${CANCELLED[last.reason]}` : ''}${transcriptLink(last)}</p>`;
   } else if (last?.status === 'interrupted') {
     // An interrupted automatic review of the head runs when the author waits, one asked for by hand when the server starts.
     const state = reviewer.headStatus(p.pull).state;
     const again = stagingState(p.pull) !== 'done' && last.head_sha === p.pull.head_sha && (state === 'unreviewed' || state === 'interrupted');
-    status = html`<p class="codex-status">${icon('sync', { cls: 'color-fg-attention' })} Review of <code>${shortSha(last.head_sha)}</code> interrupted by a restart${again ? '; it will run again' : ''}</p>`;
+    status = html`<p class="codex-status">${icon('sync', { cls: 'color-fg-attention' })} Review of <code>${shortSha(last.head_sha)}</code> interrupted by a restart${again ? '; it will run again' : ''}${transcriptLink(last)}</p>`;
   } else {
     status = html`<p class="codex-status color-fg-muted">Has not reviewed this pull request.</p>`;
   }
@@ -960,27 +966,53 @@ function reviewerSidebar(p: PullPage, reviewer: Reviewer): Safe {
   </div>`;
 }
 
-/** What the latest run cost, and all of them together, when the tool reports it (Claude does). */
+/** What the latest run cost, and all of them together, when the tool reports it (Claude the cost, Codex the tokens). */
 function runUsage(runs: ReviewRunRow[]): Safe {
   const reported = runs.flatMap((r) => (r.usage ? [JSON.parse(r.usage) as RunUsage] : []));
   if (!reported.length) return raw('');
   const last = runs.at(-1)?.usage ? reported.at(-1)! : null;
-  const total = reported.length > 1 ? `${reported.length} runs: ${dollars(reported.reduce((sum, u) => sum + (u.cost_usd ?? 0), 0))}` : null;
-  if (!last) return html`<p class="sidebar-text color-fg-muted">${total}</p>`;
-  const tokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
-  const input = last.input_tokens + last.cache_creation_input_tokens + last.cache_read_input_tokens;
-  const parts = [last.cost_usd !== null ? dollars(last.cost_usd) : null, `${tokens(input)} tokens in, ${tokens(last.output_tokens)} out`, last.turns !== null ? plural(last.turns, 'turn') : null];
+  const costs = reported.flatMap((u) => (u.cost_usd === null ? [] : [u.cost_usd]));
+  const total = costs.length > 1 ? `${costs.length} runs: ${dollars(costs.reduce((sum, n) => sum + n, 0))}` : null;
+  if (!last) return total ? html`<p class="sidebar-text color-fg-muted">${total}</p>` : raw('');
+  const parts = usageParts(last);
   const detail = [
     last.models.length ? `Model: ${last.models.join(', ')}` : null,
     `Input: ${last.input_tokens} tokens, ${last.cache_creation_input_tokens} written to the cache, ${last.cache_read_input_tokens} read from it`,
     `Output: ${last.output_tokens} tokens`,
     last.duration_ms !== null ? `Took ${Math.round(last.duration_ms / 1000)} s` : null,
   ];
-  return html`<p class="sidebar-text color-fg-muted" title="${detail.filter(Boolean).join('\n')}">Last run: ${parts.filter(Boolean).join(' · ')}${total ? `. ${total}` : ''}</p>`;
+  return html`<p class="sidebar-text color-fg-muted" title="${detail.filter(Boolean).join('\n')}">Last run: ${parts.join(' · ')}${total ? `. ${total}` : ''}</p>`;
 }
 
-function dollars(n: number): string {
-  return `$${n < 0.01 ? n.toFixed(4) : n.toFixed(2)}`;
+const runBase = (p: PullPage) => ({ htmlBase: p.htmlBase, repoBase: `/${p.repo.owner}/${p.repo.name}` });
+
+/** A reviewer agent's run on this pull request, and the reviewer. */
+function findRun(p: PullPage, runId: number): { run: ReviewRunRow; reviewer: Reviewer } {
+  for (const reviewer of p.s.reviewerAgents()) {
+    const run = reviewer.runs(p.pull).find((r) => r.id === runId);
+    if (run) return { run, reviewer };
+  }
+  throw new HttpError(404, 'No such review run on this pull request');
+}
+
+/** A run's transcript, on a page of its own (an extension). While the run goes on, the page follows it. */
+export function transcriptPage(p: PullPage, runId: number): string {
+  const { run, reviewer } = findRun(p, runId);
+  const live = reviewer.live(p.pull);
+  const progress = live?.run.id === run.id ? live.progress : null;
+  const content = transcriptContent(runBase(p), { run, login: reviewer.actor().login, label: reviewer.label, entries: transcript(p.s.db, run.id), live: progress });
+  return pullLayout(p, null, content, progress ? { 'run-live': run.id } : {});
+}
+
+/** The sidebar's view of a running review, which pages fetch again as it makes progress; null once it has finished. */
+export async function progressPart(s: Service, owner: string, name: string, number: number, runId: number): Promise<string | null> {
+  // Without syncing: it is fetched every few seconds while the run goes on.
+  const { pull } = await s.ctx(owner, name, number, { sync: false });
+  for (const reviewer of s.reviewerAgents()) {
+    const live = reviewer.live(pull);
+    if (live?.run.id === runId) return runProgress({ htmlBase: `/${owner}/${name}/pull/${number}`, repoBase: `/${owner}/${name}` }, live.run, live.progress).value;
+  }
+  return null;
 }
 
 export async function conversationPage(p: PullPage): Promise<string> {
@@ -1017,6 +1049,8 @@ export async function conversationPage(p: PullPage): Promise<string> {
     });
   }
   const opts = threadOpts(p, true);
+  // The reviewer agents' reviews link to the transcript of the run that wrote them.
+  const runs = new Map(s.reviewerAgents().flatMap((reviewer) => reviewer.runs(pull).flatMap((run) => (run.review_id && hasTranscript(s.db, run.id) ? [[run.review_id, run] as const] : []))));
   for (const r of p.reviews) {
     if (r.state === 'PENDING' || !r.submitted_at) continue;
     const a = s.db.actorById(r.author_id);
@@ -1031,7 +1065,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
       html: html`<div class="timeline-review" id="pullrequestreview-${r.id}">
         ${timelineBadge(single ? 'comment' : meta.icon, html`${who} ${text} <a class="link-muted" href="#pullrequestreview-${r.id}">${relTime(r.submitted_at)}</a>`, { cls: single ? '' : meta.cls })}
         <div class="timeline-review-body">
-          ${r.body.trim() ? html`<div class="review-summary"><div class="comment-body markdown-body">${raw(renderMarkdown(r.body, { references: p.references }))}</div></div>` : ''}
+          ${r.body.trim() ? html`<div class="review-summary"><div class="comment-body markdown-body">${raw(renderMarkdown(r.body, { references: p.references }))}</div>${runs.has(r.id) ? html`<a class="review-run-link" href="${runUrl(runBase(p), runs.get(r.id)!)}">${icon('list-unordered')} Transcript of this review</a>` : ''}</div>` : ''}
           ${threads.map((t) => reviewThread(s, t, opts))}
         </div>
       </div>`,

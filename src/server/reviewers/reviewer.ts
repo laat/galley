@@ -12,6 +12,7 @@ import { now, type Actor, type CancelReason, type CommentRow, type Priority, typ
 import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type Ctx, type HeadStatus, type ReviewColumns, type Service } from '../service.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
 import { cacheEnv, installCommand } from './install.ts';
+import { RunLog, type Progress, type ProgressEvent, type SessionUpdate } from './transcript.ts';
 
 export interface ModelInfo {
   slug: string;
@@ -107,9 +108,11 @@ export interface EngineJob {
   settings: ReviewerSettings;
   timeoutMs: number;
   signal: AbortSignal;
+  /** Hears what the tool does while it runs, as ACP session updates (transcript.ts). */
+  onUpdate: (update: SessionUpdate) => void;
 }
 
-/** What a run cost, as the tool reports it (Claude Code does, Codex does not). */
+/** What a run cost, as the tool reports it: Claude Code the tokens and the cost, Codex the tokens. */
 export interface RunUsage {
   cost_usd: number | null;
   /** Input tokens besides those written to and read from the prompt cache. */
@@ -154,7 +157,7 @@ export interface Engine {
    * checkout and `tmp`, the TMPDIR in `env`.
    */
   install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult>;
-  /** Run the review and read its answer. Throws with what went wrong. */
+  /** Run the review and read its answer, telling `job.onUpdate` what the tool does as it goes. Throws with what went wrong. */
   review(job: EngineJob): Promise<EngineResult>;
   /** Where its models come from, when they are read from the tool (`codex debug models`). */
   readonly catalogSource?: string;
@@ -182,6 +185,8 @@ interface Job {
   runId: number;
   done: Promise<void>;
   abort: AbortController;
+  /** What it has done so far (transcript.ts). */
+  log: RunLog;
 }
 
 export class Reviewer {
@@ -426,6 +431,8 @@ export class Reviewer {
    */
   private halt(job: Job, status: 'interrupted' | 'cancelled', reason: CancelReason | null = null): void {
     this.s.db.run("UPDATE review_runs SET status = ?, reason = ?, finished_at = ? WHERE id = ? AND status = 'running'", status, reason, now(), job.runId);
+    // Its transcript ends here, and pages hear no more of its progress.
+    job.log.finish();
     job.abort.abort(status);
   }
 
@@ -454,6 +461,13 @@ export class Reviewer {
     const decisions = [...this.deciding.values()].filter((d) => d.pullId === pull.id);
     if (decisions.some((d) => d.resume) || (decisions.length && this.wouldReview(pull))) return { status: 'QUEUED', head_sha: pull.head_sha, started_at: null };
     return null;
+  }
+
+  /** The review running on this pull request, and what it has done so far. */
+  live(pull: PullRow): { run: ReviewRunRow; progress: Progress } | null {
+    const job = this.jobs.get(pull.id);
+    const run = job && this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', job.runId);
+    return job && run?.status === 'running' ? { run, progress: job.log.progress() } : null;
   }
 
   runs(pull: PullRow): ReviewRunRow[] {
@@ -651,16 +665,22 @@ export class Reviewer {
     });
     this.s.emit(ctx.pull.id, `${this.engine}_started`, actor);
     const abort = new AbortController();
-    const done = this.review(ctx, runId, settings, trigger, abort.signal)
-      .then(() => this.s.emit(ctx.pull.id, `${this.engine}_finished`, actor))
+    // Progress is not a change: it wakes no `pr wait`, only pages showing the run.
+    const log = new RunLog(this.s.db, runId, () => this.s.bus.emit('progress', { pullId: ctx.pull.id, runId } satisfies ProgressEvent));
+    const done = this.review(ctx, runId, settings, trigger, abort.signal, log)
+      .then(() => {
+        log.finish();
+        this.s.emit(ctx.pull.id, `${this.engine}_finished`, actor);
+      })
       .catch((e: Error) => {
+        log.finish();
         // Interrupted or cancelled, it was recorded as such when it was stopped (halt).
         const stopped: string | null = abort.signal.aborted ? abort.signal.reason : null;
         if (!stopped) this.s.db.update('review_runs', runId, { status: 'failed', error: e.message.slice(0, 4000), finished_at: now() });
         this.s.emit(ctx.pull.id, `${this.engine}_${stopped ?? 'failed'}`, actor);
       })
       .finally(() => this.jobs.delete(ctx.pull.id));
-    this.jobs.set(ctx.pull.id, { runId, done, abort });
+    this.jobs.set(ctx.pull.id, { runId, done, abort, log });
     return runId;
   }
 
@@ -670,7 +690,7 @@ export class Reviewer {
     await this.jobs.get(pullId)?.done;
   }
 
-  private async review(ctx: Ctx, runId: number, settings: ReviewerSettings, trigger: 'auto' | 'manual', signal: AbortSignal): Promise<void> {
+  private async review(ctx: Ctx, runId: number, settings: ReviewerSettings, trigger: 'auto' | 'manual', signal: AbortSignal, log: RunLog): Promise<void> {
     const { git } = ctx;
     const pull = ctx.pull;
     // The real path (/private/var, not /var), as the tool sees it, so its settings for the checkout apply.
@@ -686,11 +706,13 @@ export class Reviewer {
       if (settings.runTests) {
         mkdirSync(tmp);
         env = cacheEnv(tmp);
-        installed = await this.install(git, pull.head_sha, checkout, tmp, env, signal);
+        installed = await this.install(git, pull.head_sha, checkout, tmp, env, signal, log);
         signal.throwIfAborted();
       }
       const prompt = await this.prompt(ctx, trigger, settings, installed);
-      const job = { dir, checkout, gitDir: git.gitDir, tmp: settings.runTests ? tmp : null, env, prompt, settings, timeoutMs, signal };
+      log.update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: prompt } });
+      const onUpdate = (u: SessionUpdate) => log.update(u);
+      const job = { dir, checkout, gitDir: git.gitDir, tmp: settings.runTests ? tmp : null, env, prompt, settings, timeoutMs, signal, onUpdate };
       const result = await this.tool.review(job).catch((e: Error) => {
         if (e instanceof EngineError && e.usage) this.s.db.update('review_runs', runId, { usage: JSON.stringify(e.usage) });
         throw e;
@@ -710,15 +732,25 @@ export class Reviewer {
    * network, from the lockfile and without running the repository's scripts. Null when there is
    * no lockfile.
    */
-  private async install(git: Repo, sha: string, checkout: string, tmp: string, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Installed | null> {
+  private async install(git: Repo, sha: string, checkout: string, tmp: string, env: NodeJS.ProcessEnv, signal: AbortSignal, log: RunLog): Promise<Installed | null> {
     const how = await installCommand(git, sha, tmp);
     if (!how) return null;
     const command = how.command.join(' ');
+    // laatsux's own step, the first in the transcript: what the run is doing until the tool starts.
+    const step = (status: 'in_progress' | 'completed' | 'failed', output?: string) =>
+      log.update(
+        status === 'in_progress'
+          ? { sessionUpdate: 'tool_call', toolCallId: 'laatsux-install', title: command, kind: 'execute', status, rawInput: { command } }
+          : { sessionUpdate: 'tool_call_update', toolCallId: 'laatsux-install', status, content: [{ type: 'content', content: { type: 'text', text: output ?? '' } }] },
+      );
+    step('in_progress');
     try {
       const r = await this.tool.install(how.command, { checkout, tmp, env: { ...env, ...how.env }, timeoutMs: INSTALL_TIMEOUT_MS, signal });
       const failure = r.code === 0 ? null : r.timedOut ? `timed out after ${INSTALL_TIMEOUT_MS / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
+      step(failure ? 'failed' : 'completed', `${r.stdout}\n${r.stderr}`.trim());
       return { command, failure, output: lastLines(`${r.stdout}\n${r.stderr}`, 20) };
     } catch (e) {
+      step('failed', (e as Error).message);
       return { command, failure: 'could not start', output: (e as Error).message };
     }
   }

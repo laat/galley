@@ -266,6 +266,14 @@ CREATE TABLE IF NOT EXISTS review_runs (
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
+-- What a reviewer agent did during a run, as ACP session updates (see reviewers/transcript.ts).
+CREATE TABLE IF NOT EXISTS review_run_events (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES review_runs(id) ON DELETE CASCADE,
+  data TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS review_run_events_run ON review_run_events (run_id);
 -- The signed copy made of each agent commit when publishing, so publishing again reuses it.
 CREATE TABLE IF NOT EXISTS signed_commits (
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
