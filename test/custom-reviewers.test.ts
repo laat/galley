@@ -224,6 +224,8 @@ async function wait(cwd: string, number: number): Promise<string> {
 }
 
 const sha = (cwd: string) => git(cwd, 'rev-parse', 'HEAD');
+/** What the merge box says each reviewer agent found in the last round, as text. */
+const round = (path: string) => page(path).then((html) => (html.match(/<div class="iterations-found">([^]*?)<\/div>/)?.[1] ?? '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim());
 const runStatus = (id: number) => server.service.db.get<{ status: string }>('SELECT status FROM review_runs WHERE id = ?', id)!.status;
 
 /** Until `check` holds, for up to `ms`: what a watcher on the files hears comes in its own time. */
@@ -307,6 +309,8 @@ test('a reviewer of the description reads no code, and approves what follows its
   assert.match(html, /Approved the description at <code>[0-9a-f]{7}<\/code>/);
   assert.match(html, /house-rules<\/a><span class="Label Label--bot">bot<\/span> approved the description/);
   assert.match(html, /Ask house-rules to review/);
+  // In the merge box's last round too, its approval reads as one.
+  assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules approved');
 });
 
 test('it reviews again when the title, description or commit messages change, not for a commit that leaves them as they are', async () => {
@@ -339,8 +343,7 @@ test('it reviews again when the title, description or commit messages change, no
   assert.deepEqual([thread.subject_type, thread.commit_id, thread.priority, thread.body], ['commit', sha(acme), 'low', 'Say why.']);
   assert.deepEqual((await runs()).map((r: any) => [r.status, r.findings]), [['done', 0], ['done', 3]]);
   // The merge box's last round counts them: the thread on the commit, and those in the body.
-  const round = () => page(`/acme/widgets/pull/${number}`).then((html) => (html.match(/<div class="iterations-found">([^]*?)<\/div>/)?.[1] ?? '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim());
-  assert.equal(await round(), 'Last round: house-rules 1 Medium 2 Low');
+  assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 Medium 2 Low');
   assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
 
   // A reworded commit: a verdict that is not approve, with nothing to point at, is a finding; one it may not give is a comment.
@@ -355,7 +358,7 @@ test('it reviews again when the title, description or commit messages change, no
   assert.equal(server.service.readiness(row('acme', number)).reviewers.find((r) => r.login === 'house-rules')!.status.state, 'capped');
   // With one more to go, the merge box counts its summary for the finding.
   await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`, { max_iterations: 4 });
-  assert.equal(await round(), 'Last round: house-rules 1 unprioritized');
+  assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 unprioritized');
   await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`, { max_iterations: null });
 });
 
@@ -418,6 +421,25 @@ test('it reviews only the repositories it names', async () => {
   const solo1 = await stage(solo);
   const { message } = await human('POST', `/api/repos/local/solo/pulls/${solo1.number}/reviewers/house-rules`, undefined, 404);
   assert.equal(message, 'house-rules does not review repositories without a GitHub remote');
+});
+
+test('a custom reviewer with the head still to review keeps the pull request with the agents, where it reviews', async () => {
+  git(acme, 'checkout', '-qb', 'feature/neg', 'main');
+  writeFileSync(join(acme, 'neg.js'), 'export const neg = (a) => -a;\n');
+  git(acme, 'add', 'neg.js');
+  git(acme, 'commit', '-qm', 'Add neg');
+  const { number } = await stage(acme);
+  // Codex and Claude are off: house-rules is the one to start, when the author waits.
+  const turn = server.service.turn(row('acme', number));
+  assert.equal(turn.whose, 'author');
+  const texts = turn.reasons.map((r) => r.text);
+  assert.ok(texts.includes('agent has not asked for review yet (pr wait)'), texts.join('; '));
+  assert.ok(texts.includes('house-rules reviews the description when agent waits for review'), texts.join('; '));
+  await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });
+  // Where it does not review, nothing is left for a reviewer agent: the pull request is the reviewer's.
+  const elsewhere = server.service.turn(row('other', 1));
+  assert.equal(elsewhere.whose, 'reviewer');
+  assert.ok(!elsewhere.reasons.some((r) => r.kind === 'reviewer_agent' || r.text.includes('has not asked for review')), elsewhere.reasons.map((r) => r.text).join('; '));
 });
 
 test('an edit while the author waits has the reviewer of the description review the new version at once', async () => {
@@ -675,6 +697,12 @@ test('an interrupted review does not run again for a repository its reviewer no 
   await reviewer('house-rules').settle(id);
   assert.equal(runStatus(run_id), 'interrupted');
   assert.equal(runs(), count, 'not run again');
+  // Nor is it in the last round of a pull request it no longer reviews, beside one that does.
+  await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/error-handling`, { enabled: true });
+  const html = await page(`/acme/widgets/pull/${number}`);
+  assert.match(html, />Stop iterating<\/button>/);
+  assert.doesNotMatch(html, /title="house-rules's latest review/);
+  await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/error-handling`, { enabled: null });
 });
 
 test('a custom reviewer\'s bot moves off your name when you take it, also the bot of one deleted', async () => {
