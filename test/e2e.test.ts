@@ -958,6 +958,15 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(html, /<h3 class="sidebar-heading">Claude<\/h3>\s*<a class="sidebar-person" href="\/settings#claude" title="Settings for claude-review">/);
   assert.match(html, /Last run: \$0\.01 · 45k tokens in, 2k out · 7 turns/);
   assert.match(html, /Ask Claude to review/);
+  // Its transcript: the file it read by its full path, linked as the repository's own at the
+  // reviewed commit, what it said, and its answer.
+  const transcript = await (await fetch(`${server.url}/acme/widgets/pull/${number}/runs/${runs[0].id}`)).text();
+  assert.match(transcript, new RegExp(`Read <a class="run-location" href="/acme/widgets/blob/${runs[0].head_sha}/math\\.js#L2"><code>math\\.js:2</code></a>`));
+  assert.match(transcript, /The answer is off by one\./);
+  assert.match(transcript, /&quot;summary&quot;: &quot;Off by one\.&quot;/);
+  assert.match(transcript, /2 steps · \$0\.01 · 45k tokens in, 2k out · 7 turns/);
+  // The first step was laatsux's: installing the dependencies.
+  assert.match(transcript, /<code class="run-command">pnpm install --frozen-lockfile [^<]*<\/code><\/span> <svg[^>]*octicon-check[^]*?Packages: \+1/);
 
   // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
   // read-only too, and nothing installed. A failed run keeps Claude Code's error.
@@ -1012,6 +1021,102 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   assert.match(html, new RegExp(`js-reviewer-switch" data-api="${base}/reviewers/claude" data-enabled="true"[^>]*>Turn on</button>`));
   assert.deepEqual(await human('PATCH', `${base}/reviewers/claude`, { enabled: null }), { enabled: true, max_iterations: 2, overrides: { enabled: null, max_iterations: null } });
   await human('PUT', '/api/settings/claude', { enabled: false, model: '', effort: '', maxIterations: 3 });
+});
+
+test("a reviewer agent's progress shows while it runs, and its transcript stays", async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/progress');
+  writeFileSync(join(repo, 'progress.js'), 'export const progress = 1;\n');
+  git('add', 'progress.js');
+  git('commit', '-qm', 'Add progress.js');
+  const created = await cli(['pr', 'create', '--title', 'Show the progress', '--body', 'x']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const pullPath = `/acme/widgets/pull/${number}`;
+  const page = async (path = '') => (await fetch(server.url + pullPath + path)).text();
+  const pull = await human('GET', base);
+  const until = async (ok: () => Promise<boolean>, what: string) => {
+    for (let i = 0; i < 400; i++) {
+      if (await ok()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(`timed out waiting until ${what}`);
+  };
+  const gate = join(dir, 'codex-progress-gate');
+  process.env.FAKE_CODEX_GATE = gate;
+  process.env.FAKE_CODEX_BIG = '1';
+  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'One thing.', comments: [{ path: 'progress.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name it better.' }] });
+  await human('PUT', '/api/settings/codex', { runTests: false });
+  // Pages hear of progress on the stream they share, as their own kind of message.
+  const listening = new AbortController();
+  const heard = fetch(`${server.url}/events?pull=${pull.id}`, { signal: listening.signal }).then(async (res) => {
+    const reader = res.body!.getReader();
+    let text = '';
+    while (!/data: \{"type":"progress".*\n/.test(text)) text += new TextDecoder().decode((await reader.read()).value);
+    return text;
+  });
+  let runId: number;
+  try {
+    ({ run_id: runId } = await human('POST', `${base}/reviewers/codex`));
+    // While Codex waits, the sidebar shows what it did: the file it read, at the reviewed commit,
+    // the command it runs now, what it said and how many steps it took.
+    await until(async () => (await page()).includes('git diff HEAD~1 HEAD'), 'the sidebar shows the running command');
+    const html = await page();
+    const box = `<div class="run-progress js-run-progress" data-run="${runId}" data-src="${pullPath}/runs/${runId}/progress">`;
+    assert.ok(html.includes(box), html);
+    assert.match(html, new RegExp(`run-step--completed">[^]*?<span class="run-step-label">Read <a class="run-location" href="/acme/widgets/blob/${pull.head.sha}/math\\.js#L2"><code>math\\.js:2</code></a></span>`));
+    assert.match(html, /run-step--in_progress">[^]*?<code class="run-command">git diff HEAD~1 HEAD<\/code>/);
+    assert.match(html, /<p class="run-said" title="What it last said">I will read math\.js and the diff\.<\/p>/);
+    assert.match(html, new RegExp(`<a class="run-link" href="${pullPath}/runs/${runId}">.*Transcript \\(2 steps\\)</a>`));
+    // The same box alone, which the page fetches again when it hears of progress.
+    const part = await fetch(`${server.url}${pullPath}/runs/${runId}/progress`);
+    assert.equal(part.status, 200);
+    assert.ok((await part.text()).startsWith(box));
+    assert.ok((await heard).includes(`data: {"type":"progress","event":{"pullId":${pull.id},"runId":${runId}}}\n`), 'a progress message');
+    // The transcript page follows the run while it goes on.
+    const live = await page(`/runs/${runId}`);
+    assert.match(live, new RegExp(`<div id="main"[^>]* data-run-live="${runId}"`));
+    assert.match(live, /Reviewing for <relative-time/);
+    writeFileSync(gate, '');
+    await server.service.codex!.settle(pull.id);
+  } finally {
+    listening.abort();
+    delete process.env.FAKE_CODEX_GATE;
+    delete process.env.FAKE_CODEX_BIG;
+    rmSync(gate, { force: true });
+    await human('PUT', '/api/settings/codex', { runTests: true });
+  }
+
+  // Once it is done, the box is gone, and the sidebar and the review link to the transcript.
+  assert.equal((await fetch(`${server.url}${pullPath}/runs/${runId}/progress`)).status, 204);
+  const html = await page();
+  assert.doesNotMatch(html, /js-run-progress/);
+  assert.match(html, new RegExp(`Reviewed <code>[0-9a-f]{7}</code></a> <relative-time[^>]*>[^<]*</relative-time> · <a href="${pullPath}/runs/${runId}">Transcript</a>`));
+  assert.match(html, new RegExp(`<a class="review-run-link" href="${pullPath}/runs/${runId}">`));
+  // Codex says how many tokens it used.
+  assert.match(html, /Last run: 12k tokens in, 300 out/);
+
+  const transcript = await page(`/runs/${runId}`);
+  assert.doesNotMatch(transcript, /data-run-live/);
+  assert.match(transcript, /codex-review's review on request of <code>[0-9a-f]{7}<\/code>/);
+  assert.match(transcript, new RegExp(`<a href="${pullPath}#pullrequestreview-\\d+">Posted its review</a>`));
+  assert.match(transcript, /2 steps · 12k tokens in, 300 out/);
+  assert.match(transcript, /The prompt laatsux gave it<\/summary><pre class="run-output">[^<]*Title: Show the progress/);
+  assert.match(transcript, /run-thought[^]*<strong>Reading the change<\/strong>/);
+  assert.match(transcript, /I will read math\.js and the diff\./);
+  // The read links to the file at the reviewed commit, with the command that read it and its
+  // output, of which only the start and the end are kept.
+  assert.match(transcript, new RegExp(`Read <a class="run-location" href="/acme/widgets/blob/${pull.head.sha}/math\\.js#L2"><code>math\\.js:2</code></a></span> <svg[^>]*octicon-check[^]*?<pre class="run-output run-output--command">\\$ sed -n &#39;2,20p&#39; math\\.js</pre>`));
+  assert.match(transcript, /<pre class="run-output">a{8192}\n… 83616 bytes left out …\nx{8192}<\/pre>/);
+  assert.match(transcript, /<code class="run-command">git diff HEAD~1 HEAD<\/code><\/span> <svg[^>]*octicon-check[^]*?\+export const answer = 41;/);
+  // Its answer, as code.
+  assert.match(transcript, /&quot;summary&quot;: &quot;One thing\.&quot;/);
+  // Stored as ACP session updates; the tokens are not among them.
+  const stored = server.service.db.all<{ data: string }>('SELECT data FROM review_run_events WHERE run_id = ? ORDER BY id', runId).map((r) => JSON.parse(r.data).sessionUpdate);
+  assert.deepEqual(stored, ['user_message_chunk', 'agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'tool_call', 'tool_call_update', 'agent_message_chunk']);
+  // A run of another pull request is not this one's.
+  assert.equal((await fetch(`${server.url}/acme/widgets/pull/1/runs/${runId}`)).status, 404);
 });
 
 test('a reviewer can not take a name that --reviewer would take for the other one', async () => {
@@ -1627,6 +1732,19 @@ test('a running review is cancelled when the pull request is published, closed, 
       await reviewer('codex').settle(pr.id);
       assert.deepEqual(await runs(pr, 'codex'), [['cancelled', 'closed']]);
       assert.match(await pr.page(), /Review of <code>[0-9a-f]{7}<\/code> cancelled .*?: closed here/);
+      // Its live box is gone, and its transcript keeps what it did until then, and why it stopped.
+      const [{ id: runId }] = (await human('GET', `${pr.base}/reviewers/codex`)).runs;
+      const runPath = `/acme/widgets/pull/${pr.number}/runs/${runId}`;
+      const html = await pr.page();
+      assert.doesNotMatch(html, /js-run-progress/);
+      assert.ok(html.includes(`: closed here · <a href="${runPath}">Transcript</a>`), 'the sidebar links to its transcript');
+      assert.equal((await fetch(server.url + runPath + '/progress')).status, 204);
+      const transcript = await (await fetch(server.url + runPath)).text();
+      assert.doesNotMatch(transcript, /data-run-live/);
+      assert.match(transcript, /Cancelled \(closed here\) <relative-time/);
+      // The read it finished, and the diff it was running, which never finished.
+      assert.match(transcript, /Read <a class="run-location"[^>]*><code>math\.js:2<\/code><\/a><\/span> <svg[^>]*octicon-check/);
+      assert.match(transcript, /<code class="run-command">git diff HEAD~1 HEAD<\/code><\/span> <svg[^>]*octicon-circle-slash[^>]*aria-label="Did not finish"/);
     });
 
     await t.test('merged on GitHub, after which it can not be asked for again', async () => {
@@ -2748,6 +2866,9 @@ test('a review the server stops under is interrupted, runs again when it starts,
     const env = { ...process.env, LAATSUX_URL: s.url, LAATSUX_ACTOR: 'agent', LAATSUX_NO_AUTOSTART: '1', NO_COLOR: '1' };
     const waiting = exec(process.execPath, [BIN, 'pr', 'wait', String(pr.number), '--timeout', '30s'], { cwd: repo, env });
     for (let i = 0; i < 200 && !s.service.codex!.isRunning(pr.id); i++) await new Promise((r) => setTimeout(r, 25));
+    // Until Codex is at work, with steps in its transcript.
+    const pull = () => s.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', pr.id);
+    for (let i = 0; i < 200 && (s.service.codex!.live(pull())?.progress.total ?? 0) < 2; i++) await new Promise((r) => setTimeout(r, 25));
     const started = Date.now();
     await s.close();
     assert.ok(Date.now() - started < 5000, `close took ${Date.now() - started} ms`);
@@ -2757,7 +2878,13 @@ test('a review the server stops under is interrupted, runs again when it starts,
     writeFileSync(gate, '');
     s = await start({ port });
     assert.deepEqual(await runs(), [['auto', 'interrupted', null]]);
-    assert.match(await page(), /Review of <code>[0-9a-f]{7}<\/code> interrupted by a restart; it will run again/);
+    // Its transcript keeps what it did until the stop, and says why it ended.
+    const [{ id: interrupted }] = (await (await fetch(`${s.url}${base}/reviewers/codex`)).json()).runs;
+    const runPath = `/${registered.full_name}/pull/${pr.number}/runs/${interrupted}`;
+    assert.match(await page(), new RegExp(`Review of <code>[0-9a-f]{7}</code> interrupted by a restart; it will run again · <a href="${runPath}">Transcript</a>`));
+    const transcript = await (await fetch(s.url + runPath)).text();
+    assert.match(transcript, /Interrupted by a restart <relative-time/);
+    assert.match(transcript, /I will read math\.js and the diff\./);
     const r = await waiting;
     assert.match(r.stdout, /codex-review reviewed: commented/);
     await s.service.codex!.settle(pr.id);

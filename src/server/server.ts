@@ -13,6 +13,7 @@ import { CodexReviewer } from './reviewers/codex.ts';
 import { ClaudeReviewer } from './reviewers/claude.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
+import type { ProgressEvent } from './reviewers/transcript.ts';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
 const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -54,24 +55,31 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
     return c.body(avatarSvg(login, actor?.type ?? 'User'), 200, { 'content-type': 'image/svg+xml', 'cache-control': 'max-age=3600' });
   });
 
-  // Live updates for open pages: every change to a pull request is pushed as an event.
+  // Live updates for open pages: every change to a pull request is pushed as an event, and so
+  // is a reviewer agent's progress (throttled), for pages that show the run. Each is a message
+  // { type, event }, which the shared worker passes on to the tabs whatever its type.
   app.get('/events', (c) => {
     const pullId = c.req.query('pull') ? Number(c.req.query('pull')) : null;
     return streamSSE(c, async (stream) => {
+      const send = (type: 'change' | 'progress', event: ChangeEvent | ProgressEvent) => stream.writeSSE({ data: JSON.stringify({ type, event }) }).catch(() => {});
       const onChange = (e: ChangeEvent) => {
-        if (pullId === null || e.pullId === pullId || e.pullId === null) {
-          stream.writeSSE({ event: 'change', data: JSON.stringify(e) }).catch(() => {});
-        }
+        if (pullId === null || e.pullId === pullId || e.pullId === null) send('change', e);
+      };
+      const onProgress = (e: ProgressEvent) => {
+        if (pullId === null || e.pullId === pullId) send('progress', e);
+      };
+      const off = () => {
+        s.bus.off('change', onChange);
+        s.bus.off('progress', onProgress);
       };
       s.bus.on('change', onChange);
-      stream.onAbort(() => {
-        s.bus.off('change', onChange);
-      });
+      s.bus.on('progress', onProgress);
+      stream.onAbort(off);
       while (!stream.aborted) {
         await stream.sleep(20_000);
         await stream.writeSSE({ event: 'ping', data: '' }).catch(() => {});
       }
-      s.bus.off('change', onChange);
+      off();
     });
   });
 

@@ -1,9 +1,10 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Db, now } from '../src/server/db.ts';
+import { Db, now, type ReviewRunRow } from '../src/server/db.ts';
 import { CodexEvents } from '../src/server/reviewers/codex.ts';
 import { ClaudeEvents } from '../src/server/reviewers/claude.ts';
 import { clip, commandKind, MAX_BYTES, MAX_TEXT, MAX_UPDATES, PROGRESS_MS, RunLog, transcript, type SessionUpdate } from '../src/server/reviewers/transcript.ts';
+import { transcriptContent } from '../src/server/web/runs.ts';
 
 const CHECKOUT = '/private/var/folders/xy/T/laatsux-review-abc/checkout';
 
@@ -244,4 +245,21 @@ test('a run log follows the latest steps, and tells pages at most every few seco
   } finally {
     mock.timers.reset();
   }
+});
+
+test("the transcript shows a shell step's command in full, also one too long for its title", () => {
+  const { db, runId } = setup();
+  const log = new RunLog(db, runId, () => {});
+  const long = `rg -n "${'x'.repeat(1200)}" src`;
+  log.update({ sessionUpdate: 'tool_call', toolCallId: 'long', title: long, kind: 'search', status: 'completed', rawInput: { command: long } });
+  // One with no output, which the summary may show only in part.
+  log.update({ sessionUpdate: 'tool_call', toolCallId: 'short', title: 'git status --short', kind: 'execute', status: 'completed', rawInput: { command: 'git status --short' } });
+  log.finish();
+  const run = db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', runId)!;
+  const html = transcriptContent({ htmlBase: '/acme/widgets/pull/1', repoBase: '/acme/widgets' }, { run, login: 'codex-review', label: 'Codex', entries: transcript(db, runId), live: null }).value;
+  // Its title, in the summary, keeps its start and end.
+  assert.match(html, /<code class="run-command">rg -n &quot;x+\n… \d+ bytes left out …\nx+&quot; src<\/code>/);
+  // Opened, each shows its command as it ran.
+  assert.ok(html.includes(`<pre class="run-output run-output--command">$ ${long.replaceAll('"', '&quot;')}</pre>`), 'the long command in full');
+  assert.ok(html.includes('<pre class="run-output run-output--command">$ git status --short</pre>'), 'the short one too');
 });

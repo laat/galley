@@ -357,10 +357,11 @@ How they run:
 - Reviewer agents only comment. They never approve or request changes, so the review decision
   stays yours.
 - Each reviewer has its own section in a pull request's sidebar: what it is doing or did, what
-  its last run cost when the tool reports it (Claude does), "Turn off" or "Turn on" for this
-  pull request whatever the settings say, and its limit, set with the − and + after the number
-  ("Automatic reviews: 3 of 3 − +"). "reset" goes back to the setting. If the author is
-  waiting when a reviewer is turned on or its limit goes up, it starts right away.
+  its last run cost as the tool reports it (Claude the cost and tokens, Codex the tokens), "Turn
+  off" or "Turn on" for this pull request whatever the settings say, and its limit, set with the
+  − and + after the number ("Automatic reviews: 3 of 3 − +"). "reset" goes back to the setting.
+  If the author is waiting when a reviewer is turned on or its limit goes up, it starts right
+  away.
 - **Stop iterating**, in the merge box, is your call that the pull request has had enough
   automatic reviews. A running review finishes and reaches the author; after that no reviewer
   starts an automatic review and each counts as done, whatever its limit, and the author's
@@ -381,6 +382,12 @@ How they run:
   pages say what it waits for. A second signal, or `laatsux serve --now`, stops at once. A review
   cut off by a stop is interrupted, not failed: it does not count toward the cap, and it runs
   again when the server starts, at once if it was asked for by hand, or when the author waits.
+- While a review runs, its section shows its latest steps (the files it read, linked to the
+  reviewed commit, and the commands it runs), what it last said, how long it has run and the
+  tokens so far (Claude reports them as it goes, Codex when it is done). Each run has a
+  transcript page, linked from the sidebar and from the review it posted: the prompt, every
+  step with its output, what the agent said and thought, and what it cost. laatsux keeps up to
+  2 MB of each run, and the start and end of a long output.
 - While a reviewer works, `pr view` and `pr wait` say so, an approval no longer tells the agent
   that nothing is left open, and publishing takes a second click on the Publish button (or
   `pr publish --during-review`). The server decides, so a page loaded before the review
@@ -395,7 +402,7 @@ How they run:
 
 ### Codex
 
-- Codex runs `codex exec --ephemeral` in the checkout.
+- Codex runs `codex exec --ephemeral --json` in the checkout.
 - When Codex may run the tests, laatsux first installs the dependencies from the lockfile
   (pnpm, npm, Yarn or Bun) in Codex's sandbox, with network but without the repository's
   install scripts, pnpmfile or yarnPath. Codex then runs in its `workspace-write` sandbox
