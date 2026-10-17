@@ -42,6 +42,12 @@ const octicons = createRequire(import.meta.url)('@primer/octicons/build/data.jso
   { heights: Record<string, { width: number; path: string }> }
 >;
 
+// Octicons has no filled pin, for a pinned pull request. The outline pin's first contour is the
+// whole pin; without the second, the inner one, it is filled.
+octicons['pin-fill'] = {
+  heights: Object.fromEntries(Object.entries(octicons.pin.heights).map(([h, d]) => [h, { ...d, path: d.path.replace(/Z[Mm][^"]*"/, 'Z"') }])),
+};
+
 export function icon(name: string, opts: { size?: 16 | 24; cls?: string; label?: string } = {}): Safe {
   const size = opts.size ?? 16;
   const data = octicons[name]?.heights[size] ?? octicons[name]?.heights[16];

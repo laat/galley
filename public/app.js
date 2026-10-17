@@ -120,6 +120,9 @@
       const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
       const next = doc.getElementById('main');
       if (!next) return;
+      // The repository filter keeps its focus and caret.
+      const active = document.activeElement;
+      const filtering = active && active.matches('.js-repo-filter') ? [active.selectionStart, active.selectionEnd] : null;
       main().replaceWith(document.adoptNode(next));
       // The repo tabs live in the header, outside #main, and their counts change too.
       const tabs = $('.app-header-wrap .UnderlineNav');
@@ -127,6 +130,11 @@
       if (tabs && nextTabs) tabs.replaceWith(document.adoptNode(nextTabs));
       document.title = doc.title;
       afterRender();
+      const filter = filtering && $('.js-repo-filter');
+      if (filter) {
+        filter.focus();
+        filter.setSelectionRange(...filtering);
+      }
     })().finally(() => {
       refreshing = null;
     });
@@ -147,6 +155,7 @@
     restoreDrafts();
     updateTimes();
     notifyTurns();
+    showRepos();
     markActiveTreeItem();
     markLines(false);
     restoreExpanded().then(restoreDrafts);
@@ -199,12 +208,17 @@
     closed_on_github: 'Closed on GitHub',
   };
 
+  // The viewer's own changes that its other tabs show too: a pin moves the pull request on every front page.
+  const EVERY_TAB = { pinned: true, unpinned: true };
+
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);
 
   let pending = null;
   function onChange(ev) {
     const own = ev.actor === viewer();
-    if (own && ev.type !== 'waiting' && !AUTOMATIC[ev.type]) return; // our own actions refresh after the request
+    // Our own actions refresh after the request. Those every tab shows refresh here as well, in
+    // the tab they were made in a second time, since nothing tells which tab that was.
+    if (own && ev.type !== 'waiting' && !AUTOMATIC[ev.type] && !EVERY_TAB[ev.type]) return;
     if (ev.type === 'waiting' && dirty()) return;
     const msg = AUTOMATIC[ev.type] || (DESCRIBE[ev.type] ? `${ev.actor} ${DESCRIBE[ev.type]}` : null);
     clearTimeout(pending);
@@ -1073,6 +1087,10 @@
       await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       userState.threads.delete(el.closest('.review-thread').dataset.thread);
       refresh();
+    } else if ((el = on('.js-pin'))) {
+      el.disabled = true;
+      await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
+      refresh();
     } else if ((el = on('.js-codex-step'))) {
       stepCodexLimit(el);
     } else if ((el = on('.js-codex-reset'))) {
@@ -1188,6 +1206,44 @@
       const next = file.nextElementSibling;
       if (next && file.getBoundingClientRect().top < 0) file.scrollIntoView({ block: 'start' });
     }
+  });
+
+  // ---------------------------------------------------------- repositories
+  // The front page's repositories: the first few, "Show more" for the rest, and a filter over
+  // all of them. Both last through live refreshes.
+
+  const repoList = { filter: '', more: false };
+
+  function showRepos() {
+    const list = $('.js-repo-list');
+    if (!list) return;
+    const input = $('.js-repo-filter');
+    // Down to so few that the filter is gone: what was typed in it goes too.
+    if (!input) repoList.filter = '';
+    else input.value = repoList.filter;
+    const filter = repoList.filter.trim().toLowerCase();
+    const limit = filter || repoList.more ? Infinity : Number(list.dataset.shown);
+    let matching = 0;
+    for (const item of $$('.repo-list-item', list)) {
+      const match = item.dataset.name.toLowerCase().includes(filter);
+      item.hidden = !match || matching >= limit;
+      if (match) matching++;
+    }
+    const more = $('.js-repo-more');
+    if (more) more.hidden = matching <= limit;
+    const none = $('.js-repo-none');
+    if (none) none.hidden = matching > 0;
+  }
+
+  document.addEventListener('input', (e) => {
+    if (!e.target.matches || !e.target.matches('.js-repo-filter')) return;
+    repoList.filter = e.target.value;
+    showRepos();
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest || !e.target.closest('.js-repo-more')) return;
+    repoList.more = true;
+    showRepos();
   });
 
   // -------------------------------------------------------- notifications

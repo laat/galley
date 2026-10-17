@@ -3337,3 +3337,190 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   assert.equal(wrong.code, 1);
   assert.match(wrong.stderr, /state must be one of staged, published, done/);
 });
+
+/**
+ * A repository of its own, acme/<name> on GitHub (pushing to a bare repository), or with `github`
+ * false local/<name> with no remote, where `stage` stages a branch with a commit of its own as the agent.
+ */
+async function scratchRepo(name: string, { github = true } = {}) {
+  const path = join(dir, name);
+  const bare = join(dir, `${name}.git`);
+  execFileSync('git', ['init', '-q', '-b', 'main', path]);
+  const g = (...args: string[]) => execFileSync('git', ['-C', path, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
+  writeFileSync(join(path, 'a.js'), 'export {};\n');
+  g('add', '.');
+  g('commit', '-qm', 'Initial commit');
+  if (github) {
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
+    g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
+    g('push', '-q', 'origin', 'main');
+    g('update-ref', 'refs/remotes/origin/main', 'main');
+  }
+  const { full_name } = await human('POST', '/api/repos', { path });
+  const api = `/api/repos/${full_name}/pulls`;
+  const stage = async (branch: string): Promise<{ id: number; number: number }> => {
+    g('checkout', '-q', 'main');
+    g('checkout', '-qb', branch);
+    writeFileSync(join(path, `${branch}.js`), 'export {};\n');
+    g('add', '.');
+    g('commit', '-qm', `Add ${branch}`);
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-laatsux-actor': 'agent' },
+      body: JSON.stringify({ title: `Add ${branch}`, head: branch, base: 'main', automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    return res.json();
+  };
+  return { fullName: full_name as string, api, stage };
+}
+
+test('the reviewer pins pull requests to the top of the front page, until they unpin them', async () => {
+  const { api, stage } = await scratchRepo('pins');
+  const [a, b, c] = [await stage('pin-a'), await stage('pin-b'), await stage('pin-c')];
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  const titles = (html: string) => [...html.matchAll(/<a class="pr-row-title" href="\/acme\/pins\/pull\/(\d+)">/g)].map((m) => Number(m[1]));
+  /** The front page's Pinned section, and the list under it. */
+  const front = async (path = '/') => {
+    const [top, list] = (await page(path)).split('<div class="Box pr-list"');
+    return { pinned: titles(top.split('<div class="Box pinned-list">')[1] ?? ''), list: titles(list) };
+  };
+  /** What open pages hear of pinning. */
+  const events: string[] = [];
+  const listen = (e: { pullId: number | null; type: string }) => e.type.endsWith('pinned') && events.push(`${e.type} ${e.pullId}`);
+  server.service.bus.on('change', listen);
+  try {
+    // The front page is the reviewer's: agents can not pin, or unpin.
+    for (const method of ['PUT', 'DELETE']) {
+      const res = await fetch(`${server.url}${api}/${a.number}/pinned`, { method, headers: { 'x-laatsux-actor': 'agent' } });
+      assert.equal(res.status, 403);
+      assert.match((await res.json()).message, /only the reviewer can pin/);
+    }
+
+    const updated = (await human('GET', `${api}/${a.number}`)).updated_at;
+    await human('PUT', `${api}/${a.number}/pinned`);
+    await human('PUT', `${api}/${c.number}/pinned`);
+    // Pinned again, it keeps its place: no news.
+    await human('PUT', `${api}/${a.number}/pinned`);
+    assert.deepEqual(events, [`pinned ${a.id}`, `pinned ${c.id}`]);
+    const rest = await human('GET', `${api}/${a.number}`);
+    // Pinning is not activity.
+    assert.equal(rest.updated_at, updated);
+    assert.ok(rest.pinned_at < (await human('GET', `${api}/${c.number}`)).pinned_at);
+    assert.equal((await human('GET', `${api}/${b.number}`)).pinned_at, null);
+    for (const [n, isPinned] of [[a.number, true], [b.number, false]] as const) {
+      const view = await cli(['pr', 'view', String(n), '-R', 'acme/pins', '--json', 'isPinned']);
+      assert.equal(view.code, 0, view.stderr);
+      assert.deepEqual(JSON.parse(view.stdout), { isPinned });
+    }
+
+    // At the top of the front page, most recently pinned first, and not again under the tabs.
+    let shown = await front();
+    assert.deepEqual(shown, { pinned: [c.number, a.number], list: [b.number] });
+    assert.match(await page('/'), /<div class="Box-header turn-group">[^]*?<h2 class="turn-group-title">Pinned<\/h2> <span class="Counter">2<\/span> <span class="turn-group-note">most recently pinned first<\/span>/);
+    // With their turn, as elsewhere.
+    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="turn-reason">agent is not waiting/);
+    // A repository's list has them in their place, with a pin.
+    const list = await page('/acme/pins');
+    assert.doesNotMatch(list, /pinned-list/);
+    const row = (html: string, n: number) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/pins/pull/${n}"`))!;
+    for (const n of [a.number, c.number]) assert.match(row(list, n), /<span class="pin-mark" title="Pinned to the top of the front page"><svg class="octicon octicon-pin-fill" [^>]*aria-label="Pinned"/);
+    assert.doesNotMatch(row(list, b.number), /pin-mark/);
+    // The pull request's pin is filled while it is pinned, and unpins.
+    assert.match(await page(`/acme/pins/pull/${a.number}`), new RegExp(`<button type="button" class="btn btn-sm btn-pin js-pin selected" data-api="${api}/${a.number}/pinned" data-method="DELETE" title="Unpin" aria-label="Unpin" aria-pressed="true"><svg class="octicon octicon-pin-fill"`));
+    assert.match(await page(`/acme/pins/pull/${b.number}`), new RegExp(`<button type="button" class="btn btn-sm btn-pin js-pin" data-api="${api}/${b.number}/pinned" data-method="PUT" title="Pin to the top of the front page" aria-label="Pin to the top of the front page" aria-pressed="false"><svg class="octicon octicon-pin"`));
+
+    // Pinned through publishing, the merge, and a close here.
+    await human('POST', `${api}/${a.number}/publish`, { sign: false });
+    const merged = { state: 'MERGED', mergedAt: '2026-10-16T09:00:00Z', closedAt: '2026-10-16T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: 'e468a4e' + '1'.repeat(33) }, timelineItems: { nodes: [{ __typename: 'ClosedEvent', actor: { login: 'laat' } }] } };
+    writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${a.id}`]: merged } } }));
+    try {
+      await server.service.followGithub();
+    } finally {
+      rmSync(join(dir, 'gh-pulls.json'), { force: true });
+    }
+    await human('PATCH', `${api}/${c.number}`, { state: 'closed' });
+    const done = await human('GET', `${api}/${a.number}`);
+    assert.deepEqual([done.github_state, done.pinned_at], ['merged', rest.pinned_at]);
+    for (const path of ['/', '/?state=done', '/?state=published']) {
+      shown = await front(path);
+      assert.deepEqual(shown.pinned, [c.number, a.number], path);
+      assert.ok(!shown.list.includes(a.number) && !shown.list.includes(c.number), path);
+    }
+    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="Label Label--merged">Merged<\/span>/);
+
+    // Unpinned, it is back in its tab.
+    await human('DELETE', `${api}/${a.number}/pinned`);
+    await human('DELETE', `${api}/${a.number}/pinned`);
+    assert.equal((await human('GET', `${api}/${a.number}`)).pinned_at, null);
+    assert.deepEqual(await front('/?state=done'), { pinned: [c.number], list: [a.number] });
+    await human('DELETE', `${api}/${c.number}/pinned`);
+    assert.doesNotMatch(await page('/'), /pinned-list/);
+    assert.deepEqual(events, [`pinned ${a.id}`, `pinned ${c.id}`, `unpinned ${a.id}`, `unpinned ${c.id}`]);
+  } finally {
+    server.service.bus.off('change', listen);
+  }
+});
+
+test('the front page lists the repositories with pull requests, latest activity first, with your turn in each', async () => {
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  /** The front page's repositories: name, link, avatar, how many are your turn, and whether shown. */
+  const sidebar = async (path = '/') => {
+    const html = await page(path);
+    const aside = html.match(/<aside class="dashboard-sidebar"[^]*?<\/aside>/)?.[0] ?? '';
+    const repos = [...aside.matchAll(/<li class="repo-list-item" data-name="([^"]+)"( hidden)?>\s*<img class="avatar " src="([^"]+)"[^>]*>\s*<a class="repo-list-name" href="([^"]+)"[^>]*>[^<]*<\/a>\s*(?:<span class="list-tab-turn" title="([^"]+)">[^]*?<\/svg> (\d+)<\/span>)?/g)].map((m) => ({
+      name: m[1],
+      shown: !m[2],
+      avatar: m[3],
+      href: m[4],
+      turn: m[6] ? Number(m[6]) : 0,
+      title: m[5],
+    }));
+    return { aside, repos };
+  };
+  const north = await scratchRepo('north');
+  const south = await scratchRepo('south');
+  const local = await scratchRepo('sidebar-local', { github: false });
+  const n1 = await north.stage('n1');
+  await south.stage('s1');
+  await south.stage('s2');
+  const s3 = await south.stage('s3');
+  // Closed: not your turn, but activity.
+  await human('PATCH', `${south.api}/${s3.number}`, { state: 'closed' });
+  await local.stage('l1');
+
+  let { repos } = await sidebar();
+  const mine = (names: string[]) => repos.filter((r) => names.includes(r.name));
+  // Latest activity first, each with how many are your turn; a link to the repository, and the owner's avatar.
+  assert.deepEqual(mine([local.fullName, south.fullName, north.fullName]), [
+    { name: local.fullName, shown: true, avatar: '/avatars/local.svg', href: `/${local.fullName}`, turn: 1, title: '1 pull request waiting for you' },
+    { name: 'acme/south', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/south', turn: 2, title: '2 pull requests waiting for you' },
+    { name: 'acme/north', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/north', turn: 1, title: '1 pull request waiting for you' },
+  ]);
+  assert.equal(repos[0].name, local.fullName);
+  // A GitHub owner's avatar falls back to the generated one; a generated one needs none.
+  assert.match((await sidebar()).aside, /src="https:\/\/github\.com\/acme\.png\?size=40" data-fallback="\/avatars\/acme\.svg"/);
+  // A comment is activity; a repository with nothing for you has no count.
+  await human('POST', `/api/repos/acme/north/issues/${n1.number}/comments`, { body: 'Moving.' });
+  await human('PATCH', `${north.api}/${n1.number}`, { state: 'closed' });
+  ({ repos } = await sidebar('/?state=done'));
+  assert.deepEqual(repos[0], { name: 'acme/north', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/north', turn: 0, title: undefined });
+  // Only on the front page.
+  assert.doesNotMatch(await page('/acme/north'), /dashboard-sidebar/);
+
+  // Ten at most, then a filter and "Show more".
+  for (let i = repos.length; i < 10; i++) await (await scratchRepo(`more-${i}`)).stage('more');
+  let { aside } = await sidebar();
+  ({ repos } = await sidebar());
+  assert.equal(repos.length, 10);
+  assert.doesNotMatch(aside, /js-repo-filter|js-repo-more/);
+  await (await scratchRepo('eleventh')).stage('more');
+  ({ aside, repos } = await sidebar());
+  assert.equal(repos.length, 11);
+  assert.deepEqual(repos.map((r) => r.shown), [...Array(10).fill(true), false]);
+  assert.equal(repos[0].name, 'acme/eleventh');
+  assert.match(aside, /<input type="search" class="form-control repo-filter js-repo-filter" placeholder="Find a repository…"/);
+  assert.match(aside, /<ul class="repo-list js-repo-list" data-shown="10">/);
+  assert.match(aside, /<button type="button" class="btn-link repo-list-more js-repo-more">Show more<\/button>/);
+});

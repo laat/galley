@@ -34,7 +34,10 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   // A tab per state, each pull request in one of them (stagingState), so the counts do not overlap.
   const staging = new Map(all.map((p) => [p.id, stagingState(p)]));
   const state = ['staged', 'published', 'done', 'all'].includes(opts.state) ? opts.state : 'staged';
-  const shown = state === 'all' ? all : all.filter((p) => staging.get(p.id) === state);
+  // The front page has the pinned ones at the top, whatever their state, most recently pinned first, and not again below.
+  const pinned = opts.repo ? [] : all.filter((p) => p.pinned_at).sort((a, b) => b.pinned_at!.localeCompare(a.pinned_at!));
+  const listed = opts.repo ? all : all.filter((p) => !p.pinned_at);
+  const shown = state === 'all' ? listed : listed.filter((p) => staging.get(p.id) === state);
   const base = opts.repo ? `/${opts.repo.owner}/${opts.repo.name}` : '/';
   const turns = new Map(all.map((p) => [p.id, s.turn(p)]));
   const turn = (p: PullRow) => turns.get(p.id)!;
@@ -59,10 +62,11 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     .map((p) => ({ p, t: turns.get(p.id) ?? s.turn(p) }))
     .filter(({ t }) => t.whose === 'reviewer')
     .map(({ p, t }) => ({ id: p.id, title: p.title, url: href(p), reasons: t.reasons.map(reasonText).join(' · ') }));
+  const pinMark = html`<span class="pin-mark" title="Pinned to the top of the front page">${icon('pin-fill', { label: 'Pinned' })}</span>`;
   const heading = (p: PullRow) => {
     const repo = s.repoById(p.repo_id);
     return html`${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
-    <a class="pr-row-title" href="${href(p)}">${p.title}</a> ${checksIndicator(p)}`;
+    <a class="pr-row-title" href="${href(p)}">${p.title}</a> ${checksIndicator(p)}${p.pinned_at && opts.repo ? pinMark : ''}`;
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
@@ -117,25 +121,35 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     const group = (iconName: string, title: string, n: number, note = '') =>
       html`<div class="Box-row turn-group">${icon(iconName)} <h2 class="turn-group-title">${title}</h2> <span class="Counter">${n}</span>${note ? html` <span class="turn-group-note">${note}</span>` : ''}</div>`;
     const mine = shown.filter((p) => turn(p).whose === 'reviewer').sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+    const pinnedMine = pinned.some((p) => staging.get(p.id) === state && turn(p).whose === 'reviewer');
     const agents = shown.filter((p) => turn(p).whose === 'author' || turn(p).whose === 'reviewer_agents');
     // Published with nothing new here: the next move is on GitHub (its review, checks, the merge).
     const github = shown.filter((p) => turn(p).whose === 'none');
     rows = [
       group('inbox', 'Your turn', mine.length, mine.length > 1 ? 'oldest first' : ''),
-      ...(mine.length ? mine.map(row) : [html`<div class="Box-row turn-empty">Nothing is waiting for you.</div>`]),
+      ...(mine.length ? mine.map(row) : [html`<div class="Box-row turn-empty">Nothing ${pinnedMine ? 'else ' : ''}is waiting for you.</div>`]),
       ...(agents.length ? [group('hubot', 'With agents', agents.length), ...agents.map(compactRow)] : []),
       ...(github.length ? [group('mark-github', 'Waiting on GitHub', github.length, 'nothing new since publishing'), ...github.map(compactRow)] : []),
     ];
   }
   const nothing: Record<string, string> = { staged: 'No staged pull requests', published: 'No published pull requests open on GitHub', done: 'No merged or closed pull requests', all: 'No pull requests' };
+  // Those pinned above are not repeated.
+  const other = pinned.some((p) => state === 'all' || staging.get(p.id) === state);
   const empty = html`<div class="blankslate">
   ${icon('git-pull-request', { size: 24 })}
-  <h3>${nothing[state]}${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
+  <h3>${other ? nothing[state].replace(/^No /, 'No other ') : nothing[state]}${opts.repo ? html` in ${opts.repo.owner}/${opts.repo.name}` : ''}</h3>
   <p>Agents stage pull requests with <code>laatsux pr create</code>, the same way they would use <code>gh pr create</code>.</p>
 </div>`;
-  const body = html`<div class="container container-lg">
-  <div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>
+  const list = html`<div class="list-header-row"><h1 class="page-title">${opts.repo ? html`${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests'}</h1>
     <button type="button" class="btn btn-sm notify-toggle js-notify" hidden title="A desktop notification when a pull request becomes your turn, while a page like this is open">${icon('bell')} <span class="js-notify-label">Notify me</span></button></div>
+  ${
+    pinned.length
+      ? html`<div class="Box pinned-list">
+    <div class="Box-header turn-group">${icon('pin')} <h2 class="turn-group-title">Pinned</h2> <span class="Counter">${pinned.length}</span>${pinned.length > 1 ? html` <span class="turn-group-note">most recently pinned first</span>` : ''}</div>
+    ${pinned.map(row)}
+  </div>`
+      : ''
+  }
   <div class="Box pr-list" data-your-turn="${JSON.stringify(notify)}">
     <div class="Box-header list-tabs">
       ${tab('staged', 'git-pull-request', 'Staged')}
@@ -143,8 +157,12 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
       ${tab('done', 'check', 'Done')}
     </div>
     ${rows.length ? rows : empty}
-  </div>
-</div>`;
+  </div>`;
+  // The front page has your repositories beside the list.
+  const sidebar = opts.repo ? null : repoSidebar(s, all, yours);
+  const body = sidebar
+    ? html`<div class="container container-xl dashboard">${sidebar}<div class="dashboard-main">${list}</div></div>`
+    : html`<div class="container container-lg">${list}</div>`;
   // The tab's title counts the pull requests waiting for you, as a mail client counts unread mail.
   const title = opts.repo ? `Pull requests · ${opts.repo.owner}/${opts.repo.name}` : 'Staged pull requests · laatsux';
   return layout(s, {
@@ -154,6 +172,37 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     body,
     live: 'all',
   });
+}
+
+/** How many repositories the front page's sidebar shows before "Show more". */
+const SIDEBAR_REPOS = 10;
+
+/**
+ * The front page's repositories: those with pull requests, latest activity first (the latest
+ * update of a pull request in each), with how many of them are your turn. With more than
+ * SIDEBAR_REPOS, a filter and "Show more" (public/app.js). Null when there are none.
+ */
+function repoSidebar(s: Service, all: PullRow[], yours: PullRow[]): Safe | null {
+  // Newest first, so a repository's first pull request is its latest activity.
+  const repos = [...new Set(all.map((p) => p.repo_id))].map((id) => s.repoById(id));
+  if (!repos.length) return null;
+  const many = repos.length > SIDEBAR_REPOS;
+  const items = repos.map((repo, i) => {
+    const name = `${repo.owner}/${repo.name}`;
+    const owner = repo.github_slug?.split('/')[0];
+    const mine = yours.filter((p) => p.repo_id === repo.id).length;
+    return html`<li class="repo-list-item" data-name="${name}"${i >= SIDEBAR_REPOS ? raw(' hidden') : ''}>
+      ${avatar(owner ? `https://github.com/${owner}.png?size=40` : `/avatars/${encodeURIComponent(repo.owner)}.svg`, owner ?? repo.owner, 20)}
+      <a class="repo-list-name" href="/${name}" title="${name}">${name}</a>
+      ${mine ? html`<span class="list-tab-turn" title="${plural(mine, 'pull request')} waiting for you">${icon('inbox')} ${mine}</span>` : ''}
+    </li>`;
+  });
+  return html`<aside class="dashboard-sidebar" aria-labelledby="repo-list-title">
+  <h2 class="dashboard-sidebar-title" id="repo-list-title">Repositories</h2>
+  ${many ? html`<input type="search" class="form-control repo-filter js-repo-filter" placeholder="Find a repository…" aria-label="Find a repository" autocomplete="off">` : ''}
+  <ul class="repo-list js-repo-list" data-shown="${SIDEBAR_REPOS}">${items}</ul>
+  ${many ? html`<p class="repo-list-none js-repo-none" hidden>No repository matches.</p><button type="button" class="btn-link repo-list-more js-repo-more">Show more</button>` : ''}
+</aside>`;
 }
 
 /**
@@ -259,6 +308,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
     <div class="gh-header-title-row js-title-view">
       <h1 class="gh-header-title"><bdi>${pull.title}</bdi> <span class="gh-header-number">#${pull.number}</span></h1>
       <div class="gh-header-actions">
+        ${pinButton(p)}
         <button type="button" class="btn btn-sm js-title-edit">Edit</button>
         ${pull.published_url ? html`<a class="btn btn-sm" href="${pull.published_url}" target="_blank" rel="noopener">${icon('mark-github')} View on GitHub</a>` : ''}
       </div>
@@ -290,6 +340,13 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files', cont
     live: pull.id,
     data: { 'api-base': p.apiBase, 'pull-id': pull.id, ...extraData },
   });
+}
+
+/** Pins the pull request to the top of the front page, filled while it is pinned. */
+function pinButton(p: PullPage): Safe {
+  const pinned = !!p.pull.pinned_at;
+  const label = pinned ? 'Unpin' : 'Pin to the top of the front page';
+  return html`<button type="button" class="btn btn-sm btn-pin js-pin${pinned ? ' selected' : ''}" data-api="${p.apiBase}/pinned" data-method="${pinned ? 'DELETE' : 'PUT'}" title="${label}" aria-label="${label}" aria-pressed="${pinned ? 'true' : 'false'}">${icon(pinned ? 'pin-fill' : 'pin')}</button>`;
 }
 
 function threadOpts(p: PullPage, standalone: boolean) {

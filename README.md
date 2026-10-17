@@ -88,8 +88,9 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 A pull request is found the way gh finds it: by number, URL, branch name, or the current branch.
 
 `pr view --json` supports gh's fields plus `reviewThreads` (with `isResolved`, `isOutdated`,
-`path`, `line`, `diffHunk` and the comments), `publishedUrl`, `waiting`, and `autoPublishRequest`
-(who turned [auto-publish](#auto-publish) on and when, and its options; null when it is off).
+`path`, `line`, `diffHunk` and the comments), `publishedUrl`, `waiting`, `isPinned` (pinned to the
+top of the [front page](#the-front-page)), and `autoPublishRequest` (who turned
+[auto-publish](#auto-publish) on and when, and its options; null when it is off).
 `autoMergeRequest` is gh's field for the [auto-merge](#auto-merge) laatsux enabled on the GitHub
 pull request. `reviewRequests` lists a reviewer agent that is reviewing or about to, with `status`
 (`IN_PROGRESS` or `QUEUED`), `commit` and `startedAt`. `turn` says whose move it is (`AUTHOR`,
@@ -141,6 +142,16 @@ The list has a tab for each state a pull request is in, with counts that do not 
 
 Staged pull requests are blue, not GitHub's green for open: they are not open anywhere yet.
 
+The pin next to a pull request's Edit button pins it to the top of the front page: a **Pinned**
+section above the tabs lists the pinned pull requests whatever their state, most recently pinned
+first, with their turn and reasons as below, where they are not listed again. A pull request stays
+pinned when it is published, merged or closed, until you unpin it, so you can follow it to the end.
+A repository's list marks pinned pull requests with a pin. Only you can pin; agents can not.
+
+Beside the list, the front page lists the repositories with pull requests here, the one with the
+latest activity first, each with how many of its pull requests are your turn. With more than ten,
+a filter box finds one and **Show more** lists the rest. On a narrow screen they are above the list.
+
 The Staged and Published tabs list the pull requests whose turn it is for you first, oldest first,
 then those with the agents; Published then those waiting on GitHub, with nothing new here. A tab
 with pull requests whose turn it is for you says how many, whichever tab is shown. The author
@@ -187,6 +198,7 @@ Extensions: `PUT|DELETE …/pulls/{n}/threads/{id}/resolved`, `POST …/pulls/{n
 `PUT|DELETE …/pulls/{n}/auto-publish` (body `{sign, draft, force, auto_merge}`; with `auto_merge`,
 both take the `merge_method` the page shows, and answer 412 when the setting has changed since),
 `GET …/pulls/{n}/wait?timeout=s`, `GET …/gh/pulls[/{n}]?fields=` (the `gh --json` shapes),
+`PUT|DELETE …/pulls/{n}/pinned` (pin to the top of the front page, for the reviewer only),
 `POST|GET …/pulls/{n}/reviewers/codex` (ask Codex to review; list its runs and this pull
 request's settings), `PATCH …/pulls/{n}/reviewers/codex` (this pull request's own `enabled` and
 `max_iterations`; null follows the settings, and fields left out stay as they are),
@@ -195,10 +207,11 @@ with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, a
 (server-sent events). A pull request's `state` is `open` or `closed`, as on GitHub: closed once it
 is done (merged included), and `?state=` on the list takes laatsux's states too, as `pr list
 --state` does. A pull request also has `staging_state` (`staged`, `published` or `done`), `turn`
-(`whose`: `author`, `reviewer_agents`, `reviewer` or `none`, and `reasons`) and
-`unpublished_changes`, and once published `github_state` (`open`, `merged` or `closed` on GitHub;
-null until laatsux has asked), `github_closed_at` and `github_closed_by`, and GitHub's own
-`merged`, `merged_at`, `merged_by` and `merge_commit_sha`.
+(`whose`: `author`, `reviewer_agents`, `reviewer` or `none`, and `reasons`),
+`unpublished_changes` and `pinned_at` (when you pinned it; null when it is not), and once
+published `github_state` (`open`, `merged` or `closed` on GitHub; null until laatsux has asked),
+`github_closed_at` and `github_closed_by`, and GitHub's own `merged`, `merged_at`, `merged_by` and
+`merge_commit_sha`.
 
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
