@@ -11,7 +11,7 @@ import type { CustomReviewers } from './reviewers/custom.ts';
 import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
-import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, prependThreads, present, readGithub, PULL_FIELDS, type GithubPull, type GithubStatus } from './github-follow.ts';
+import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
 import {
   Db,
   now,
@@ -217,7 +217,8 @@ export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped' | 'stalle
 export interface TurnReason {
   /**
    * The author agent, a reviewer agent, what changed since the reviewer's last review, the decision,
-   * unresolved threads, an update not on GitHub yet, conflicts with the base, or what GitHub has for the reviewer.
+   * unresolved threads, an update not on GitHub yet, conflicts with the base, or what GitHub has for
+   * the reviewer (on nobody's turn, what it waits for).
    */
   kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'conflicts' | 'github';
   /** A few words. The reviewer is named by login, so it reads the same to the reviewer and to agents. */
@@ -239,7 +240,8 @@ export interface TurnReason {
  * once it waits (#94). Then the reviewer's: the reviewer agents are done with the head (or none
  * reviews it), feedback the author is not waiting for is the reviewer's to pass on, or the author
  * stalled. Nobody's once it is closed (here, or merged or closed on GitHub), or published with
- * nothing new and no feedback the author has yet to be handed.
+ * nothing new and no feedback the author has yet to be handed; then the reasons say what GitHub
+ * waits for, if anything.
  */
 export interface Turn {
   whose: Whose;
@@ -507,6 +509,8 @@ export class Service {
   private following: Promise<void> = Promise.resolve();
   /** When laatsux last asked GitHub about each repository's pull requests. */
   private githubAskedAt = new Map<string, number>();
+  /** Whether to ask GitHub for the names of teams asked to review: not once it refused them for want of the read:org scope, until a restart. */
+  githubTeamNames = true;
 
   /**
    * Ask GitHub about the published pull requests it follows, with one query per repository for
@@ -531,10 +535,20 @@ export class Service {
       if (due && Date.now() - (this.githubAskedAt.get(slug) ?? 0) < every - 1000) continue;
       this.githubAskedAt.set(slug, Date.now());
       const [owner, name] = slug.split('/');
-      // Aliased by pull id: one GitHub pull request can have been published from several staged ones.
-      const fields = items.map(({ pull, number }) => `p${pull.id}:pullRequest(number:${number}){${PULL_FIELDS}}`);
-      const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${fields.join(' ')}}}`;
-      const found = await run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 })
+      const ask = (fields: string) => {
+        // Aliased by pull id: one GitHub pull request can have been published from several staged ones.
+        const pulls = items.map(({ pull, number }) => `p${pull.id}:pullRequest(number:${number}){${fields}}`);
+        const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${pulls.join(' ')}}}`;
+        return run(this.ghBin, ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`], { allowFail: true, timeoutMs: 15_000 });
+      };
+      const found = await ask(this.githubTeamNames ? PULL_FIELDS : PULL_FIELDS_WITHOUT_TEAMS)
+        .then((r) => {
+          // Refused for the teams' names (gh prints GitHub's answer, errors and all): ask again without them, from now on.
+          const errors: { type?: string }[] = (r.code !== 0 && JSON.parse(r.stdout || '{}').errors) || [];
+          if (!this.githubTeamNames || !errors.some((e) => e.type === 'INSUFFICIENT_SCOPES')) return r;
+          this.githubTeamNames = false;
+          return ask(PULL_FIELDS_WITHOUT_TEAMS);
+        })
         .then((r) => JSON.parse(r.stdout).data.repository as Record<string, GithubPull | null>)
         .catch(() => null);
       // Those without an answer (gh failed, or the pull request is gone) are asked again next time.
@@ -1945,8 +1959,9 @@ export class Service {
     // A review that failed after publishing (asked for by hand) needs the reviewer all the same.
     const failed = r.reviewers.some((x) => x.status.state === 'failed' && !!x.status.failedAt && x.status.failedAt > (pull.published_at ?? ''));
     // So does what GitHub has once it is published: failed checks, changes requested, threads, a
-    // conflict. It is for the reviewer to act on (or hand to an agent), not feedback for the author.
-    const github = githubAsks(githubStatus(pull), pull.base_ref);
+    // conflict, the merge. It is for the reviewer to act on (or hand to an agent), not feedback for the author.
+    const onGithub = githubStatus(pull);
+    const github = githubAsks(onGithub, pull.base_ref);
     // Feedback being handed over (the author waits) makes it the author's turn; feedback it is not
     // waiting for is the reviewer's to pass on, published or not, and so is a stalled author.
     const whose: Whose = atWork
@@ -1960,7 +1975,8 @@ export class Service {
             : pull.state === 'published' && !unpublished.length && !failed && !unseen && !github.length
               ? 'none'
               : 'reviewer';
-    if (whose === 'none') return { whose, reasons: [] };
+    // Waiting on GitHub: for whom, when it says.
+    if (whose === 'none') return { whose, reasons: githubWaits(onGithub).map((text) => ({ kind: 'github', text })) };
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
     const stopped = this.stoppedText(pull);

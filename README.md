@@ -68,7 +68,8 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 The conversation stays in laatsux; GitHub gets the branch, title and description.
 
 The front page lists the pull requests waiting for you first, each with the reason, then those
-the agents are working on. **Notify me** shows a desktop notification when one becomes your
+the agents are working on. A published pull request is your turn once GitHub can merge it and
+auto-merge is off, and its title opens it on GitHub. **Notify me** shows a desktop notification when one becomes your
 turn.
 
 ## Reviewer agents

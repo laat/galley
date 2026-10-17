@@ -77,7 +77,7 @@ const WHOSE: Record<string, string> = {
   AUTHOR: "the author's turn",
   REVIEWER_AGENTS: "the reviewer agents' turn",
   REVIEWER: "the reviewer's turn",
-  NONE: 'nothing waiting',
+  NONE: "nobody's turn",
 };
 
 /** Whose move it is and why: "the reviewer's turn: claude is waiting for review, 3 min; codex-review found nothing in 8c64534". */
