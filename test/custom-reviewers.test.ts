@@ -470,6 +470,30 @@ test('an edit while the author waits has the reviewer of the description review 
   await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });
 });
 
+test('findings on the description keep the reviewer agents from being done until it reviews an edited version, whatever the author has seen', async () => {
+  git(acme, 'checkout', '-qb', 'feature/mod', 'main');
+  writeFileSync(join(acme, 'mod.js'), 'export const mod = (a, b) => a % b;\n');
+  git(acme, 'add', 'mod.js');
+  git(acme, 'commit', '-qm', 'Add mod');
+  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'The title.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'Say what it adds.' }] });
+  const { number } = await stage(acme);
+  try {
+    assert.match(await wait(acme, number), /house-rules reviewed: commented/);
+    // Seen, with no thread to reply in: the next wait does not hand the commit to the reviewer, and says what would.
+    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '2s']);
+    assert.equal(held.code, 124);
+    assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\./m);
+    // An edited title: it reviews the new version, and once that finds nothing, the reviewer agents are done.
+    process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] });
+    assert.equal((await cli(acme, ['pr', 'edit', String(number), '--title', 'Add mod, the remainder'])).code, 0);
+    assert.match(await wait(acme, number), /house-rules reviewed: approved/);
+    assert.match(await wait(acme, number), /^The reviewer agents are done with [0-9a-f]{7} \(house-rules approved the description\); ask the reviewer to review it/m);
+    assert.equal((await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`)).runs.length, 2);
+  } finally {
+    await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });
+  }
+});
+
 test('a review of the description is cancelled when the base moves and changes the commits, also with the head where it was', async () => {
   git(acme, 'checkout', '-qb', 'feature/two', 'main');
   writeFileSync(join(acme, 'two.js'), 'export const two = 2;\n');
