@@ -182,6 +182,8 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
           });
         });
       }
+      // Checks for conflicts with the base read the database too.
+      await service.conflictChecks;
       db.sql.close();
     },
   };

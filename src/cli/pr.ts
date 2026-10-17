@@ -4,15 +4,15 @@ import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson } from './output.ts';
-import { conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
+import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
-  'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments', 'commits',
-  'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'isPinned', 'latestReviews', 'mergeCommit', 'mergeStateStatus',
-  'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state', 'statusCheckRollup',
-  'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
+  'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseConflicts', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments',
+  'commits', 'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'isPinned', 'latestReviews', 'mergeCommit',
+  'mergeStateStatus', 'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state',
+  'statusCheckRollup', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
 ];
 
 // gh flags that have no meaning here. They are accepted so habitual invocations keep working.
@@ -589,6 +589,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if (found && dir === undefined) out(c.gray(`To read the images, save them as files with \`laatsux pr view ${t.number} --comments --download-images <dir>\`.`));
     for (const line of approvedBefore(pr, new Set(r.reviews))) out(line);
+    // The head conflicts with its base: the author's to rebase, with whatever else there is.
+    const conflicts = conflictsText(pr);
+    if (conflicts) out(`This branch conflicts ${conflicts}`);
     // Said once per commit: the agents' part of the review is over, so the reviewer's starts.
     if (r.status === 'agents_done') {
       const { sha, reviewers } = r.agents_done;
@@ -605,7 +608,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
-        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at, agents_done: r.agents_done?.sha });
+        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at, agents_done: r.agents_done?.sha, conflicts: conflicts ? (r.conflicts ?? undefined) : undefined });
         break;
       } catch (e) {
         if (!transient(e) || attempt === 10) {
@@ -646,12 +649,20 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       return 0;
     }
     if (r.status === 'agents_done') return 0;
+    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`laatsux pr wait ${all}\` again.` : null;
+    if (r.status === 'conflicts') {
+      // Gone again before it could be shown (the base moved once more): nothing to say, so keep waiting.
+      if (!rebase) continue;
+      out(c.gray(rebase));
+      return 0;
+    }
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
     for (const line of atWork) out(`${line}.`);
     if (pr.reviewDecision === 'APPROVED' && !unresolved.length && atWork.length) {
       out(c.gray(`${stillReviewing(pr)}; ${getIt}`));
     } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
-      out(c.gray(`Approved with nothing left open. Run \`laatsux pr wait ${all}\` to wait until the reviewer publishes it.`));
+      // Approved, but it conflicts with its base: the rebase is left.
+      out(c.gray(rebase ?? `Approved with nothing left open. Run \`laatsux pr wait ${all}\` to wait until the reviewer publishes it.`));
     } else {
       out(
         c.gray(

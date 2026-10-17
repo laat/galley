@@ -107,14 +107,41 @@ const LISTED = new Map([
 ]);
 
 export interface WaitResult {
-  /** `merged` and `closed_on_github` are about the published pull request on GitHub; `agents_done`, see Service.agentsDone. */
-  status: 'feedback' | 'published' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'timeout';
+  /**
+   * `merged` and `closed_on_github` are about the published pull request on GitHub; `agents_done`,
+   * see Service.agentsDone; `conflicts`, the head conflicts with its base (Service.baseConflicts).
+   */
+  status: 'feedback' | 'published' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'conflicts' | 'timeout';
   reviews: ReviewRow[];
   comments: CommentRow[];
   /** What the author confirms with markSeen once it has shown this feedback. */
   seenAt?: string;
   /** With `agents_done`: the head the reviewer agents are done with, and what each made of it. */
   agentsDone?: AgentsDone;
+  /** The head, when it conflicts with its base: the author confirms with markSeen that it was told. */
+  conflicts?: string;
+}
+
+/**
+ * Whether a pull request's head merges cleanly into the tip of its base branch, as laatsux worked
+ * it out with `git merge-tree` (see Service.baseConflicts).
+ */
+export interface BaseConflicts {
+  /** The base branch it is about (pulls.base_ref). */
+  branch: string;
+  /** The branch it was merged into: the remote-tracking one (origin/main) when there is one, else the local one. */
+  ref: string;
+  /** That branch's tip, as this repository has it (laatsux does not fetch); null when there is no such branch. */
+  base: string | null;
+  head: string;
+  /** Whether the head merges cleanly: false when it conflicts, null when git could not tell (see error). */
+  clean: boolean | null;
+  /** The files that conflict. A conflict can be in no file, such as a directory renamed two ways (see messages). */
+  files: string[];
+  /** git's message for each conflict in none of those files. */
+  messages: string[];
+  /** Why git could not tell, when it could not. */
+  error: string | null;
 }
 
 /** The reviewer agents are done with the head: what `pr wait` tells the author once per commit. */
@@ -166,8 +193,11 @@ export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped';
 
 /** One reason for whose turn it is, as the list row and `pr view` say it. */
 export interface TurnReason {
-  /** The author agent, a reviewer agent, what changed since the reviewer's last review, the decision, unresolved threads, an update not on GitHub yet, or what GitHub has for the reviewer. */
-  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'github';
+  /**
+   * The author agent, a reviewer agent, what changed since the reviewer's last review, the decision,
+   * unresolved threads, an update not on GitHub yet, conflicts with the base, or what GitHub has for the reviewer.
+   */
+  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'conflicts' | 'github';
   /** A few words. The reviewer is named by login, so it reads the same to the reviewer and to agents. */
   text: string;
   /** Since when it has been so: waiting, reviewing, working on feedback, or stopped. */
@@ -795,6 +825,7 @@ export class Service {
     const head = await git.resolve(`refs/heads/${pull.head_ref}`);
     if (!head) return current(); // Branch deleted locally; keep showing the last known state.
     const baseTip = await this.baseCommit(repo, pull.base_ref);
+    this.observeBase(pull.id, baseTip);
     const mergeBase = (baseTip && (await git.mergeBase(baseTip, head))) ?? pull.base_sha;
     if (head === pull.head_sha && mergeBase === pull.base_sha) return current();
 
@@ -813,6 +844,9 @@ export class Service {
     });
     if (seq === null) return current();
     await this.pin(git, pull, seq, head);
+    // Whether the new head merges cleanly: a waiting author hears of it when it is known, since it
+    // does not wake for its own push.
+    this.checkConflicts(pull.id);
     this.emit(pull.id, 'pushed', author);
     return current();
   }
@@ -837,10 +871,114 @@ export class Service {
           this.lastPolled.set(pull.id, key);
           await this.sync(pull).catch(() => {});
         }
+        this.observeBase(pull.id, base ?? null);
       }
     }
   }
   private lastPolled = new Map<number, string>();
+
+  // --------------------------------------------------------- base conflicts
+
+  /** What checkConflicts last found for each pull request. */
+  private conflictsFound = new Map<number, BaseConflicts>();
+  /** The tip of each pull request's base branch as last seen (sync and the poll look), which auto-publish needs an answer for. */
+  private baseTips = new Map<number, string | null>();
+  /** Pull requests whose check has not started yet; it reads the branches when it starts. */
+  private conflictsQueued = new Set<number>();
+  /** The checks, one at a time, so a server starting with many open pull requests runs one git at a time. The server waits for them before it closes. */
+  conflictChecks: Promise<void> = Promise.resolve();
+
+  /**
+   * Whether the head merges cleanly into the tip of its base branch, for a head GitHub does not
+   * have (GitHub's own answer covers the one it has: githubStatus); null otherwise. Never waits on
+   * git: it answers from what was found (or with null) and works it out in the background, as it
+   * does when the base moves (observeBase). Until then, the answer is for the base as it was.
+   */
+  baseConflicts(pull: PullRow): BaseConflicts | null {
+    if (!this.headUnpublished(pull)) return null;
+    const found = this.conflictsFound.get(pull.id);
+    if (found?.head === pull.head_sha && found.branch === pull.base_ref) return found;
+    this.checkConflicts(pull.id);
+    return null;
+  }
+
+  /**
+   * What baseConflicts found, if it is for the base's tip as last seen; null while the answer for
+   * that tip is still being worked out. What auto-publish goes by: an answer for a base that has
+   * moved since says nothing about the merge GitHub would do.
+   */
+  currentConflicts(pull: PullRow): BaseConflicts | null {
+    const found = this.baseConflicts(pull);
+    const tip = this.baseTips.get(pull.id);
+    return found && (tip === undefined || found.base === tip) ? found : null;
+  }
+
+  /** The head is one GitHub does not have, of a pull request that is not done: whether it merges cleanly is for laatsux to work out. */
+  headUnpublished(pull: PullRow): boolean {
+    return stagingState(pull) !== 'done' && pull.head_sha !== (pull.published_source_sha ?? pull.published_head_sha);
+  }
+
+  /** Whether the head's conflicts with the base as it is now are still being worked out. */
+  private conflictsPending(pull: PullRow): boolean {
+    return this.headUnpublished(pull) && this.currentConflicts(pull) === null;
+  }
+
+  /**
+   * Record the tip of the pull request's base branch as just seen. When what was found is for
+   * another tip, or git could not tell, work it out again: on each poll, until it can.
+   */
+  private observeBase(id: number, tip: string | null): void {
+    this.baseTips.set(id, tip);
+    const found = this.conflictsFound.get(id);
+    if (found && (found.base !== tip || found.clean === null)) this.checkConflicts(id);
+  }
+
+  /**
+   * Merge the head into the tip of the base branch (`git merge-tree`, no working tree), unless what
+   * was found is for these already, and tell pages, a waiting author and auto-publish when the
+   * answer changed. In the background, after the checks before it.
+   */
+  private checkConflicts(id: number): void {
+    if (this.conflictsQueued.has(id)) return;
+    this.conflictsQueued.add(id);
+    this.conflictChecks = this.conflictChecks
+      .then(async () => {
+        this.conflictsQueued.delete(id);
+        const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
+        if (!pull) return;
+        const repo = this.repoById(pull.repo_id);
+        const git = this.git(repo);
+        // The base as baseCommit has it: the remote-tracking branch wins.
+        const tracking = await git.resolve(`refs/remotes/${repo.remote}/${pull.base_ref}`);
+        const base = tracking ?? (await git.resolve(`refs/heads/${pull.base_ref}`));
+        // Seen just now, so the answer for it counts once it comes (currentConflicts), without
+        // waiting for the next poll to see the same tip; a later look overwrites it.
+        this.baseTips.set(id, base);
+        const before = this.conflictsFound.get(id);
+        if (before && before.head === pull.head_sha && before.branch === pull.base_ref && before.base === base && before.clean !== null) return;
+        const found: BaseConflicts = {
+          branch: pull.base_ref,
+          ref: tracking ? `${repo.remote}/${pull.base_ref}` : pull.base_ref,
+          base,
+          head: pull.head_sha,
+          clean: null,
+          files: [],
+          messages: [],
+          error: null,
+        };
+        if (!base) found.error = `there is no ${repo.remote}/${pull.base_ref} or ${pull.base_ref} branch in this repository`;
+        else {
+          try {
+            Object.assign(found, await git.mergeTree(base, pull.head_sha));
+          } catch (e) {
+            found.error = (e as Error).message;
+          }
+        }
+        this.conflictsFound.set(id, found);
+        if (JSON.stringify(found) !== JSON.stringify(before)) this.bus.emit('change', { pullId: id, type: 'base_conflicts', actor: 'git' } satisfies ChangeEvent);
+      })
+      .catch((e) => console.error('checking for conflicts with the base failed:', e));
+  }
 
   addEvent(pull: PullRow, actor: Actor, type: string, data: object = {}, ts = now()): void {
     this.db.insert('events', { pull_id: pull.id, actor_id: actor.id, type, data: JSON.stringify(data), created_at: ts });
@@ -1329,20 +1467,24 @@ export class Service {
 
   /**
    * Record that the author has been shown everything up to `at` (taken before reading the
-   * feedback), and that the reviewer agents are done with `agentsDone`, when it was told so.
+   * feedback), that the reviewer agents are done with `agentsDone`, and that `conflicts`
+   * conflicts with its base, when it was told so.
    */
-  markSeen(pull: PullRow, at: string, agentsDone?: string): void {
+  markSeen(pull: PullRow, at: string, agentsDone?: string, conflicts?: string): void {
     const moved = this.db.transaction(() => {
-      const before = this.db.get<{ seen: string }>('SELECT author_seen_at AS seen FROM pulls WHERE id = ?', pull.id)!.seen;
+      const { seen: before, told } = this.db.get<{ seen: string; told: string | null }>('SELECT author_seen_at AS seen, conflicts_told_sha AS told FROM pulls WHERE id = ?', pull.id)!;
       // Only forward: a late confirmation must not bring back feedback seen since, nor take back
       // that the reviewer agents are done with a later commit.
       if (before >= at) return false;
-      // Among it, feedback that asks something of the author: from now, its turn (see turn).
+      // Among it, feedback that asks something of the author, or a conflict it was told of for
+      // the first time: from now, its turn (see turn).
       const asked = this.askedAt(pull, at);
+      const handed = (asked !== null && asked > before) || (!!conflicts && conflicts !== told);
       this.db.update('pulls', pull.id, {
         author_seen_at: at,
-        ...(asked !== null && asked > before ? { author_handed_at: at } : {}),
+        ...(handed ? { author_handed_at: at } : {}),
         ...(agentsDone ? { agents_done_sha: agentsDone } : {}),
+        ...(conflicts ? { conflicts_told_sha: conflicts } : {}),
       });
       return true;
     });
@@ -1394,10 +1536,17 @@ export class Service {
     const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
     // Closed here, or merged or closed on GitHub: nothing more is coming, so every wait says so.
     const ended = pull.state === 'closed' ? 'closed' : pull.github_state === 'merged' ? 'merged' : pull.github_state === 'closed' ? 'closed_on_github' : null;
-    const status = ended ?? (published ? 'published' : (fb.reviews.length || fb.comments.length) && !this.agentsStillReviewing(pull, fb) ? 'feedback' : null);
+    const unseen = fb.reviews.length > 0 || fb.comments.length > 0;
+    // Reviews from reviewer agents still at work are held, to come together (agentsStillReviewing).
+    const held = unseen && this.agentsStillReviewing(pull, fb);
+    // A head that conflicts with its base is the author's to rebase: said once per commit, with any
+    // other news, but not ahead of held reviews, which a wait that returned would mark as seen.
+    const conflicts = this.baseConflicts(pull)?.clean === false ? pull.head_sha : undefined;
+    const fresh = conflicts !== undefined && conflicts !== pull.conflicts_told_sha;
+    const status = ended ?? (published ? 'published' : held ? null : unseen ? 'feedback' : fresh ? 'conflicts' : null);
     // Not marked as seen here: the author confirms once it has shown the feedback, so a
     // response lost on the way (a restart) delivers it again instead of losing it.
-    return status && { status, ...fb, seenAt: checkedAt };
+    return status && { status, ...fb, seenAt: checkedAt, conflicts };
   }
 
   async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
@@ -1418,10 +1567,13 @@ export class Service {
         const result = this.waitResult(id);
         if (result) {
           // What asks nothing of the author (an approval, a review that found nothing, a publish)
-          // hands it no turn, so the wait that returns it is its latest action all the same.
+          // hands it no turn, so the wait that returns it is its latest action all the same. A
+          // conflict it has not been told of does, whatever comes with it: recorded, the wait would
+          // count as acting on it (markSeen hands it over at about the same moment).
           const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
           const asked = pull ? this.askedAt(pull) : null;
-          if (pull && (asked === null || asked <= pull.author_seen_at)) this.recordWait(pull, checkedAt, author);
+          const conflict = result.conflicts !== undefined && result.conflicts !== pull?.conflicts_told_sha;
+          if (pull && !conflict && (asked === null || asked <= pull.author_seen_at)) this.recordWait(pull, checkedAt, author);
           return result;
         }
         const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!;
@@ -1494,11 +1646,12 @@ export class Service {
    * They found nothing in it, used up their automatic reviews, are off, or have nothing more to
    * say (the author answered their comments without a new commit, or a review failed). `pr wait`
    * says so once per commit, so the author asks the reviewer to review it. Not under
-   * auto-publish, which publishes then instead, nor for a commit that is published already.
+   * auto-publish, which publishes then instead, nor for a commit that is published already, nor
+   * before it is known whether the commit conflicts with its base, which the author hears of first.
    */
   private agentsDone(pull: PullRow): AgentsDone | null {
     if (pull.state === 'closed' || pull.auto_publish || pull.agents_done_sha === pull.head_sha) return null;
-    if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha)) return null;
+    if (pull.head_sha === (pull.published_source_sha ?? pull.published_head_sha) || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
     const reviewers = this.reviewerAgents().map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
     if (reviewers.some((r) => r.status.state === 'reviewing' || r.status.state === 'queued' || r.status.state === 'unreviewed')) return null;
@@ -1597,6 +1750,12 @@ export class Service {
     )!.n;
     if (unresolved) reasons.push({ kind: 'threads', text: `${unresolved} unresolved thread${unresolved === 1 ? '' : 's'}` });
     if (unpublished.length) reasons.push({ kind: 'unpublished', text: `update not published: ${unpublished.join(', ')}` });
+    const conflicts = this.baseConflicts(pull);
+    if (conflicts?.clean === false) {
+      const { files } = conflicts;
+      const where = files.length === 1 ? ` in ${files[0]}` : files.length ? ` in ${files.length} files` : '';
+      reasons.push({ kind: 'conflicts', text: `conflicts with ${conflicts.ref}${where}` });
+    }
     for (const text of github) reasons.push({ kind: 'github', text });
     return { whose, reasons };
   }
@@ -1671,12 +1830,18 @@ export class Service {
 
   /**
    * Auto-publish is on and may publish now: there is something GitHub does not have yet, the agents
-   * are done, and none of the reviewer's threads is open. It stays on after publishing, for the
-   * next update, until the pull request is merged or closed (see AutoPublishOff).
+   * are done, none of the reviewer's threads is open, and the head is known not to conflict with
+   * its base as it is now. It stays on after publishing, for the next update, until the pull
+   * request is merged or closed (see AutoPublishOff).
    */
   autoPublishReady(pull: PullRow): boolean {
     if (!pull.auto_publish || pull.state === 'closed') return false;
     if (pull.published_url && !this.unpublishedChanges(pull).length) return false;
+    // Known to merge cleanly into the base as it is now: not while that is worked out, nor when git could not tell.
+    if (this.headUnpublished(pull)) {
+      const conflicts = this.currentConflicts(pull);
+      if (conflicts?.clean !== true) return false;
+    }
     const r = this.readiness(pull);
     return r.agentsDone && r.openThreads === 0;
   }

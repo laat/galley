@@ -85,6 +85,18 @@ export function turnLine(turn: { whose: string; reasons: string[] }): string {
   return `${WHOSE[turn.whose] ?? turn.whose.toLowerCase()}${turn.reasons.length ? `: ${turn.reasons.join('; ')}` : ''}`;
 }
 
+/**
+ * "with origin/main in a.js, b.js; rebase onto origin/main.", and what git says of conflicts in no
+ * file, while the head conflicts with its base; null otherwise.
+ */
+export function conflictsText(pr: GhPull): string | null {
+  const conflicts = pr.baseConflicts;
+  if (!conflicts?.conflicting) return null;
+  const files = conflicts.files.length ? ` in ${conflicts.files.join(', ')}` : '';
+  const said = conflicts.messages?.length ? ` git says: ${conflicts.messages.join(' ')}` : '';
+  return `with ${conflicts.ref}${files}; rebase onto ${conflicts.ref}.${said}`;
+}
+
 /** `gh pr view` without a TTY: key/value header, "--", body. */
 export function viewPlain(pr: GhPull, images?: ImageRef): string {
   const lines = [
@@ -113,6 +125,8 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
   // A server older than the CLI has neither field.
   if (pr.unpublishedChanges?.length) lines.push(`unpublished:\t${unpublished(pr)}`);
   if (pr.turn) lines.push(`turn:\t${pr.turn.whose.toLowerCase()}\t${pr.turn.reasons.join('; ')}`);
+  const conflicts = conflictsText(pr);
+  if (conflicts) lines.push(`conflicts:\t${conflicts}`);
   if (pr.mergedAt) lines.push(`merged:\t${mergedText(pr)}`);
   if (pr.githubStatus) lines.push(`github:\t${githubSummary(pr)}`);
   return `${lines.join('\n')}\n--\n${withImages(pr.body, images)}\n`;
@@ -154,6 +168,8 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved).length;
   if (unresolved) out.push(c.yellow(`${unresolved} unresolved review thread${unresolved === 1 ? '' : 's'}`));
   if (pr.turn && pr.turn.whose !== 'NONE') out.push(`${c.bold('Turn:')} ${turnLine(pr.turn)}`);
+  const conflicts = conflictsText(pr);
+  if (conflicts) out.push(c.red(`This branch conflicts ${conflicts}`));
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');
   if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}${pr.unpublishedChanges?.length ? c.yellow(` (update not published: ${unpublished(pr)})`) : ''}`);
   if (pr.mergedAt) out.push(`Merged on GitHub ${mergedText(pr)}`);

@@ -81,6 +81,9 @@ feedback, and the loop repeats until the user publishes it.
    - `thread <id> on commit <sha>` is about that commit's **message**. Reword the commit.
    - A ```` ```suggestion ```` block is a replacement for the commented lines. Apply it as written unless it is wrong.
    - Comments without a thread are about the pull request as a whole, often the title or description.
+   - `This branch conflicts with origin/main in <files>; rebase onto origin/main`: the base moved
+     on (often another pull request was merged). Rebase onto that branch, resolve the conflicts,
+     run the tests, and wait again. It says so once per commit.
    - `Image: <url>` under a comment is a screenshot or other image the user pasted. Look at it:
      run `laatsux pr view --comments --download-images <dir>` (or give `pr wait` the same flag)
      and read the files it prints in place of the URLs.
