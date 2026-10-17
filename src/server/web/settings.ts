@@ -1,5 +1,6 @@
 import type { Service } from '../service.ts';
 import type { Reviewer } from '../reviewers/reviewer.ts';
+import type { Definition } from '../reviewers/definition.ts';
 import { readSettings, MAX_ITERATIONS_LIMIT, MERGE_METHODS } from '../settings.ts';
 import { html, icon, raw, type Safe } from './html.ts';
 import { layout } from './components.ts';
@@ -15,6 +16,7 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
   <nav class="settings-nav" aria-label="Settings">
     <h2 class="settings-nav-heading">Settings</h2>
     ${item('/settings', 'code-review', 'Code review')}
+    ${item('/settings/reviewers', 'checklist', 'Custom reviewers')}
     ${item('/settings/publishing', 'mark-github', 'Publishing')}
   </nav>
   <div class="settings-main">${main}</div>
@@ -24,7 +26,7 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
 
 export async function settingsPage(s: Service): Promise<string> {
   const sections: Safe[] = [];
-  for (const reviewer of s.reviewerAgents()) sections.push(await reviewerSection(reviewer));
+  for (const reviewer of [s.codex, s.claude]) if (reviewer) sections.push(await reviewerSection(reviewer));
   return settingsLayout(s, '/settings', html`${sections}`);
 }
 
@@ -111,6 +113,151 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
     </form>`;
+}
+
+/** The custom reviewers: one file each, which Settings writes and you may edit too. */
+export function customReviewersPage(s: Service): string {
+  const custom = s.custom;
+  const files = custom?.entries() ?? [];
+  const rows = files.map((f) => {
+    const d = f.definition;
+    const facts = d
+      ? [
+          d.engine === 'codex' ? 'Codex' : 'Claude',
+          d.reviews === 'description' ? 'the title, description and commit messages' : 'the code',
+          d.repos ? d.repos.join(', ') : 'every repository',
+          d.verdict === 'approve' ? 'approves when it finds nothing' : 'comments only',
+          d.enabled ? `up to ${d.max_iterations} automatic reviews` : 'automatic reviews off',
+        ]
+      : [];
+    return html`<li class="Box-row">
+      <a href="/settings/reviewers/${f.name}"><strong>${f.name}</strong></a>
+      ${facts.length ? html`<div class="note">${facts.join(' · ')}</div>` : ''}
+      ${f.error ? html`<div class="flash flash-error">${icon('alert')} Not running: ${f.error}</div>` : ''}
+    </li>`;
+  });
+  return settingsLayout(
+    s,
+    '/settings/reviewers',
+    html`<div class="Subhead">
+      <h2 class="Subhead-heading">Custom reviewers</h2>
+      <p class="Subhead-description">Reviewer agents of your own, next to Codex and Claude: each with its own instructions, the repositories it reviews, and whether it reviews the code or the title, description and commit messages. One may approve when it finds nothing; its approval is its own, never yours. Each is a file in <code>${custom?.dir ?? ''}</code>, which you can edit too.</p>
+    </div>
+    <p><a class="btn btn-primary" href="/settings/new-reviewer">${icon('plus')} New reviewer</a></p>
+    ${rows.length ? html`<ul class="Box">${rows}</ul>` : html`<p class="color-fg-muted">No custom reviewers yet.</p>`}`,
+  );
+}
+
+/** A custom reviewer's form, or a new one's (name null). */
+export async function customReviewerPage(s: Service, name: string | null): Promise<string> {
+  const file = name === null ? null : s.custom?.entry(name);
+  if (name !== null && !file) return settingsLayout(s, '/settings/reviewers', html`<div class="flash flash-error">No reviewer called ${name}. <a href="/settings/reviewers">All custom reviewers</a></div>`);
+  const title = name ?? 'New reviewer';
+  const head = html`<div class="Subhead">
+      <h2 class="Subhead-heading"><a href="/settings/reviewers">Custom reviewers</a> / ${title}</h2>
+      ${file ? html`<p class="Subhead-description">Its file is <code>${s.custom!.path(file.name)}</code>.</p>` : ''}
+    </div>
+    ${file?.error ? html`<div class="flash flash-error">${icon('alert')} Not running: ${file.error}</div>` : ''}`;
+  const remove = file ? html`<button type="button" class="btn btn-danger js-delete-reviewer" data-api="/api/settings/reviewers/${file.name}" data-next="/settings/reviewers">${icon('trash')} Delete</button>` : '';
+  // A file that can not be read is fixed in the file, or deleted: saving the form would write over what is in it.
+  if (file && !file.definition) return settingsLayout(s, '/settings/reviewers', html`${head}<p>Fix the file, or delete the reviewer.</p>${remove}`);
+  const d: Omit<Definition, 'name'> = file?.definition ?? { engine: 'claude', model: '', effort: '', repos: null, reviews: 'code', verdict: 'comment', max_iterations: 3, run_tests: true, enabled: true, instructions: '' };
+  const { models, efforts } = await modelChoices(s, d);
+  const checked = (on: boolean) => (on ? raw(' checked') : '');
+  const radio = (field: string, value: string, label: string, note: string, cls = '') =>
+    html`<div class="form-checkbox"><label><input type="radio" name="${field}" value="${value}"${cls ? raw(` class="${cls}"`) : ''}${checked((d as Record<string, unknown>)[field] === value)}> ${label}</label><p class="note">${note}</p></div>`;
+  const form = html`<form class="settings-form js-api-form" data-api="${file ? `/api/settings/reviewers/${file.name}` : '/api/settings/reviewers'}" data-method="${file ? 'PATCH' : 'POST'}"${file ? raw(' data-toast="Reviewer saved"') : raw(' data-next="/settings/reviewers"')}>
+      ${
+        file
+          ? ''
+          : html`<div class="form-group">
+        <label class="form-label" for="reviewer-name">Name</label>
+        <input class="form-control input-medium" type="text" id="reviewer-name" name="name" required autocomplete="off" spellcheck="false">
+        <p class="note">Who its reviews are from, and what <code>--reviewer</code> asks for it by. It names the file, and stays: to rename a reviewer, define one by the new name and delete this one.</p>
+      </div>`
+      }
+      <div class="form-checkbox">
+        <label><input type="checkbox" name="enabled"${checked(d.enabled)}> Review automatically</label>
+        <p class="note">When the author agent runs <code>laatsux pr wait</code> on a pull request in its repositories, it reviews first, as Codex and Claude do. Off, it reviews when asked from the pull request.</p>
+      </div>
+      <div class="form-group">
+        <span class="form-label">What it reviews</span>
+        ${radio('reviews', 'description', 'The title, description and commit messages', 'Without a checkout, so it is quick and cheap. It reviews again when one of them changes, not for a new commit that leaves them as they are.', 'js-reviewer-reviews')}
+        ${radio('reviews', 'code', 'The code', 'A checkout of the head, as Codex and Claude review it, once per commit.', 'js-reviewer-reviews')}
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="reviewer-instructions">Instructions</label>
+        <textarea class="form-control" id="reviewer-instructions" name="instructions" rows="12">${d.instructions}</textarea>
+        <p class="note">What to look for, in Markdown. For the code, left empty it looks for what Codex and Claude look for.</p>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="reviewer-repos">Repositories</label>
+        <textarea class="form-control" id="reviewer-repos" name="repos" rows="3" placeholder="every repository" spellcheck="false">${(d.repos ?? []).join('\n')}</textarea>
+        <p class="note">On GitHub, one per line as <code>owner/name</code>, where <code>*</code> matches any part of either: <code>nrkno/*</code>. Empty, it reviews every repository, also those with no GitHub remote.</p>
+      </div>
+      <div class="form-group">
+        <span class="form-label">Verdict</span>
+        ${radio('verdict', 'comment', 'Comment only', 'Like Codex and Claude: it never approves or requests changes.')}
+        ${radio('verdict', 'approve', 'Approve when it finds nothing', 'Otherwise it comments. Its approval is its own: it shows as its, and counts as it being done, never as your decision.')}
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="reviewer-engine">Tool</label>
+        <select class="form-select js-reviewer-engine" id="reviewer-engine" name="engine">
+          ${[s.codex, s.claude].map((r) => (r ? html`<option value="${r.engine}"${d.engine === r.engine ? raw(' selected') : ''}>${r.label}</option>` : ''))}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="reviewer-model">Model</label>
+        <select class="form-select js-codex-model" id="reviewer-model" name="model">${models}</select>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="reviewer-effort">Reasoning effort</label>
+        ${efforts}
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="reviewer-iterations">Max iterations</label>
+        <input class="form-control input-narrow" type="number" id="reviewer-iterations" name="max_iterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${d.max_iterations}">
+        <p class="note">Automatic reviews per pull request. Asking it to review from a pull request is not limited.</p>
+      </div>
+      <div class="form-checkbox js-code-only"${d.reviews === 'code' ? '' : raw(' hidden')}>
+        <label><input type="checkbox" name="run_tests"${checked(d.run_tests)}> Let it install dependencies and run tests</label>
+        <p class="note">As for Codex and Claude: laatsux installs the dependencies from the lockfile without their install scripts, and the reviewer may run the typecheck, tests or build without network access.</p>
+      </div>
+      <div class="flash flash-error js-form-error" hidden></div>
+      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">${file ? 'Save reviewer' : 'Create reviewer'}</button> ${remove}</div>
+    </form>`;
+  return settingsLayout(s, '/settings/reviewers', html`${head}${form}`);
+}
+
+/** The models of both tools for a custom reviewer's form, those of the other tool hidden, and the efforts of the chosen model. */
+async function modelChoices(s: Service, d: Omit<Definition, 'name'>): Promise<{ models: Safe[]; efforts: Safe }> {
+  const models: Safe[] = [];
+  let efforts = html``;
+  for (const reviewer of [s.codex, s.claude]) {
+    if (!reviewer) continue;
+    const mine = reviewer.engine === d.engine;
+    const list = await reviewer.models();
+    const defaults = reviewer.defaults();
+    const byDefault = `${reviewer.label} default`;
+    const defaultEffort = (m: { defaultEffort: string } | undefined) => defaults.effort ?? m?.defaultEffort ?? '';
+    const defaultModel = list.find((m) => m.slug === defaults.model);
+    const attrs = (selected: boolean) => raw(`data-engine="${reviewer.engine}"${mine ? '' : ' hidden disabled'}${mine && selected ? ' selected' : ''}`);
+    models.push(
+      html`<option value="" data-efforts="${(defaultModel?.efforts ?? reviewer.efforts('') ?? []).join(',')}" data-default-effort="${defaultEffort(defaultModel)}" data-default-label="${byDefault}" ${attrs(!d.model)}>${byDefault}${defaults.model ? ` (${defaults.model})` : ''}</option>`,
+      ...list.map((m) => html`<option value="${m.slug}" data-efforts="${m.efforts.join(',')}" data-default-effort="${defaultEffort(m)}" ${attrs(d.model === m.slug)}>${m.name}${m.description ? ` – ${m.description}` : ''}</option>`),
+    );
+    if (!mine) continue;
+    // A model set earlier that the catalog no longer lists stays selectable.
+    if (d.model && !list.some((m) => m.slug === d.model)) models.push(html`<option value="${d.model}" data-efforts="" data-default-effort="${defaults.effort ?? ''}" ${attrs(true)}>${d.model}</option>`);
+    const selected = list.find((m) => m.slug === (d.model || defaults.model));
+    const levels = selected?.efforts ?? reviewer.efforts(d.model) ?? (d.effort ? [d.effort] : []);
+    const fallback = defaultEffort(selected);
+    efforts = html`<select class="form-select js-codex-effort" id="reviewer-effort" name="effort" data-default-label="${byDefault}">
+          <option value=""${d.effort ? '' : raw(' selected')}>${byDefault}${fallback ? ` (${fallback})` : ''}</option>
+          ${levels.map((e) => html`<option value="${e}"${d.effort === e ? raw(' selected') : ''}>${e}</option>`)}
+        </select>`;
+  }
+  return { models, efforts };
 }
 
 export function publishingSettingsPage(s: Service): string {

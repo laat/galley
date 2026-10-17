@@ -71,7 +71,7 @@ new vocabulary. Flags that mean nothing here (labels, assignees, reviewers other
 
 | Command | |
 |---|---|
-| `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` (or `claude`) turns that [reviewer agent](#reviewer-agents)'s automatic reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns all of them off. Without either, the settings decide |
+| `laatsux pr create` | Stage the current branch. `--title`, `--body`, `--body-file`, `--base`, `--head`, `--draft`, `--fill`, `--fill-first`, `--fill-verbose`. `-r, --reviewer codex` (or `claude`, or a [custom reviewer](#custom-reviewers) by name) turns that [reviewer agent](#reviewer-agents)'s automatic reviews on for this pull request, `codex:3` with its own limit of 3; `--no-review` turns all of them off. Without either, the settings decide |
 | `laatsux pr list` | `--state staged\|published\|done\|merged\|closed\|open\|all`, `--json`, `--jq`. As in gh, `open` (the default) is the staged and the published ones, and `closed` takes in merged |
 | `laatsux pr view [<n>]` | `--comments` adds reviews and review threads; `--json`, `--jq`, `--web`. `--download-images <dir>` saves the images in them as files |
 | `laatsux pr diff [<n>]` | `--name-only`, `--patch` |
@@ -92,7 +92,8 @@ A pull request is found the way gh finds it: by number, URL, branch name, or the
 top of the [front page](#the-front-page)), and `autoPublishRequest` (who turned
 [auto-publish](#auto-publish) on and when, and its options; null when it is off).
 `autoMergeRequest` is gh's field for the [auto-merge](#auto-merge) laatsux enabled on the GitHub
-pull request. `reviewRequests` lists a reviewer agent that is reviewing or about to, with `status`
+pull request. Each of `reviews` says whether a reviewer agent posted it (`byReviewerAgent`), whose
+approval is not in `reviewDecision`. `reviewRequests` lists a reviewer agent that is reviewing or about to, with `status`
 (`IN_PROGRESS` or `QUEUED`), `commit` and `startedAt`. `turn` says whose move it is (`AUTHOR`,
 `REVIEWER_AGENTS`, `REVIEWER` or `NONE`) and why, as on the [front page](#the-front-page). `state`
 is `STAGED` where gh would say `OPEN`, until the pull request is published, and `PUBLISHED` while
@@ -219,11 +220,15 @@ author confirms what it showed with `PUT …/pulls/{n}/seen`), `GET …/gh/pulls
 `PUT|DELETE …/pulls/{n}/pinned` (pin to the top of the front page, for the reviewer only),
 `PUT|DELETE …/pulls/{n}/stop-iterating` (stop the reviewer agents' automatic reviews, or resume
 them, for the reviewer only),
-`POST|GET …/pulls/{n}/reviewers/{codex|claude}` (ask a reviewer agent to review; list its runs,
-with what each cost as `usage` when the tool says, and this pull request's settings),
-`PATCH …/pulls/{n}/reviewers/{codex|claude}` (this pull request's own `enabled` and
+`POST|GET …/pulls/{n}/reviewers/{codex|claude|<name>}` (ask a reviewer agent to review; list its runs,
+with what each cost as `usage` when the tool says, and this pull request's settings; a
+[custom reviewer](#custom-reviewers) by its name, 404 for a repository it does not review),
+`PATCH …/pulls/{n}/reviewers/{codex|claude|<name>}` (this pull request's own `enabled` and
 `max_iterations`; null follows the settings, and fields left out stay as they are),
-`GET /api/settings`, `PUT /api/settings/codex`, `PUT /api/settings/claude` and `PUT /api/settings/publish` (`mergeMethod`), `POST /api/uploads` (an image's bytes; answers
+`GET /api/settings`, `PUT /api/settings/codex`, `PUT /api/settings/claude` and `PUT /api/settings/publish` (`mergeMethod`),
+`GET|POST /api/settings/reviewers` and `GET|PATCH|DELETE /api/settings/reviewers/{name}` (custom
+reviewers, with their file's keys, and `path`, `login` and the `error` that keeps one from
+running; PATCH changes the fields given, and refuses `name`), `POST /api/uploads` (an image's bytes; answers
 with its `path`, `/uploads/<sha256>.<ext>`) and `GET /uploads/<sha256>.<ext>`, and `GET /events`
 (server-sent events). A pull request's `state` is `open` or `closed`, as on GitHub: closed once it
 is done (merged included), and `?state=` on the list takes laatsux's states too, as `pr list
@@ -239,7 +244,8 @@ published `github_state` (`open`, `merged` or `closed` on GitHub; null until laa
 `POST …/pulls` also takes the reviewer agents for the new pull request. `reviewers` turns the
 named ones on: logins as in GitHub's requested reviewers (`["codex"]`), or
 `{"login": "codex", "max_iterations": 3}` for a limit of its own. A login matches a reviewer
-agent by its kind (`codex`, `claude`) or its name in settings (`codex-review`); others are ignored and listed in the
+agent by its kind (`codex`, `claude`) or its name in settings (`codex-review`), or a custom reviewer
+that reviews the repository by its name; others are ignored and listed in the
 response's `ignored_reviewers`. `"automatic_reviews": false` turns all of them off (`true`
 turns all of them on), and is refused together with a reviewer agent in `reviewers`. Left
 out, the settings decide.
@@ -347,6 +353,7 @@ staged pull requests.
 | `LAATSUX_URL` | `http://localhost:7171` | Where the CLI finds the server |
 | `LAATSUX_PORT` | `7171` | Port for `serve` and the default URL |
 | `LAATSUX_HOME` | `~/.local/share/laatsux` | Server data directory |
+| `LAATSUX_CONFIG_DIR` | `~/.config/laatsux` | Your configuration: the [custom reviewers](#custom-reviewers), in `reviewers/` (`$XDG_CONFIG_HOME/laatsux` when that is set) |
 | `LAATSUX_ACTOR` | see below | Who CLI calls act as |
 | `LAATSUX_USER` | your `gh` login | The reviewer's name in the UI |
 | `LAATSUX_GH` | `gh` | gh binary used for publishing |
@@ -387,8 +394,8 @@ How they run:
   reviewer agents are done with the latest commit (each found nothing, used up its automatic
   reviews or is off, or the agent answered without a new commit), `pr wait` tells the agent to
   ask you to review it.
-- Reviewer agents only comment. They never approve or request changes, so the review decision
-  stays yours.
+- Codex and Claude only comment. A [custom reviewer](#custom-reviewers) may approve, and none
+  requests changes. Their approvals are their own: the review decision stays yours.
 - Each reviewer has its own section in a pull request's sidebar: what it is doing or did, what
   its last run cost as the tool reports it (Claude the cost and tokens, Codex the tokens), "Turn
   off" or "Turn on" for this pull request whatever the settings say, and its limit, set with the
@@ -497,14 +504,71 @@ takes any local caller for you. Once [#52](https://github.com/laat/stage-pr/issu
 call without the token can not publish. Turn these settings off for repositories whose code you
 do not trust.
 
+### Custom reviewers
+
+Reviewer agents of your own, next to Codex and Claude: each with its own instructions, the
+repositories it reviews, and whether it reviews the code or the title, description and commit
+messages. Each is a Markdown file in `~/.config/laatsux/reviewers/` (see `LAATSUX_CONFIG_DIR`;
+the server makes the directory when it starts), named after the reviewer, with its settings in
+front matter and its instructions as the body:
+
+```markdown
+---
+engine: claude            # or codex
+model: sonnet
+effort: low
+repos: [nrkno/*]          # GitHub owner/name, * and ? within each; left out: every repository
+reviews: description      # description | code
+verdict: approve          # approve when it finds nothing; comment (the default) only comments
+max_iterations: 3
+---
+Check the title and description against these rules: …
+```
+
+`run_tests` (code reviewers, as for Codex and Claude) and `enabled` (review automatically) are
+true unless the file says otherwise. **Settings** → Custom reviewers lists them, with why one does
+not run, and creates, edits and deletes them; it writes the file, in this form, so comments in the
+front matter are lost when you save there. Edits to the files take effect as you save them; a
+review already running goes on as it began.
+
+- **Its repositories**: `repos` matches the repository's GitHub `owner/name`, in any case. A
+  repository with no GitHub remote gets only the reviewers of every repository. A reviewer has
+  nothing to do with the pull requests of other repositories: they do not list it in the
+  sidebar, wait for it, or take `--reviewer` for it.
+- **The description**: `reviews: description` reads no code. It runs in an empty directory with
+  no tools (Claude Code with `--tools ""`, Codex in its read-only sandbox), and its prompt has its
+  instructions, the title, the description and each commit's message, so it is quick and cheap.
+  It reviews each version of those once: editing the title or description, or rewording a commit,
+  makes it review again when the author waits, and a new commit that leaves them as they are
+  does not. An edit cancels a review of what was there before. A comment on a commit's message
+  becomes a thread on that commit, which the author answers as yours; those on the title and
+  description go in the review's body.
+- **The code**: `reviews: code` reviews as Codex and Claude do, with its instructions in place of
+  what they look for. Empty instructions look for what they look for.
+- **Approval**: with `verdict: approve`, it answers with a verdict too, and laatsux posts an
+  approval when it approves and has no comments, and comments otherwise; never a request for
+  changes. The approval is its own: "house-rules approved the description" in the timeline and
+  the sidebar. It counts as that reviewer being done with the head, for `pr wait`, auto-publish
+  and the front page, and never as your decision: it is not in `reviewDecision`, and the author is
+  not told the pull request is approved.
+- **Its name** is its bot's, which the API refuses to CLI callers, like Codex's, also once the
+  reviewer is deleted. It can not be an author agent's, yours, Codex's or Claude's (their kinds,
+  or their names in settings), or another reviewer's in any case. A reviewer keeps its name: to
+  rename one, define one by the new name and delete the old one. Deleting one interrupts its
+  running reviews and keeps its earlier ones; defined again by the same name, it is the same
+  reviewer, with its reviews and runs, and a review asked for by hand that deleting interrupted
+  runs again.
+- Its sidebar section and per-pull-request settings (on or off, its limit) are those Codex and
+  Claude have, and `--reviewer house-rules:2` stages with it as with them.
+
 ## Auto-publish
 
 **Publish when reviews are done**, next to Publish, approves publishing in advance, like
 GitHub's "Enable auto-merge". laatsux then publishes on its own once:
 
-- every reviewer agent is done with the head commit: its latest review of it found nothing,
-  it has used up its automatic reviews (or you stopped them), or it is off for the pull request
-  (in Settings, or with `pr create --no-review`);
+- every reviewer agent is done with the head commit: its latest review of it found nothing or
+  approved it, it has used up its automatic reviews (or you stopped them), or it is off for the
+  pull request (in Settings, or with `pr create --no-review`);
 - the author agent is waiting in `laatsux pr wait`, with all feedback seen;
 - none of the conversations you started is unresolved;
 - the head merges cleanly into the base branch as it is now, fetched right before publishing. A

@@ -214,12 +214,9 @@
     published: 'published the pull request',
     resolved: 'resolved a conversation',
     comment_edited: 'edited a comment',
-    codex_started: 'started reviewing',
-    codex_failed: 'could not finish its review',
-    codex_cancelled: 'stopped reviewing',
-    claude_started: 'started reviewing',
-    claude_failed: 'could not finish its review',
-    claude_cancelled: 'stopped reviewing',
+    reviewer_started: 'started reviewing',
+    reviewer_failed: 'could not finish its review',
+    reviewer_cancelled: 'stopped reviewing',
   };
   // What laatsux did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
   const AUTOMATIC = {
@@ -419,6 +416,12 @@
       if (publishing && res && res.published_url) {
         leaving = true;
         location.href = res.published_url;
+        return;
+      }
+      // A form that made something goes on to where it is listed.
+      if (target.dataset.next) {
+        leaving = true;
+        location.href = target.dataset.next;
         return;
       }
       await refresh();
@@ -1375,6 +1378,14 @@
       if (!confirmed(el, 'Click again to delete this staged pull request')) return;
       await api('DELETE', el.dataset.api).catch((err) => toast(err.message));
       location.href = el.dataset.next;
+    } else if ((el = on('.js-delete-reviewer'))) {
+      if (!confirmed(el, 'Click again to delete its file')) return;
+      try {
+        await api('DELETE', el.dataset.api);
+        location.href = el.dataset.next;
+      } catch (err) {
+        toast(err.message);
+      }
     } else if ((el = on('.js-inline-cancel'))) {
       closeInlineForm(el.closest('.inline-comment-form'));
     } else if ((el = on('.js-file-toggle'))) {
@@ -1435,6 +1446,22 @@
       }, 500),
     );
   }
+
+  // A custom reviewer's models are its tool's, and only a reviewer of the code runs the tests.
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.matches && t.matches('.js-reviewer-engine')) {
+      const model = $('.js-codex-model', t.form);
+      for (const o of model.options) o.hidden = o.disabled = o.dataset.engine !== t.value;
+      const tool = [...model.options].find((o) => o.dataset.engine === t.value && !o.value);
+      model.value = '';
+      tool.selected = true;
+      $('.js-codex-effort', t.form).dataset.defaultLabel = tool.dataset.defaultLabel;
+      model.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (t.matches && t.matches('.js-reviewer-reviews')) {
+      $('.js-code-only', t.form).hidden = t.value !== 'code';
+    }
+  });
 
   // Settings: the effort levels on offer depend on the model.
   document.addEventListener('change', (e) => {

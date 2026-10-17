@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import { HttpError, type Service } from '../service.ts';
 import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, progressPart, pullList, transcriptPage } from './pages.ts';
-import { publishingSettingsPage, settingsPage } from './settings.ts';
+import { customReviewerPage, customReviewersPage, publishingSettingsPage, settingsPage } from './settings.ts';
 import { browseUrl, type DiffMode } from './diffview.ts';
 import { blobPage, excerpt, locate, rawFile, treeItemsHtml, treePage } from './browse.ts';
 
@@ -25,6 +25,17 @@ export function web(s: Service): Hono {
   // Registered before /:owner/:repo, which would otherwise match "settings".
   app.get('/settings', async (c) => c.html(await settingsPage(s)));
   app.get('/settings/publishing', (c) => c.html(publishingSettingsPage(s)));
+  // The files are read again, for edits made while nothing followed the directory (made after the server started).
+  app.get('/settings/reviewers', (c) => {
+    s.custom?.load();
+    return c.html(customReviewersPage(s));
+  });
+  // Not under /settings/reviewers/, where a reviewer could be called "new".
+  app.get('/settings/new-reviewer', async (c) => c.html(await customReviewerPage(s, null)));
+  app.get('/settings/reviewers/:name', async (c) => {
+    s.custom?.load();
+    return c.html(await customReviewerPage(s, c.req.param('name')));
+  });
   app.get('/:owner/:repo', (c) => c.html(pullList(s, { repo: s.repo(c.req.param('owner'), c.req.param('repo')), state: c.req.query('state') ?? 'staged' })));
   app.get('/:owner/:repo/pulls', (c) => c.redirect(`/${c.req.param('owner')}/${c.req.param('repo')}`));
   app.get('/:owner/:repo/pull/:n', async (c) => c.html(await conversationPage(await load(c))));

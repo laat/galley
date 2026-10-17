@@ -15,6 +15,13 @@ export function dataDir(): string {
   return join(xdg, 'laatsux');
 }
 
+/** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
+export function configDir(): string {
+  if (process.env.LAATSUX_CONFIG_DIR) return process.env.LAATSUX_CONFIG_DIR;
+  const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  return join(xdg, 'laatsux');
+}
+
 /**
  * Who the CLI acts as. Agents get their own identity so the UI can tell their comments
  * from yours, and so their own comments do not count as feedback in `pr wait`.

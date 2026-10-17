@@ -447,6 +447,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
       url: `${s.pullUrl(repo, pull)}#issuecomment-${c.id}`,
     })),
   );
+  let agentReviews: Set<number> | undefined;
   const review = (r: ReviewRow) => ({
     id: `PRR_${r.id}`,
     databaseId: r.id,
@@ -455,6 +456,8 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     state: r.state,
     submittedAt: r.submitted_at,
     commit: { oid: r.commit_id },
+    // laatsux extension: posted by a reviewer agent, whose approval is its own and not in reviewDecision.
+    byReviewerAgent: (agentReviews ??= s.agentReviews(pull)).has(r.id),
   });
   set('reviews', () => reviews.map(review));
   set('latestReviews', () => {
@@ -462,7 +465,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
     for (const r of reviews) latest.set(r.author_id, r);
     return [...latest.values()].map(review);
   });
-  set('reviewDecision', () => reviewDecision(reviews));
+  set('reviewDecision', () => s.reviewDecision(pull, reviews));
   // laatsux extensions: whose move it is, and what GitHub does not have yet (#6, #29). `state`
   // stays PUBLISHED when an update is not published, as gh would show it.
   set('turn', () => ghTurn(s.turn(pull)));

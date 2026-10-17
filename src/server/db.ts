@@ -54,6 +54,10 @@ export interface PullRow {
   /** The same two for Claude. */
   claude_max_iterations: number | null;
   claude_enabled: number | null;
+  /** The same for custom reviewers, by name: a ReviewerOverrides as JSON; null when none has its own. */
+  reviewer_overrides: string | null;
+  /** The commit messages from base to head, hashed: what reviewers of the description read besides the title and description. Null until a reviewer needs it. */
+  messages_sha: string | null;
   /** Auto-publish, when it is on: an AutoPublish as JSON (see Service.autoPublish). */
   auto_publish: string | null;
   /** Automatic reviews, when the reviewer stopped them: an IterationsStopped as JSON (see Service.stopIterating). */
@@ -251,7 +255,7 @@ CREATE TABLE IF NOT EXISTS viewed (
   blob TEXT NOT NULL,
   PRIMARY KEY (pull_id, path)
 );
--- Each time a reviewer agent (Codex, Claude) reviewed, or tried to review, a pull request.
+-- Each time a reviewer agent (Codex, Claude, a custom one) reviewed, or tried to review, a pull request.
 CREATE TABLE IF NOT EXISTS review_runs (
   id INTEGER PRIMARY KEY,
   pull_id INTEGER NOT NULL REFERENCES pulls(id) ON DELETE CASCADE,
@@ -283,8 +287,12 @@ CREATE TABLE IF NOT EXISTS signed_commits (
 );
 `;
 
-/** What happened to a pull request while a reviewer agent reviewed it, which cancelled the review: closed here, merged or closed on GitHub, published, or a new head pushed. */
-export type CancelReason = 'closed' | 'merged' | 'closed_on_github' | 'published' | 'pushed';
+/**
+ * What happened to a pull request while a reviewer agent reviewed it, which cancelled the review:
+ * closed here, merged or closed on GitHub, published, a new head pushed, or (for reviewers of the
+ * description) the title or description edited, or the base moved, changing the commits.
+ */
+export type CancelReason = 'closed' | 'merged' | 'closed_on_github' | 'published' | 'pushed' | 'edited' | 'base_moved';
 
 export interface ReviewRunRow {
   id: number;
@@ -307,6 +315,8 @@ export interface ReviewRunRow {
   usage: string | null;
   /** Why a cancelled run was cancelled. */
   reason: CancelReason | null;
+  /** What it reviewed (Reviewer.subject): the head, or `description:<hash>` of the title, description and commit messages; null for older runs, of the head. */
+  subject: string | null;
   started_at: string;
   finished_at: string | null;
 }
@@ -334,6 +344,9 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'iterations_stopped', 'TEXT'],
   ['pulls', 'conflicts_told_sha', 'TEXT'],
   ['review_runs', 'reason', 'TEXT'],
+  ['pulls', 'reviewer_overrides', 'TEXT'],
+  ['pulls', 'messages_sha', 'TEXT'],
+  ['review_runs', 'subject', 'TEXT'],
 ];
 
 export class Db {

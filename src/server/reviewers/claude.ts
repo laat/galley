@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
-import { EngineError, lastLines, makeWritable, removeDir, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
+import { EngineError, lastLines, makeWritable, removeDir, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
 import { sandboxed } from './sandbox.ts';
 import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCall } from './transcript.ts';
 
@@ -98,7 +98,7 @@ export class ClaudeEngine implements Engine {
         'stream-json',
         '--verbose',
         '--json-schema',
-        JSON.stringify(SCHEMA),
+        JSON.stringify(job.schema),
         '--no-session-persistence',
         // The checkout is untrusted: without its settings files and the user's (hooks,
         // permissions, plugins), its .mcp.json, CLAUDE.md, skills and agents, and with Read, Grep
@@ -107,10 +107,10 @@ export class ClaudeEngine implements Engine {
         '--safe-mode',
         '--strict-mcp-config',
         '--disable-slash-commands',
-        '--tools',
-        'Read,Grep,Glob,Bash',
-        '--allowedTools',
-        ...['Read', 'Grep', 'Glob', ...(settings.runTests ? [] : READ_ONLY_GIT.map((c) => `Bash(git ${c}:*)`))],
+        // A review of the description has what it reads in the prompt, and no tools.
+        ...(job.reads === 'description'
+          ? ['--tools', '']
+          : ['--tools', 'Read,Grep,Glob,Bash', '--allowedTools', 'Read', 'Grep', 'Glob', ...(settings.runTests ? [] : READ_ONLY_GIT.map((c) => `Bash(git ${c}:*)`))]),
         '--disallowedTools',
         'mcp__*',
         // Nobody is there to answer: what is not allowed above (or by the sandbox) is denied.
@@ -173,7 +173,7 @@ export class ClaudeEngine implements Engine {
         allowWrite: job.tmp ? [job.tmp] : [],
         denyWrite: [
           join(job.checkout, '.git'),
-          job.gitDir,
+          ...(job.gitDir ? [job.gitDir] : []),
           ...(job.settings.runTests ? [] : [job.checkout]),
           ...(uid === undefined ? [] : [`/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`]),
         ],

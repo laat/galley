@@ -179,10 +179,13 @@ leave it out of the next one, as the output says.
 
 ## Reviewer agents
 
-Codex and Claude can review the pull request before the user does. They review when you run
+Codex and Claude can review the pull request before the user does, and so can reviewer agents
+the user defined, by their own names (some review only the title, description and commit
+messages, and review them again when you change them). They review when you run
 `laatsux pr wait`, and their reviews wake you like the user's: address them the same way and
-wait again. One loop is one review from each reviewer agent and your answer to them. Whether
-they review is the user's setting, unless they say otherwise when they ask you to stage:
+wait again. One loop is one review from each reviewer agent and your answer to them. A reviewer
+agent's approval is not the user's: wait for the user all the same. Whether they review is the
+user's setting, unless they say otherwise when they ask you to stage:
 
 | The user says | Add to `laatsux pr create` |
 |---|---|
@@ -191,6 +194,7 @@ they review is the user's setting, unless they say otherwise when they ask you t
 | "stage PR with codex" | `--reviewer codex` (as many loops as the settings allow) |
 | "stage PR with claude" | `--reviewer claude` (`claude:2` for two loops) |
 | "stage PR with codex and claude" | `--reviewer codex --reviewer claude` |
+| "stage PR with house-rules" (a reviewer the user defined) | `--reviewer house-rules` (`house-rules:2` for two loops) |
 | "stage PR no review" | `--no-review` |
 | nothing about review | nothing; the settings decide |
 
@@ -198,7 +202,7 @@ they review is the user's setting, unless they say otherwise when they ask you t
 
 | gh | laatsux | notes |
 |---|---|---|
-| `gh pr create` | `laatsux pr create` | stages; never pushes. `--reviewer codex[:N]`, `--reviewer claude[:N]`, `--no-review` |
+| `gh pr create` | `laatsux pr create` | stages; never pushes. `--reviewer codex[:N]`, `--reviewer claude[:N]`, `--reviewer <name>[:N]`, `--no-review` |
 | `gh pr view [--comments] [--json f] [--jq q]` | same | `--comments` includes review threads; `--json reviewThreads` exists; `--download-images <dir>` saves pasted images as files |
 | `gh pr list`, `diff`, `edit`, `comment`, `checkout`, `status`, `ready`, `close`, `reopen` | same | |
 | `gh pr review -c/-a/-r -b` | same | for reviewer agents |

@@ -68,7 +68,8 @@ export function readSettings(db: Db): Settings {
   };
 }
 
-const SLUG = /^[A-Za-z0-9._:/-]{0,100}$/;
+/** A model or effort as the tools name them. */
+export const SLUG = /^[A-Za-z0-9._:/-]{0,100}$/;
 const LOGIN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}$/;
 
 /** What the CLI calls author agents (cliActor in src/config.ts). A reviewer may not take those names, even before such an agent turns up. */

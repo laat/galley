@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import { now, type Actor, type CommentRow } from '../db.ts';
 import { splitPriorityPrefix, type Service } from '../service.ts';
-import { EngineError, lastLines, outsideTheDiff, Reviewer, SCHEMA, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
+import { customActorKey, EngineError, lastLines, outsideTheDiff, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
 import { DEFAULT_SETTINGS, readSettings, REVIEWER_KINDS, saveSettings } from '../settings.ts';
 import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCallLocation, type ToolCallStatus, type ToolKind } from './transcript.ts';
 
@@ -78,7 +78,8 @@ export class CodexEngine implements Engine {
     const { checkout, settings, timeoutMs } = job;
     const schemaFile = join(job.dir, 'schema.json');
     const outFile = join(job.dir, 'review.json');
-    writeFileSync(schemaFile, JSON.stringify(SCHEMA));
+    writeFileSync(schemaFile, JSON.stringify(job.schema));
+    // A review of the description runs read-only in an empty directory: it has nothing to read but the prompt.
     const sandbox = settings.runTests ? ['-s', 'workspace-write', ...workspaceWrite(false)] : ['-s', 'read-only'];
     // --json prints what Codex does as it goes; the answer still goes to the -o file.
     const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), '-C', checkout, '--color', 'never', '--json', '--output-schema', schemaFile, '-o', outFile];
@@ -286,11 +287,13 @@ export class CodexReviewer extends Reviewer {
     this.leaveFormerDefault();
     // Earlier versions recorded the reviewer's login in review_runs; fold those identities into
     // one. Runs from before laatsux knew another engine are all Codex's, also under a login that
-    // is another engine's kind now (the bot could be called "claude").
+    // is another engine's kind now (the bot could be called "claude"). A custom reviewer's runs
+    // are under its name, which has its bot in meta from before its first run (CustomReviewers.load).
     let since = this.s.db.getMeta('engines_since');
     if (!since) this.s.db.setMeta('engines_since', (since = now()));
     const kinds = REVIEWER_KINDS.map((k) => `'${k}'`).join(', ');
-    const legacy = `reviewer != '${this.engine}' AND (reviewer NOT IN (${kinds}) OR started_at < ?)`;
+    const custom = `SELECT substr(key, ${customActorKey('').length + 1}) FROM meta WHERE key LIKE '${customActorKey('')}%'`;
+    const legacy = `reviewer != '${this.engine}' AND ((reviewer NOT IN (${kinds}) AND reviewer NOT IN (${custom})) OR started_at < ?)`;
     for (const { reviewer } of this.s.db.all<{ reviewer: string }>(`SELECT DISTINCT reviewer FROM review_runs WHERE ${legacy}`, since)) {
       const old = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', reviewer);
       const me = this.actor();
