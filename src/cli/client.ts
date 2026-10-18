@@ -40,15 +40,18 @@ const unreachable = (e: unknown) => {
 };
 
 const notRunning = (base: string) => `the galley server is not running at ${base}, and it could not be started. Run \`galley serve\` to see why.`;
-const silent = (base: string) =>
-  `nothing answered at ${base} within 5 seconds: galley may be stuck there, or another program holds the port. If it is another program, run galley on another port with GALLEY_PORT=<port>, and set GALLEY_PORT for your agents too.`;
+const silent = (base: string, ms: number) =>
+  `nothing answered at ${base} within ${ms / 1000} seconds: galley may be stuck there, or another program holds the port. If it is another program, run galley on another port with GALLEY_PORT=<port>, and set GALLEY_PORT for your agents too.`;
+
+/** How long whatever answers at the server's URL has to say what it is (identify). */
+const PROBE_MS = 5000;
 
 /**
  * What answers at `base`: galley, galley still starting, another program, one that takes the
- * connection but does not answer in time, or nothing.
+ * connection but does not answer within `ms`, or nothing.
  */
-export async function identify(base: string): Promise<'galley' | 'starting' | 'other' | 'silent' | 'none'> {
-  const signal = AbortSignal.timeout(5000);
+export async function identify(base: string, ms = PROBE_MS): Promise<'galley' | 'starting' | 'other' | 'silent' | 'none'> {
+  const signal = AbortSignal.timeout(ms);
   let res: Response;
   try {
     res = await fetch(`${base}/api/meta`, { signal });
@@ -93,8 +96,11 @@ export class Client {
   private triedAutostart = false;
   /** Making sure that galley answers at `base`, before the first request (check). */
   private checking: Promise<void> | null = null;
-  constructor(base = serverUrl()) {
+  /** How long it has to say that it is galley (identify; tests shorten it). */
+  private probeMs: number;
+  constructor(base = serverUrl(), { probeMs = PROBE_MS } = {}) {
     this.base = base;
+    this.probeMs = probeMs;
   }
 
   /**
@@ -102,7 +108,7 @@ export class Client {
    * When nothing answers there, one is started.
    */
   private async check(): Promise<void> {
-    let found = await identify(this.base);
+    let found = await identify(this.base, this.probeMs);
     if (found === 'none') {
       // Once per command: a wait that asks again while the server is away starts no more.
       if (!this.triedAutostart) {
@@ -113,10 +119,10 @@ export class Client {
     }
     for (let i = 0; found === 'starting' && i < 150; i++) {
       await new Promise((r) => setTimeout(r, 200));
-      found = await identify(this.base);
+      found = await identify(this.base, this.probeMs);
     }
     if (found === 'none') throw new CliError(notRunning(this.base));
-    if (found === 'silent') throw new CliError(silent(this.base));
+    if (found === 'silent') throw new CliError(silent(this.base, this.probeMs));
     if (found === 'other') {
       throw new CliError(`something other than galley answers at ${this.base}. Stop it, or run galley on another port with GALLEY_PORT=<port>, and set GALLEY_PORT for your agents too.`);
     }

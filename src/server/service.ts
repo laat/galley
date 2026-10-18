@@ -349,6 +349,9 @@ export const FOLLOW_IDLE_MS = 60_000;
  */
 export const AUTHOR_STALL_MS = 30 * 60 * 1000;
 
+/** How long a `pr wait` that ended still counts as waiting, in case the author comes straight back (Service.setWaiting). */
+export const WAIT_GRACE_MS = 3000;
+
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
@@ -407,6 +410,8 @@ export class Service {
   waiters = new Map<number, number>();
   /** When an author that keeps the reviewer agents waiting has stalled (AUTHOR_STALL_MS; tests shorten it). */
   stallMs = AUTHOR_STALL_MS;
+  /** How long a wait that ended still counts (WAIT_GRACE_MS; tests shorten it). */
+  waitGraceMs = WAIT_GRACE_MS;
   private syncing = new Map<number, Promise<PullRow>>();
   private viewerLogin: string;
   /** How long after fetching a repository's base branches they may be fetched again, except right before publishing (fetchBases). */
@@ -1858,7 +1863,7 @@ export class Service {
         this.waitingStopped.delete(id);
         this.waitingSince.delete(id);
         this.emit(id, 'waiting', author);
-      }, 3000);
+      }, this.waitGraceMs);
       t.unref();
       this.waitingStopped.set(id, t);
     }

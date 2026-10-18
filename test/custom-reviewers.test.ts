@@ -343,9 +343,10 @@ test('it reviews again when the title, description or commit messages change, no
   // Only a new version answers it: with its findings seen and its thread replied to, auto-publish still waits for one.
   assert.equal((await cli(acme, ['pr', 'comment', String(number), '--reply-to', String(thread.id), '-b', 'The description says why.'])).code, 0);
   await human('PUT', `/api/repos/acme/widgets/pulls/${number}/auto-publish`, {});
-  const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '2s']);
+  const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
   assert.equal(held.code, 124);
   assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\. The reviewer agents are not done with it until then\.$/m);
+  await server.autoPublisher.settle(row('acme', number).id);
   assert.ok((await human('GET', `/api/repos/acme/widgets/pulls/${number}`)).auto_publish, 'auto-publish is still on, and nothing was published');
   assert.match(await page(`/acme/widgets/pull/${number}`), /house-rules found problems in the description, and reviews it again once it changes/);
   assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
@@ -505,7 +506,7 @@ test('findings on the description keep the reviewer agents from being done until
   try {
     assert.match(await wait(acme, number), /house-rules reviewed: commented/);
     // Seen, with no thread to reply in: the next wait does not hand the commit to the reviewer, and says what would.
-    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '2s']);
+    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
     assert.equal(held.code, 124);
     assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\./m);
     // An edited title: it reviews the new version, and once that finds nothing, the reviewer agents are done.

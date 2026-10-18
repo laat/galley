@@ -63,6 +63,11 @@ export class AutoPublisher {
     this.running.set(pullId, p);
   }
 
+  /** Wait for the check of the pull request under way, and the checks it brings on (used by tests). */
+  async settle(pullId: number): Promise<void> {
+    for (let p = this.running.get(pullId); p; p = this.running.get(pullId)) await p;
+  }
+
   private async publishIfReady(pullId: number): Promise<void> {
     // Let whoever emitted the change finish first.
     await new Promise((resolve) => setImmediate(resolve));

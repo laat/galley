@@ -16,7 +16,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../src/server/server.ts';
 import { Db, now, type PullRow } from '../src/server/db.ts';
 import { readSettings, saveSettings } from '../src/server/settings.ts';
-import { AUTHOR_STALL_MS, Service, type ChangeEvent } from '../src/server/service.ts';
+import { AUTHOR_STALL_MS, Service, WAIT_GRACE_MS, type ChangeEvent } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
 import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { doneForAutoPublish } from '../src/server/reviewers/head-status.ts';
@@ -390,7 +390,7 @@ test('the agent loop, from staging to publishing', async (t) => {
 
   await t.test('an approval without text still reaches the agent', async () => {
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
-    await new Promise((r) => setTimeout(r, 300));
+    await until(async () => (await human('GET', '/api/repos/acme/widgets/pulls/1')).author_waiting, 'the agent waits');
     const review = await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', { event: 'APPROVE' });
     const r = await waiting;
     assert.match(r.stdout, /reviewer reviewed: approved/);
@@ -517,7 +517,7 @@ test('the agent loop, from staging to publishing', async (t) => {
   await t.test('publishing pushes the reviewed commit and opens the pull request', async () => {
     await handedOver();
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
-    await new Promise((r) => setTimeout(r, 300));
+    await until(async () => (await human('GET', '/api/repos/acme/widgets/pulls/1')).author_waiting, 'the agent waits');
     const pr = await human('POST', '/api/repos/acme/widgets/pulls/1/publish', {});
     assert.equal(pr.published_url, 'https://github.com/acme/widgets/pull/7');
     assert.equal(pr.staging_state, 'published');
@@ -597,7 +597,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     // Published, its wait pushes the rewritten history, which the commit added on GitHub refuses, once.
     assert.match((await cli(['pr', 'wait', '--timeout', '20s'])).stdout, /^Could not push [0-9a-f]{7} to GitHub: git push failed \(the branch on GitHub changed since it was last published/m);
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
-    await new Promise((r) => setTimeout(r, 300));
+    await until(async () => (await human('GET', '/api/repos/acme/widgets/pulls/1')).author_waiting, 'the agent waits');
     await human('POST', '/api/repos/acme/widgets/issues/1/comments', { body: 'Closing: we went another way.' });
     await human('PATCH', '/api/repos/acme/widgets/pulls/1', { state: 'closed' });
     const r = await waiting;
@@ -2276,7 +2276,7 @@ test('findings the author answers without a new commit: the reviewer agents are 
       assert.match((await cli(['pr', 'wait', String(number), '--timeout', '20s'])).stdout, /codex-review reviewed: commented/);
       await server.service.codex!.settle(id);
       // Unanswered, the finding holds the reviewer agents up: no wait says they are done, and one that times out says why.
-      const held = await cli(['pr', 'wait', String(number), '--timeout', '2s']);
+      const held = await cli(['pr', 'wait', String(number), '--timeout', '1s']);
       assert.equal(held.code, 124);
       assert.match(held.stderr, new RegExp(`^codex-review commented on ${sha()}: reply to or resolve each of its threads, or push a commit\\. The reviewer agents are not done with it until then\\.$`, 'm'));
       // Its row in the sidebar: what it found, and whether it is answered (as GitHub marks a reviewer, a check is for an approval).
@@ -2437,6 +2437,8 @@ test('auto-publish publishes once the agents are done', async (t) => {
       page: async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(),
       timeline: (): Promise<any[]> => human('GET', `/api/repos/acme/widgets/issues/${number}/timeline`),
       created: () => new RegExp(`^pr create .* --head ${branch} `, 'm').test(readFileSync(join(dir, 'gh.log'), 'utf8')),
+      /** Until auto-publish is done checking it: what it would publish is published by then. */
+      settle: async () => server.autoPublisher.settle((await human('GET', base)).id),
     };
   };
   const untilWaiting = async (base: string) => {
@@ -2554,7 +2556,8 @@ test('auto-publish publishes once the agents are done', async (t) => {
 
         // One thread answered and resolved, the other not: it waits for the other.
         assert.equal((await cli(['pr', 'comment', String(pr.number), '--reply-to', String(first), '--resolve', '-b', 'It is named after what it is.'])).code, 0);
-        assert.equal((await cli(['pr', 'wait', String(pr.number), '--timeout', '2s'])).code, 124);
+        assert.equal((await cli(['pr', 'wait', String(pr.number), '--timeout', '1s'])).code, 124);
+        await pr.settle();
         assert.equal(pr.created(), false);
         assert.match(await pr.page(), new RegExp(`codex-review found problems in <code>${sha}</code>, and reviews the commit that addresses them`));
 
@@ -2606,7 +2609,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
         await until(() => codex.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
         await untilWaiting(pr.base);
         // The agent waits and nothing else is open, but Codex is at work.
-        await new Promise((r) => setTimeout(r, 500));
+        await pr.settle();
         assert.equal(pr.created(), false);
         assert.match(await pr.page(), new RegExp(`codex-review is reviewing <code>${git('rev-parse', '--short=7', 'HEAD')}</code>`));
         writeFileSync(gate, '');
@@ -2694,7 +2697,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       await human('DELETE', `${pr.base}/auto-publish`);
       signing.open();
       await until(() => signedCopy() !== '', 'signing finished');
-      await new Promise((r) => setTimeout(r, 300));
+      await pr.settle();
       assert.equal(pr.created(), false);
       assert.throws(() => execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', 'refs/heads/feature/auto-sign'], { stdio: 'ignore' }));
       // Without auto-publish, the reviewer agents being done with the commit makes it the reviewer's to review.
@@ -2714,7 +2717,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       signing.open();
       assert.match((await fed).stdout, /One more thing\./);
       await until(() => signedCopy() !== before, 'signing finished again');
-      await new Promise((r) => setTimeout(r, 300));
+      await pr.settle();
       assert.equal(pr.created(), false);
       const done = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       assert.match(done.stdout, /Published to GitHub/);
@@ -2788,7 +2791,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
       await until(() => holding, 'the lease is being looked up');
       await human('DELETE', `${pr.base}/auto-publish`);
       release();
-      await new Promise((r) => setTimeout(r, 500));
+      await pr.settle();
       assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/auto-lease'], { encoding: 'utf8' }).trim(), theirs);
       assert.equal(pr.created(), false);
       assert.match((await waiting).stdout, /ask the user to review it/);
@@ -2816,12 +2819,14 @@ test('auto-publish publishes once the agents are done', async (t) => {
         const refused = await observe();
         assert.equal(refused.status, 403);
         assert.match(refused.message, /^only the author of this pull request \(agent\) can wait for its feedback, not observer\./);
-        await new Promise((r) => setTimeout(r, 300));
+        // An author waiting would have Codex deciding by now (consider), or reviewing.
+        const { id } = await human('GET', pr.base);
+        assert.equal(server.service.codex!.atWork(server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!), null);
         assert.deepEqual((await human('GET', `${pr.base}/reviewers/codex`)).runs, []);
         // ... and with Codex off for the pull request, auto-publish does not go ahead.
         await human('PATCH', `${pr.base}/reviewers/codex`, { enabled: false });
         assert.equal((await observe()).status, 403);
-        await new Promise((r) => setTimeout(r, 300));
+        await pr.settle();
         assert.equal(pr.created(), false);
         assert.ok((await human('GET', pr.base)).auto_publish);
         assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Published to GitHub/);
@@ -2902,7 +2907,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.equal((await cli(['pr', 'comment', String(pr.number), '--reply-to', String(thread.id), '-b', 'Yes.'])).code, 0);
     const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
     await untilWaiting(pr.base);
-    await new Promise((r) => setTimeout(r, 300));
+    await pr.settle();
     assert.equal(pr.created(), false);
     assert.match(await pr.page(), /1 conversation you started is unresolved/);
 
@@ -3676,7 +3681,8 @@ test('pr wait keeps waiting when the server restarts under it', async (t) => {
   await first.close();
   const second = await startServer({ port, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
   try {
-    await new Promise((r) => setTimeout(r, 4000)); // the wait retries every 3 seconds
+    // The wait tries again every 3 seconds.
+    await until(async () => (await (await fetch(`${second.url}/api/repos/${registered.full_name}/pulls/${pr.number}`)).json()).author_waiting, 'the wait is back');
     await fetch(`${second.url}/api/repos/${registered.full_name}/issues/${pr.number}/comments`, { method: 'POST', headers: json, body: JSON.stringify({ body: 'Still there?' }) });
     const r = await waiting;
     assert.match(r.stdout, /Still there\?/);
@@ -4348,6 +4354,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
   const review = { summary: 'One thing.', comments: [{ path: 'turns.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Name it.' }] };
   await withFakes({ FAKE_CODEX_GATE: gate, FAKE_CODEX_REVIEW: JSON.stringify(review) }, async () => {
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 2 });
+    // A wait that ended counts for a moment, not seconds: waitEnded waits for that.
+    server.service.waitGraceMs = 100;
     try {
       await t.test("staged and not waiting: the author's, to start Codex", async () => {
         assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not asked for review yet (pr wait)', `codex-review reviews ${sha()} when agent waits for review`] });
@@ -4560,6 +4568,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         server.service.bus.on('change', listen);
         const first = new AbortController();
         const renewal = new AbortController();
+        const grace = server.service.waitGraceMs;
+        server.service.waitGraceMs = WAIT_GRACE_MS;
         try {
           // A wait started within seconds of the last one announces nothing itself (setWaiting) ...
           const again = server.service.wait(ctx, author, 20_000, first.signal);
@@ -4578,6 +4588,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
           first.abort();
           renewal.abort();
           server.service.bus.off('change', listen);
+          server.service.waitGraceMs = grace;
         }
       });
 
@@ -4633,7 +4644,9 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         // The author works on the comment it was handed above, and an approval arrives meanwhile.
         await human('POST', `${base}/reviews`, { event: 'APPROVE', body: 'Fine as it is.' });
         assert.equal((await turn()).whose, 'author');
-        // Its next wait returns only the approval, which asks nothing: waiting is its latest action.
+        // Its next wait returns only the approval, which asks nothing: waiting is its latest action,
+        // while the wait counts (setWaiting).
+        server.service.waitGraceMs = WAIT_GRACE_MS;
         const r = await cli(['pr', 'wait', String(number), '--timeout', '5s']);
         assert.match(r.stdout, /Fine as it is\./);
         const { whose, reasons } = await turn();
@@ -4647,6 +4660,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
       });
     } finally {
+      server.service.waitGraceMs = WAIT_GRACE_MS;
       rmSync(gate, { force: true });
       await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
     }
@@ -4686,6 +4700,8 @@ test("while the reviewer agents still have the head to review, it is theirs or t
   const toStart = (login: string) => `${login} reviews ${sha()} when agent waits for review`;
   const codexGate = join(dir, 'agents-first-codex');
   const claudeGate = join(dir, 'agents-first-claude');
+  // A wait that ended counts for a moment, not seconds: waitEnded waits for that.
+  server.service.waitGraceMs = 100;
   try {
     await t.test("staged, not waiting: the author's, to start the reviewer agents", async () => {
       assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not asked for review yet (pr wait)', toStart('codex-review'), toStart('claude-review')] });
@@ -4716,7 +4732,8 @@ test("while the reviewer agents still have the head to review, it is theirs or t
         // As if the author's last action were longer ago than that: the server's poll notices, once.
         server.service.stallMs = 0;
         await until(() => events.includes('stalled'), 'pages hear that the author stalled');
-        await new Promise((r) => setTimeout(r, 300));
+        // The next poll says nothing again.
+        server.service.noticeStalls();
         assert.deepEqual(events.filter((e) => e === 'stalled'), ['stalled']);
         assert.deepEqual(await turn(), {
           whose: 'reviewer',
@@ -4810,6 +4827,7 @@ test("while the reviewer agents still have the head to review, it is theirs or t
       assert.deepEqual({ whose: turn.whose, reasons: turn.reasons.map((x: any) => x.text) }, { whose: 'reviewer', reasons: ['agent is not waiting', 'no review from reviewer yet'] });
     });
   } finally {
+    server.service.waitGraceMs = WAIT_GRACE_MS;
     rmSync(codexGate, { force: true });
     rmSync(claudeGate, { force: true });
     await human('PUT', '/api/settings/codex', { enabled: false });
@@ -4926,7 +4944,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       git('commit', '-qam', 'More work on the branch');
       const again = await cli(['pr', 'create', '--title', 'More on the merged branch', '--body', 'x', '--no-review']);
       assert.equal(again.code, 0, again.stderr);
-      await new Promise((r) => setTimeout(r, 300)); // the server polls branches every 50 ms here
+      await server.service.pollAll();
       assert.equal((await human('GET', pr.base)).head.sha, mergedHead);
       assert.equal((await human('GET', `${pr.base}/commits`)).length, 1);
       assert.equal(JSON.parse((await cli(['pr', 'view', '--json', 'number'])).stdout).number, Number(again.stdout.trim().split('/').pop()));
@@ -5274,7 +5292,7 @@ test('published pull requests are followed until they are merged or closed on Gi
         writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = false; // 3\n');
         git('commit', '-qam', 'Fix auto-fix.js with auto-merge off');
         await wait(/^Pushed [0-9a-f]{7} to GitHub/m);
-        await new Promise((r) => setTimeout(r, 300));
+        await server.autoPublisher.settle(id);
         assert.equal(merges(), mergesBefore + 4);
         const pushed = (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).findLast((e: any) => e.event === 'github_push');
         assert.deepEqual([pushed.result, pushed.source, pushed.head, pushed.force, pushed.sign], ['pushed', git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD'), false, false]);
@@ -5286,7 +5304,7 @@ test('published pull requests are followed until they are merged or closed on Gi
         writeFileSync(join(repo, 'auto-fix.js'), 'export const broken = 0;\n');
         git('commit', '-qam', 'After the merge');
         await wait(/^Merged on GitHub as e468a4e by laat/m);
-        await new Promise((r) => setTimeout(r, 500));
+        await server.autoPublisher.settle(id);
         assert.notEqual(remoteHead(), git('rev-parse', 'HEAD'));
       } finally {
         await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
@@ -5319,7 +5337,7 @@ test('published pull requests are followed until they are merged or closed on Gi
         writeFileSync(join(repo, 'at-once.js'), 'export const once = 2;\n');
         git('commit', '-qam', 'After the merge');
         assert.match((await cli(['pr', 'wait', n, '--timeout', '5s'])).stdout, /^Merged on GitHub/m);
-        await new Promise((r) => setTimeout(r, 500));
+        await server.autoPublisher.settle(pull.id);
         assert.equal(remoteHead(), pushed);
       });
     });
@@ -5533,20 +5551,27 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     const pr = await published('feature/push-race');
     pr.commit('export const raced = 1;\n');
     const gate = join(dir, 'push-race-gate');
+    const pushUpdate = server.service.pushUpdate;
+    let pushing = false;
+    server.service.pushUpdate = async (...args: Parameters<Service['pushUpdate']>) => {
+      pushing = true;
+      return pushUpdate.apply(server.service, args);
+    };
     try {
       await withFakes({ FAKE_GH_EDIT_GATE: gate }, async () => {
         // The reviewer publishes the update by hand, signed this time, which force-pushes signed copies; gh pr edit holds it up.
         const publishing = human('POST', `${pr.base}/publish`, { sign: true, force: true });
         await until(() => pr.tip().signed, 'the publish pushed');
-        // Meanwhile the agent waits with the same head.
+        // Meanwhile the agent waits with the same head, and the push for it starts.
         const waiting = pr.wait();
-        await until(async () => (await human('GET', pr.base)).author_waiting, 'the agent waits');
-        await new Promise((r) => setTimeout(r, 500));
+        await until(() => pushing, 'the push for the waiting author starts');
         writeFileSync(gate, '');
         await publishing;
         assert.match((await waiting).stdout, /^Published to GitHub/m);
+        await server.autoPublisher.settle(pr.id);
       });
     } finally {
+      server.service.pushUpdate = pushUpdate;
       rmSync(gate, { force: true });
     }
     assert.deepEqual(await pr.pushes(), []);
@@ -5634,6 +5659,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     await withFakes({ FAKE_GH_FAIL: 'HTTP 502: gh is down' }, async () => {
       // The author hears nothing of it, and one wait tries once.
       assert.equal((await pr.wait('3s')).code, 124);
+      await server.autoPublisher.settle(pr.id);
     });
     assert.equal(pr.tip().sha, before);
     const failed = await pr.pushes();
@@ -5655,8 +5681,8 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     // Merged on GitHub a moment ago: following has not asked yet, so galley knows only when it asks before the push.
     await withFakes({ FAKE_GH_VIEW: JSON.stringify({ state: 'MERGED', mergedAt: '2026-10-17T12:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: 'e468a4e' + '2'.repeat(33) } }) }, async () => {
       assert.match((await pr.wait()).stdout, /^Merged on GitHub as e468a4e by laat/m);
+      await server.autoPublisher.settle(pr.id);
     });
-    await new Promise((r) => setTimeout(r, 300));
     assert.equal(pr.tip().sha, before);
     assert.deepEqual(await pr.pushes(), []);
   });
@@ -5679,7 +5705,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
         // The agent waits: its wait holds Codex's review for Claude's, and its commit is not pushed meanwhile.
         const waiting = pr.wait();
         await until(async () => (await human('GET', pr.base)).author_waiting, 'the agent waits');
-        await new Promise((r) => setTimeout(r, 500));
+        await server.autoPublisher.settle(pr.id);
         assert.equal(pr.tip().sha, before);
         writeFileSync(gate, '');
         const r = await waiting;
