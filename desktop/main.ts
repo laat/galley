@@ -7,6 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { serverUrl } from '../src/config.ts';
 import { follow } from './live.ts';
 import { trayMenu, trayTitle, trayToolTip } from './menu.ts';
+import { notAPage } from './pages.ts';
 import { attach, findNode, loginShellEnv, noAutostart, startServer, type Found } from './server.ts';
 import { Turns, yourTurns, type YourTurn } from './turns.ts';
 
@@ -26,6 +27,10 @@ const waiting = new Map<BrowserWindow, string>();
 /** The page each window last failed to load as galley did not answer, and how often in a row since the stream last opened. */
 const failed = new Map<BrowserWindow, { path: string; tries: number }>();
 let lastFocused: BrowserWindow | null = null;
+/** On macOS galley's header is a window's title bar (public/app.css). */
+const headerIsTitleBar = process.platform === 'darwin';
+/** Windows showing an uploaded image or a raw file, with no header: they keep a title bar of their own, and show no page. */
+const headerless = new WeakSet<BrowserWindow>();
 /** Whether start has run; until then, a window asked for opens once it has. */
 let started = false;
 let openWhenStarted = false;
@@ -46,15 +51,27 @@ if (!app.requestSingleInstanceLock()) {
       e.preventDefault();
       openOutside(url);
     };
-    contents.on('will-navigate', (e, url) => elsewhere(e, url));
+    contents.on('will-navigate', (e, url) => {
+      elsewhere(e, url);
+      // Nor does a page's window show an uploaded image or a raw file, which has no header to drag
+      // it by: a window with a title bar does.
+      if (headerIsTitleBar && ours(url) && notAPage(url)) {
+        e.preventDefault();
+        const { pathname, search, hash } = new URL(url);
+        newWindow(pathname + search + hash, true);
+      }
+    });
     contents.on('will-redirect', (e, url) => elsewhere(e, url));
     contents.on('will-attach-webview', (e) => e.preventDefault());
     contents.setWindowOpenHandler(({ url }) => {
-      if (ours(url)) return { action: 'allow', overrideBrowserWindowOptions: windowOptions() };
+      if (ours(url)) return { action: 'allow', overrideBrowserWindowOptions: windowOptions(notAPage(url)) };
       openOutside(url);
       return { action: 'deny' };
     });
-    contents.on('did-create-window', (win) => track(win));
+    contents.on('did-create-window', (win, { url }) => {
+      if (notAPage(url)) headerless.add(win);
+      track(win);
+    });
   });
   // Not awaited here: Electron is ready only once this module has run.
   void app.whenReady().then(start);
@@ -108,7 +125,7 @@ async function start(): Promise<void> {
   if (openWhenStarted || !app.getLoginItemSettings().wasOpenedAtLogin) openWindow();
   // The Dock icon, clicked. Not before: at launch, macOS activates the app too.
   app.on('activate', () => {
-    if (!BrowserWindow.getAllWindows().length) openWindow();
+    if (!BrowserWindow.getAllWindows().some((w) => !headerless.has(w))) openWindow();
   });
 }
 
@@ -168,20 +185,27 @@ function openOutside(url: string): void {
   if (/^(https?|mailto):/i.test(url)) void shell.openExternal(url);
 }
 
-function windowOptions(): BrowserWindowConstructorOptions {
+/** A window's options; `noHeader` for an uploaded image or a raw file, which keeps macOS's title bar. */
+function windowOptions(noHeader = false): BrowserWindowConstructorOptions {
   return {
     width: 1280,
     height: 900,
+    // Until the page's own: the title bar does not show it, the Window menu and Mission Control do.
     title: 'galley',
     icon: join(icons, 'icon.png'),
+    // On macOS, galley's header is the title bar: the traffic lights sit at its left end, 24px down
+    // in its 64px, and the overlay tells the page where they are, so it makes room for them and
+    // keeps the header at the top (public/app.css). In full screen there is no overlay.
+    ...(headerIsTitleBar && !noHeader ? { titleBarStyle: 'hidden', titleBarOverlay: { height: 64 }, trafficLightPosition: { x: 20, y: 24 } } : {}),
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   };
 }
 
-/** Show the web UI at `path` (by default as it was), in the window last used, or a new one. */
+/** Show the web UI at `path` (by default as it was), in the page window last used, or a new one. */
 function openWindow(path?: string): void {
   if (!connected) void ensure();
-  const win = BrowserWindow.getFocusedWindow() ?? (lastFocused && !lastFocused.isDestroyed() ? lastFocused : null) ?? BrowserWindow.getAllWindows()[0];
+  const page = (w: BrowserWindow | null) => (w && !w.isDestroyed() && !headerless.has(w) ? w : null);
+  const win = page(BrowserWindow.getFocusedWindow()) ?? page(lastFocused) ?? BrowserWindow.getAllWindows().find((w) => !headerless.has(w));
   if (!win) return void newWindow(path ?? '/');
   if (path !== undefined) load(win, path);
   if (win.isMinimized()) win.restore();
@@ -190,8 +214,9 @@ function openWindow(path?: string): void {
   win.focus();
 }
 
-function newWindow(path: string): BrowserWindow {
-  const win = new BrowserWindow(windowOptions());
+function newWindow(path: string, noHeader = false): BrowserWindow {
+  const win = new BrowserWindow(windowOptions(noHeader));
+  if (noHeader) headerless.add(win);
   track(win);
   load(win, path);
   return win;
@@ -236,11 +261,11 @@ function load(win: BrowserWindow, path: string): void {
   void win.loadURL(base + path).catch(() => {});
 }
 
-/** A page of the app's own, with no script, that says why galley's is not there. */
+/** A page of the app's own, with no script, that says why galley's is not there. It has no header, so all of it drags the window. */
 function waitingPage(): string {
   const text = (status() ?? `Waiting for galley at ${base}…`).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
   const page = `<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>galley</title>
-<style>body{margin:0;height:100vh;display:grid;place-items:center;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:GrayText}</style><p>${text}</p>`;
+<style>body{margin:0;height:100vh;display:grid;place-items:center;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:GrayText;app-region:drag}</style><p>${text}</p>`;
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(page);
 }
 

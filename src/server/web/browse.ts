@@ -188,6 +188,9 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
   const rawUrl = browseUrl(loc.base, 'raw', loc.sha, loc.path);
   const here = browseUrl(loc.base, 'blob', loc.sha, loc.path);
   const binary = isBinary(bytes);
+  // The raw URL of a binary file other than an image is a download (rawFile), and its links say so:
+  // the app (desktop/) opens a window of its own for a raw file a link shows, and would leave it empty.
+  const download = binary && !IMAGE_TYPES[ext] ? raw(' download') : '';
   const text = binary || bytes.length > MAX_SHOWN ? '' : bytes.toString('utf8');
   const lines = text ? text.replace(/\n$/, '').split('\n') : [];
   // Markdown and SVG show rendered, with the source a click away, as on GitHub.
@@ -196,8 +199,8 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
 
   let body: Safe;
   if (IMAGE_TYPES[ext]) body = html`<div class="blob-image"><img src="${rawUrl}" alt="${baseName(loc.path)}"></div>`;
-  else if (bytes.length > MAX_SHOWN) body = html`<div class="blob-note">This file is too big to show (${size(bytes.length)}). <a href="${rawUrl}">View raw</a></div>`;
-  else if (binary) body = html`<div class="blob-note">Binary file not shown. <a href="${rawUrl}">Download</a></div>`;
+  else if (bytes.length > MAX_SHOWN) body = html`<div class="blob-note">This file is too big to show (${size(bytes.length)}). <a href="${rawUrl}"${download}>View raw</a></div>`;
+  else if (binary) body = html`<div class="blob-note">Binary file not shown. <a href="${rawUrl}"${download}>Download</a></div>`;
   else if (bytes.length === 0) body = html`<div class="blob-note">This file is empty.</div>`;
   else if (rendered && ext === 'svg') {
     // A data: URL in an <img> renders the picture without running any script in it.
@@ -220,7 +223,7 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
     `${loc.repo.name}/${loc.path}`,
     html`${await header(loc)}
     <div class="Box blob-box">
-      <div class="Box-header blob-header">${toggle}<span class="blob-meta">${meta}</span><span class="flex-auto"></span><a class="btn btn-sm" href="${rawUrl}">Raw</a></div>
+      <div class="Box-header blob-header">${toggle}<span class="blob-meta">${meta}</span><span class="flex-auto"></span><a class="btn btn-sm" href="${rawUrl}"${download}>Raw</a></div>
       <div class="blob-body"${rendered ? html` data-plain="${here}?plain=1"` : ''}>${body}</div>
     </div>`,
   );
