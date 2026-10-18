@@ -535,3 +535,76 @@ test("while the reviewer agents still have the head to review, it is theirs or t
     await human('PUT', '/api/settings/codex', { enabled: false });
   }
 });
+
+test("feedback the author acted on since it came, without being handed it: the author's, until it stalls", async (t) => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/acted-on');
+  writeFileSync(join(repo, 'acted-on.js'), 'export const acted = 1;\n');
+  git('add', 'acted-on.js');
+  git('commit', '-qm', 'Add acted-on.js');
+  writeFileSync(join(repo, 'acted-on.md'), 'Acted on.\n');
+  git('add', 'acted-on.md');
+  git('commit', '-qm', 'Describe acted-on.js');
+  // No reviewer agent: nothing waits for the author to start one.
+  const created = await cli(['pr', 'create', '--title', 'Act on it', '--body', 'x', '--no-review']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const { id } = await human('GET', base);
+  const turn = async (): Promise<{ whose: string; reasons: any[] }> => (await human('GET', base)).turn;
+  const texts = async () => (await turn()).reasons.map((r) => r.text);
+  // As when a restart cuts off the wait that would have handed the feedback over, or it was read some other way.
+  const working = async (since: string) => {
+    const { whose, reasons } = await turn();
+    assert.equal(whose, 'author');
+    assert.deepEqual(reasons[0], { kind: 'author', state: 'working', text: 'agent is working on the feedback', since });
+  };
+
+  await t.test("a new base the reviewer picked after it: still the reviewer's", async () => {
+    await human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body: 'Count from two.' });
+    const { whose, reasons } = await turn();
+    assert.equal(whose, 'reviewer');
+    assert.deepEqual(reasons.slice(0, 2).map((r) => r.text), ['agent has not seen the latest feedback', 'agent is not waiting']);
+    // A base with the first commit in it moves the merge base alone, which galley records as a push of the author's.
+    git('branch', 'acted-on-base', 'HEAD~1');
+    await human('PATCH', base, { base: 'acted-on-base' });
+    const moved = JSON.parse(server.service.db.get<{ data: string }>("SELECT data FROM events WHERE pull_id = ? AND type = 'pushed' ORDER BY id DESC LIMIT 1", id)!.data);
+    assert.equal(moved.before, moved.after);
+    assert.equal((await turn()).whose, 'reviewer');
+  });
+
+  await t.test("a push after it: the author's", async () => {
+    const asked = server.service.db.get<{ at: string }>('SELECT MAX(created_at) AS at FROM comments WHERE pull_id = ?', id)!.at;
+    writeFileSync(join(repo, 'acted-on.js'), 'export const acted = 2;\n');
+    git('commit', '-qam', 'Count from two');
+    await until(async () => (await turn()).whose === 'author', "the author's turn after its push");
+    await working(asked);
+    assert.ok(!(await texts()).includes('agent has not seen the latest feedback'));
+  });
+
+  await t.test("a reply in a thread after it: the author's", async () => {
+    await human('POST', `${base}/reviews`, { event: 'COMMENT', comments: [{ path: 'acted-on.js', line: 1, side: 'RIGHT', body: 'Why two?' }] });
+    assert.equal((await turn()).whose, 'reviewer');
+    const asked = server.service.db.get<{ at: string }>("SELECT submitted_at AS at FROM reviews WHERE pull_id = ? AND state = 'COMMENTED'", id)!.at;
+    const thread = JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewThreads'])).stdout).reviewThreads[0].databaseId;
+    const reply = await cli(['pr', 'comment', String(number), '--reply-to', String(thread), '-b', 'It starts from two now.']);
+    assert.equal(reply.code, 0, reply.stderr);
+    await working(asked);
+  });
+
+  await t.test("nothing from it for the stall time: the reviewer's, and pages hear of it", async () => {
+    const events: string[] = [];
+    const listen = (e: { pullId: number | null; type: string }) => e.pullId === id && events.push(e.type);
+    server.service.bus.on('change', listen);
+    try {
+      // As if the author's last action were longer ago than that: the server's poll notices.
+      server.service.stallMs = 0;
+      await until(() => events.includes('stalled'), 'pages hear that the author stalled');
+      assert.equal((await turn()).whose, 'reviewer');
+      assert.deepEqual(await texts(), ['agent has not seen the latest feedback', 'agent stopped without waiting', 'agent answered 1 thread', '1 unresolved thread']);
+    } finally {
+      server.service.stallMs = AUTHOR_STALL_MS;
+      server.service.bus.off('change', listen);
+    }
+  });
+});

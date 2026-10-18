@@ -129,8 +129,9 @@ The front page lists the pull requests waiting for you first, each with the reas
 the agents are working on. A published pull request is your turn once GitHub can merge it and
 auto-merge is off, and its title opens it on GitHub; its s#N opens it here, and **Update not
 published** opens the box to publish the update from. One that auto-publish publishes on its own
-is not your turn, unless it waits for something of yours. **Notify me** shows a desktop
-notification when one has been your turn for 10 seconds.
+is not your turn, unless it waits for something of yours, nor is a commit whose signing galley
+tries again. **Notify me** shows a desktop notification when one has been your turn for 10
+seconds.
 
 ## Reviewer agents
 

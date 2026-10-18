@@ -183,8 +183,9 @@ test('a review the server stops under is interrupted, runs again when it starts,
         Service.prototype.ctx = ctx;
       }
       assert.deepEqual((await runs()).slice(8), [['manual', 'failed', 'the repository moved']]);
+      // The author's, who committed since Codex's last findings.
       const failed = s.service.turn(row());
-      assert.deepEqual([failed.whose, failed.reasons.find((x) => x.kind === 'reviewer_agent')?.text], ['reviewer', `codex-review's review of ${row().head_sha.slice(0, 7)} failed`]);
+      assert.deepEqual([failed.whose, failed.reasons.find((x) => x.kind === 'reviewer_agent')?.text], ['author', `codex-review's review of ${row().head_sha.slice(0, 7)} failed`]);
 
       // Given time, stopping waits for a running review to post, and pages say so meanwhile in the
       // header, which live updates refresh along with #main.
