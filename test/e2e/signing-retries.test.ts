@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PullRow } from '../../src/server/db.ts';
-import { SIGNING_RETRY_MS } from '../../src/server/service.ts';
+import { SIGNING_RETRY_MS, WAIT_GRACE_MS } from '../../src/server/service.ts';
 
 startHarness();
 
@@ -264,6 +264,12 @@ test('a signing that fails for now is tried again later, up to the limit', async
     const before = tip();
     let signer = failSigning(1);
     server.service.signingRetryMs = 60_000;
+    // A wait that ended counts for a moment, not seconds.
+    server.service.waitGraceMs = 100;
+    const turn = async () => {
+      const { turn } = await human('GET', pr.base);
+      return { whose: turn.whose, reasons: turn.reasons.map((r: any) => r.text) };
+    };
     try {
       // The agent waits with a commit; signing it fails for now. The agent hears nothing of it.
       const sha = pr.commit('export const pushed = 1;\n');
@@ -274,6 +280,14 @@ test('a signing that fails for now is tried again later, up to the limit', async
         await pr.page(),
         /Signing failed \(1Password prompt not answered\)\. It is tried again at <time [^>]*>[^<]*<\/time>, retry 1 of 3, whether agent waits or not\. Publish the update yourself to push it now\./,
       );
+      // Nothing for the user to do meanwhile, with the agent away too.
+      await until(() => !server.service.authorWaiting(pr.id, { grace: true }), 'the wait is over');
+      assert.deepEqual(await turn(), { whose: 'none', reasons: [`the push of ${sha} waits to try signing again`] });
+      // An approval the agent has not read holds the retry until it has (mayPush): not nobody's then.
+      await human('POST', `${pr.base}/reviews`, { event: 'APPROVE' });
+      assert.equal((await turn()).whose, 'reviewer');
+      await cli(['pr', 'view', String(pr.number), '--comments']);
+      assert.deepEqual(await turn(), { whose: 'none', reasons: [`the push of ${sha} waits to try signing again`] });
       // Waiting again does not try it before its time, as each wait would have before.
       await pr.waitUntil(async () => true, 'the agent waits');
       assert.deepEqual([signer.tries(), tip()], [1, before]);
@@ -300,6 +314,10 @@ test('a signing that fails for now is tried again later, up to the limit', async
       );
       assert.equal(signer.tries(), 2);
       assert.match(await pr.page(), /Signing failed \(1Password prompt not answered\) after 1 retry\. agent was told, and it is not tried again/);
+      // The retries ran out: the user's, to publish it by hand.
+      const out = await turn();
+      assert.equal(out.whose, 'reviewer');
+      assert.ok(out.reasons.includes(`update not published: commits; pushing ${next} failed`), out.reasons.join('; '));
 
       // A failure trying again can not get past is final at once.
       failSigning(1000, '1Password: No SSH private key found for the specified public key');
@@ -320,6 +338,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
       assert.deepEqual([denied.retry, denied.signing], [false, { why: '1Password prompt denied', final: true, failures: 1, retries: 1, next_at: null }]);
       assert.match(await pr.page(), /Signing failed \(1Password prompt denied\)\. agent was told, and it is not tried again/);
     } finally {
+      server.service.waitGraceMs = WAIT_GRACE_MS;
       await restore();
     }
   });
