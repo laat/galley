@@ -74,9 +74,10 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
    someone added commits to the branch on GitHub, or rewrote it there, galley fetches it for the
    agent to rebase onto, and pushes the agent's new commits on top of it. A commit that would
    bring back what the rewrite removed is refused. One that fails otherwise (GitHub out of
-   reach, a signing prompt nobody answered) is tried again when the agent next waits. When the
-   branch conflicts with its base, galley tells the agent to rebase it, as before publishing,
-   and pushes the rebase.
+   reach) is tried again when the agent next waits; one whose signing prompt nobody answered is
+   tried again a few times over the next hour, whether the agent waits or not. When the branch
+   conflicts with its base, galley tells the agent to rebase it, as before publishing, and
+   pushes the rebase.
 
 The conversation stays in galley; GitHub gets the branch, title and description.
 
@@ -127,15 +128,17 @@ A custom reviewer's approval is its own; it never counts as yours.
 GitHub's auto-merge. galley publishes once the reviewer agents are done with the latest commit,
 the agent is waiting with all feedback seen, your conversations are resolved, and the branch
 merges cleanly into its base. It is for the first publish only. Cancel, closing it, your own
-Request changes, a new base or a failed publish turns it off. With **Enable auto-merge on
-GitHub** checked too, GitHub merges it once its required checks pass.
+Request changes, a new base or a failed publish turns it off; a signing prompt nobody answered
+does so only after a few tries over the next hour. With **Enable auto-merge on GitHub** checked
+too, GitHub merges it once its required checks pass.
 
 ## Settings
 
 The gear in the header. Per reviewer agent: whether it reviews automatically, its name, model,
 reasoning effort, limit of automatic reviews, whether it may install dependencies and run the
 tests, whether it skips pull requests by its own kind of agent, and for Claude, whether those
-tests may listen on localhost. Under Publishing: the merge method for auto-merge.
+tests may listen on localhost. Under Publishing: the merge method for auto-merge, and how many
+times to try signing again.
 
 | Variable | Default | |
 |---|---|---|

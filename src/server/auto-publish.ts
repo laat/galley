@@ -2,9 +2,11 @@
 // galley publishes on its own once the agents are done with the pull request: the reviewer
 // agents with its head, and the author with their feedback (Service.readiness). After that, each
 // commit the author waits with is pushed to the published pull request, with no approval and no
-// review here (Service.pushUpdate): GitHub's reviews and checks take over.
+// review here (Service.pushUpdate): GitHub's reviews and checks take over. A signing that failed
+// for now is tried again later, on the server's poll, whether the author still waits or not
+// (Service.autoPublishSigningFailed, Service.pushReady).
 import type { PullRow } from './db.ts';
-import { HttpError, publishFingerprint, type ChangeEvent, type Service } from './service.ts';
+import { HttpError, publishFingerprint, SigningError, type ChangeEvent, type Service } from './service.ts';
 
 export class AutoPublisher {
   private s: Service;
@@ -36,15 +38,19 @@ export class AutoPublisher {
   }
 
   /**
-   * Check every pull request that has auto-publish on, and every one whose author waits. The
-   * server does this when it polls, for what changes without an event: settings, or an automatic
-   * review that decided not to start.
+   * Check every pull request that has auto-publish on, every published one with a head GitHub does
+   * not have, and every one whose author waits. The server does this when it polls, for what
+   * changes without an event: settings, an automatic review that decided not to start, or the time
+   * coming to try a signing again.
    */
   considerAll(): void {
     // A poll that was under way when the server closed must not touch the closed database.
     if (this.stopped) return;
     const approved = this.s.db.all<{ id: number }>("SELECT id FROM pulls WHERE auto_publish IS NOT NULL AND state = 'staged'").map((p) => p.id);
-    for (const id of new Set([...approved, ...this.s.waitingPulls()])) this.consider(id);
+    const unpushed = this.s.db
+      .all<{ id: number }>("SELECT id FROM pulls WHERE state = 'published' AND COALESCE(github_state, 'open') = 'open' AND head_sha IS NOT COALESCE(published_source_sha, published_head_sha)")
+      .map((p) => p.id);
+    for (const id of new Set([...approved, ...unpushed, ...this.s.waitingPulls()])) this.consider(id);
   }
 
   /** Publish, or push an update, in the background if the pull request is ready for it. */
@@ -93,6 +99,7 @@ export class AutoPublisher {
     } catch (e) {
       // Changed since the check (a push, an edit, new feedback, a review starting, a new approval): the change brings another check.
       if (e instanceof HttpError && (e.status === 412 || e.status === 428)) return;
+      if (e instanceof SigningError) return this.s.autoPublishSigningFailed(pull, by, e, approval);
       this.s.autoPublishFailed(pull, by, (e as Error).message, approval);
     }
   }

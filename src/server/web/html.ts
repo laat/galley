@@ -87,6 +87,14 @@ export function duration(iso: string, nowMs = Date.now()): string {
   return `${Math.round(h / 24)} days`;
 }
 
+/** A time still to come, as the time of day ("12:40"), with the day when it is not today. */
+export function clockTime(iso: string, nowMs = Date.now()): Safe {
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const day = d.toDateString() === new Date(nowMs).toDateString() ? '' : `${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} `;
+  return html`<time datetime="${iso}" title="${d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}">${day}${time}</time>`;
+}
+
 /** A duration since `iso` that keeps counting in the page (see updateTimes in app.js). */
 export function since(iso: string | null | undefined): Safe {
   if (!iso) return raw('');

@@ -1,7 +1,7 @@
 import type { Service } from '../service.ts';
 import type { Reviewer } from '../reviewers/reviewer.ts';
 import type { Definition } from '../reviewers/definition.ts';
-import { readSettings, MAX_ITERATIONS_LIMIT, MERGE_METHODS } from '../settings.ts';
+import { readSettings, MAX_ITERATIONS_LIMIT, MAX_SIGNING_RETRIES, MERGE_METHODS } from '../settings.ts';
 import { html, icon, raw, type Safe } from './html.ts';
 import { layout } from './components.ts';
 
@@ -275,6 +275,19 @@ export function publishingSettingsPage(s: Service): string {
           ${MERGE_METHODS.map((m) => html`<option value="${m}"${settings.mergeMethod === m ? raw(' selected') : ''}>${MERGE_METHOD_NAMES[m]}</option>`)}
         </select>
         <p class="note">How GitHub merges a pull request that galley enabled auto-merge for.</p>
+      </div>
+      <div class="flash flash-error js-form-error" hidden></div>
+      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
+    </form>
+    <div class="Subhead">
+      <h2 class="Subhead-heading">Signing</h2>
+      <p class="Subhead-description">Auto-publish and the pushes after publishing sign with your key while nobody may be there to answer a prompt. When signing fails in a way that may pass, such as a 1Password prompt nobody answered or an agent that is locked or not running, they try again later instead of giving up: after 5 minutes, then 15, then 45, each wait three times the last. Each try may show the prompt again.</p>
+    </div>
+    <form class="settings-form js-api-form" data-api="/api/settings/publish" data-method="PUT" data-toast="Settings saved">
+      <div class="form-group">
+        <label class="form-label" for="signing-retries">Signing retries</label>
+        <input class="form-control input-narrow" type="number" id="signing-retries" name="signingRetries" min="0" max="${MAX_SIGNING_RETRIES}" value="${settings.signingRetries}">
+        <p class="note">After this many, auto-publish turns off and a push is not tried again, as for a signing failure that can not pass, such as a missing key. 0 gives up at once.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>

@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type Ctx, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
@@ -10,7 +10,7 @@ import { lastEvent, readEvent } from '../events.ts';
 import { avatarUrl, commentUrl, reasonText } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
-import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, since, type Safe } from './html.ts';
+import { avatar, clockTime, fileAnchor, html, icon, plural, raw, relTime, shortSha, since, type Safe } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
 import { closingIssues, pullReferences, type ReferenceContext } from './references.ts';
 import {
@@ -615,9 +615,17 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
           { cls: 'timeline-badge--open' },
         );
       }
+      const signing = data.signing;
+      const next = signing
+        ? signing.next_at
+          ? html`. Signing failed${signingWhy(signing)}; it is tried again ${signingRetry(signing, signing.next_at)}`
+          : html`. Signing failed${signingWhy(signing)}, so it is not tried again`
+        : data.retry
+          ? `, and it is tried again when ${p.author.login} waits`
+          : '';
       return timelineBadge(
         'x',
-        html`Could not ${data.force ? 'force-push' : 'push'} <code>${shortSha(data.source)}</code> to ${to} ${when}; nothing on GitHub was overwritten${data.retry ? `, and it is tried again when ${p.author.login} waits` : ''}
+        html`Could not ${data.force ? 'force-push' : 'push'} <code>${shortSha(data.source)}</code> to ${to} ${when}; nothing on GitHub was overwritten${next}
         <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
@@ -649,7 +657,14 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     case 'auto_publish_failed':
       return timelineBadge(
         'x',
-        html`Auto-publish failed and turned itself off ${when}
+        html`Auto-publish failed and turned itself off ${when}${data.signing ? html`: signing failed${signingWhy(data.signing)}` : ''}
+        <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        { cls: 'timeline-badge--danger' },
+      );
+    case 'auto_publish_retry':
+      return timelineBadge(
+        'x',
+        html`Auto-publish could not sign <code>${shortSha(data.head)}</code>${signingWhy(data.signing)} ${when}; it stays on and tries again ${signingRetry(data.signing, data.signing.next_at ?? e.created_at)}
         <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
@@ -843,8 +858,9 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     // Auto-publish turns itself off when publishing fails; say so until it is on again or the pull request is published.
     const last = lastEvent(s.db, pull, ['auto_publish_enabled', 'auto_publish_disabled', 'auto_publish_failed', 'published']);
     if (last?.type === 'auto_publish_failed') {
+      const signing = last.data.signing;
       rows.push(html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Auto-publish failed ${relTime(last.created_at)}</strong>
-        <div class="color-fg-muted">It turned itself off. Publish by hand, or turn it on again.</div>
+        <div class="color-fg-muted">${signing ? html`Signing failed${signingWhy(signing)}, and it ` : 'It '}turned itself off. Publish by hand, or turn it on again.</div>
         <pre class="merge-error">${last.data.error}</pre></div></div>`);
     }
   }
@@ -932,17 +948,42 @@ function onRewritten(rewritten: GithubPush['rewritten']): Safe | '' {
 }
 
 /**
+ * After "signing failed": why, " (1Password prompt not answered)", and once it is not tried again,
+ * how that ended: " after 3 retries", or ", in a way trying again can not get past".
+ */
+function signingWhy(f: SigningFailure): Safe {
+  if (!f.why) return html`, in a way trying again can not get past`;
+  const why = html` (${f.why})`;
+  return f.next_at || !f.retries ? why : html`${why} after ${plural(f.retries, 'retry', 'retries')}`;
+}
+
+/**
+ * When a signing that failed is tried again, `at`, and which retry that is: "at 12:40, retry 1 of
+ * 3". `now`: what the pull request waits for now, which says "now, …" once it is due; the timeline
+ * keeps the time.
+ */
+function signingRetry(f: SigningFailure, at: string, now = false): Safe {
+  return html`${now && Date.parse(at) <= Date.now() ? 'now' : html`at ${clockTime(at)}`}, retry ${f.failures} of ${f.retries}`;
+}
+
+/**
  * Published, the commit the author waited with could not be pushed to GitHub (Service.pushUpdate):
- * GitHub refused it, and it is not tried again, or it failed otherwise, and is tried again.
+ * GitHub refused it, and it is not tried again; signing failed, and it is tried again later or
+ * not at all; or it failed otherwise, and is tried again.
  */
 function pushFailedRow(p: PullPage, push: GithubPush): Safe {
   const { author } = p;
   const rewritten = push.fetched && 'sha' in push.fetched && push.fetched.rewritten;
-  const next = push.retry
-    ? html`It is tried again each time ${author.login} waits, every few minutes while it does. Publish the update yourself to push it now, signing it if a prompt went unanswered.`
-    : rewritten
-      ? html`${author.login} was told to rebase the commits it made since galley last pushed onto the branch as rewritten on GitHub, which galley fetched, without the commits from before. This commit is not tried again; the next one ${author.login} waits with goes on top of the rewritten branch, unless it brings back commits the rewrite removed.`
-      : html`${author.login} was told. It is not tried again: publish the update yourself once the branch on GitHub is sorted out. A later commit ${author.login} waits with is pushed if GitHub takes it: one that has the commits added there (fetched, and rebased onto), or leaves out what GitHub declined.`;
+  const signing = push.signing;
+  const next = signing?.next_at
+    ? html`Signing failed${signingWhy(signing)}. It is tried again ${signingRetry(signing, signing.next_at, true)}, whether ${author.login} waits or not. Publish the update yourself to push it now.`
+    : signing
+      ? html`Signing failed${signingWhy(signing)}. ${author.login} was told, and it is not tried again: publish the update yourself to sign and push it. The next commit ${author.login} waits with is pushed as usual.`
+      : push.retry
+        ? html`It is tried again each time ${author.login} waits, every few minutes while it does. Publish the update yourself to push it now.`
+        : rewritten
+          ? html`${author.login} was told to rebase the commits it made since galley last pushed onto the branch as rewritten on GitHub, which galley fetched, without the commits from before. This commit is not tried again; the next one ${author.login} waits with goes on top of the rewritten branch, unless it brings back commits the rewrite removed.`
+          : html`${author.login} was told. It is not tried again: publish the update yourself once the branch on GitHub is sorted out. A later commit ${author.login} waits with is pushed if GitHub takes it: one that has the commits added there (fetched, and rebased onto), or leaves out what GitHub declined.`;
   return html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Could not ${push.force ? 'force-push' : 'push'} <code>${shortSha(push.source)}</code> to GitHub ${relTime(push.at)}</strong>
     <div class="color-fg-muted">Nothing on GitHub was overwritten. ${next}</div>
     <pre class="merge-error">${push.error ?? ''}</pre></div></div>`;
@@ -1077,7 +1118,8 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const method = auto.autoMerge;
   const items = s.autoPublishChecklist(pull).map((i) => {
     const mark = i.ok ? icon('check', { cls: 'color-fg-success' }) : i.failed ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' });
-    return html`<li>${mark} <span>${'text' in i ? i.text : reviewerText(i.reviewer.login, i.reviewer.status, pull, author)}</span></li>`;
+    const text = 'text' in i ? i.text : 'signing' in i ? signingRetryText(i.signing) : reviewerText(i.reviewer.login, i.reviewer.status, pull, author);
+    return html`<li>${mark} <span>${text}</span></li>`;
   });
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-open' })}<div class="flex-auto">
     <strong>Auto-publish is on</strong>
@@ -1085,6 +1127,11 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
     <ul class="merge-checks">${items}</ul>
   </div>
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;
+}
+
+/** The signing auto-publish tries again, for its checklist. */
+function signingRetryText(retry: AutoPublishRetry): Safe {
+  return html`Signing failed ${relTime(retry.at)}${signingWhy(retry)}; trying again ${signingRetry(retry, retry.next_at, true)}`;
 }
 
 /** A reviewer agent's progress with the head, for the auto-publish checklist. */

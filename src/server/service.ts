@@ -46,6 +46,18 @@ export class HttpError extends Error {
 }
 
 /**
+ * Signing a commit failed. `transient`: what went wrong in a few words, when trying again later
+ * may get past it (transientSigning); null when it can not.
+ */
+export class SigningError extends HttpError {
+  transient: string | null;
+  constructor(message: string, transient: string | null, status = 502) {
+    super(status, message);
+    this.transient = transient;
+  }
+}
+
+/**
  * A change to a pull request, or with pullId null to what any page may show. Open pages refresh
  * for it, and it wakes a `pr wait` on the pull request unless its author made it.
  */
@@ -174,10 +186,13 @@ export interface GithubPush {
   error?: string;
   /**
    * A failure that is not GitHub refusing the push: GitHub could not be reached or asked, or
-   * signing failed (a prompt nobody answered). Tried again when the author next waits, and not told
-   * to the author meanwhile. A refusal is final for the commit.
+   * signing failed for now (`signing`). Tried again when the author next waits, or for signing when
+   * `signing.next_at` comes, and not told to the author meanwhile. A refusal is final for the
+   * commit, and so is a signing that failed otherwise or too often.
    */
   retry?: boolean;
+  /** Why nothing was pushed: signing failed. */
+  signing?: SigningFailure;
   /**
    * Refused because the branch on GitHub has commits galley does not have: galley fetched the
    * branch into its remote-tracking branch `ref` (`origin/feature`), at `sha`, for the author to
@@ -193,6 +208,20 @@ export interface GithubPush {
    * pushed last, and was at `to` (`before`) when galley fetched it (preparePush).
    */
   rewritten?: { from: string; to: string };
+}
+
+/**
+ * A signing that failed (SigningError), as auto-publish and pushes after publishing record it
+ * (Service.signingFailure). `why`: what went wrong in a few words when trying again may get past
+ * it, null when it can not. `failures`: how many times in a row signing failed so, this time
+ * included. Tried again at `next_at` while that is at most `retries`, the setting then
+ * (signingRetries); null when it is not tried again.
+ */
+export interface SigningFailure {
+  why: string | null;
+  failures: number;
+  retries: number;
+  next_at: string | null;
 }
 
 /** The tip of a base branch (Service.baseTip). */
@@ -316,11 +345,19 @@ export interface AutoPublish {
 
 /**
  * One thing auto-publish waits for (`blocking`), or warns of, as the pull request's page lists it
- * (Service.autoPublishChecklist). `key`: `reviewer:<key>` (Reviewer.key), `author`, `threads`,
- * `conflicts` or `merge_method`. `failed`: not ok until someone acts, rather than once the agents
- * are done. A reviewer agent's item has its status in place of text, which the page words.
+ * (Service.autoPublishChecklist). `key`: `signing`, `reviewer:<key>` (Reviewer.key), `author`,
+ * `threads`, `conflicts` or `merge_method`. `failed`: not ok until someone acts, rather than once
+ * the agents are done. A reviewer agent's item has its status in place of text, and the retry of
+ * a signing that failed its failure (AutoPublishRetry), which the page words.
  */
-export type AutoPublishItem = { key: string; ok: boolean; blocking: boolean; failed: boolean } & ({ text: string } | { reviewer: { login: string; status: HeadStatus } });
+export type AutoPublishItem = { key: string; ok: boolean; blocking: boolean; failed: boolean } & (
+  | { text: string }
+  | { reviewer: { login: string; status: HeadStatus } }
+  | { signing: AutoPublishRetry }
+);
+
+/** The signing auto-publish tries again (Service.autoPublishRetry): when it failed, why, and when it is tried again. */
+export type AutoPublishRetry = SigningFailure & { at: string; error: string; next_at: string };
 
 /** What publishing now asks the user to acknowledge (Service.publishAsks): the request's field for it, and why. */
 export interface PublishAsk {
@@ -406,6 +443,13 @@ export const WAIT_GRACE_MS = 3000;
 /** How long each step of an unattended publish (signing a commit, the push, each gh call) may take. */
 export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
+/**
+ * How long after signing failed for now auto-publish or a push after publishing tries again; each
+ * retry after that waits three times as long as the one before: 5, 15, 45 minutes. Each try may
+ * show a prompt.
+ */
+export const SIGNING_RETRY_MS = 5 * 60 * 1000;
+
 /** How long after fetching a repository's base branches galley may fetch them again (Service.fetchBases). */
 export const FETCH_EVERY_MS = 60_000;
 /** How long fetching a branch may take: a base branch, or a pull request's after a refused push (Service.fetchHead). */
@@ -463,6 +507,8 @@ export class Service {
   stallMs = AUTHOR_STALL_MS;
   /** How long a wait that ended still counts (WAIT_GRACE_MS; tests shorten it). */
   waitGraceMs = WAIT_GRACE_MS;
+  /** How long after signing failed for now it is first tried again (SIGNING_RETRY_MS; tests shorten it). */
+  signingRetryMs = SIGNING_RETRY_MS;
   private syncing = new Map<number, Promise<PullRow>>();
   private viewerLogin: string;
   /** How long after fetching a repository's base branches they may be fetched again, except right before publishing (fetchBases). */
@@ -2391,26 +2437,36 @@ export class Service {
   }
 
   /**
-   * What auto-publish waits for, in the order the page lists it: each reviewer agent done with the
-   * head (doneForAutoPublish: a failed review holds it up, unlike for agentsDone), the author
-   * waiting with all feedback seen, none of the threads the reviewer started open, and the head
-   * known not to conflict with its base as it is now. Then what it does not wait for: GitHub no
-   * longer allows the auto-merge it was turned on with, so publishing will fail. Threads and the
-   * merge method are listed only when they are not ok.
+   * What auto-publish waits for, in the order the page lists it: the time to try again a signing
+   * that failed for now, each reviewer agent done with the head (doneForAutoPublish: a failed
+   * review holds it up, unlike for agentsDone), the author waiting with all feedback seen, none of
+   * the threads the reviewer started open, and the head known not to conflict with its base as it
+   * is now. Then what it does not wait for: GitHub no longer allows the auto-merge it was turned on
+   * with, so publishing will fail. The signing, threads and the merge method are listed only when
+   * there is something to say.
    */
   autoPublishChecklist(pull: PullRow): AutoPublishItem[] {
     const r = this.readiness(pull);
     const author = this.db.actorById(pull.author_id).login;
-    const items: AutoPublishItem[] = r.reviewers.map(({ login, reviewer, status }) => ({
-      key: `reviewer:${reviewer}`,
-      ok: doneForAutoPublish(status.state),
-      blocking: true,
-      failed: status.state === 'failed',
-      reviewer: { login, status },
-    }));
+    const retry = this.autoPublishRetry(pull);
+    const items: AutoPublishItem[] = [];
+    if (retry) items.push({ key: 'signing', ok: Date.parse(retry.next_at) <= Date.now(), blocking: true, failed: false, signing: retry });
+    for (const { login, reviewer, status } of r.reviewers) {
+      items.push({ key: `reviewer:${reviewer}`, ok: doneForAutoPublish(status.state), blocking: true, failed: status.state === 'failed', reviewer: { login, status } });
+    }
     const seen = r.authorWaiting && r.unseen === 0;
-    const text = seen ? `${author} is waiting for review, with all feedback seen` : r.authorWaiting ? `${author} has feedback it has not seen yet` : `${author} is working (not waiting for review)`;
-    items.push({ key: 'author', ok: seen, blocking: true, failed: false, text });
+    // The author waited with this head, all feedback seen, when signing failed for now: the retry
+    // goes ahead without it, since agents often stop waiting once their work is done. Not once it
+    // was handed feedback since, until it waits again.
+    const waited = !seen && !!retry && r.unseen === 0 && this.waitedSinceHanded(pull);
+    const text = seen
+      ? `${author} is waiting for review, with all feedback seen`
+      : waited
+        ? `${author} waited for review with this commit, with all feedback seen`
+        : r.authorWaiting
+          ? `${author} has feedback it has not seen yet`
+          : `${author} is working (not waiting for review)`;
+    items.push({ key: 'author', ok: seen || waited, blocking: true, failed: false, text });
     if (r.openThreads) {
       const threads = r.openThreads === 1 ? '1 conversation you started is' : `${r.openThreads} conversations you started are`;
       items.push({ key: 'threads', ok: false, blocking: true, failed: false, text: `${threads} unresolved` });
@@ -2478,15 +2534,69 @@ export class Service {
   /**
    * Auto-publish could not publish under `approval` (pulls.auto_publish as the attempt read it):
    * record why, and turn it off. Not when that approval has been turned off or replaced since:
-   * the failure belonged to it, and a newer approval makes its own attempt.
+   * the failure belonged to it, and a newer approval makes its own attempt. `signing`: it could
+   * not sign, and does not try again (autoPublishSigningFailed).
    */
-  autoPublishFailed(pull: PullRow, actor: Actor, error: string, approval: string): void {
+  autoPublishFailed(pull: PullRow, actor: Actor, error: string, approval: string, signing?: SigningFailure): void {
     const failed = this.db.transaction(() => {
       if (this.db.run('UPDATE pulls SET auto_publish = NULL WHERE id = ? AND auto_publish = ?', pull.id, approval).changes === 0) return false;
-      this.addEvent(pull, actor, 'auto_publish_failed', { error: error.slice(0, 4000) });
+      this.addEvent(pull, actor, 'auto_publish_failed', { error: error.slice(0, 4000), ...(signing ? { signing } : {}) });
       return true;
     });
     if (failed) this.emit(pull.id, 'auto_publish_failed', actor);
+  }
+
+  /**
+   * Auto-publish could not sign the head under `approval`. When trying again may get past it
+   * (SigningError.transient), it stays on and tries again when signingFailure says, without the
+   * author having to wait again (autoPublishChecklist), up to the setting's number of retries;
+   * after that, or for a failure trying again can not get past, it turns off (autoPublishFailed).
+   * Counted for the approval and the head: a new commit, or turning auto-publish off and on again,
+   * starts again. Not when the approval has been turned off or replaced since.
+   */
+  autoPublishSigningFailed(pull: PullRow, actor: Actor, e: SigningError, approval: string): void {
+    const at = (JSON.parse(approval) as AutoPublish).at;
+    const signing = this.signingFailure(e, (this.autoPublishRetry(pull)?.failures ?? 0) + 1);
+    if (!signing.next_at) return this.autoPublishFailed(pull, actor, e.message, approval, signing);
+    const recorded = this.db.transaction(() => {
+      if (!this.db.get('SELECT 1 FROM pulls WHERE id = ? AND auto_publish = ?', pull.id, approval)) return false;
+      this.addEvent(pull, actor, 'auto_publish_retry', { error: e.message.slice(0, 4000), head: pull.head_sha, approval: at, signing });
+      return true;
+    });
+    if (recorded) this.emit(pull.id, 'auto_publish_retry', actor);
+  }
+
+  /**
+   * The signing auto-publish tries again (autoPublishSigningFailed): its latest failure under the
+   * approval in force, while the head is the one it failed for. Null when there is none.
+   */
+  autoPublishRetry(pull: PullRow): AutoPublishRetry | null {
+    const auto = this.autoPublish(pull);
+    const e = auto && lastEvent(this.db, pull, 'auto_publish_retry', auto.at);
+    if (!e || e.data.approval !== auto!.at || e.data.head !== pull.head_sha || !e.data.signing.next_at) return null;
+    return { ...e.data.signing, next_at: e.data.signing.next_at, at: e.created_at, error: e.data.error };
+  }
+
+  /**
+   * Whether the author waited since it was last handed feedback that asks something of it, or
+   * told of a conflict (markSeen): done with it, as far as a retry of signing needs to know
+   * (autoPublishChecklist, mayPush).
+   */
+  private waitedSinceHanded(pull: PullRow): boolean {
+    return pull.author_handed_at === null || (pull.author_waited_at !== null && pull.author_waited_at > pull.author_handed_at);
+  }
+
+  /**
+   * What to record of a signing that failed, the `failures`th time in a row (counted by the
+   * caller). When trying again may get past it, it is tried again after signingRetryMs, and each
+   * time after that three times as long after the last, while `failures` is at most the
+   * setting's number of retries (signingRetries).
+   */
+  private signingFailure(e: SigningError, failures: number): SigningFailure {
+    const retries = readSettings(this.db).publish.signingRetries;
+    if (e.transient === null) return { why: null, failures: 1, retries, next_at: null };
+    const again = failures <= retries ? new Date(Date.now() + this.signingRetryMs * 3 ** (failures - 1)).toISOString() : null;
+    return { why: e.transient, failures, retries, next_at: again };
   }
 
   /** An auto-publish attempt under `approval` may go on: it is still the approval in force, and the agents are still done. */
@@ -2691,7 +2801,7 @@ export class Service {
   async signCommits(ctx: Ctx, pull: PullRow, timeoutMs?: number, keep?: string | null): Promise<{ head: string; signed: number }> {
     const { repo, git } = ctx;
     const signer = await this.signer(ctx);
-    if (!signer) throw new HttpError(422, 'set user.name and user.email in git to sign commits');
+    if (!signer) throw new SigningError('set user.name and user.email in git to sign commits', null, 422);
     let signed = 0;
     const { versions } = await this.signedVersions(ctx, pull, async (sha, c, parents) => {
       const r = await git.run(['commit-tree', '-S', c.tree, ...parents.flatMap((p) => ['-p', p]), '-F', '-'], {
@@ -2706,7 +2816,7 @@ export class Service {
         allowFail: true,
         timeoutMs,
       });
-      if (r.code !== 0) throw new HttpError(502, `signing commit ${sha.slice(0, 7)} failed:\n${failure(r, 'a passphrase or a 1Password prompt nobody answered?')}`);
+      if (r.code !== 0) throw new SigningError(`signing commit ${sha.slice(0, 7)} failed:\n${failure(r, 'a passphrase or a 1Password prompt nobody answered?')}`, transientSigning(r));
       const copy = r.stdout.trim();
       this.db.run(
         'INSERT INTO signed_commits (repo_id, source_sha, signed_sha) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET signed_sha = excluded.signed_sha',
@@ -3043,9 +3153,11 @@ export class Service {
   /**
    * Whether to push the published pull request's head now (pushUpdate): it may be pushed
    * (mayPush), and has not been tried yet while the author waits this time. A push that failed for
-   * want of GitHub or a signature is tried again when the author next waits, at least as often as
-   * `pr wait` asks again; one GitHub refused is not tried again for the same commit: the reviewer
-   * decides, and the author's next commit is pushed when it waits.
+   * want of GitHub is tried again when the author next waits, at least as often as `pr wait` asks
+   * again; one whose signing failed for now when its retry is due (signingFailure), whether the
+   * author waits or not. One GitHub refused is not tried again for the same commit, nor one whose
+   * signing failed otherwise or too often: the reviewer decides, and the author's next commit is
+   * pushed when it waits.
    */
   pushReady(pull: PullRow): boolean {
     return this.mayPush(pull) && this.pushTries.get(pull.id) !== this.pushTry(pull);
@@ -3070,23 +3182,38 @@ export class Service {
     };
   }
 
-  /** The head and the wait each push was last tried for (pushReady). */
+  /** The head and the wait each push was last tried for, or the retry of its signing (pushReady). */
   private pushTries = new Map<number, string>();
   private pushTry(pull: PullRow): string {
-    return `${pull.head_sha} ${this.waitsStarted.get(pull.id) ?? 0}`;
+    const signing = this.pushFailed(pull)?.signing;
+    return signing?.next_at ? `${pull.head_sha} signing ${signing.failures}` : `${pull.head_sha} ${this.waitsStarted.get(pull.id) ?? 0}`;
   }
 
   /**
    * Whether the published pull request's head may be pushed: GitHub does not have it, the pull
    * request is open there as far as galley knows, the author waits with all feedback seen, and
-   * GitHub has not refused this head before.
+   * GitHub has not refused this head before. After signing it failed for now, the retry must be
+   * due, and the author need not wait: it waited with this head when it failed, and agents often
+   * stop waiting once their work is done. Not once it was handed feedback since, until it waits again.
    */
   private mayPush(pull: PullRow): boolean {
-    if (stagingState(pull) !== 'published' || !this.headUnpublished(pull) || !this.authorWaiting(pull.id)) return false;
-    const fb = unseenFeedback(this.db, pull);
-    if (fb.reviews.length || fb.comments.length) return false;
+    if (stagingState(pull) !== 'published' || !this.headUnpublished(pull)) return false;
     const failed = this.pushFailed(pull);
-    return !failed || !!failed.retry;
+    if (failed && !failed.retry) return false;
+    const again = failed?.signing?.next_at;
+    const waiting = this.authorWaiting(pull.id);
+    if (again ? Date.parse(again) > Date.now() || !(waiting || this.waitedSinceHanded(pull)) : !waiting) return false;
+    const fb = unseenFeedback(this.db, pull);
+    return !fb.reviews.length && !fb.comments.length;
+  }
+
+  /**
+   * How many times in a row signing the head failed for now when pushing it, since GitHub last got
+   * a commit of the pull request (signingFailure).
+   */
+  private signingFailures(pull: PullRow): number {
+    const pushes = eventsSince(this.db, pull, 'github_push', pull.published_at ?? '');
+    return Math.max(0, ...pushes.map((e) => (e.data.source === pull.head_sha && e.data.signing?.why ? e.data.signing.failures : 0)));
   }
 
   /** The latest push of the pull request made when its author waited (pushUpdate), or the latest after `since`. */
@@ -3123,8 +3250,9 @@ export class Service {
    * the push whether the pull request is still open there: nothing is pushed once it is merged or
    * closed, nor without an answer. The title and description are left to publishing by hand.
    * Auto-merge, when galley turned it on and GitHub has not said it is off since, is asked for
-   * again. The timeline says what came of it. The author's wait hears of a push, and of one GitHub
-   * refused; one that failed otherwise is tried again when the author next waits (pushReady).
+   * again. The timeline says what came of it. The author's wait hears of a push, and of one that
+   * is not tried again (GitHub refused it, or signing failed for good); one that failed otherwise
+   * is tried again when the author next waits, or when the retry of its signing is due (pushReady).
    */
   async pushUpdate(ctx: Ctx): Promise<void> {
     // After a publish by hand under way, which may push the head itself.
@@ -3156,14 +3284,20 @@ export class Service {
       plan = await this.preparePush(ctx, pull, { sign, force: true, lease: true, timeoutMs });
       await this.pushPrepared(ctx, pull, plan, { timeoutMs, ready });
     } catch (e) {
-      // What changed brings another try, or ends it: a merge or close on GitHub, which the author hears of.
-      if (e instanceof HttpError && e.status === 412) return;
+      // What changed brings another try, or ends it: a merge or close on GitHub, which the author
+      // hears of. Not tried, so it may be tried again: a retry of signing would keep its try
+      // (pushTry) until it fails again, which it never would.
+      if (e instanceof HttpError && e.status === 412) {
+        this.pushTries.delete(pull.id);
+        return;
+      }
       // Refused because the branch on GitHub has commits galley does not have (the lease): fetch it,
       // as galley fetches base branches, for the author to rebase onto, which it may not be able to
       // fetch itself from its sandbox. Its next commit then goes on top of them (preparePush).
       const moved = e instanceof HttpError && e.status === 409 && /stale info|fetch first/.test(e.message);
       // Refused before the push for commits a rewrite on GitHub removed: what galley fetched before (preparePush).
       const fetched = moved ? await this.fetchHead(ctx, pull) : e instanceof HttpError ? (e.fields.fetched as GithubPush['fetched']) : undefined;
+      const signing = e instanceof SigningError ? this.signingFailure(e, this.signingFailures(pull) + 1) : undefined;
       const failed: Omit<GithubPush, 'at'> = {
         url,
         source: pull.head_sha,
@@ -3174,13 +3308,16 @@ export class Service {
         force: plan?.force ?? false,
         result: 'failed',
         error: (e instanceof Error ? e.message : String(e)).slice(0, 4000),
-        // GitHub refused it (409): final for this commit. Anything else is tried again.
-        retry: !(e instanceof HttpError && e.status === 409),
+        // GitHub refused it (409): final for this commit. Signing is tried again while
+        // signingFailure says so, and is final after that. Anything else is tried again.
+        retry: signing ? signing.next_at !== null : !(e instanceof HttpError && e.status === 409),
         ...(fetched ? { fetched } : {}),
+        ...(signing ? { signing } : {}),
       };
-      // The same failure again, tried again: the timeline has it already.
+      // The same failure again, tried again: the timeline has it already. Each try of signing is
+      // said, since it says which try it was and when the next is.
       const last = this.pushFailed(pull);
-      if (last?.retry && failed.retry && last.error === failed.error) return;
+      if (!signing && last?.retry && failed.retry && last.error === failed.error) return;
       this.addEvent(pull, viewer, 'github_push', failed);
       this.emit(pull.id, 'github_push_failed', viewer);
       return;
@@ -3362,6 +3499,38 @@ export function afterRound(round: number): string {
 function failure(r: RunResult, waitedFor?: string): string {
   if (r.timedOut) return `timed out after ${UNATTENDED_TIMEOUT_MS / 1000} seconds${waitedFor ? ` (${waitedFor})` : ''}`;
   return (r.stderr || r.stdout).trim();
+}
+
+/**
+ * Signing failures that trying again later may get past, by what git passed on from the signing
+ * program, with the few words the pages say each in: a prompt nobody answered in time or that was
+ * dismissed, and an agent that is locked or could not be reached. git's exit status is the same
+ * for every signing failure; only an unattended step that ran out of time (UNATTENDED_TIMEOUT_MS)
+ * has none, and that is a prompt nobody answered too.
+ */
+const TRANSIENT_SIGNING: [RegExp, string][] = [
+  // 1Password's op-ssh-sign: the agent hung up before it signed, as when its prompt timed out or was closed.
+  [/failed to fill whole buffer/, '1Password prompt not answered'],
+  // 1Password's agent answered with a failure: its prompt was denied.
+  [/1Password: agent returned an error/, '1Password prompt denied'],
+  // OpenSSH's ssh-agent: locked (ssh-add -x), or its confirmation (ssh-add -c) was denied.
+  [/agent refused operation/, 'SSH agent locked or prompt denied'],
+  [/Could not connect to socket|communication with agent failed|agent not present|can't connect to the agent|No agent running/i, 'signing agent not reachable'],
+  // gpg's pinentry.
+  [/signing failed: Timeout/, 'passphrase prompt not answered'],
+  [/signing failed: Operation cancelled/, 'passphrase prompt dismissed'],
+];
+
+/**
+ * What went wrong when signing failed in a way trying again later may get past (TRANSIENT_SIGNING),
+ * in a few words; null for anything else, which trying again can not: no signing key configured,
+ * a key that can not be read or is not in the agent, a signing program that is not there, git's
+ * configuration.
+ */
+function transientSigning(r: RunResult): string | null {
+  if (r.timedOut) return 'prompt not answered';
+  const said = `${r.stderr}\n${r.stdout}`;
+  return TRANSIENT_SIGNING.find(([pattern]) => pattern.test(said))?.[1] ?? null;
 }
 
 /**
