@@ -113,7 +113,7 @@ export interface CloseOptions {
   graceMs?: number;
 }
 
-export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; close: (o?: CloseOptions) => Promise<void> }> {
+export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; autoPublisher: AutoPublisher; close: (o?: CloseOptions) => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
 
   let server: ServerType;
@@ -241,6 +241,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     url,
     port,
     service,
+    autoPublisher,
     // Closing again while running reviews have time to post interrupts them.
     close: (o?: CloseOptions) => {
       if (closing) for (const r of service.reviewerAgents()) r.interrupt();

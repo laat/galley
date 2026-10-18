@@ -150,7 +150,8 @@ test('the CLI makes sure galley answers before its first request', async (t) => 
     for (const socket of sockets) socket.destroy();
     silent.close();
   });
-  await assert.rejects(new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`).get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 5 seconds: galley may be stuck there, or another program holds the port/);
+  const quiet = new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`, { probeMs: 200 });
+  await assert.rejects(quiet.get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 0\.2 seconds: galley may be stuck there, or another program holds the port/);
 });
 
 test("--help prints a command's usage without running it", async (t) => {
