@@ -206,10 +206,20 @@ export function fileJson(f: FileDiff) {
   };
 }
 
+/**
+ * A comment's URL, which the API's `html_url`, gh's `url` and its menu's Copy link give: the
+ * Conversation tab, which shows every thread but those of a pending review (Files changed leaves
+ * out outdated threads and those on a commit's message), at the comment. public/app.js opens what
+ * hides it and scrolls to it, and sends a link to a tab that does not show it to the one that does.
+ */
+export function commentUrl(pullUrl: string, c: Pick<CommentRow, 'id' | 'kind'>): string {
+  return `${pullUrl}#${c.kind === 'issue' ? 'issuecomment-' : 'discussion_r'}${c.id}`;
+}
+
 export function issueCommentJson(s: Service, repo: RepoRow, pull: PullRow, c: CommentRow) {
   return {
     id: c.id,
-    html_url: `${s.pullUrl(repo, pull)}#issuecomment-${c.id}`,
+    html_url: commentUrl(s.pullUrl(repo, pull), c),
     issue_url: `${apiBase(s, repo)}/issues/${pull.number}`,
     user: userJson(s, s.db.actorById(c.author_id)),
     body: c.body,
@@ -238,7 +248,7 @@ export function reviewCommentJson(s: Service, repo: RepoRow, pull: PullRow, c: C
     body: c.body,
     created_at: c.created_at,
     updated_at: c.updated_at,
-    html_url: `${s.pullUrl(repo, pull)}#discussion_r${c.id}`,
+    html_url: commentUrl(s.pullUrl(repo, pull), c),
     pull_request_url: `${apiBase(s, repo)}/pulls/${pull.number}`,
     // galley extensions:
     priority: c.priority,
@@ -460,7 +470,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
       author: ghAuthor(s, c.author_id),
       body: c.body,
       createdAt: c.created_at,
-      url: `${s.pullUrl(repo, pull)}#issuecomment-${c.id}`,
+      url: commentUrl(s.pullUrl(repo, pull), c),
     })),
   );
   let agents: Set<number> | undefined;
@@ -520,7 +530,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
           author: ghAuthor(s, c.author_id),
           body: c.body,
           createdAt: c.created_at,
-          url: `${s.pullUrl(repo, pull)}#discussion_r${c.id}`,
+          url: commentUrl(s.pullUrl(repo, pull), c),
         })),
       }));
   }

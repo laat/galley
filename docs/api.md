@@ -32,6 +32,7 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 - `POST …/pulls/{n}/pending-comments`: add a comment to the caller's pending review, starting one.
 - A comment may sit on an unchanged line of a changed file, outside the diff's hunks.
 - Fields on a review comment: `priority`, `outdated`, `resolved`.
+- A comment's `html_url` (and `url` in the gh shapes) is the Conversation tab at the comment, `…/pull/{n}#discussion_r{id}` or `#issuecomment-{id}`, also for a thread that is outdated or on a commit's message, which Files changed does not show. Opened, the page opens the thread or file that hides it; on a tab that does not show it, it goes on to the one that does.
 
 ## Reviewer agents
 

@@ -56,7 +56,7 @@ description: Stage a pull request in galley, the user's local review server, ins
 3. Read what it printed:
 
    ```
-   thread 12 on src/upload.ts:40-42 [unresolved]
+   thread 12 on src/upload.ts:40-42 [unresolved] http://localhost:24823/acme/app/pull/4#discussion_r12
        +  for (let i = 0; i < 3; i++) {
        laat:
          Use the backoff helper here.
@@ -65,6 +65,8 @@ description: Stage a pull request in galley, the user's local review server, ins
    - `thread <id> on <path>:<lines>`: about those lines; with `(old side)`, about those lines as
      they were before the change. `[unresolved, outdated]`: the code changed since; check whether
      it still applies.
+   - The URL at the end opens the thread in the web UI. Give it to the user when you mention or ask
+     about a thread.
    - `thread <id> on file <path>`: about the whole file.
    - `thread <id> on the message of commit <sha> "<headline>"`: about that commit's message.
      Reword the commit. `(no longer in the branch)` in place of the headline: a rewrite replaced
