@@ -1,11 +1,11 @@
 // A pull request's timeline events (the events table), and what each type's JSON holds. Some of
 // it also decides what galley does next: whether a push signs (Service.signsUpdates), whether a
-// failed push is tried again (Service.pushFailed), whether a push goes on top of a branch
-// rewritten on GitHub (Service.fetchedRewritten), and which merge method auto-merge asks for
-// again after a push. So events are written and read back here, typed by their type, and
+// failed push is tried again (Service.pushFailed), when auto-publish tries signing again
+// (Service.autoPublishRetry), whether a push goes on top of a branch rewritten on GitHub
+// (Service.fetchedRewritten), and which merge method auto-merge asks for again after a push. So events are written and read back here, typed by their type, and
 // reshaping one for the timeline fails typecheck where it is read.
 import { now, type Actor, type CancelReason, type Db, type EventRow, type PullRow } from './db.ts';
-import type { AutoPublishOff, GithubPush } from './service.ts';
+import type { AutoPublishOff, GithubPush, SigningFailure } from './service.ts';
 import type { MergeMethod } from './settings.ts';
 
 /** What each type of event holds. Fields marked optional are missing from events written before them. */
@@ -35,7 +35,13 @@ export interface EventData {
   auto_publish_enabled: { sign: boolean; draft: boolean; force: boolean; auto_merge?: MergeMethod | null };
   /** Before auto-publish ended at the first publish, it also turned off when merged or closed on GitHub. */
   auto_publish_disabled: { reason: AutoPublishOff | 'merged' | 'closed_on_github' };
-  auto_publish_failed: { error: string };
+  /** `signing`: it could not sign, and did not try again (Service.autoPublishSigningFailed). */
+  auto_publish_failed: { error: string; signing?: SigningFailure };
+  /**
+   * Auto-publish could not sign `head` under the approval turned on at `approval` (AutoPublish.at),
+   * and stays on to try again at `signing.next_at` (Service.autoPublishSigningFailed).
+   */
+  auto_publish_retry: { error: string; head: string; approval: string; signing: SigningFailure };
   iterations_stopped: { round: number };
   iterations_resumed: Record<string, never>;
   review_cancelled: { head: string; reason: CancelReason };

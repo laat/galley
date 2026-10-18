@@ -919,11 +919,14 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       out(
         c.gray(
           'Nothing on GitHub was overwritten, and this commit is not tried again. Do not push or force-push to GitHub yourself: the user has been told, and decides. ' +
-            (fetched?.rewritten
-              ? `The branch on GitHub was rewritten there, and galley fetched it into ${fetched.ref}. Rebase the commits you made ${since ? `after ${since}` : 'since galley last pushed'} onto it, leaving out the ones before` +
+            // Signing failed for good: nothing for the author to change, and its next commit is pushed as usual.
+            (r.push.signing
+              ? 'Signing it as the user failed; the user can publish it by hand. Your next commit is pushed when you wait.'
+              : fetched?.rewritten
+                ? `The branch on GitHub was rewritten there, and galley fetched it into ${fetched.ref}. Rebase the commits you made ${since ? `after ${since}` : 'since galley last pushed'} onto it, leaving out the ones before` +
                   (since ? ` (\`git rebase --onto ${fetched.ref} ${since}\`)` : '') +
                   `, and wait: galley pushes them on top of it. Do not merge ${fetched.ref} in: a commit that brings back what the rewrite removed is refused.`
-              : `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (${bringIn}), or leaves out what GitHub declined.`),
+                : `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (${bringIn}), or leaves out what GitHub declined.`),
         ),
       );
     }

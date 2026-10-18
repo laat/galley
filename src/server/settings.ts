@@ -36,6 +36,11 @@ export type MergeMethod = (typeof MERGE_METHODS)[number];
 export interface PublishSettings {
   /** How GitHub merges a pull request that galley turned on auto-merge for: gh pr merge --squash, --merge or --rebase. */
   mergeMethod: MergeMethod;
+  /**
+   * How many times auto-publish and pushes after publishing try again when signing failed in a
+   * way trying again may get past, such as a 1Password prompt nobody answered (Service.signingFailure).
+   */
+  signingRetries: number;
 }
 
 export interface Settings {
@@ -48,10 +53,12 @@ export const DEFAULT_SETTINGS: Settings = {
   codex: { enabled: false, name: 'codex-review', model: '', effort: '', maxIterations: 3, runTests: true, localhost: false, skipOwnKind: false },
   // Not "claude": that is what the CLI calls an author agent running in Claude Code.
   claude: { enabled: false, name: 'claude-review', model: '', effort: '', maxIterations: 3, runTests: true, localhost: false, skipOwnKind: false },
-  publish: { mergeMethod: 'squash' },
+  publish: { mergeMethod: 'squash', signingRetries: 3 },
 };
 
 export const MAX_ITERATIONS_LIMIT = 20;
+/** At most this many signing retries: the fifth comes almost seven hours after the fourth (SIGNING_RETRY_MS). */
+export const MAX_SIGNING_RETRIES = 5;
 
 export function readSettings(db: Db): Settings {
   let stored: Partial<Settings> = {};
@@ -96,6 +103,11 @@ export function nextSettings(
     const method = String(p.mergeMethod) as MergeMethod;
     if (!MERGE_METHODS.includes(method)) throw new HttpError(422, `merge method must be one of ${MERGE_METHODS.join(', ')}`);
     next.publish.mergeMethod = method;
+  }
+  if (p.signingRetries !== undefined) {
+    const n = Number(p.signingRetries);
+    if (!Number.isInteger(n) || n < 0 || n > MAX_SIGNING_RETRIES) throw new HttpError(422, `signing retries must be a whole number from 0 to ${MAX_SIGNING_RETRIES}`);
+    next.publish.signingRetries = n;
   }
   return next;
 }
