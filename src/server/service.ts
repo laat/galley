@@ -45,11 +45,21 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * A change to a pull request, or with pullId null to what any page may show. Open pages refresh
+ * for it, and it wakes a `pr wait` on the pull request unless its author made it.
+ */
 export interface ChangeEvent {
   pullId: number | null;
   type: string;
-  actor: string;
+  /** The login of the actor that made it (Service.emit); null for one from a source. */
+  actor: string | null;
+  /** Where a change no actor made comes from (Service.emitSystem); null for an actor's. */
+  source: ChangeSource | null;
 }
+
+/** Where a change no actor made comes from: GitHub, git (a fetch, a rename, a conflict check), the settings, or galley itself (a stall, a stopping server). */
+export type ChangeSource = 'github' | 'git' | 'settings' | 'galley';
 
 export interface Ctx {
   repo: RepoRow;
@@ -170,6 +180,16 @@ export interface GithubPush {
   retry?: boolean;
 }
 
+/** The tip of a base branch (Service.baseTip). */
+export interface BaseTip {
+  /** The branch it is the tip of: the remote-tracking one (origin/main) when there is one, else the local one. */
+  ref: string;
+  /** Its commit; null when there is no such branch. */
+  sha: string | null;
+  /** Whether that is the remote-tracking branch. */
+  tracking: boolean;
+}
+
 /**
  * Whether a pull request's head merges cleanly into the tip of its base branch, as galley worked
  * it out with `git merge-tree` (see Service.baseConflicts).
@@ -177,7 +197,7 @@ export interface GithubPush {
 export interface BaseConflicts {
   /** The base branch it is about (pulls.base_ref). */
   branch: string;
-  /** The branch it was merged into: the remote-tracking one (origin/main) when there is one, else the local one. */
+  /** The branch it was merged into (BaseTip.ref). */
   ref: string;
   /** That branch's tip, as this repository has it (galley fetches it: Service.fetchBases); null when there is no such branch. */
   base: string | null;
@@ -419,8 +439,8 @@ export class Service {
   custom: CustomReviewers | null = null;
   /** The server is stopping, once the reviews running now have posted (see startServer's close). */
   stopping = false;
-  /** Number of `pr wait` calls currently blocked, per pull id. */
-  waiters = new Map<number, number>();
+  /** Number of `pr wait` calls currently blocked, per pull id (authorWaiting, waitingPulls). */
+  private waiters = new Map<number, number>();
   /** When an author that keeps the reviewer agents waiting has stalled (AUTHOR_STALL_MS; tests shorten it). */
   stallMs = AUTHOR_STALL_MS;
   /** How long a wait that ended still counts (WAIT_GRACE_MS; tests shorten it). */
@@ -484,7 +504,15 @@ export class Service {
   }
 
   emit(pullId: number | null, type: string, actor: Actor): void {
-    this.bus.emit('change', { pullId, type, actor: actor.login } satisfies ChangeEvent);
+    this.bus.emit('change', { pullId, type, actor: actor.login, source: null } satisfies ChangeEvent);
+  }
+
+  /**
+   * Announce a change no actor made, from `source`. Never as an actor: an author agent may be
+   * named "github" or "git" (GALLEY_ACTOR), and its `pr wait` would take the change for its own.
+   */
+  emitSystem(pullId: number | null, type: string, source: ChangeSource): void {
+    this.bus.emit('change', { pullId, type, actor: null, source } satisfies ChangeEvent);
   }
 
   // --------------------------------------------------------- GitHub repos
@@ -555,7 +583,7 @@ export class Service {
         this.githubRepoCache.set(slug, { at: Date.now(), value });
         // Pages rendered before this answer came show old or no options; let them refresh.
         if (JSON.stringify(value) !== JSON.stringify(current?.value ?? null)) {
-          this.bus.emit('change', { pullId: null, type: 'github_repo', actor: 'github' } satisfies ChangeEvent);
+          this.emitSystem(null, 'github_repo', 'github');
         }
       });
     this.githubRepoCache.set(slug, { at: current?.at ?? 0, value: current?.value ?? null, loading });
@@ -602,7 +630,7 @@ export class Service {
       if (JSON.stringify(value) !== JSON.stringify(before)) changed = true;
     }
     // Pages rendered before the answer came link without titles; let them refresh.
-    if (changed) this.bus.emit('change', { pullId: null, type: 'github_issues', actor: 'github' } satisfies ChangeEvent);
+    if (changed) this.emitSystem(null, 'github_issues', 'github');
   }
 
   // ------------------------------------------------------ following GitHub
@@ -681,7 +709,7 @@ export class Service {
       return pull.github_state === 'open' && same ? null : 'github_status';
     });
     // From GitHub, like what merging allows: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
-    if (type) this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
+    if (type) this.emitSystem(pullId, type, 'github');
   }
 
   /**
@@ -722,7 +750,7 @@ export class Service {
     });
     if (!type) return;
     this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId)!, state === 'merged' ? 'merged' : 'closed_on_github');
-    this.bus.emit('change', { pullId, type, actor: 'github' } satisfies ChangeEvent);
+    this.emitSystem(pullId, type, 'github');
   }
 
   // ----------------------------------------------------------------- repos
@@ -787,7 +815,7 @@ export class Service {
       this.db.run('INSERT OR REPLACE INTO repo_aliases (owner, name, repo_id) VALUES (?, ?, ?)', repo.owner, repo.name, repo.id);
       this.db.update('repos', repo.id, { owner, name });
     });
-    this.bus.emit('change', { pullId: null, type: 'repo_renamed', actor: 'git' } satisfies ChangeEvent);
+    this.emitSystem(null, 'repo_renamed', 'git');
   }
 
   /** Follow each repository's remote to the GitHub repository it names now (followSlug), as registering it again would. */
@@ -841,12 +869,16 @@ export class Service {
   }
 
   /**
-   * The commit a base branch points at. The remote-tracking branch wins over the local one,
-   * because that is what the pull request will be compared against once it is on GitHub.
+   * The tip of a base branch. The remote-tracking branch wins over the local one, because that is
+   * what the pull request will be compared against once it is on GitHub. From `refs` (Repo.refs)
+   * when the caller has read them, else from git.
    */
-  async baseCommit(repo: RepoRow, baseRef: string): Promise<string | null> {
+  async baseTip(repo: RepoRow, branch: string, refs?: Map<string, string>): Promise<BaseTip> {
     const git = this.git(repo);
-    return (await git.resolve(`refs/remotes/${repo.remote}/${baseRef}`)) ?? (await git.resolve(`refs/heads/${baseRef}`));
+    const resolve = async (ref: string) => (refs ? (refs.get(ref) ?? null) : await git.resolve(ref));
+    const tracking = await resolve(`refs/remotes/${repo.remote}/${branch}`);
+    if (tracking) return { ref: `${repo.remote}/${branch}`, sha: tracking, tracking: true };
+    return { ref: branch, sha: await resolve(`refs/heads/${branch}`), tracking: false };
   }
 
   // ----------------------------------------------------------------- pulls
@@ -932,7 +964,7 @@ export class Service {
     if (head === base) throw new HttpError(422, `head branch "${head}" is the same as base branch "${base}"`);
     const headSha = await git.resolve(`refs/heads/${head}`);
     if (!headSha) throw new HttpError(422, `head branch "${head}" does not exist in ${repo.git_dir}`);
-    const baseTip = await this.baseCommit(repo, base);
+    const baseTip = (await this.baseTip(repo, base)).sha;
     if (!baseTip) throw new HttpError(422, `base branch "${base}" does not exist`);
     // One merged on GitHub is done with (sync no longer follows its branch): the branch can be
     // staged again. One closed on GitHub keeps it, since publishing it again reopens the loop.
@@ -1054,7 +1086,7 @@ export class Service {
     const current = () => this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
     const head = await git.resolve(`refs/heads/${pull.head_ref}`);
     if (!head) return current(); // Branch deleted locally; keep showing the last known state.
-    const baseTip = await this.baseCommit(repo, pull.base_ref);
+    const baseTip = (await this.baseTip(repo, pull.base_ref)).sha;
     this.observeBase(pull.id, baseTip);
     const mergeBase = (baseTip && (await git.mergeBase(baseTip, head))) ?? pull.base_sha;
     if (head === pull.head_sha && mergeBase === pull.base_sha) return current();
@@ -1101,7 +1133,7 @@ export class Service {
       }
       for (const pull of pulls) {
         const head = refs.get(`refs/heads/${pull.head_ref}`);
-        const base = refs.get(`refs/remotes/${repo.remote}/${pull.base_ref}`) ?? refs.get(`refs/heads/${pull.base_ref}`);
+        const base = (await this.baseTip(repo, pull.base_ref, refs)).sha;
         const key = `${head} ${base}`;
         if (head && this.lastPolled.get(pull.id) !== key) {
           // Once synced: a sync that failed (a git error) is tried again on the next poll.
@@ -1139,7 +1171,7 @@ export class Service {
    * GitHub over https with gh's credentials, whatever the remote's URL: an ssh remote's agent may
    * ask for approval in a window, and this runs in the background. A repository not on GitHub is
    * not fetched. Each goes into its remote-tracking branch, and only one that is there already:
-   * without one, the base is the local branch (baseCommit). The poll then sees the base move, as
+   * without one, the base is the local branch (baseTip). The poll then sees the base move, as
    * when the user fetches. At most once every fetchEveryMs per repository, however many pages and
    * pull requests ask; a round that fetched nothing (each base a local branch, say) does not count.
    * `base` (publishing) fetches that base alone, now, and leaves the throttle as it was. Each joins
@@ -1215,7 +1247,7 @@ export class Service {
       } else this.fetchErrors.delete(key);
     }
     // Pages say when the base could not be fetched; the base moving is announced when the poll sees it.
-    if (changed) this.bus.emit('change', { pullId: null, type: 'base_fetch', actor: 'git' } satisfies ChangeEvent);
+    if (changed) this.emitSystem(null, 'base_fetch', 'git');
     return fetched;
   }
 
@@ -1302,9 +1334,8 @@ export class Service {
         if (!pull) return;
         const repo = this.repoById(pull.repo_id);
         const git = this.git(repo);
-        // The base as baseCommit has it: the remote-tracking branch wins.
-        const tracking = await git.resolve(`refs/remotes/${repo.remote}/${pull.base_ref}`);
-        const base = tracking ?? (await git.resolve(`refs/heads/${pull.base_ref}`));
+        const tip = await this.baseTip(repo, pull.base_ref);
+        const base = tip.sha;
         // Seen just now, so the answer for it counts once it comes (currentConflicts), without
         // waiting for the next poll to see the same tip; a later look overwrites it.
         this.baseTips.set(id, base);
@@ -1312,7 +1343,7 @@ export class Service {
         if (before && before.head === pull.head_sha && before.branch === pull.base_ref && before.base === base && before.clean !== null) return;
         const found: BaseConflicts = {
           branch: pull.base_ref,
-          ref: tracking ? `${repo.remote}/${pull.base_ref}` : pull.base_ref,
+          ref: tip.ref,
           base,
           head: pull.head_sha,
           clean: null,
@@ -1331,7 +1362,7 @@ export class Service {
           found.behind = await git.countCommits(pull.head_sha, base).catch(() => null);
         }
         this.conflictsFound.set(id, found);
-        if (JSON.stringify(found) !== JSON.stringify(before)) this.bus.emit('change', { pullId: id, type: 'base_conflicts', actor: 'git' } satisfies ChangeEvent);
+        if (JSON.stringify(found) !== JSON.stringify(before)) this.emitSystem(id, 'base_conflicts', 'git');
       })
       .catch((e) => console.error('checking for conflicts with the base failed:', e));
   }
@@ -1357,7 +1388,7 @@ export class Service {
     const ts = now();
     const changes: Record<string, string | number | null> = {};
     if (input.base !== undefined && input.base !== pull.base_ref) {
-      if (!(await this.baseCommit(repo, input.base))) throw new HttpError(422, `base branch "${input.base}" does not exist`);
+      if (!(await this.baseTip(repo, input.base)).sha) throw new HttpError(422, `base branch "${input.base}" does not exist`);
     }
     this.db.transaction(() => {
       if (input.title !== undefined && input.title.trim() && input.title !== pull.title) {
@@ -1878,6 +1909,29 @@ export class Service {
     }
   }
 
+  /**
+   * Whether the author's `pr wait` is blocked now. With `grace`, also for waitGraceMs after one
+   * ended, until another starts (setWaiting): turn() counts that, so the author's state does not
+   * flip between re-polls. The rest asks without it: the sidebar, the merge box and the JSON say
+   * "not waiting" then, and the reviewer agents, auto-publish and pushes go only on a wait.
+   */
+  authorWaiting(id: number, opts: { grace?: boolean } = {}): boolean {
+    return this.waiters.has(id) || (opts.grace === true && this.waitingStopped.has(id));
+  }
+
+  /** The pull requests whose author's `pr wait` is blocked now (authorWaiting, without the grace). */
+  waitingPulls(): number[] {
+    return [...this.waiters.keys()];
+  }
+
+  /**
+   * The reviewer agents of the pull request (those `filter` keeps) decide again whether to review,
+   * if its author is waiting now: after a change that may let them, the author need not wait again.
+   */
+  reconsider(pull: PullRow, filter: (r: Reviewer) => boolean = () => true): void {
+    if (this.authorWaiting(pull.id)) for (const r of this.reviewersFor(pull)) if (filter(r)) r.consider(pull.id);
+  }
+
   /** What a `pr wait` on the pull request returns now, or null while there is nothing new. */
   private waitResult(id: number): WaitResult | null {
     const checkedAt = now();
@@ -1957,6 +2011,7 @@ export class Service {
             signal?.removeEventListener('abort', done);
             resolve();
           };
+          // Anything but the author's own changes; one from GitHub or git has no actor (emitSystem).
           const onChange = (e: ChangeEvent) => {
             if (e.pullId === id && e.actor !== author.login) done();
           };
@@ -2002,7 +2057,7 @@ export class Service {
    * need not wait again for them. (Those of the code review what a push brings when the author waits.)
    */
   private reconsiderDescription(pull: PullRow): void {
-    if ((this.waiters.get(pull.id) ?? 0) > 0) for (const r of this.reviewersFor(pull)) if (r.reviews === 'description') r.consider(pull.id);
+    this.reconsider(pull, (r) => r.reviews === 'description');
   }
 
   /** Cancel the reviewer agents' reviews of the pull request, for what just happened to it (see Reviewer.cancel). Before the change is announced, so nobody hears they are still at work. */
@@ -2058,7 +2113,7 @@ export class Service {
    */
   readiness(pull: PullRow): Readiness {
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engine, reviewer: r.key, status: r.headStatus(pull) }));
-    const authorWaiting = (this.waiters.get(pull.id) ?? 0) > 0;
+    const authorWaiting = this.authorWaiting(pull.id);
     const fb = unseenFeedback(this.db, pull);
     const unseen = fb.reviews.length + fb.comments.length;
     const openThreads = this.db.get<{ n: number }>(
@@ -2093,9 +2148,9 @@ export class Service {
     // Such feedback it has not been handed yet. Not waiting, it hears of it only when the reviewer says so.
     const asked = askedAt(this.db, pull);
     const unseen = asked !== null && asked > pull.author_seen_at;
-    // A wait that just ended counts for a few seconds more (see setWaiting), long enough for the
-    // author to confirm the feedback it was handed.
-    const waiting = r.authorWaiting || this.waitingStopped.has(pull.id);
+    // A wait that just ended counts for a few seconds more (authorWaiting's grace), long enough for
+    // the author to confirm the feedback it was handed.
+    const waiting = this.authorWaiting(pull.id, { grace: true });
     // Published, a commit GitHub does not have is pushed when the author waits (pushUpdate), unless
     // pushing it failed: then the reviewer decides.
     const unpushed = stagingState(pull) === 'published' && this.headUnpublished(pull);
@@ -2207,7 +2262,7 @@ export class Service {
       const acted = this.authorActedAt(pull);
       if (Date.now() - Date.parse(acted) < this.stallMs || this.stallsNoticed.get(pull.id) === acted) continue;
       this.stallsNoticed.set(pull.id, acted);
-      if (this.turn(pull).reasons.some((r) => r.state === 'stalled')) this.bus.emit('change', { pullId: pull.id, type: 'stalled', actor: 'galley' } satisfies ChangeEvent);
+      if (this.turn(pull).reasons.some((r) => r.state === 'stalled')) this.emitSystem(pull.id, 'stalled', 'galley');
     }
   }
 
@@ -2443,7 +2498,7 @@ export class Service {
     });
     if (!resumed) return false;
     this.emit(pull.id, 'updated', actor);
-    if ((this.waiters.get(pull.id) ?? 0) > 0) for (const r of this.reviewersFor(pull)) r.consider(pull.id);
+    this.reconsider(pull);
     return true;
   }
 
@@ -2888,7 +2943,7 @@ export class Service {
    * GitHub has not refused this head before.
    */
   private mayPush(pull: PullRow): boolean {
-    if (stagingState(pull) !== 'published' || !this.headUnpublished(pull) || !this.waiters.get(pull.id)) return false;
+    if (stagingState(pull) !== 'published' || !this.headUnpublished(pull) || !this.authorWaiting(pull.id)) return false;
     const fb = unseenFeedback(this.db, pull);
     if (fb.reviews.length || fb.comments.length) return false;
     const failed = this.pushFailed(pull);

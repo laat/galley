@@ -228,8 +228,8 @@ export class CustomReviewers {
     for (const r of added) r.start();
     if (JSON.stringify(files) === before) return;
     // Turned on, or given more reviews: authors waiting now need not wait for their next wait.
-    for (const r of next.values()) for (const id of this.s.waiters.keys()) r.consider(id);
-    this.s.bus.emit('change', { pullId: null, type: 'settings', actor: 'settings' });
+    for (const r of next.values()) for (const id of this.s.waitingPulls()) r.consider(id);
+    this.s.emitSystem(null, 'settings', 'settings');
   }
 
   /** Why a custom reviewer can not have a name Codex's or Claude's reviewer answers to (see Reviewer.answersTo), or yours; null when it can. */

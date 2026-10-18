@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CancelReason, type Db, type Priority, type PullRow, type RepoRow, type ReviewRow, type ReviewRunRow, type Side } from '../db.ts';
-import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type ChangeEvent, type Ctx, type ReviewColumns, type Service, type Thread } from '../service.ts';
+import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type Ctx, type ReviewColumns, type Service, type Thread } from '../service.ts';
 import type { HeadStatus } from './head-status.ts';
 import { unansweredThreads } from '../feedback.ts';
 import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
@@ -570,7 +570,7 @@ export class Reviewer {
     if (reason === 'published' && run.head_sha !== pull.published_source_sha) return;
     this.halt(job, 'cancelled', reason);
     this.s.addEvent(pull, this.actor(), 'review_cancelled', { head: run.head_sha, reason });
-    if ((this.s.waiters.get(pull.id) ?? 0) > 0) this.consider(pull.id);
+    this.s.reconsider(pull, (r) => r === this);
   }
 
   /**
@@ -779,7 +779,7 @@ export class Reviewer {
     // A limit set by hand resumes stopped automatic reviews, as Resume does (which tells pages and reconsiders every reviewer).
     if (change.max_iterations === undefined || !this.s.resumeIterating(ctx, actor)) {
       this.s.emit(ctx.pull.id, 'updated', actor);
-      if ((this.s.waiters.get(ctx.pull.id) ?? 0) > 0) this.consider(ctx.pull.id);
+      this.s.reconsider(ctx.pull, (r) => r === this);
     }
     return this.config(this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!);
   }
@@ -891,7 +891,7 @@ export class Reviewer {
       .finally(() => {
         this.jobs.delete(ctx.pull.id);
         // The pages of every pull request say how many reviews a stopping server still waits for.
-        if (this.s.stopping) this.s.bus.emit('change', { pullId: null, type: 'stopping', actor: 'galley' } satisfies ChangeEvent);
+        if (this.s.stopping) this.s.emitSystem(null, 'stopping', 'galley');
       });
     this.jobs.set(ctx.pull.id, { runId, done, abort, log, reads: plan.reads });
     return runId;

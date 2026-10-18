@@ -701,7 +701,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   const submitted = p.reviews.filter((r) => r.state !== 'PENDING');
   const decision = submitted.length ? s.reviewDecision(pull, submitted) : null;
   const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
-  const waiting = (s.waiters.get(pull.id) ?? 0) > 0;
+  const waiting = s.authorWaiting(pull.id);
   // A review still to come may ask for changes, so publishing before it takes a second click.
   const busy = pull.state === 'closed' ? [] : s.reviewersAtWork(pull);
   const rows: Safe[] = [];
@@ -1112,7 +1112,7 @@ function sidebar(p: PullPage): Safe {
         return html`<li class="sidebar-person">${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${a.login}</span> ${mark}</li>`;
       })
     : html`<li class="color-fg-muted">No reviews yet</li>`;
-  const waiting = (s.waiters.get(pull.id) ?? 0) > 0;
+  const waiting = s.authorWaiting(pull.id);
   const revisions = s.revisions(pull);
   return html`<aside class="layout-sidebar">
   <div class="sidebar-item"><h3 class="sidebar-heading">Reviewers</h3><ul class="sidebar-list">${reviewers}</ul></div>

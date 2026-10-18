@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { GitError } from './git.ts';
-import { HttpError, type ChangeEvent, type Ctx, type ReviewEvent, type Service } from './service.ts';
+import { HttpError, type Ctx, type ReviewEvent, type Service } from './service.ts';
 import { now, type Actor, type ActorType, type PullRow, type RepoRow } from './db.ts';
 import {
   autoMergeResult,
@@ -111,7 +111,7 @@ export function api(s: Service): Hono {
     saveSettings(s.db, settings);
     // Turning reviews on or raising the limit should not wait for the author's next `pr wait`
     // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
-    for (const id of s.waiters.keys()) reviewer.consider(id);
+    for (const id of s.waitingPulls()) reviewer.consider(id);
     return c.json(settings);
   });
 
@@ -147,7 +147,7 @@ export function api(s: Service): Hono {
     const settings = nextSettings(s.db, { publish: await body(c) });
     saveSettings(s.db, settings);
     // Open pull request pages show the merge method next to the auto-merge option.
-    s.bus.emit('change', { pullId: null, type: 'settings', actor: 'settings' } satisfies ChangeEvent);
+    s.emitSystem(null, 'settings', 'settings');
     return c.json(settings);
   });
 
