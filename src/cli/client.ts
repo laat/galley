@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, openSync } from 'node:fs';
 import http from 'node:http';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliActor, dataDir, DEFAULT_PORT, fromEnv, serverUrl } from '../config.ts';
+import { cliActor, dataDir, DEFAULT_PORT, fromEnv, githubSlug, serverUrl } from '../config.ts';
 
 export class CliError extends Error {
   code: number;
@@ -35,6 +36,19 @@ export interface RepoRef {
   name: string;
 }
 
+/** The repository checked out where the CLI runs, as registered with galley (Client.repoFor). */
+export interface Checkout extends RepoRef {
+  /** Its top directory, or its git directory when it has no working tree. */
+  top: string;
+  /**
+   * galley's git URL for its clone of the repository, at the URL the CLI reaches galley at; unset
+   * for a repository galley reads where it is (registered by path), or a server older than clones.
+   */
+  gitUrl?: string;
+  /** The remote that names the GitHub repository, whose remote-tracking branches what galley fetched from GitHub is fetched into. */
+  remote?: string;
+}
+
 /**
  * Send the CLI's requests through the proxy that HTTP_PROXY or HTTPS_PROXY name, as curl and git
  * do; fetch ignores them on its own. A sandbox such as Claude Code's lets the CLI out to a galley
@@ -43,9 +57,23 @@ export interface RepoRef {
  */
 export function proxyFromEnv(env = process.env): void {
   if (!env.HTTP_PROXY && !env.HTTPS_PROXY && !env.http_proxy && !env.https_proxy) return;
-  const noProxy = env.NO_PROXY ?? env.no_proxy ?? 'localhost,127.0.0.1,[::1]';
+  const noProxy = noProxyFromEnv(env);
   // Node 24.14 and later: a named import would keep the CLI from loading on an earlier one.
   http.setGlobalProxyFromEnv?.({ ...env, NO_PROXY: noProxy, no_proxy: noProxy });
+}
+
+/** The hosts the CLI reaches directly when a proxy is set (proxyFromEnv): NO_PROXY, or this machine's. */
+export const noProxyFromEnv = (env = process.env) => env.NO_PROXY ?? env.no_proxy ?? 'localhost,127.0.0.1,[::1]';
+
+/**
+ * Why a sandbox keeps galley out of reach, when the CLI can tell, so that the agent tells the user
+ * rather than work around it; empty otherwise.
+ */
+export function sandboxed(): string {
+  if (process.env.CODEX_SANDBOX_NETWORK_DISABLED === '1') {
+    return ' Codex runs this command in its sandbox without network access (CODEX_SANDBOX_NETWORK_DISABLED), which keeps galley out of reach: tell the user, rather than work around it.';
+  }
+  return '';
 }
 
 const unreachable = (e: unknown) => {
@@ -67,11 +95,11 @@ const ranHere = () => existsSync(join(dataDir(), 'galley.db'));
 
 /** Why nothing answers at `base`, after the CLI started no server there or one that did not answer. */
 function away(base: string): string {
-  if (!isLocal(base)) return `galley does not answer at ${base}. Is the server running there, and can this machine reach it (is it on the tailnet)?`;
+  if (!isLocal(base)) return `galley does not answer at ${base}. Is the server running there, and can this machine reach it (is it on the tailnet)?${sandboxed()}`;
   if (!fromEnv('NO_AUTOSTART') && !ranHere()) {
-    return `the galley server is not running at ${base}, and none was started: no galley server has run on this machine with its data in ${dataDir()}. Set GALLEY_URL to your galley server's URL, or run \`galley serve\` to start one here.`;
+    return `the galley server is not running at ${base}, and none was started: no galley server has run on this machine with its data in ${dataDir()}. Set GALLEY_URL to your galley server's URL, or run \`galley serve\` to start one here.${sandboxed()}`;
   }
-  return `the galley server is not running at ${base}, and it could not be started. Run \`galley serve\` to see why.`;
+  return `the galley server is not running at ${base}, and it could not be started. Run \`galley serve\` to see why.${sandboxed()}`;
 }
 const silent = (base: string, ms: number) =>
   `nothing answered at ${base} within ${ms / 1000} seconds: galley may be stuck there, or another program holds the port.` +
@@ -159,6 +187,12 @@ export class Client {
   private linksBase: string | null = null;
   /** Whether the desktop app on this computer follows the server and opens galley links, as it said when it answered. */
   private appOpensLinks = false;
+  /** The checkouts registered (repoFor), by directory: each once per command. */
+  private checkouts = new Map<string, Promise<Checkout>>();
+  /** The checkouts registered by their GitHub name alone (checkoutOf), by directory; null where the server registers by path. */
+  private named = new Map<string, Promise<Checkout | null>>();
+  /** Where the CLI runs, for X-Galley-Client: this machine and the checkout's git directory, once it registered one. */
+  private client: string | null = null;
   constructor(base = serverUrl(), { probeMs = PROBE_MS } = {}) {
     this.base = base;
     this.probeMs = probeMs;
@@ -203,8 +237,11 @@ export class Client {
       this.appOpensLinks = !!meta?.desktop_app?.open_links;
       return found;
     } catch (e) {
-      if ((e as { cause?: { code?: string } }).cause?.code === 'UND_ERR_SOCKET') throw e;
-      throw new CliError(`could not reach galley at ${this.base}: ${reason(e)}`);
+      const code = (e as { cause?: { code?: string } }).cause?.code;
+      if (code === 'UND_ERR_SOCKET') throw e;
+      // Not allowed to connect: a sandbox's doing, likely.
+      const hint = code === 'EPERM' || code === 'EACCES' ? ' Connecting to it is not allowed here, as from a sandbox that keeps it out: tell the user, rather than work around it.' : sandboxed();
+      throw new CliError(`could not reach galley at ${this.base}: ${reason(e)}${hint ? `.${hint}` : ''}`);
     }
   }
 
@@ -240,6 +277,7 @@ export class Client {
       headers['x-galley-actor'] = actor.login;
       headers['x-galley-actor-type'] = actor.type;
     }
+    if (this.client) headers['x-galley-client'] = this.client;
     let body: string | undefined = opts.rawBody;
     if (opts.body !== undefined) body = JSON.stringify(opts.body);
     if (body !== undefined) headers['content-type'] = 'application/json';
@@ -267,14 +305,55 @@ export class Client {
     return this.json<T>('GET', path, undefined, signal);
   }
 
-  /** Register the repository at `cwd` with the server and return its owner/name. */
+  /** Register the repository at `cwd` with the server (checkout) and return its owner/name; with `override` (--repo), that one's. */
   async repoFor(cwd: string, override?: string): Promise<RepoRef> {
     if (override) {
       const parts = override.replace(/^https?:\/\/[^/]+\//, '').split('/');
       const [owner, name] = parts.length >= 3 ? parts.slice(-2) : parts;
       if (!owner || !name) throw new CliError(`expected the "[HOST/]OWNER/REPO" format, got "${override}"`);
+      await this.checkoutOf(cwd, { owner, name });
       return { owner, name };
     }
+    let checkout = this.checkouts.get(cwd);
+    if (!checkout) {
+      checkout = this.register(cwd);
+      this.checkouts.set(cwd, checkout);
+      checkout.catch(() => this.checkouts.delete(cwd));
+    }
+    return checkout;
+  }
+
+  /**
+   * Register the checkout at `cwd` when its remote names `repo`, for a command that names the
+   * repository (--repo) or the pull request by its URL: its branch is sent from there all the same
+   * (send.ts). Outside a checkout, or in one of another repository, nothing.
+   */
+  async checkoutOf(cwd: string, repo: RepoRef): Promise<void> {
+    if (this.checkouts.has(cwd) || this.named.has(cwd) || remoteOf(cwd).github?.toLowerCase() !== `${repo.owner}/${repo.name}`.toLowerCase()) return;
+    // By its GitHub name alone, which only a server that keeps clones of its own registers it by.
+    // One that registers repositories by path (422) is not asked to read the checkout, which may not
+    // be on its machine; the command goes on without it. Kept apart from repoFor's registration, which
+    // such a server takes.
+    const named = this.register(cwd, { byPath: false }).catch((e) => {
+      if (e instanceof ApiError && e.status === 422) return null;
+      throw e;
+    });
+    this.named.set(cwd, named);
+    await named;
+  }
+
+  /** The checkout at `cwd`, when this command registered it (repoFor, checkoutOf); null otherwise. */
+  async registered(cwd: string): Promise<Checkout | null> {
+    return (await this.checkouts.get(cwd)?.catch(() => null)) ?? (await this.named.get(cwd)?.catch(() => null)) ?? null;
+  }
+
+  /**
+   * Register the repository at `cwd`: by its path, and by the GitHub repository its remote names
+   * (origin, else its first), which a server that keeps clones of its own registers it by; without
+   * `byPath`, by that alone. Such a server answers with the clone's git URL, which the CLI sends
+   * branches to (send.ts).
+   */
+  private async register(cwd: string, { byPath = true } = {}): Promise<Checkout> {
     let top: string;
     try {
       top = git(cwd, ['rev-parse', '--show-toplevel']);
@@ -285,13 +364,39 @@ export class Client {
         throw new CliError('not a git repository (or any of the parent directories)');
       }
     }
-    const repo = await this.json<{ owner: { login: string }; name: string }>('POST', '/api/repos', { path: top });
-    return { owner: repo.owner.login, name: repo.name };
+    const { remote, github } = remoteOf(cwd);
+    // One per checkout: worktrees of one repository share its branches, and so its id. A header
+    // takes ASCII only.
+    const gitDir = tryGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    if (gitDir) this.client = `${hostname()}:${gitDir}`.replace(/[^\x20-\x7e]/gu, encodeURIComponent);
+    const repo = await this.json<{ owner: { login: string }; name: string; git_url?: string }>('POST', '/api/repos', byPath ? { path: top, ...(github ? { github } : {}) } : { github });
+    // At the URL the CLI reaches galley at, which its public URL may not be from here (on the server's machine, or from a sandbox).
+    const gitUrl = repo.git_url ? this.base + new URL(repo.git_url).pathname : undefined;
+    return { owner: repo.owner.login, name: repo.name, top, gitUrl, remote };
   }
 }
 
 export function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
+/** git's output, or empty when it failed. */
+function tryGit(cwd: string, args: string[]): string {
+  try {
+    return git(cwd, args);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The remote of the checkout at `cwd` that names its GitHub repository, origin or else its first,
+ * as the server follows one registered by path, and that repository's owner/name (githubSlug).
+ */
+function remoteOf(cwd: string): { remote: string | undefined; github: string | null } {
+  const remotes = tryGit(cwd, ['remote']).split('\n').filter(Boolean);
+  const remote = remotes.includes('origin') ? 'origin' : remotes[0];
+  return { remote, github: remote ? githubSlug(tryGit(cwd, ['remote', 'get-url', remote])) : null };
 }
 
 export function currentBranch(cwd: string): string | null {

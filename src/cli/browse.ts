@@ -4,6 +4,7 @@ import { ApiError, CliError, git, repoPath, type Client, type RepoRef } from './
 import { isTTY, out, stagedRef, stagedNumber } from './output.ts';
 import { openPage } from './open.ts';
 import { rendersByDefault } from '../rendered.ts';
+import { sendCommit } from './send.ts';
 
 export const BROWSE_USAGE = `Print the web UI's URL for a staged pull request, a file or a directory, and open it
 in the browser when run at a terminal, or in the desktop app while it runs and opens
@@ -91,6 +92,18 @@ function here(cwd: string): Lookup {
   };
 }
 
+/** The repository here (here), sending a commit the link names to galley's clone when it does not have it (sendCommit). */
+function sending(client: Client, cwd: string, repo: RepoRef, look: Lookup): Lookup {
+  return {
+    ...look,
+    commit: async (rev) => {
+      const sha = await look.commit(rev);
+      if (sha) await sendCommit(client, cwd, repo, sha);
+      return sha;
+    },
+  };
+}
+
 /** Another repository (--repo), through the server's GitHub-shaped API: the CLI never reads its git directory. */
 function there(client: Client, repo: RepoRef): Lookup {
   const api = repoPath(repo);
@@ -129,7 +142,7 @@ async function target(client: Client, cwd: string, arg: string | undefined, v: {
   }
   const repo = await client.repoFor(cwd, v.repo);
   const base = `/${repo.owner}/${repo.name}`;
-  const look = v.repo ? there(client, repo) : here(cwd);
+  const look = v.repo ? there(client, repo) : sending(client, cwd, repo, here(cwd));
   const commitOf = async (rev: string) => {
     const sha = await look.commit(rev);
     if (!sha) throw new CliError(`no commit "${rev}" in ${repo.owner}/${repo.name}`);

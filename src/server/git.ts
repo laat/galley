@@ -602,10 +602,3 @@ export class Repo {
     return (await this.out(['remote'])).split('\n').filter(Boolean);
   }
 }
-
-/** owner/name from a GitHub remote URL, or null when the remote is not on github.com. */
-export function githubSlug(url: string | null): string | null {
-  if (!url) return null;
-  const m = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-  return m ? `${m[1]}/${m[2]}` : null;
-}

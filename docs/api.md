@@ -13,7 +13,7 @@ under `/api/repos/{owner}/{repo}`.
 ## Identity
 
 - `X-Galley-Actor: <login>`: who the caller is; without it, the user. `X-Galley-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409.
-- `X-Galley-Client: <where>`: where the CLI runs, such as `<hostname>:<git directory>`. `POST …/pulls` keeps it with the pull request, as `client` in the gh shapes.
+- `X-Galley-Client: <where>`: where the CLI runs: `<hostname>:<git directory>`, the checkout's, from the CLI, with characters outside ASCII percent-encoded. `POST …/pulls` keeps it with the pull request, as `client` in the gh shapes.
 - Another agent can review as a GitHub review bot does, under its own name: `GALLEY_ACTOR=reviewer galley pr review <n> --comment -b "…"`, or `POST …/pulls/{n}/reviews`. Its reviews wake the author's `pr wait` like the user's.
 - Callers of type `Bot` get 403 from what is the user's to do: deleting, pinning, stop-iterating, settings, and asking for or configuring a reviewer agent.
 - Publishing and turning auto-publish on or off are the user's and the pull request's author's: other callers of type `Bot`, such as an agent reviewing under its own name, get 403. Auto-publish publishes as whoever turned it on.
@@ -62,6 +62,8 @@ A repository galley keeps a clone of (`POST /api/repos {github}`) has `git_url`,
 - replaces a branch only by a fast-forward, or with a lease on the commit galley has there: the push option `lease=<branch>:<sha>`, an empty `<sha>` for a branch galley does not have, as in `git push --force-with-lease=<branch>:<sha> -o lease=<branch>:<sha> <git_url> <branch>` (git checks `--force-with-lease` on the pushing side only).
 
 What it refuses comes back as `remote: galley: <branch>: <why>`. A push answers once galley has synced the repository's open pull requests with it, so a call right after it sees the new head. Publishing pushes from the clone to GitHub over https with `gh`'s credentials.
+
+The CLI registers a checkout with `POST /api/repos {github, path}`, and works through `git_url` when the answer has one. Run by the author, an agent, of the latest pull request that has the branch, it pushes the branch here before `pr create`, `pr wait`, `pr comment`, `pr edit`, `pr review`, `pr ready`, `pr view` and `galley browse`: a fast-forward of galley's, or a rewrite with the lease on galley's commit when the branch in the checkout had that commit (before an amend or a rebase there), never over one it never had, fetched or not. `pr create` sends nothing to the branch of an open pull request, replaces galley's branch when it is nobody's (a name used again, whose pull requests merged or were closed before publishing), and only adds to one that an open pull request is stacked on. When `pr wait` says to rebase, it fetches `refs/remotes/origin/<base>`, or `refs/remotes/origin/<head>` after a push GitHub refused (`fetched`), from here into the checkout's remote-tracking branch, unless that already has galley's commit. `pr checkout` fetches the head from here by its SHA. A pull request named by its URL, or a repository by `--repo`, counts as the checkout's when the checkout's remote names that repository: the CLI registers it then with `{github}` alone, and goes on without it when the server registers by path.
 
 ## gh shapes
 
