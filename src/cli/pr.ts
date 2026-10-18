@@ -647,39 +647,51 @@ async function status(client: Client, cwd: string, args: string[]): Promise<numb
 
 // -------------------------------------------------------------- the loop
 
-const PUBLISH_USAGE = `Push the branch and open the pull request on GitHub, or update it there.
+const PUBLISH_USAGE = `Push the branch and open the pull request on GitHub, or update it there. The user may
+publish, and so may the agent that staged it.
 
 USAGE
   galley pr publish ${PULL} [flags]
 
 FLAGS
-  -d, --draft             Open it on GitHub as a draft (default: as it is staged)
-      --sign              Sign the commits as you (default: as the last publish did, or as
-                          commit.gpgsign says)
-      --no-sign           Push the commits as they are
-  -f, --force             Force-push over commits on GitHub that this push replaces
-      --during-review     Publish while reviewer agents review it, cancelling their reviews
-      --during-conflict   Publish although the branch conflicts with its base
-      --auto              Publish once the reviewer agents are done and the author has answered
-                          them, like \`gh pr merge --auto\`
-      --auto-merge        Turn on auto-merge on GitHub once it is published
-      --disable-auto      Turn auto-publish off
+  -d, --draft                 Open it on GitHub as a draft (default: as it is staged)
+      --sign                  Sign the commits as you (default: as the last publish did, or as
+                              commit.gpgsign says)
+      --no-sign               Push the commits as they are
+  -f, --force                 Force-push, with a lease, over commits on GitHub that this push
+                              replaces (the default)
+      --no-force              Refuse to publish when it would have to force-push
+      --during-review         Publish while reviewer agents review it, cancelling their reviews
+      --during-conflict       Publish although the branch conflicts with its base
+      --auto                  Publish once the reviewer agents are done and the author has answered
+                              them, like \`gh pr merge --auto\`
+      --auto-merge [method]   Turn on auto-merge on GitHub once it is published: squash, merge or
+                              rebase (default: the merge method in galley's settings)
+      --disable-auto          Turn auto-publish off
 `;
 
+const MERGE_METHODS = ['squash', 'merge', 'rebase'];
+
 async function publish(client: Client, cwd: string, args: string[]): Promise<number> {
-  const { values: v, positionals } = parse(args, PUBLISH_USAGE, {
+  // A bare --auto-merge takes the merge method in settings; parseArgs would take what follows as one.
+  const fixed = args.map((a, i) => (a === '--auto-merge' && !MERGE_METHODS.includes(args[i + 1]) ? '--auto-merge=' : a));
+  const { values: v, positionals } = parse(fixed, PUBLISH_USAGE, {
     draft: { type: 'boolean', short: 'd' },
     force: { type: 'boolean', short: 'f' },
+    'no-force': { type: 'boolean' },
     sign: { type: 'boolean' },
     'no-sign': { type: 'boolean' },
     'during-review': { type: 'boolean' },
     'during-conflict': { type: 'boolean' },
     auto: { type: 'boolean' },
     'disable-auto': { type: 'boolean' },
-    'auto-merge': { type: 'boolean' },
+    'auto-merge': { type: 'string' },
   });
+  const method = v['auto-merge'] as string | undefined;
+  if (method && !MERGE_METHODS.includes(method)) throw new CliError(`--auto-merge takes ${MERGE_METHODS.join(', ')}, not ${method}`);
+  if (v.force && v['no-force']) throw new CliError('specify only one of --force or --no-force');
   if (v.auto && v['disable-auto']) throw new CliError('specify only one of --auto or --disable-auto');
-  if (v['auto-merge'] && v['disable-auto']) throw new CliError('--auto-merge goes with publishing; --disable-auto only turns auto-publish off');
+  if (method !== undefined && v['disable-auto']) throw new CliError('--auto-merge goes with publishing; --disable-auto only turns auto-publish off');
   if (v.auto && v['during-review']) throw new CliError('--during-review publishes now; --auto waits for the reviews instead');
   if (v.auto && v['during-conflict']) throw new CliError('--during-conflict publishes now; --auto waits for a head that merges cleanly instead');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
@@ -691,16 +703,20 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     err(`✓ Auto-publish disabled for pull request ${name}`);
     return 0;
   }
-  const autoMerge = !!v['auto-merge'];
+  const autoMerge = method !== undefined;
+  // Force-push when it has to, as the publish box offers: with a lease, over only what it replaces.
+  const force = !v['no-force'];
+  // Without a method, the server's setting.
+  const options = { draft: v.draft ? true : undefined, force, sign, auto_merge: autoMerge, merge_method: method || undefined };
   if (v.auto) {
-    await client.json('PUT', `${pullPath(t)}/auto-publish`, { draft: v.draft ? true : undefined, force: !!v.force, sign, auto_merge: autoMerge });
+    await client.json('PUT', `${pullPath(t)}/auto-publish`, options);
     err(`✓ Pull request ${name} will be published when the reviewer agents are done and the author has answered them${autoMerge ? ', with auto-merge on GitHub' : ''}`);
     return 0;
   }
   err(`Publishing ${name} to GitHub…`);
   const acknowledged = (['during-review', 'during-conflict'] as const).filter((flag) => v[flag]);
-  const body = { draft: v.draft ? true : undefined, force: !!v.force, sign, during_review: !!v['during-review'], during_conflict: !!v['during-conflict'], auto_merge: autoMerge };
-  const pr = await client.json('POST', `${pullPath(t)}/publish`, body).catch((e) => {
+  const body = { ...options, during_review: !!v['during-review'], during_conflict: !!v['during-conflict'] };
+  const pr = await client.json('POST', `${pullPath(t)}/publish`, body).catch(async (e) => {
     // A reviewer is at work, or the head conflicts with its base: the server asks whether to publish
     // anyway, and lists what the request must acknowledge (during_review, during_conflict).
     if (e instanceof ApiError && e.status === 428) {
@@ -710,6 +726,24 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
       } catch {}
       const flags = new Set([...acknowledged, ...asked.map((field) => field.replace('_', '-'))]);
       throw new CliError(`${e.message}\nRun \`galley pr publish s${t.number} ${[...flags].map((f) => `--${f}`).join(' ')}\` to publish anyway.`);
+    }
+    // Signing as the user failed (`signing`, an extension), often a prompt nobody was there to answer.
+    let signing: { transient: boolean } | undefined;
+    try {
+      signing = e instanceof ApiError ? JSON.parse(e.body).signing : undefined;
+    } catch {}
+    if (signing) {
+      // This publish again, with its options, for the same pull request: as given, a number as s4, and the repository given.
+      const ref = positionals[0] === undefined || stagedNumber(positionals[0]) !== null ? `s${t.number}` : positionals[0];
+      const command = (...flags: string[]) => ['galley pr publish', ref, ...(v.repo ? ['-R', v.repo] : []), ...flags].join(' ');
+      const same = [v.draft ? '--draft' : '', v.sign ? '--sign' : '', v['no-force'] ? '--no-force' : '', autoMerge ? `--auto-merge${method ? ` ${method}` : ''}` : ''].filter(Boolean);
+      // Auto-publish is for the first publish. An update is left to the user: the author's next wait
+      // pushes the head as the last publish did, not with this one's options.
+      const published = !!(await client.get<any>(pullPath(t)).catch(() => null))?.published_url;
+      const again = published
+        ? `Tell the user, and run \`${command(...same, ...acknowledged.map((f) => `--${f}`))}\` again when they can answer the signing prompt.`
+        : `Turn on auto-publish with \`${command('--auto', ...same)}\` and wait: it publishes once it can, and tries signing again over the next hour. Or tell the user.`;
+      throw new CliError(`${e.message}\nNothing was published. ${signing.transient ? again : 'Trying again fails the same way: tell the user.'}`);
     }
     throw e;
   });
@@ -919,7 +953,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`galley pr wait ${all}\` again${pushes}` : null;
     if (r.status === 'published') {
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
-      else out(text ? 'Published, but read the feedback above: the user may still want changes.' : 'The user is done with this pull request.');
+      // Whoever published it: the user, the author, or auto-publish that either turned on.
+      else out(text ? 'Published, but read the feedback above: the user may still want changes.' : 'Its review in galley is over.');
       // Published with a conflict (a second click): the rebase is left.
       out(c.gray(rebase ?? `Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       out(c.gray(PUSHES));
@@ -984,7 +1019,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       );
     }
     if (pr.state === 'PUBLISHED') out(c.gray(PUSHES));
-    // The reviewer approved in advance; publishing happens while the author waits.
+    // The user or the author approved in advance; publishing happens while the author waits.
     const auto = pr.autoPublishRequest;
     if (auto) {
       out(

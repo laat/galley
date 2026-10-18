@@ -48,13 +48,14 @@ export class HttpError extends Error {
 /**
  * Signing a commit failed. `why`: what went wrong in a few words, when galley can tell from what
  * the signing program said (signingCause); null when it can not. `transient`: trying again later
- * may get past it.
+ * may get past it. Both are in the error's JSON as `signing` (an extension), so the CLI can tell
+ * an agent what to do.
  */
 export class SigningError extends HttpError {
   why: string | null;
   transient: boolean;
   constructor(message: string, cause: SigningCause | null, status = 502) {
-    super(status, message);
+    super(status, message, { signing: { why: cause?.why ?? null, transient: cause?.transient ?? false } });
     this.why = cause?.why ?? null;
     this.transient = cause?.transient ?? false;
   }
@@ -600,12 +601,24 @@ export class Service {
 
   /**
    * The actor, refused with 403 and `message` when it is an agent (a Bot): for what is the user's
-   * to do, as docs/api.md lists it. Publishing, auto-publish, deleting, pinning and stop-iterating
-   * are checked here, asking for or configuring a reviewer agent in Reviewer, settings in the API.
+   * to do, as docs/api.md lists it. Deleting, pinning and stop-iterating are checked here, asking
+   * for or configuring a reviewer agent in Reviewer, settings in the API. Publishing and
+   * auto-publish are the author's too (requireUserOrAuthor).
    */
   requireHuman(actor: Actor, message = 'only the user can do this'): Actor {
     if (actor.type === 'Bot') throw new HttpError(403, message);
     return actor;
+  }
+
+  /**
+   * The actor, refused with 403 unless it is the user or the pull request's author: for publishing
+   * and auto-publish, which the agent that staged a pull request may do when the user asks it to.
+   * Any other agent is refused, one that reviews under its own name among them. `what`: what is
+   * refused, as "publish it".
+   */
+  requireUserOrAuthor(actor: Actor, pull: PullRow, what: string): Actor {
+    if (actor.type !== 'Bot' || actor.id === pull.author_id) return actor;
+    throw new HttpError(403, `only the user or the author of this pull request (${this.db.actorById(pull.author_id).login}) can ${what}, not ${actor.login}`);
   }
 
   /** Look up the GitHub login of whoever `gh` is authenticated as, so the UI can show their avatar. */
@@ -2723,11 +2736,12 @@ export class Service {
    * Approve the first publish in advance: galley publishes on its own once the agents are done
    * (see readiness), even commits pushed after this. The options are fixed now, as the publish box
    * shows them: signing and draft as checked, force if it was checked and turns out to be needed,
-   * and auto-merge with the merge method `autoMerge`.
+   * and auto-merge with the merge method `autoMerge`. The user's to do, or the author agent's when
+   * the user asked it to publish: galley then publishes as that agent.
    */
   async enableAutoPublish(ctx: Ctx, opts: { sign?: boolean; draft?: boolean; force?: boolean; autoMerge?: MergeMethod }, actor: Actor): Promise<AutoPublish> {
     const { pull, repo } = ctx;
-    this.requireHuman(actor, 'only the user can turn on auto-publish; ask them to turn it on from galley');
+    this.requireUserOrAuthor(actor, pull, 'turn on auto-publish');
     if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request before turning on auto-publish');
     if (pull.published_url) throw new HttpError(422, 'this pull request is published already; auto-publish is for the first publish, and each commit the author waits with is pushed to it');
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
@@ -2749,7 +2763,7 @@ export class Service {
   }
 
   disableAutoPublish(ctx: Ctx, actor: Actor): void {
-    this.requireHuman(actor, 'only the user can turn off auto-publish');
+    this.requireUserOrAuthor(actor, ctx.pull, 'turn off auto-publish');
     if (this.db.transaction(() => this.autoPublishOff(ctx.pull, actor, 'cancelled'))) this.emit(ctx.pull.id, 'auto_publish', actor);
   }
 
@@ -2765,7 +2779,8 @@ export class Service {
       this.addEvent(pull, actor, 'auto_publish_failed', { error: error.slice(0, 4000), ...(signing ? { signing } : {}) });
       return true;
     });
-    if (failed) this.emit(pull.id, 'auto_publish_failed', actor);
+    // Galley's doing, not the actor's: one that is the author still hears of it in its wait.
+    if (failed) this.emitSystem(pull.id, 'auto_publish_failed', 'galley');
   }
 
   /**
@@ -2785,7 +2800,7 @@ export class Service {
       this.addEvent(pull, actor, 'auto_publish_retry', { error: e.message.slice(0, 4000), head: pull.head_sha, approval: at, signing });
       return true;
     });
-    if (recorded) this.emit(pull.id, 'auto_publish_retry', actor);
+    if (recorded) this.emitSystem(pull.id, 'auto_publish_retry', 'galley');
   }
 
   /**
@@ -3249,10 +3264,11 @@ export class Service {
   }
 
   /**
-   * Push the head and open (or update) the pull request on GitHub. `approval` is auto-publish
-   * doing it, under that approval (pulls.auto_publish as the attempt read it): the attempt only
-   * goes ahead while that exact approval is in force, and nobody is there to answer a prompt,
-   * so each step gets UNATTENDED_TIMEOUT_MS. `autoMerge` turns on auto-merge on GitHub afterwards,
+   * Push the head and open (or update) the pull request on GitHub: the user's to do, or the author
+   * agent's when the user asked it to. `approval` is auto-publish doing it, under that approval
+   * (pulls.auto_publish as the attempt read it): the attempt only goes ahead while that exact
+   * approval is in force. Then, or for an agent, nobody may be there to answer a prompt, so each
+   * step gets UNATTENDED_TIMEOUT_MS. `autoMerge` turns on auto-merge on GitHub afterwards,
    * with that merge method: auto-publish's, fixed when it was turned on, or the one in settings
    * when the request came in. Publishing while a reviewer agent is at work, or a head that conflicts
    * with its base, needs `duringReview` or `duringConflict`. A head that brings back commits a
@@ -3278,7 +3294,7 @@ export class Service {
     actor: Actor,
   ): Promise<PullRow> {
     const { repo } = ctx;
-    this.requireHuman(actor, 'only the user can publish; ask them to publish from galley');
+    this.requireUserOrAuthor(actor, ctx.pull, 'publish it');
     // Refused before any work: bringing back what a rewrite on GitHub removed is the user's call,
     // made at the publish box. A CLI caller can claim to be the user (GALLEY_ACTOR), so the API
     // says whether the request came from the page, as far as its headers tell.
@@ -3307,7 +3323,9 @@ export class Service {
     // Refused before anything is pushed, rather than published without the auto-merge asked for.
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
     const cwd = repo.work_dir ?? tmpdir();
-    const timeoutMs = auto ? UNATTENDED_TIMEOUT_MS : undefined;
+    // An agent publishing is unattended too: a signing prompt nobody answers fails, as one
+    // auto-publish tries again (SigningError.transient), rather than holding the agent up.
+    const timeoutMs = auto || actor.type === 'Bot' ? UNATTENDED_TIMEOUT_MS : undefined;
     const sign = opts.sign ?? (await this.signsByDefault(ctx));
     // Every await before the push (signing can wait minutes for a prompt) lets a cancel, a replaced
     // approval, new feedback or a starting review come in. So auto-publish's last check comes after
@@ -3365,7 +3383,9 @@ export class Service {
     });
     // Published during a review (a second click): its findings would come too late.
     this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!, 'published');
-    this.emit(pull.id, auto ? 'auto_published' : 'published', actor);
+    // Auto-publish's publish is galley's doing: an author that turned it on hears of it in its wait.
+    if (auto) this.emitSystem(pull.id, 'auto_published', 'galley');
+    else this.emit(pull.id, 'published', actor);
     if (mergeMethod) await this.enableAutoMerge(ctx, url!, pushed, mergeMethod, actor, timeoutMs);
     return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
   }
@@ -3706,7 +3726,12 @@ export class Service {
     if (!merging) throw new HttpError(502, `could not ask GitHub whether ${slug} allows auto-merge`);
     if (!merging.autoMerge) throw new HttpError(422, `${slug} does not allow auto-merge. Turn on "Allow auto-merge" in the repository's settings on GitHub.`);
     if (!merging.methods.includes(method)) {
-      throw new HttpError(422, `${slug} does not allow ${method} merges, the merge method in galley's settings (it allows ${merging.methods.join(', ')}). Change it under Settings → Publishing.`);
+      // The CLI may name another than the one in settings (`--auto-merge rebase`).
+      const setting = method === readSettings(this.db).publish.mergeMethod;
+      throw new HttpError(
+        422,
+        `${slug} does not allow ${method} merges${setting ? ", the merge method in galley's settings" : ''} (it allows ${merging.methods.join(', ')}).${setting ? ' Change it under Settings → Publishing.' : ''}`,
+      );
     }
     return method;
   }

@@ -1,6 +1,6 @@
 ---
 name: galley
-description: Stage a pull request in galley, the user's local review server, instead of opening it on GitHub. Use when the user says "stage PR" or "stage a PR". The CLI mirrors `gh pr` and `gh api`; the user reviews in a GitHub-like web UI, you address the feedback, and the user publishes to GitHub.
+description: Stage a pull request in galley, the user's local review server, instead of opening it on GitHub. Use when the user says "stage PR" or "stage a PR". The CLI mirrors `gh pr` and `gh api`; the user reviews in a GitHub-like web UI, you address the feedback, and the user publishes to GitHub, or you do when the user asks.
 ---
 
 # Stage a PR
@@ -9,8 +9,9 @@ description: Stage a pull request in galley, the user's local review server, ins
 
 ## Rules
 
-- Do not `git push` or run `gh pr create`. The user publishes. After that, commit and run
-  `galley pr wait`: it pushes your commits. Never push to GitHub yourself.
+- Do not `git push` or run `gh pr create`. galley publishes, for the user or, when the user asks,
+  for you ([Publishing](#publishing)). After that, commit and run `galley pr wait`: it pushes
+  your commits. Never push to GitHub yourself.
 - Do not run `galley pr publish`, `pr close` or `pr review` unless the user asks.
 - Commit on a branch, with at least one commit over the base.
 - Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
@@ -36,7 +37,8 @@ description: Stage a pull request in galley, the user's local review server, ins
 
    Tell the user the URL it prints, that you staged it, and that the reviewer agents review it
    first; do not ask for the user's review yet. Say so if the CLI started the server. If the
-   user said how to review it, add the flag from [Reviewer agents](#reviewer-agents).
+   user said how to review it, add the flag from [Reviewer agents](#reviewer-agents). If the user
+   asked you to publish or merge it, turn on auto-publish now ([Publishing](#publishing)).
 
 2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
@@ -133,6 +135,34 @@ description: Stage a pull request in galley, the user's local review server, ins
    - `Could not push 3f2a1c9 to GitHub: …`: nothing was pushed. Do not push or force-push it
      yourself; the user decides. When it says galley fetched the branch, rebase onto it as it
      says; do not merge it in. Tell the user why, and wait again.
+
+## Publishing
+
+When the user asks you to publish ("publish", "make a real PR", "merge"), turn on auto-publish
+right after staging:
+
+```sh
+galley pr publish --auto                # publish once the reviewer agents are done
+galley pr publish --auto --auto-merge   # and let GitHub merge it once its checks pass
+```
+
+Add `--auto-merge` when the user asks you to merge, with the method if they name one
+(`--auto-merge rebase`); without a method, galley uses the user's setting. galley publishes once
+the reviewer agents are done with your latest commit and you wait with their feedback addressed,
+so go through the loop without asking the user to review: where `pr wait` would say the reviewer
+agents are done, it prints `Published to GitHub: <url>`. Go on with step 8, and keep running
+`galley pr wait` until it prints `Merged on GitHub` or says the pull request was closed.
+
+Run `galley pr publish` without `--auto` only when the user asks you to publish now. It signs
+the commits as the user, which may need them to answer a prompt; if signing fails, do what it
+says.
+
+After publishing, `pr wait` tells you of a merge or close, a conflict with the base, and
+feedback in galley, but not of GitHub's checks and reviews. Those are for another skill, such as
+`babysit`, when the user asked you to babysit the pull request. Commit its fixes and run
+`galley pr wait`, which pushes them.
+
+Without such a request, leave publishing to the user.
 
 ## After the merge
 

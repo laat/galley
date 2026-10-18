@@ -1,6 +1,7 @@
-// Auto-publish, after GitHub's auto-merge. The reviewer approves the first publish in advance, and
-// galley publishes on its own once the agents are done with the pull request: the reviewer
-// agents with its head, and the author with their feedback (Service.readiness). After that, each
+// Auto-publish, after GitHub's auto-merge. The reviewer approves the first publish in advance, or
+// the author agent when the user asked it to publish, and galley publishes on its own, as whoever
+// approved, once the agents are done with the pull request: the reviewer agents with its head,
+// and the author with their feedback (Service.readiness). After that, each
 // commit the author waits with is pushed to the published pull request, with no approval and no
 // review here (Service.pushUpdate): GitHub's reviews and checks take over. A signing that failed
 // for now is tried again later, on the server's poll, whether the author still waits or not

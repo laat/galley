@@ -78,10 +78,10 @@ test('auto-publish publishes once the agents are done', async (t) => {
       await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1 });
       try {
         assert.match(await pr.page(), /<button type="submit" class="btn" data-api="[^"]*\/auto-publish" data-method="PUT"[^>]*>.*Publish when reviews are done<\/button>/);
-        // Only the reviewer can turn it on, as only the reviewer can publish.
-        const agent = await cli(['pr', 'publish', String(pr.number), '--auto']);
-        assert.equal(agent.code, 1);
-        assert.match(agent.stderr, /only the user can turn on auto-publish/);
+        // The reviewer can turn it on, as can the author; not another agent.
+        const other = await cli(['pr', 'publish', String(pr.number), '--auto'], { actor: 'observer' });
+        assert.equal(other.code, 1);
+        assert.match(other.stderr, /only the user or the author of this pull request \(agent\) can turn on auto-publish, not observer/);
         const on = await cli(['pr', 'publish', String(pr.number), '--auto'], { actor: 'reviewer' });
         assert.equal(on.code, 0, on.stderr);
         assert.match(on.stderr, new RegExp(`Pull request acme/widgets s#${pr.number} will be published when the reviewer agents are done`));
@@ -89,7 +89,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
         const { autoPublishRequest } = JSON.parse((await cli(['pr', 'view', String(pr.number), '--json', 'autoPublishRequest'])).stdout);
         assert.deepEqual(
           { ...autoPublishRequest, enabledAt: undefined },
-          { enabledAt: undefined, enabledBy: { login: 'reviewer', is_bot: false }, sign: true, draft: false, force: false, autoMerge: null },
+          { enabledAt: undefined, enabledBy: { login: 'reviewer', is_bot: false }, sign: true, draft: false, force: true, autoMerge: null },
         );
 
         // Codex's review wakes the agent, and nothing is published until the agent has answered it.
@@ -328,8 +328,8 @@ test('auto-publish publishes once the agents are done', async (t) => {
         assert.match(await pr.page(), new RegExp(`codex-review's review of <code>${git('rev-parse', '--short=7', 'HEAD')}</code> failed\\. Ask it to review again, or publish by hand\\.`));
         // Someone has to ask for another review, or publish by hand: the user's turn.
         assert.equal((await human('GET', pr.base)).turn.whose, 'reviewer');
-        const agent = await cli(['pr', 'publish', String(pr.number), '--disable-auto']);
-        assert.equal(agent.code, 1);
+        const other = await cli(['pr', 'publish', String(pr.number), '--disable-auto'], { actor: 'observer' });
+        assert.equal(other.code, 1);
         const off = await cli(['pr', 'publish', String(pr.number), '--disable-auto'], { actor: 'reviewer' });
         assert.equal(off.code, 0, off.stderr);
         assert.match(off.stderr, new RegExp(`Auto-publish disabled for pull request acme/widgets s#${pr.number}`));

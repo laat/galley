@@ -95,7 +95,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       // A page that still shows squash cannot publish with rebase, nor turn on auto-publish.
       const update = ghCalls();
       for (const [method, path] of [['POST', 'publish'], ['PUT', 'auto-publish']]) {
-        const stale = await fetch(`${server.url}${pr.base}/${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auto_merge: true, merge_method: 'squash' }) });
+        const stale = await fetch(`${server.url}${pr.base}/${path}`, { method, headers: { 'content-type': 'application/json', origin: server.url }, body: JSON.stringify({ auto_merge: true, merge_method: 'squash' }) });
         assert.equal(stale.status, 412, path);
         assert.equal((await stale.json()).message, 'The merge method in Settings changed to rebase after this page was loaded. Refresh before publishing.');
       }
@@ -145,8 +145,8 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
       const pull = await human('POST', `${pr.base}/publish`, { auto_merge: true, merge_method: 'squash' });
       assert.deepEqual(pull.auto_merge_result, { state: 'enabled', merge_method: 'squash', error: null });
       assert.ok(calls().includes(`pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`), calls().join('\n'));
-      // A method that is neither auto-publish's nor the one in settings is still refused.
-      const stale = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auto_merge: true, merge_method: 'merge' }) });
+      // From the page, a method that is neither auto-publish's nor the one in settings is still refused.
+      const stale = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json', origin: server.url }, body: JSON.stringify({ auto_merge: true, merge_method: 'merge' }) });
       assert.equal(stale.status, 412);
     } finally {
       await human('DELETE', `${pr.base}/auto-publish`);
