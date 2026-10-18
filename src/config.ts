@@ -4,8 +4,12 @@ import { join } from 'node:path';
 export const VERSION = '0.1.0';
 /** Unassigned with IANA, below the ports macOS and Linux hand out for outgoing connections, and no dev server's default (#41). */
 export const DEFAULT_PORT = 24823;
-/** What GET /api/meta answers (an extension), so the CLI knows galley from another program on its port. */
-export const META = { name: 'galley', version: VERSION };
+/**
+ * What GET /api/meta answers (an extension), so the CLI knows galley from another program on its
+ * port. `features` names what this server can do that an older one could not, so a newer CLI can
+ * ask the user to update the server instead of failing on it; none yet.
+ */
+export const META = { name: 'galley', version: VERSION, features: [] as string[] };
 
 /** A setting from the environment: GALLEY_<name>, unset when empty. */
 export function fromEnv(name: string): string | undefined {
@@ -16,6 +20,12 @@ export function serverUrl(): string {
   const url = fromEnv('URL');
   if (url) return url.replace(/\/$/, '');
   return `http://localhost:${fromEnv('PORT') ?? DEFAULT_PORT}`;
+}
+
+/** Where a server listening on `host` (galley serve --host) answers on this machine. */
+export function localUrl(host: string, port: number): string {
+  if (['127.0.0.1', '::1', 'localhost', '0.0.0.0', '::'].includes(host)) return `http://localhost:${port}`;
+  return `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
 }
 
 export function dataDir(): string {

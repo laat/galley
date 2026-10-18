@@ -2,7 +2,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { ApiError, CliError, Client, Help, currentBranch, git, repoPath, type RepoRef } from './client.ts';
+import { ApiError, CliError, Client, GATEWAY_DOWN, Help, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, stagedNumber } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews } from './reviewers.ts';
@@ -745,9 +745,23 @@ function approvedBefore(pr: any, fresh: Set<number>): string[] {
   return lines;
 }
 
-/** The server is down or restarting: worth asking again shortly. */
+/**
+ * The server is down or restarting, or out of reach for now: worth asking again shortly. While it
+ * starts it answers 503, and a proxy in front of it (`tailscale serve`) 502 while it is down. An
+ * error of galley's own with such a status says what went wrong, and asking again would not help.
+ */
 function transient(e: unknown): boolean {
-  return (e instanceof TypeError && e.message === 'fetch failed') || (e instanceof CliError && /not running/.test(e.message));
+  if (e instanceof ApiError) return GATEWAY_DOWN.includes(e.status) && !galleyError(e);
+  return (e instanceof TypeError && e.message === 'fetch failed') || (e instanceof CliError && /not running|does not answer/.test(e.message));
+}
+
+/** Whether the error is galley's own: JSON with its message and its status, as GitHub's errors are. */
+function galleyError(e: ApiError): boolean {
+  try {
+    return typeof JSON.parse(e.body).status === 'string';
+  } catch {
+    return false;
+  }
 }
 
 const WAIT_USAGE = `Block until a staged pull request has news, and print it: feedback, the reviewer agents done
@@ -804,8 +818,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     const { t, r } = first;
     const others = targets.flatMap((other, i) => (other === t ? [] : [again(i)]));
-    const url = `${client.base}/${t.repo.owner}/${t.repo.name}/pull/${t.number}`;
     const pr = r.pr;
+    // The server's link, which starts with its public URL.
+    const url = pr.url;
     // Waiting on several: say which one this is about.
     if (others.length) out(`${c.bold(named(t))} (${pr.headRefName}): ${url}\n`);
     const fresh = {

@@ -46,13 +46,27 @@ mkdir -p "$dir" && ln -s "$PWD/bin/galley.ts" "$dir/gh-galley"
 galley serve            # http://localhost:24823
 ```
 
-You rarely need to: when no server is running, the CLI starts one in the background (log in
-`~/.local/share/galley/server.log`). `GALLEY_NO_AUTOSTART=1` turns that off. When another
-program has the port, the CLI and `galley serve` say so; `GALLEY_PORT` moves galley to another.
+Run it once on the machine that keeps your pull requests. After that you rarely need to: when
+no server is running there, the CLI starts one in the background (log in
+`~/.local/share/galley/server.log`). It starts none on a machine where galley has never run, so
+a forgotten `GALLEY_URL` fails instead of starting a second galley. `GALLEY_NO_AUTOSTART=1`
+turns starting off. When another program has the port, the CLI and `galley serve` say so;
+`GALLEY_PORT` moves galley to another.
 
 The server publishes with your `git push`, `gh` and signing key, so they must work where it
 runs. If an agent's sandbox blocks them, start the server yourself. Stopping the server lets
 running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
+
+To open galley from your other devices on a [Tailscale](https://tailscale.com) network, keep it
+on 127.0.0.1 and let `tailscale serve` give it an HTTPS address on the tailnet:
+
+```sh
+tailscale serve --bg 24823
+GALLEY_PUBLIC_URL=https://<host>.<tailnet>.ts.net galley serve
+```
+
+Links galley gives, such as **Copy link** and the ones agents print, then use that address, so
+they open on your other devices too. Agents still stage from the server's machine.
 
 ## Desktop app
 
@@ -161,6 +175,8 @@ times to try signing again.
 |---|---|---|
 | `GALLEY_URL` | `http://localhost:24823` | Where the CLI finds the server |
 | `GALLEY_PORT` | `24823` | Port for `serve` and the default URL |
+| `GALLEY_PUBLIC_URL` | the local URL | Where other machines reach the server (`serve --public-url`): its links use it, and it accepts requests to its host |
+| `GALLEY_ALLOWED_HOSTS` | unset | More hosts, or host:port, the server accepts requests to, comma-separated (`serve --allowed-host`) |
 | `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
 | `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
@@ -176,6 +192,8 @@ times to try signing again.
   process running as you can still call its API as you, publishing included: agents are kept
   from publishing only by the name the CLI gives them, which `GALLEY_ACTOR` overrides
   ([#52](https://github.com/laat/galley/issues/52)).
+- With a public URL, such as `tailscale serve`'s, every device that can reach it acts as you too.
+  Never put galley on the internet (`tailscale funnel`).
 - Secrets in a push are left to GitHub's push protection.
 - Reviewer agents run code from the pull request in a sandbox with no network, except while the
   dependencies install. Code that gets past the install's precautions could reach the API.

@@ -1,10 +1,10 @@
 import './helpers/env.ts';
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, type IncomingHttpHeaders } from 'node:http';
-import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
+import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'node:http';
+import { connect, createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -152,6 +152,123 @@ test('the CLI makes sure galley answers before its first request', async (t) => 
   });
   const quiet = new Client(`http://127.0.0.1:${(silent.address() as AddressInfo).port}`, { probeMs: 200 });
   await assert.rejects(quiet.get('/api/repos'), /nothing answered at http:\/\/127\.0\.0\.1:\d+ within 0\.2 seconds: galley may be stuck there, or another program holds the port/);
+});
+
+/** Runs bin/galley.ts in a data directory of its own, with these variables. */
+async function galley(t: TestContext, env: Record<string, string>, ...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const home = mkdtempSync(join(tmpdir(), 'galley-cli-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  try {
+    const r = await promisify(execFile)(process.execPath, [join(import.meta.dirname, '..', 'bin', 'galley.ts'), ...args], { cwd: home, env: { ...process.env, GALLEY_HOME: home, NO_COLOR: '1', ...env }, timeout: 20_000 });
+    return { code: 0, ...r };
+  } catch (e) {
+    const { code, stdout, stderr } = e as { code: number; stdout: string; stderr: string };
+    return { code, stdout, stderr };
+  }
+}
+
+test('the CLI starts no server for a galley on another machine, and says it does not answer there', async (t) => {
+  // On a machine that has run a server, which would start one for a local URL.
+  const home = mkdtempSync(join(tmpdir(), 'galley-cli-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, 'galley.db'), '');
+  const r = await galley(t, { GALLEY_URL: 'http://galley.invalid:24823', GALLEY_HOME: home, GALLEY_NO_AUTOSTART: '' }, 'api', 'health');
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'galley does not answer at http://galley.invalid:24823. Is the server running there, and can this machine reach it (is it on the tailnet)?\n');
+  assert.deepEqual(readdirSync(home), ['galley.db']);
+});
+
+test('the CLI goes through the proxy the environment names, to a galley on another machine only', async (t) => {
+  const galleyThere = await fake(t, (path) => (path === '/api/meta' ? [200, META] : [200, { ok: true }]));
+  // As `tailscale serve` answers for a galley that is down behind it.
+  const down = await fake(t, () => [502, 'Bad Gateway']);
+  // A proxy as a sandbox's is, which tunnels to the hosts it allows: down.example to the one that
+  // is down, any other name to the fake galley.
+  const tunnels: string[] = [];
+  const proxy = createServer((_req, res) => res.writeHead(405).end());
+  proxy.on('connect', (req, socket: Socket, head) => {
+    tunnels.push(req.url!);
+    if (req.url!.startsWith('blocked.example:')) return socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n');
+    const upstream = connect(Number(new URL(req.url!.startsWith('down.example:') ? down.url : galleyThere.url).port), '127.0.0.1', () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      upstream.write(head);
+      upstream.pipe(socket).on('error', () => {});
+      socket.pipe(upstream).on('error', () => {});
+    });
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    proxy.closeAllConnections();
+    proxy.close();
+  });
+  const env = { HTTP_PROXY: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`, GALLEY_NO_AUTOSTART: '1' };
+  const { port } = new URL(galleyThere.url);
+
+  const there = await galley(t, { ...env, GALLEY_URL: `http://galley.example:${port}` }, 'api', 'health');
+  assert.equal(there.code, 0, there.stderr);
+  assert.deepEqual(JSON.parse(there.stdout), { ok: true });
+  assert.deepEqual([...new Set(tunnels)], [`galley.example:${port}`]);
+  assert.deepEqual(galleyThere.paths, ['/api/meta', '/api/health']);
+  // One on this machine is reached directly, as without a proxy.
+  const tunnelled = tunnels.length;
+  const here = await galley(t, { ...env, GALLEY_URL: galleyThere.url }, 'api', 'health');
+  assert.equal(here.code, 0, here.stderr);
+  assert.equal(tunnels.length, tunnelled);
+  assert.equal(galleyThere.paths.length, 4);
+  // A proxy that refuses the host, as a sandbox's does one it does not allow, says so.
+  const blocked = await galley(t, { ...env, GALLEY_URL: 'http://blocked.example:24823' }, 'api', 'health');
+  assert.equal(blocked.code, 1);
+  assert.match(blocked.stderr, /^could not reach galley at http:\/\/blocked\.example:24823: .*\b403\b/);
+  // A proxy in front of galley that answers for it while it is down, as `tailscale serve` does.
+  const gateway = await galley(t, { ...env, GALLEY_URL: 'http://down.example:443' }, 'api', 'health');
+  assert.equal(gateway.code, 1);
+  assert.match(gateway.stderr, /^galley does not answer at http:\/\/down\.example:443\. Is the server running there/);
+});
+
+test("pr wait keeps waiting while galley restarts or a proxy in front of it says it is down, not after an error of galley's own", async (t) => {
+  // The first wait gets `first`, if any; the others wait out the rest, as galley does. With `drop`,
+  // the first question whether it is galley loses its connection, as when galley restarts.
+  let first: ((res: ServerResponse) => void) | null = null;
+  let drop = false;
+  const waits: string[] = [];
+  const server = createServer((req, res) => {
+    const json = (status: number, body: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+    if (req.url === '/api/meta' && drop) return ((drop = false), req.socket.destroy());
+    if (req.url === '/api/meta') return json(200, META);
+    const wait = req.url!.match(/\/wait\?timeout=(\d+)/);
+    if (!wait) return json(404, { message: 'Not Found' });
+    waits.push(req.url!);
+    if (waits.length === 1 && first) return first(res);
+    setTimeout(() => json(200, { status: 'timeout' }), Number(wait[1]) * 1000);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const wait = () => galley(t, { GALLEY_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1' }, 'pr', 'wait', 's1', '-R', 'acme/widgets', '--timeout', '4');
+
+  // What `tailscale serve` answers while galley is down behind it.
+  first = (res) => res.writeHead(502).end('Bad Gateway');
+  const r = await wait();
+  assert.equal(r.code, 124, r.stderr);
+  assert.match(r.stderr, /No feedback yet on acme\/widgets s#1 \(timed out\)/);
+  assert.equal(waits.length, 2);
+  // galley's own error, with the same status, ends the wait.
+  waits.length = 0;
+  first = (res) => res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ message: 'the server is shutting down', status: '503' }));
+  const own = await wait();
+  assert.equal(own.code, 1);
+  assert.equal(own.stderr, 'the server is shutting down\n');
+  assert.equal(waits.length, 1);
+  // A connection dropped before the first wait.
+  waits.length = 0;
+  drop = true;
+  first = null;
+  const dropped = await wait();
+  assert.equal(dropped.code, 124, dropped.stderr);
+  assert.equal(drop, false);
+  assert.equal(waits.length, 1);
 });
 
 test("--help prints a command's usage without running it", async (t) => {

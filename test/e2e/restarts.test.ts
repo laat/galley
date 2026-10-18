@@ -453,7 +453,7 @@ test('auto-publish stays on when the server restarts', async (t) => {
   }
 });
 
-test('the CLI starts a server when none is running', async () => {
+test('the CLI starts a server when none is running, on a machine that has run one', async () => {
   const port = await new Promise<number>((resolve) => {
     const probe = createServer().listen(0, '127.0.0.1', () => {
       const { port } = probe.address() as AddressInfo;
@@ -463,8 +463,17 @@ test('the CLI starts a server when none is running', async () => {
   const url = `http://localhost:${port}`;
   const home = mkdtempSync(join(tmpdir(), 'galley-autostart-'));
   try {
-    const r = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '' } });
+    // Only on a machine that has run one: on another, GALLEY_URL was likely forgotten.
+    const elsewhere = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '' } }).catch((e) => e);
+    assert.equal(elsewhere.code, 1);
+    assert.match(elsewhere.stderr, /, and none was started: no galley server has run on this machine with its data in .*\. Set GALLEY_URL to your galley server's URL, or run `galley serve` to start one here\./);
+    assert.equal(await fetch(`${url}/api/health`).then(() => 'answered', () => 'nothing'), 'nothing');
+    await (await startServer({ port: 0, dataDir: home, ghBin: 'false', codexBin: 'false', claudeBin: 'false', reviewersDir: join(home, 'reviewers'), viewerLogin: 'reviewer' })).close();
+    // It starts with the settings it would have from the user's shell, and the links are its.
+    const env = { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '', GALLEY_PUBLIC_URL: 'https://galley.tailnet-1234.ts.net' };
+    const r = await exec(process.execPath, [BIN, 'browse', '--settings', '--no-browser'], { cwd: repo, env });
     assert.match(r.stderr, new RegExp(`Started the galley server at ${url}`));
+    assert.equal(r.stdout, 'https://galley.tailnet-1234.ts.net/settings\n');
     // It keeps running after the command that started it.
     const health = await (await fetch(`${url}/api/health`)).json();
     assert.equal(health.ok, true);
@@ -503,7 +512,7 @@ test('the server leaves an idle connection open until the client closes it', asy
 });
 
 test('the server says it is galley, and serve says who has its port', async () => {
-  assert.deepEqual(await (await fetch(`${server.url}/api/meta`)).json(), { name: 'galley', version: '0.1.0' });
+  assert.deepEqual(await (await fetch(`${server.url}/api/meta`)).json(), { name: 'galley', version: '0.1.0', features: [], url: server.url });
   const home = mkdtempSync(join(tmpdir(), 'galley-taken-'));
   const other = createHttpServer((req, res) => res.end('hello'));
   try {
