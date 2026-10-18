@@ -491,6 +491,8 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     });
     const streamed = await fetch(`${server.url}/api/uploads`, { method: 'POST', headers: { 'content-type': 'image/png' }, body: chunks, duplex: 'half' } as RequestInit);
     assert.equal(streamed.status, 413);
+    // Read to its end before it is refused, so the client was done sending, and the connection carries on.
+    assert.equal(streamed.headers.get('connection'), 'keep-alive');
   });
 
   await t.test('uploads from other sites are refused', async () => {
