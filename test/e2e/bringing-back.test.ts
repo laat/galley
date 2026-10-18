@@ -15,7 +15,8 @@ startHarness();
 test('a head that would bring back what a rewrite on GitHub removed is refused, unless the user brings it back from the publish box', async (t) => {
   await t.test('signed, a head whose signed copies would bring back a commit the rewrite removed is refused too', async () => {
     const pr = await published('feature/push-recopied', { sign: true });
-    const ref = 'origin/feature/push-recopied';
+    // Where pr wait fetches it into the checkout.
+    const ref = 'galley/feature/push-recopied';
     const at = pr.tip().sha;
     // Someone force-pushes the unsigned commit to GitHub, and a commit on top: the signed copy galley pushed is gone.
     git('push', '-q', '--force', remote, 'HEAD:refs/heads/feature/push-recopied');
@@ -37,7 +38,8 @@ test('a head that would bring back what a rewrite on GitHub removed is refused, 
 
   await t.test('only the user, from the publish box, can publish a head that brings back what the rewrite removed: not an agent, a CLI caller claiming to be the user, nor auto-publish', async () => {
     const pr = await published('feature/push-back');
-    const ref = 'origin/feature/push-back';
+    // Where pr wait fetches it into the checkout, and where galley's clone has it.
+    const [ref, there] = ['galley/feature/push-back', 'origin/feature/push-back'];
     const at = pr.tip().sha;
     const theirs = madeOnGithub(at, git('rev-parse', 'main'), 'Add push-back.js, rebased');
     execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-back', theirs]);
@@ -50,7 +52,7 @@ test('a head that would bring back what a rewrite on GitHub removed is refused, 
 
     // The publish box says so before any click: which commit, from which rewrite, and a box to bring it back, not a force-push.
     let page = await pr.page();
-    const note = `The branch on GitHub was rewritten from <code>${at.slice(0, 7)}</code> to <code>${theirs.slice(0, 7)}</code> (galley fetched it into <code>${ref}</code>), and pushing this head would bring back a commit the rewrite removed: <code>${at.slice(0, 7)}</code>.`;
+    const note = `The branch on GitHub was rewritten from <code>${at.slice(0, 7)}</code> to <code>${theirs.slice(0, 7)}</code> (galley fetched it into <code>${there}</code>), and pushing this head would bring back a commit the rewrite removed: <code>${at.slice(0, 7)}</code>.`;
     assert.ok(page.includes(note), page);
     assert.ok(page.includes(`<input type="checkbox" name="bring_back" data-values="${at}"> Bring back the commit the rewrite removed</label>`), page);
     assert.match(page, /<label class="js-force-option" hidden>/);

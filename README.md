@@ -60,10 +60,13 @@ turns starting off. When another program has the port, the CLI and `galley serve
 galley stages pull requests of GitHub repositories, and keeps its own clone of each in its data
 directory. Before the author's commands on a pull request, such as `galley pr wait`, the CLI
 sends the agent's branch there with git, and when galley tells the agent to rebase, it fetches
-what galley fetched from GitHub into the checkout. The server publishes from its clone with
-`gh`'s credentials and your signing key, so they must work where it runs. If an agent's sandbox
-blocks them, start the server yourself. Stopping the server lets running reviews finish for up to
-10 minutes; a second Ctrl-C stops it at once.
+what galley fetched from GitHub into the checkout. The CLI keeps a remote called `galley` in the
+checkout for this: what galley fetched is in `galley/<branch>`, and `origin` stays as you last
+fetched it. A staged branch's `git push` goes to galley, not GitHub, until its pull request is
+merged or closed. A remote called `galley` of your own is left alone. The server publishes from
+its clone with `gh`'s credentials and your signing key, so they must work where it runs. If an
+agent's sandbox blocks them, start the server yourself. Stopping the server lets running reviews
+finish for up to 10 minutes; a second Ctrl-C stops it at once.
 
 To open galley from your other devices on a [Tailscale](https://tailscale.com) network, keep it
 on 127.0.0.1 and let `tailscale serve` give it an HTTPS address on the tailnet:

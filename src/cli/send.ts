@@ -3,6 +3,11 @@
 // (git-http.ts), from a checkout of the repository. Nothing for one registered by path before
 // galley kept clones, which galley could not move into one (Service.migrateRepos).
 //
+// The CLI keeps a remote called galley in the checkout, at that URL (galleyRemote), and fetches
+// back into its remote-tracking branches, galley/<branch>, leaving origin as the checkout last
+// fetched it from GitHub. A staged branch's plain `git push` goes there (setPushRemote). The CLI
+// itself sends and fetches by the URL, with git's settings for galley (toGalley), not the remote's.
+//
 // Only the pull request's author sends, as an agent (cliActor): a person at a terminal reviews, and
 // may have the branch at something else. It sends a fast-forward of what galley has, or a rewrite
 // of a commit galley has that the branch here had, with a lease on it (receive-hook.ts): never
@@ -10,7 +15,7 @@
 // even once they are fetched.
 import { execFile } from 'node:child_process';
 import { cliActor } from '../config.ts';
-import { ApiError, CliError, currentBranch, noProxyFromEnv, repoPath, sandboxed, type Checkout, type Client, type RepoRef } from './client.ts';
+import { ApiError, CliError, currentBranch, isGalleyGitUrl, noProxyFromEnv, repoPath, sandboxed, type Checkout, type Client, type RepoRef } from './client.ts';
 import { err } from './output.ts';
 
 type CloneCheckout = Checkout & { gitUrl: string };
@@ -50,7 +55,66 @@ async function cloneCheckout(client: Client, cwd: string, repo: RepoRef): Promis
   const checkout = await client.registered(cwd);
   if (!checkout?.gitUrl) return null;
   const same = checkout.owner.toLowerCase() === repo.owner.toLowerCase() && checkout.name.toLowerCase() === repo.name.toLowerCase();
-  return same ? (checkout as CloneCheckout) : null;
+  if (!same) return null;
+  await galleyRemote(checkout as CloneCheckout);
+  return checkout as CloneCheckout;
+}
+
+/** The remote the CLI keeps for galley in the checkout (galleyRemote). */
+const REMOTE = 'galley';
+
+/**
+ * What `git fetch galley` fetches: what galley fetched from GitHub, which its clone keeps in
+ * refs/remotes/origin/ (the bases, and a branch after a push GitHub refused), into galley/<branch>,
+ * where `pr wait` fetches it and tells the author to rebase onto it (fetchBack). Not the branches
+ * sent to galley, its refs/heads/: the agents' own, which would clash here with GitHub's of the
+ * same name, such as a branch's after a push GitHub refused. Nor origin/HEAD, which would be a
+ * branch here.
+ */
+const FETCH = [`+refs/remotes/origin/*:refs/remotes/${REMOTE}/*`, '^refs/remotes/origin/HEAD'];
+
+/**
+ * How the checkout's remote called galley stands, once per command (keepRemote): galley's, at its
+ * URL; the user's own, at another; or none, the checkout's git config could not be written.
+ */
+const remotes = new WeakMap<Checkout, Promise<'galley' | 'other' | 'none'>>();
+function galleyRemote(checkout: CloneCheckout): Promise<'galley' | 'other' | 'none'> {
+  let kept = remotes.get(checkout);
+  if (!kept) remotes.set(checkout, (kept = keepRemote(checkout)));
+  return kept;
+}
+
+/**
+ * Keep the remote called galley in the checkout at galley's git URL as the CLI reaches it, so it
+ * follows the server when it moves, and its push URL with it, should it have one; one added
+ * fetches FETCH. One by that name with a URL or a push URL that is not galley's is the user's (git
+ * pushes to each of them), and is left alone. That, or a git config that can not be written (as
+ * from a sandbox), is said, and the CLI goes on by URL.
+ */
+async function keepRemote(checkout: CloneCheckout): Promise<'galley' | 'other' | 'none'> {
+  const all = async (key: string) => (await run(checkout, ['config', '--get-all', key])).stdout.split('\n').filter(Boolean);
+  const urls = await all(`remote.${REMOTE}.url`);
+  const pushUrls = await all(`remote.${REMOTE}.pushurl`);
+  const theirs = [...urls, ...pushUrls].find((u) => !isGalleyGitUrl(u));
+  if (theirs) {
+    err(`This checkout has a remote called ${REMOTE} at ${theirs}, which is not galley's. The CLI leaves it alone, and goes to galley by its URL, ${checkout.gitUrl}.`);
+    return 'other';
+  }
+  if (urls.length === 1 && [...urls, ...pushUrls].every((u) => u === checkout.gitUrl)) return 'galley';
+  const url = urls[0];
+  const writes = [['config', '--replace-all', `remote.${REMOTE}.url`, checkout.gitUrl]];
+  if (!url) writes.push(['config', '--replace-all', `remote.${REMOTE}.fetch`, FETCH[0]], ...FETCH.slice(1).map((spec) => ['config', '--add', `remote.${REMOTE}.fetch`, spec]));
+  if (pushUrls.length) writes.push(['config', '--replace-all', `remote.${REMOTE}.pushurl`, checkout.gitUrl]);
+  for (const args of writes) {
+    const r = await run(checkout, args);
+    if (r.code === 0) continue;
+    err(
+      `Could not ${url ? 'set' : 'add'} the remote ${REMOTE} at ${checkout.gitUrl} in this checkout: ${lastLine(r.stderr) || `git exited with ${r.code}`}. ` +
+        `The CLI sends and fetches by that URL all the same, but a plain \`git push\` here does not go to galley.`,
+    );
+    return 'none';
+  }
+  return 'galley';
 }
 
 /** Whether galley's clone has the commit `rev` names. */
@@ -151,6 +215,49 @@ export async function sendHead(client: Client, cwd: string, repo: RepoRef, branc
   await send(client, checkout, branch, true, { replace: named.every((p) => p.state === 'MERGED' || !p.publishedUrl), kept });
 }
 
+/** A setting in the checkout's git config, or empty. */
+const setting = async (checkout: Checkout, key: string) => (await run(checkout, ['config', '--get', key])).stdout.trim();
+
+/**
+ * After `pr create` or `pr reopen`, and before the author's commands on an open pull request
+ * (sendPull): point a plain `git push` of its branch at galley (branch.<name>.pushRemote), so that
+ * one run by hand goes to galley, not GitHub. It runs the user's hooks and settings, unlike the
+ * CLI's (sendBranch): galley takes a fast-forward from it, but refuses the whole push when it
+ * brings a tag (push.followTags), and git-lfs's hook fails it; nothing goes to GitHub either way.
+ * A rewrite needs the lease that only the CLI sends. Only for the agent, whose branches the CLI
+ * sends.
+ */
+export async function setPushRemote(client: Client, cwd: string, repo: RepoRef, branch: string): Promise<void> {
+  const checkout = await cloneCheckout(client, cwd, repo);
+  if (!checkout || !cliActor() || (await galleyRemote(checkout)) !== 'galley') return;
+  const key = `branch.${branch}.pushRemote`;
+  if ((await setting(checkout, key)) === REMOTE) return;
+  if ((await run(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code !== 0) return;
+  const r = await run(checkout, ['config', key, REMOTE]);
+  if (r.code !== 0) err(`Could not point \`git push\` of ${branch} at galley in this checkout: ${lastLine(r.stderr) || `git exited with ${r.code}`}.`);
+}
+
+/**
+ * After the pull request of `branch` was merged or closed: its plain `git push` goes where it went
+ * before it was staged, unless an open pull request has the branch (its name used again). An
+ * upstream on galley goes too: the one a first push set with push.autoSetupRemote. Only on
+ * galley's remote, not one of the user's by that name.
+ */
+export async function clearPushRemote(client: Client, cwd: string, repo: RepoRef, branch: string): Promise<void> {
+  const checkout = await cloneCheckout(client, cwd, repo);
+  if (!checkout || (await galleyRemote(checkout)) !== 'galley') return;
+  if ((await setting(checkout, `branch.${branch}.pushRemote`)) !== REMOTE) return;
+  // Left as it is when galley does not say: the wait's news comes first.
+  const open = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=open&head=${encodeURIComponent(branch)}&limit=1&fields=number`).catch(() => null);
+  if (open?.length !== 0) return;
+  const keys = ['pushRemote', ...((await setting(checkout, `branch.${branch}.remote`)) === REMOTE ? ['remote', 'merge'] : [])];
+  for (const key of keys) {
+    const r = await run(checkout, ['config', '--unset', `branch.${branch}.${key}`]);
+    // Exit code 5: it was not set (an upstream's merge).
+    if (r.code !== 0 && r.code !== 5) err(`Could not unset branch.${branch}.${key} in this checkout: ${lastLine(r.stderr) || `git exited with ${r.code}`}.`);
+  }
+}
+
 /**
  * Before `pr create --base`: send the base, a branch of this checkout's that galley does not have,
  * which is not on GitHub either as far as the checkout knows (it has no remote-tracking branch of
@@ -175,12 +282,15 @@ export async function sendPull(client: Client, cwd: string, repo: RepoRef, numbe
   const checkout = await cloneCheckout(client, cwd, repo);
   const actor = cliActor();
   if (!checkout || !actor) return;
-  const pr = await client.get(`${repoPath(repo)}/gh/pulls/${number}?fields=author,headRefName`);
+  const pr = await client.get(`${repoPath(repo)}/gh/pulls/${number}?fields=author,headRefName,state`);
   if (pr.author.login !== actor.login) return;
   // The branch is the latest pull request's that has it: one done with before its name was used
   // again sends nothing to the other's.
   const named = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=all&head=${encodeURIComponent(pr.headRefName)}&limit=1000&fields=number`);
-  if (Math.max(...named.map((p) => p.number)) === number) await send(client, checkout, pr.headRefName, strict);
+  if (Math.max(...named.map((p) => p.number)) !== number) return;
+  await send(client, checkout, pr.headRefName, strict);
+  // Also for one staged before the CLI kept the remote, or reopened.
+  if (pr.state !== 'MERGED' && pr.state !== 'CLOSED') await setPushRemote(client, cwd, repo, pr.headRefName);
 }
 
 /**
@@ -203,18 +313,24 @@ export async function sendCommit(client: Client, cwd: string, repo: RepoRef, sha
 
 /**
  * After `pr wait`: fetch what galley fetched from GitHub, galley's refs/remotes/origin/<branch> at
- * `sha`, into the checkout's remote-tracking branch, for the author to rebase onto, as it may not
- * reach GitHub from its sandbox: the base the head conflicts with, or the branch on GitHub after a
- * push GitHub refused. With `staged`, the base is a branch staged in galley (stacked pull
- * requests): galley's refs/heads/<branch>, into refs/remotes/galley/<branch>, never a local branch.
- * One here that has `sha` in it, fetched since, stays; one that is older, or another (rewritten),
- * becomes galley's. Says what it is called here (<remote>/<branch>, or galley/<branch>), or null
- * when it could not be fetched, or galley has no clone of `repo`.
+ * `sha`, into galley/<branch> here (FETCH), for the author to rebase onto, as it may not reach
+ * GitHub from its sandbox: the base the head conflicts with, or the branch on GitHub after a push
+ * GitHub refused. With `staged`, the base is a branch staged in galley (stacked pull requests):
+ * galley's refs/heads/<branch>, also into galley/<branch>, never a local branch. One here that has
+ * `sha` in it, fetched since, stays; one that is older, or another (rewritten), becomes galley's.
+ * Says what it is called here, or null when it could not be fetched, or galley has no clone of
+ * `repo`. When the user has a remote called galley of their own, what is GitHub's goes into the
+ * remote-tracking branch of the remote that names GitHub's repository, and a staged base nowhere.
  */
 export async function fetchBack(client: Client, cwd: string, repo: RepoRef, branch: string, sha: string, { staged = false } = {}): Promise<string | null> {
   const checkout = await cloneCheckout(client, cwd, repo);
   if (!checkout?.remote) return null;
-  const local = `${staged ? 'galley' : checkout.remote}/${branch}`;
+  const theirs = (await galleyRemote(checkout)) === 'other';
+  if (theirs && staged) {
+    err(`Did not fetch ${branch} from galley: the remote called ${REMOTE} here is not galley's. Fetch it with \`git fetch ${checkout.gitUrl} ${branch}\`, and rebase onto FETCH_HEAD rather than your ${branch}.`);
+    return null;
+  }
+  const local = `${theirs ? checkout.remote : REMOTE}/${branch}`;
   const here = (await run(checkout, ['rev-parse', '--verify', '--quiet', `refs/remotes/${local}`])).stdout.trim();
   if (here && (await run(checkout, ['merge-base', '--is-ancestor', sha, here])).code === 0) return local;
   const spec = `+refs/${staged ? 'heads' : 'remotes/origin'}/${branch}:refs/remotes/${local}`;

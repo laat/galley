@@ -45,7 +45,7 @@ export interface Checkout extends RepoRef {
    * for one registered by path before galley kept clones, which galley could not move into one.
    */
   gitUrl?: string;
-  /** The remote that names the GitHub repository, whose remote-tracking branches what galley fetched from GitHub is fetched into. */
+  /** The remote that names the GitHub repository. */
   remote?: string;
 }
 
@@ -381,11 +381,24 @@ function tryGit(cwd: string, args: string[]): string {
   }
 }
 
-/** The remote of the checkout at `cwd` that names its GitHub repository, origin or else its first, and that repository's owner/name (githubSlug). */
+/**
+ * The remote of the checkout at `cwd` that names its GitHub repository, origin or else its first
+ * that is not galley's (the CLI keeps one: send.ts), and that repository's owner/name (githubSlug).
+ */
 function remoteOf(cwd: string): { remote: string | undefined; github: string | null } {
   const remotes = tryGit(cwd, ['remote']).split('\n').filter(Boolean);
-  const remote = remotes.includes('origin') ? 'origin' : remotes[0];
+  const remote = remotes.includes('origin') ? 'origin' : remotes.find((r) => !isGalleyGitUrl(tryGit(cwd, ['remote', 'get-url', r])));
   return { remote, github: remote ? githubSlug(tryGit(cwd, ['remote', 'get-url', remote])) : null };
+}
+
+/** Whether `url` is one of galley's git URLs, /git/<owner>/<name>.git on any server, at any address. */
+export function isGalleyGitUrl(url: string): boolean {
+  try {
+    const { protocol, pathname } = new URL(url);
+    return (protocol === 'http:' || protocol === 'https:') && /\/git\/[^/]+\/[^/]+\.git\/?$/.test(pathname);
+  } catch {
+    return false;
+  }
 }
 
 export function currentBranch(cwd: string): string | null {
