@@ -14,6 +14,7 @@ import { ClaudeReviewer } from './reviewers/claude.ts';
 import { CustomReviewers } from './reviewers/custom.ts';
 import { configDir, fromEnv, localUrl, META } from '../config.ts';
 import { uploads } from './uploads.ts';
+import { gitHttp } from './git-http.ts';
 import { AutoPublisher } from './auto-publish.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
 
@@ -38,7 +39,8 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
     await next();
   });
 
-  // Before the API and the web routes, whose /:owner/:repo would take /uploads/<file>.
+  // Before the API and the web routes, whose /:owner/:repo would take /uploads/<file> and /git/<owner>/<name>.git.
+  app.use('/git/*', gitHttp(s));
   app.route('/', uploads(opts.uploadsDir));
   app.route('/api', api(s));
 
@@ -117,6 +119,10 @@ export interface StartOptions {
   followMs?: number;
   /** How long after fetching a repository's base branches they may be fetched again (Service.fetchBases). */
   fetchMs?: number;
+  /** Keep a clone of each repository registered by its GitHub owner/name in the data directory, which the CLI pushes branches to (GALLEY_CLONES; Service.registerGithub). */
+  clones?: boolean;
+  /** Where to fetch a GitHub repository from and push it to, for clones, in place of GitHub (in tests). */
+  githubUrl?: (slug: string) => string;
 }
 
 export interface CloseOptions {
@@ -173,7 +179,16 @@ export async function startServer(opts: StartOptions): Promise<{
   // Where it answers on this machine: localhost, unless it listens on one address that is not.
   const url = localUrl(host, port);
   const publicUrl = opts.publicUrl ? new URL(opts.publicUrl) : null;
-  const service = new Service({ db, baseUrl: publicUrl?.origin ?? url, ghBin: opts.ghBin ?? fromEnv('GH'), viewerLogin: opts.viewerLogin ?? fromEnv('USER'), fetchEveryMs: opts.fetchMs });
+  const service = new Service({
+    db,
+    baseUrl: publicUrl?.origin ?? url,
+    ghBin: opts.ghBin ?? fromEnv('GH'),
+    viewerLogin: opts.viewerLogin ?? fromEnv('USER'),
+    fetchEveryMs: opts.fetchMs,
+    dataDir,
+    clones: opts.clones ?? !!fromEnv('CLONES'),
+    githubUrl: opts.githubUrl,
+  });
   // A new instance id (a copied database, or one from before namespaces) pins what it has first.
   await service.pinRevisions();
   // A repository whose remote names another GitHub repository now (renamed there) takes its name before the first page.

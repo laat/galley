@@ -169,9 +169,12 @@ export function api(s: Service): Hono {
 
   // ------------------------------------------------------------------ repos
 
+  // `github` (an extension): the repository's GitHub owner/name, which a server that keeps clones
+  // of its own (GALLEY_CLONES) registers it by. Otherwise `path`, on the server's machine.
   app.post('/repos', async (c) => {
-    const { path } = await body(c);
-    if (!path) throw new HttpError(422, 'path is required');
+    const { path, github } = await body(c);
+    if (github && s.clones) return c.json(repoJson(s, await s.registerGithub(String(github))));
+    if (!path) throw new HttpError(422, github ? 'this galley registers repositories by path: path is required' : 'path is required');
     return c.json(repoJson(s, await s.registerRepo(String(path))));
   });
   app.get('/repos', (c) => c.json(s.repos().map((r) => repoJson(s, r))));
@@ -262,7 +265,9 @@ export function api(s: Service): Hono {
     const b = await body(c);
     // galley extension: `reviewers` and `automatic_reviews` decide the reviewer agents for this pull request.
     const review = s.reviewRequest(repo, b.reviewers, b.automatic_reviews);
-    const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns }, actor(c));
+    // galley extension: X-Galley-Client says where the CLI that stages it runs.
+    const client = c.req.header('x-galley-client')?.trim().slice(0, 1000) || null;
+    const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns, client }, actor(c));
     // And the reviewer agents that review it, so the author can say who does.
     const agents = s.reviewersFor(pull).map((r) => reviewerAgentJson(r, r.enabled(pull), r.limit(pull)));
     return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}), reviewer_agents: agents }, 201);

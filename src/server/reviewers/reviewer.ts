@@ -146,7 +146,7 @@ export interface EngineJob {
   dir: string;
   /** The checkout of the head; an empty directory for a review of the description. */
   checkout: string;
-  /** The user's repository's git directory, which the checkout's .git points into: it stays read-only. Null without a checkout. */
+  /** The repository's git directory (the user's, or galley's clone of it), which the checkout's .git points into: it stays read-only. Null without a checkout. */
   gitDir: string | null;
   /** The review's TMPDIR, beside the checkout, when it may run the tests; null when it only reads. */
   tmp: string | null;

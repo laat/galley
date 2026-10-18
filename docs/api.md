@@ -13,6 +13,7 @@ under `/api/repos/{owner}/{repo}`.
 ## Identity
 
 - `X-Galley-Actor: <login>`: who the caller is; without it, the user. `X-Galley-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409.
+- `X-Galley-Client: <where>`: where the CLI runs, such as `<hostname>:<git directory>`. `POST …/pulls` keeps it with the pull request, as `client` in the gh shapes.
 - Another agent can review as a GitHub review bot does, under its own name: `GALLEY_ACTOR=reviewer galley pr review <n> --comment -b "…"`, or `POST …/pulls/{n}/reviews`. Its reviews wake the author's `pr wait` like the user's.
 - Callers of type `Bot` get 403 from what is the user's to do: publishing, auto-publish, deleting, pinning, stop-iterating, settings, and asking for or configuring a reviewer agent.
 - Bringing back commits a rewrite on GitHub removed (`bring_back` when publishing) is the user's from galley's page only: a request with `X-Galley-Actor`, whatever its type, or without the browser's `Origin` header gets 403 for it. Like the rest of the API, this goes by headers: there is no authentication, so it keeps out the CLI and plain API calls, not a caller that sends a browser's headers on purpose.
@@ -51,14 +52,25 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 - `GET …/reviewers`: the reviewer agents that review the repository: `login`, `reviewer` (as `{reviewer}` above), `engine`, `reviews` (`code` or `description`), `automatic` (whether it reviews the caller's pull requests on its own) and `max_iterations`, never their instructions. `POST …/pulls` answers with those of the new pull request, for it, in `reviewer_agents`.
 - `GET|POST /api/settings/reviewers`, `GET|PATCH|DELETE /api/settings/reviewers/{name}`: custom reviewers, with their file's keys plus `path`, `login` and the `error` that keeps one from running. PATCH changes the fields given and refuses `name`.
 
+## git
+
+A repository galley keeps a clone of (`POST /api/repos {github}`) has `git_url`, `/git/{owner}/{name}.git`, which git pushes branches to and fetches from over git's smart HTTP, protocol v2 included. Other paths under it, git's dumb protocol, unknown repositories and those registered by path get 404, and the hosts above apply. A push:
+
+- moves branches only: `refs/heads/…`. The rest are galley's: `refs/remotes/origin/…`, which it fetches from GitHub (the default branch, base branches, and a published branch after GitHub refused a push), and its pins, which it does not advertise.
+- deletes no branch.
+- replaces a branch only by a fast-forward, or with a lease on the commit galley has there: the push option `lease=<branch>:<sha>`, an empty `<sha>` for a branch galley does not have, as in `git push --force-with-lease=<branch>:<sha> -o lease=<branch>:<sha> <git_url> <branch>` (git checks `--force-with-lease` on the pushing side only).
+
+What it refuses comes back as `remote: galley: <branch>: <why>`. A push answers once galley has synced the repository's open pull requests with it, so a call right after it sees the new head. Publishing pushes from the clone to GitHub over https with `gh`'s credentials.
+
 ## gh shapes
 
-- `GET …/gh/pulls[/{n}]?fields=<a,b>`: what `gh pr list|view --json` prints. Besides gh's fields: `reviewThreads`, `publishedUrl`, `waiting`, `isPinned`, `autoPublishRequest`, `reviewRequests` (with `status`, `commit`, `startedAt`), `turn`, `unpublishedChanges`, `baseConflicts`, `githubStatus`, `ref` (`s4` for staged pull request s#4, as the CLI takes it), and `byReviewerAgent` on each review (such an approval is not in `reviewDecision`). `state` is also `STAGED` and `PUBLISHED`.
+- `GET …/gh/pulls[/{n}]?fields=<a,b>`: what `gh pr list|view --json` prints. Besides gh's fields: `reviewThreads`, `publishedUrl`, `waiting`, `isPinned`, `autoPublishRequest`, `reviewRequests` (with `status`, `commit`, `startedAt`), `turn`, `unpublishedChanges`, `baseConflicts`, `githubStatus`, `client` (`X-Galley-Client` when it was staged; null without), `ref` (`s4` for staged pull request s#4, as the CLI takes it), and `byReviewerAgent` on each review (such an approval is not in `reviewDecision`). `state` is also `STAGED` and `PUBLISHED`.
 
 ## Other
 
 - `GET /api/settings`, `PUT /api/settings/{codex|claude}`, `PUT /api/settings/publish` (`mergeMethod`, `signingRetries`: 0 to 5).
 - `POST /api/repos` `{path}`: register the repository at that path. Its `full_name` is the GitHub owner/name of its remote, and follows the remote when it names another (a repository renamed on GitHub); the old name still works under `/api/repos`, and its pages redirect.
+- `POST /api/repos` `{github}`, on a server with `GALLEY_CLONES`: register a GitHub repository by its owner/name, in any case. One registered already as that GitHub repository is answered, also one registered by path, which stays so. Otherwise galley clones it into its data directory, with the default branch fetched from GitHub (502 when GitHub does not answer with one), and the repository's `git_url` is where branches go in (see [git](#git)). Registering one twice at once clones it once. Without `GALLEY_CLONES`, `path` is required.
 - `POST /api/markdown`: also takes `pull` (a pull request's API path), to link references as its pages do, `s#4` to staged pull request 4 among them.
 - `POST /api/uploads`: an image's bytes; answers with its `path`, `/uploads/<sha256>.<ext>`, served by `GET /uploads/<sha256>.<ext>`.
 - `GET /api/meta`: `{"name": "galley", "version": …, "features": […]}`, so the CLI knows it reached galley and not another program on its port. While the server starts, the same with 503. `features` names what the server can do that an older one could not, so a newer CLI can ask for the server to be updated; none yet. Once started, `url` is its public URL, which the CLI's own links (`galley browse`, `--web`) start with.

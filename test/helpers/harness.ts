@@ -1,7 +1,9 @@
 // What each end-to-end test file in test/e2e starts from: a repository whose origin is GitHub's
 // acme/widgets, pushing to a bare repository beside it; stand-ins for gh, codex, claude and
 // sandbox-exec or bwrap; and a galley server for them. Each file calls startHarness() and gets its
-// own: node runs test files in parallel, and the tests within a file one after another.
+// own: node runs test files in parallel, and the tests within a file one after another. With
+// `clones`, the server keeps clones of its own, which fetch from and push to the bare repositories
+// in place of GitHub.
 import './env.ts';
 import { assertLeftAsFound, fakes } from './fakes.ts';
 import { after, afterEach, before } from 'node:test';
@@ -120,12 +122,33 @@ export async function human(method: string, path: string, body?: unknown): Promi
   return text ? JSON.parse(text) : null;
 }
 
+/**
+ * git in the agent's repository (or `cwd`) against the server's git endpoint, past the proxy that
+ * keeps GitHub out. Run as a process of its own, since the server runs in this one.
+ */
+export async function gitToGalley(args: string[], opts: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' };
+  try {
+    const { stdout, stderr } = await exec('git', ['-c', 'http.proxy=', ...args], { cwd: opts.cwd ?? repo, env });
+    return { stdout, stderr, code: 0 };
+  } catch (e) {
+    const { stdout = '', stderr = '', code = 1 } = e as { stdout?: string; stderr?: string; code?: number };
+    return { stdout, stderr, code };
+  }
+}
+
+/** Where a clone of the server fetches a GitHub repository from: the bare repository beside the file's repository, or a scratch repository's. */
+function githubUrl(slug: string): string {
+  return slug === 'acme/widgets' ? remote : join(dir, `${slug.split('/')[1]}.git`);
+}
+
 /** The file's repository with its remote, the fakes, and the server. */
-async function setUp(): Promise<void> {
+async function setUp({ clones = false }: { clones?: boolean }): Promise<void> {
   dir = mkdtempSync(join(tmpdir(), 'galley-test-'));
   remote = join(dir, 'remote.git');
   repo = join(dir, 'repo');
-  execFileSync('git', ['init', '-q', '--bare', remote]);
+  // Its default branch is main, as GitHub's is.
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
   git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git');
   // Pushes go to the local bare repository; the fetch URL still says GitHub.
@@ -279,7 +302,19 @@ console.log('Packages: +1\\nDone in 1s');
   chmodSync(sandboxExec, 0o755);
   // Tests ask GitHub and fetch base branches themselves (followGithub, page loads, publishing), so its
   // timer does not run in between; it has a test of its own.
-  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: gh, codexBin: codex, claudeBin: claude, sandboxExec, reviewersDir: join(dir, 'reviewers'), viewerLogin: 'reviewer', pollMs: 50, followMs: 60 * 60_000 });
+  server = await startServer({
+    port: 0,
+    dataDir: join(dir, 'data'),
+    ghBin: gh,
+    codexBin: codex,
+    claudeBin: claude,
+    sandboxExec,
+    reviewersDir: join(dir, 'reviewers'),
+    viewerLogin: 'reviewer',
+    pollMs: 50,
+    followMs: 60 * 60_000,
+    ...(clones ? { clones, githubUrl } : {}),
+  });
   startingFakes = fakes();
 }
 
@@ -287,8 +322,8 @@ console.log('Packages: +1\\nDone in 1s');
  * Sets up the file's repository, fakes and server before its tests, and removes them after. After
  * each test, checks that it left no review running and the fakes as it found them.
  */
-export function startHarness(): void {
-  before(setUp);
+export function startHarness(opts: { clones?: boolean } = {}): void {
+  before(() => setUp(opts));
 
   // A test leaves no review running or about to start on the file's server, where it would answer
   // with the fakes of the tests after it, and leaves the fakes as it found them. Checked after each
@@ -306,7 +341,8 @@ export function startHarness(): void {
 
 /**
  * A repository of its own, acme/<name> on GitHub (pushing to a bare repository), or with `github`
- * false local/<name> with no remote, where `stage` stages a branch with a commit of its own as the agent.
+ * false local/<name> with no remote, registered by path, where `stage` stages a branch with a
+ * commit of its own as the agent.
  */
 export async function scratchRepo(name: string, { github = true } = {}) {
   const path = join(dir, name);
@@ -317,7 +353,7 @@ export async function scratchRepo(name: string, { github = true } = {}) {
   g('add', '.');
   g('commit', '-qm', 'Initial commit');
   if (github) {
-    execFileSync('git', ['init', '-q', '--bare', bare]);
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
     g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
     g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
     g('push', '-q', 'origin', 'main');

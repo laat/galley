@@ -13,6 +13,7 @@ export interface Actor {
 
 export interface RepoRow {
   id: number;
+  /** The user's repository's (common) git directory, or for galley's own clone of a GitHub repository, its path in the data directory, repos/<id>.git (Service.registerGithub). */
   git_dir: string;
   work_dir: string | null;
   owner: string;
@@ -84,6 +85,8 @@ export interface PullRow {
   github_status: string | null;
   /** When the reviewer pinned it to the top of the front page; null when it is not pinned. */
   pinned_at: string | null;
+  /** Where the CLI that staged it ran, as its X-Galley-Client header said; null when it said nothing. */
+  client: string | null;
 }
 
 export type GithubState = 'open' | 'merged' | 'closed';
@@ -354,6 +357,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'reviewer_overrides', 'TEXT'],
   ['pulls', 'messages_sha', 'TEXT'],
   ['review_runs', 'subject', 'TEXT'],
+  ['pulls', 'client', 'TEXT'],
 ];
 
 export class Db {
