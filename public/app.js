@@ -406,7 +406,8 @@
     const body = {};
     for (const el of form.elements) {
       if (!el.name || el.disabled || el.tagName === 'BUTTON') continue;
-      if (el.type === 'checkbox') body[el.name] = el.checked;
+      // A box that stands for a list (the commits publishing brings back) sends the list when checked.
+      if (el.type === 'checkbox') body[el.name] = el.checked && el.dataset.values ? el.dataset.values.split(' ') : el.checked;
       else if (el.type === 'radio') {
         if (el.checked) body[el.name] = el.value;
       } else body[el.name] = el.value;
@@ -450,7 +451,8 @@
     } catch (err) {
       busy(form, false);
       formError(form, err);
-      if (publishing && err.status === 409) {
+      // Refused for commits a rewrite on GitHub removed: force does not get past that, the box to bring them back does.
+      if (publishing && err.status === 409 && !(err.json && err.json.bring_back)) {
         const force = $('.js-force-option', form);
         if (force) force.hidden = false;
       }
