@@ -82,10 +82,11 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   const done = await page('/acme/tabs?state=done');
   assert.deepEqual(listed(done), [merged.number, closedOnGithub.number, closedHere.number].sort());
   // Done says how each ended, in the colours of the states: purple merged, red closed. Open on GitHub is green.
+  // What GitHub did opens it there, with GitHub's mark; a close here opens it here.
   const row = (html: string, n: number) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/tabs/pull/${n}"`))!;
-  assert.match(row(done, merged.number), /octicon-git-merge color-fg-done[^]*<span class="Label Label--merged">Merged<\/span>/);
-  assert.match(row(done, closedOnGithub.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed on GitHub<\/span>/);
-  assert.match(row(done, closedHere.number), /octicon-git-pull-request-closed color-fg-closed[^]*<span class="Label Label--closed">Closed<\/span>/);
+  assert.match(row(done, merged.number), /octicon-git-merge color-fg-done[^]*<a class="Label Label--merged" href="https:\/\/github\.com\/[^"]+" target="_blank" rel="noopener"><svg [^>]*octicon-mark-github[^]*?<\/svg> Merged<\/a>/);
+  assert.match(row(done, closedOnGithub.number), /octicon-git-pull-request-closed color-fg-closed[^]*<a class="Label Label--closed" href="https:\/\/github\.com\/[^"]+" target="_blank" rel="noopener"><svg [^>]*octicon-mark-github[^]*?<\/svg> Closed on GitHub<\/a>/);
+  assert.match(row(done, closedHere.number), new RegExp(`octicon-git-pull-request-closed color-fg-closed[^]*<a class="Label Label--closed" href="/acme/tabs/pull/${closedHere.number}">Closed</a>`));
   assert.match(row(publishedTab, published.number), /octicon-mark-github color-fg-open/);
   // A published pull request's title opens it on GitHub, and a staged one's here.
   assert.match(row(publishedTab, published.number), /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add published<\/a>/);
@@ -124,6 +125,31 @@ test('the list has a tab for each state: staged, published and open on GitHub, a
   const wrong = await cli(['pr', 'list', '-R', 'acme/tabs', '--state', 'opened']);
   assert.equal(wrong.code, 1);
   assert.match(wrong.stderr, /state must be one of staged, published, done/);
+});
+
+test("a published pull request's row opens it here by its s#N and at the publish box by an update not published, and on GitHub by its title and GitHub's number", async () => {
+  const { api, stage } = await scratchRepo('row-links');
+  const pr = await stage('row-links');
+  await human('POST', `${api}/${pr.number}/publish`, { sign: false });
+  await human('PATCH', `${api}/${pr.number}`, { body: 'Says more now.' });
+  const here = `/acme/row-links/pull/${pr.number}`;
+  const page = async (path: string) => (await fetch(server.url + path)).text();
+  const row = (html: string) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="${here}"`));
+  // The front page's and the repository's lists, in the Published tab's Your turn and in All.
+  for (const path of ['/?state=published', '/?state=all', '/acme/row-links?state=published', '/acme/row-links?state=all']) {
+    const r = row(await page(path));
+    assert.ok(r, path);
+    assert.match(r, new RegExp(`<a class="pr-row-number" href="${here}">s#${pr.number}</a> staged`), path);
+    // The update is published here, so its label opens the publish box, without GitHub's mark.
+    const label = r.match(/<a class="Label Label--attention"[^]*?<\/a>/)?.[0] ?? '';
+    assert.match(label, new RegExp(`^<a class="Label Label--attention" href="${here}#publish"><svg [^>]*octicon-rocket[^]*?</svg> Update not published: description</a>$`), path);
+    assert.doesNotMatch(label, /mark-github/, path);
+    assert.match(r, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add row-links<\/a>/, path);
+    assert.match(r, /<a href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener"><svg [^>]*octicon-mark-github[^]*?<\/svg> acme\/widgets#7<\/a>/, path);
+  }
+  assert.match(await page('/acme/row-links?state=published'), new RegExp(`<h2 class="turn-group-title">Your turn</h2>[^]*?href="${here}"`));
+  // There, the box with Publish update.
+  assert.match(await page(here), /<div class="merge-box" id="publish">[^]*?<button type="submit" class="btn btn-primary btn-publish"[^>]*><svg [^]*?<\/svg> Publish update<\/button>/);
 });
 
 test('a repository renamed on GitHub takes its new name, and its old URLs lead there', async () => {
@@ -296,7 +322,7 @@ test('the reviewer pins pull requests to the top of the front page, until they u
       assert.deepEqual(shown.pinned, [c.number, a.number], path);
       assert.ok(!shown.list.includes(a.number) && !shown.list.includes(c.number), path);
     }
-    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<span class="Label Label--merged">Merged<\/span>/);
+    assert.match((await page('/')).split('<div class="Box pr-list"')[0], /<a class="Label Label--merged" href="https:\/\/github\.com\/[^"]+" target="_blank" rel="noopener"><svg [^>]*octicon-mark-github[^]*?<\/svg> Merged<\/a>/);
 
     // Unpinned, it is back in its tab.
     await human('DELETE', `${api}/${a.number}/pinned`);

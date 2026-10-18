@@ -102,7 +102,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.match(page, /<strong>Merged on GitHub<\/strong>/);
       assert.doesNotMatch(page, /js-publish-form/);
       const list = await (await fetch(`${server.url}/acme/widgets?state=all`)).text();
-      assert.match(list, new RegExp(`octicon-git-merge color-fg-done[^]*?href="/acme/widgets/pull/${pr.number}">Add merge\\.js</a>\\s*<span class="Label Label--merged">Merged</span>`));
+      assert.match(list, new RegExp(`octicon-git-merge color-fg-done[^]*?href="/acme/widgets/pull/${pr.number}">Add merge\\.js</a>\\s*<a class="Label Label--merged" href="https://github\\.com/acme/widgets/pull/7" target="_blank" rel="noopener"><svg [^>]*octicon-mark-github[^]*?</svg> Merged</a>`));
       // Nothing is published over a merge.
       const res = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST' });
       assert.equal(res.status, 422);
@@ -322,7 +322,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.match(mine.row, /<span class="turn-reason"><svg [^>]*octicon-mark-github[^]*?<\/svg>ready to merge on GitHub<\/span>/);
       // Its title opens it on GitHub, where the reviewer merges it; its number opens it here.
       assert.match(mine.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
-      assert.match(mine.row, new RegExp(`<a href="/acme/widgets/pull/${n}">s#${n}</a> staged`));
+      assert.match(mine.row, new RegExp(`<a class="pr-row-number" href="/acme/widgets/pull/${n}">s#${n}</a> staged`));
       // With auto-merge on, GitHub merges it by itself, also once checks that run now pass.
       const autoMerge = { autoMergeRequest: { enabledAt: '2026-10-17T12:00:00Z' } };
       await githubSays({ [pr.id]: github(passed, autoMerge) });

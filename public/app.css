@@ -301,7 +301,7 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .Label--success { color: var(--success); border-color: var(--success); }
 .Label--success .octicon { width: 10px; }
 .Label--danger { color: var(--danger); border-color: var(--danger); }
-.Label--attention .octicon, .Label--danger .octicon { width: 12px; }
+.Label--attention .octicon, .Label--danger .octicon, .Label--merged .octicon, .Label--closed .octicon { width: 12px; }
 .Label--priority { font-weight: 600; }
 .Label--priority-high { color: var(--danger); border-color: var(--danger); background: var(--danger-subtle); }
 .Label--priority-medium { color: var(--attention); border-color: var(--attention-muted); background: var(--attention-subtle); }
@@ -328,6 +328,8 @@ textarea.form-control { resize: vertical; min-height: 100px; font-family: var(--
 .State--merged { background: var(--done-emphasis); }
 .Label--merged { color: var(--done); border-color: var(--done); }
 .Label--closed { color: var(--danger); border-color: var(--danger); }
+/* A list row's labels link to what they say (pullList). */
+a.Label:hover { text-decoration: none; border-color: currentColor; }
 
 .branch-name {
   display: inline-block;
@@ -444,7 +446,8 @@ kbd {
 .pr-row-meta { margin-top: 4px; font-size: 12px; color: var(--fg-muted); }
 .pr-row-meta a { color: inherit; }
 .pr-row-side { font-size: 12px; white-space: nowrap; padding-top: 2px; }
-.pr-row-number { color: var(--fg-muted); font-size: 12px; }
+/* A row's s#N opens the pull request here, also when its title opens it on GitHub, so it looks like a link. */
+.pr-row-number, .pr-row-meta .pr-row-number { color: var(--accent); font-size: 12px; }
 .pr-row--compact { padding: 6px 16px; }
 .pr-row--compact .pr-row-title, .pr-row--compact .pr-row-repo { font-size: 14px; }
 .pr-row--compact .pr-row-turn { margin-top: 2px; }
@@ -741,7 +744,7 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
 
 /* ----------------------------------------------------------- merge box */
 
-.merge-box { display: flex; gap: 16px; margin: 8px 0 16px; padding-top: 16px; border-top: 2px solid var(--border-muted); }
+.merge-box { display: flex; gap: 16px; margin: 8px 0 16px; padding-top: 16px; border-top: 2px solid var(--border-muted); scroll-margin-top: 16px; }
 .merge-box-icon {
   display: flex;
   align-items: center;
