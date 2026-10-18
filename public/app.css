@@ -158,13 +158,26 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
 .container-xl { max-width: 1280px; }
 .container-full { max-width: none; }
 
-.app-header-wrap { background: var(--header-bg); border-bottom: 1px solid var(--border); }
+/* In the macOS app (desktop/) the header is the window's title bar. The window draws its buttons over
+   the header's left end and says where with the titlebar-area-* variables (the Window Controls
+   Overlay), which a browser tab does not have, nor the app in full screen. There the header makes
+   room for the buttons, is at least the overlay's height, stays at the top over the page and its
+   menus, and drags the window but for its links and buttons (app-region, which a browser tab
+   ignores). What sticks under it adds --header-stuck, the header's height there and 0 elsewhere:
+   64px, or the overlay's height when the page is zoomed out (the overlay is in CSS pixels, so zoom
+   scales it the other way). */
+:root { --header-stuck: max(env(titlebar-area-height, 0px), sign(env(titlebar-area-height, 0px)) * 64px); }
+html { scroll-padding-top: var(--header-stuck); }
+.app-header-wrap { position: sticky; top: env(titlebar-area-y, auto); z-index: 150; background: var(--header-bg); border-bottom: 1px solid var(--border); app-region: drag; }
 .app-header {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 16px 24px;
+  padding-left: max(24px, env(titlebar-area-x, 0px));
+  min-height: env(titlebar-area-height, 0px);
 }
+.app-header :is(a, button, input, select, textarea, summary, [title]) { app-region: no-drag; }
 .app-header-logo {
   display: inline-flex;
   align-items: center;
@@ -177,7 +190,11 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
   background: var(--bg);
 }
 .app-header-logo:hover { background: var(--btn-hover); text-decoration: none; }
-.app-header-context { flex: 1; font-size: 14px; display: flex; align-items: center; gap: 4px; min-width: 0; }
+/* The crumbs stay on one line, so the header keeps its height, which the overlay and --header-stuck
+   count on in the app: in a narrow window the bold one, the repository's or the page's, gives way. */
+.app-header-context { flex: 1; font-size: 14px; display: flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }
+.app-header-context > * { flex-shrink: 0; }
+.app-header-context > a:has(strong) { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .app-header-context a { color: var(--fg); padding: 2px 6px; border-radius: 6px; }
 .app-header-context a:hover { background: var(--neutral-muted); text-decoration: none; }
 .crumb-sep { color: var(--fg-muted); }
@@ -890,7 +907,7 @@ code.wrap { word-break: break-all; }
 /* The toolbar's height, which app.js measures: it wraps on narrow screens, and zoom makes it fractional.
    The file headers stick right under it. Without script, its height on one line. */
 :root { --files-toolbar-height: 45px; }
-.files-toolbar { position: sticky; top: 0; z-index: 20; background: var(--bg); border-bottom: 1px solid var(--border); }
+.files-toolbar { position: sticky; top: var(--header-stuck); z-index: 20; background: var(--bg); border-bottom: 1px solid var(--border); }
 .files-toolbar-inner { display: flex; align-items: center; gap: 8px; padding-top: 8px; padding-bottom: 8px; flex-wrap: wrap; }
 .files-note { font-size: 12px; color: var(--fg-muted); }
 .files-note code { font-size: 11px; }
@@ -908,7 +925,7 @@ code.wrap { word-break: break-all; }
 
 .files-layout { display: flex; gap: 16px; padding-top: 16px; padding-bottom: 32px; align-items: flex-start; }
 .files { flex: 1; min-width: 0; }
-.file-tree { position: sticky; top: calc(var(--files-toolbar-height) + 11px); width: 280px; max-height: calc(100vh - var(--files-toolbar-height) - 27px); overflow: auto; flex-shrink: 0; font-size: 14px; }
+.file-tree { position: sticky; top: calc(var(--header-stuck) + var(--files-toolbar-height) + 11px); width: 280px; max-height: calc(100vh - var(--header-stuck) - var(--files-toolbar-height) - 27px); overflow: auto; flex-shrink: 0; font-size: 14px; }
 body.tree-hidden .files-layout > .file-tree { display: none; }
 /* Like GitHub's tree: each level is indented half a chevron, with a guide line down from its
    directory's chevron while the pointer is over the tree, and a file keeps a chevron's room so
@@ -966,7 +983,7 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
 .file::after { right: -1px; border-right: 1px solid var(--border); border-top-right-radius: 6px; }
 .file-header {
   position: sticky;
-  top: var(--files-toolbar-height);
+  top: calc(var(--header-stuck) + var(--files-toolbar-height));
   z-index: 10;
   display: flex;
   align-items: center;
@@ -1137,7 +1154,7 @@ body.selecting { user-select: none; cursor: ns-resize; }
 .browse { flex: 1; min-width: 0; }
 /* The file tree beside it looks like the Files changed tree. Shown on wide screens and hidden on
    narrow ones, where it goes above the page, until the viewer says otherwise (public/app.js). */
-.browse-tree { top: 16px; max-height: calc(100vh - 32px); }
+.browse-tree { top: calc(var(--header-stuck) + 16px); max-height: calc(100vh - var(--header-stuck) - 32px); }
 .browse-tree-filter { position: sticky; top: 0; z-index: 2; padding-bottom: 8px; background: var(--bg); }
 .browse-tree summary { cursor: pointer; }
 .browse-tree summary > a.tree-name { flex: 0 1 auto; color: var(--fg); }

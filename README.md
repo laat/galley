@@ -77,7 +77,9 @@ On macOS, `desktop/` has an app: galley in a window of its own with a Dock icon,
 when a pull request becomes your turn (clicking it opens the pull request), and the number waiting
 for you in the menu bar, with a menu listing them and a Start at login switch. It is a window onto
 the server the CLI uses: it starts one when none is running, and quitting it leaves the server
-running.
+running. Its window has no title bar of its own: galley's header holds the window's buttons, drags
+the window, and stays at the top as you scroll. Uploaded images and raw files open in windows of
+their own, with a title bar.
 
 ```sh
 pnpm --dir desktop install
