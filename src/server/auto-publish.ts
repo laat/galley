@@ -44,7 +44,7 @@ export class AutoPublisher {
     // A poll that was under way when the server closed must not touch the closed database.
     if (this.stopped) return;
     const approved = this.s.db.all<{ id: number }>("SELECT id FROM pulls WHERE auto_publish IS NOT NULL AND state = 'staged'").map((p) => p.id);
-    for (const id of new Set([...approved, ...this.s.waiters.keys()])) this.consider(id);
+    for (const id of new Set([...approved, ...this.s.waitingPulls()])) this.consider(id);
   }
 
   /** Publish, or push an update, in the background if the pull request is ready for it. */

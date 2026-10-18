@@ -498,7 +498,7 @@ test('an edit while the author waits has the reviewer of the description review 
   // Nothing more to say about this version: the author waits for the reviewer.
   const id = row('acme', number).id;
   const waiting = wait(acme, number);
-  await until(() => (server.service.waiters.get(id) ?? 0) > 0, 'the author waits');
+  await until(() => server.service.authorWaiting(id), 'the author waits');
   await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Say what it subtracts.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'What is subtracted?' }] }) }, async () => {
     await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { title: 'Subtract' });
     assert.match(await waiting, /Say what it subtracts\./);

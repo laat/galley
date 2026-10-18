@@ -205,7 +205,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     // waits for, pushes and merges are still noticed, and the author's `pr wait` gets the review.
     if (graceMs > 0 && service.reviewsRunning()) {
       service.stopping = true;
-      service.bus.emit('change', { pullId: null, type: 'stopping', actor: 'galley' } satisfies ChangeEvent);
+      service.emitSystem(null, 'stopping', 'galley');
     }
     // Changes to the definitions start and stop no more reviewers.
     service.custom?.stop();

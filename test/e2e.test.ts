@@ -1476,7 +1476,7 @@ test('stop iterating: a running review finishes, no new one starts, the author h
 
       // Resume lets them go on, and the waiting author's commit is reviewed at once (the gate is open).
       const again = cli(['pr', 'wait', String(number), '--timeout', '30s']);
-      await until(() => (server.service.waiters.get(id) ?? 0) > 0, 'the author waits');
+      await until(() => server.service.authorWaiting(id), 'the author waits');
       await human('DELETE', `${base}/stop-iterating`);
       assert.equal((await human('GET', base)).iterations_stopped, null);
       const reviewed = await again;
@@ -1532,7 +1532,7 @@ test('a review that fails after iterations stop holds nothing up, and the next c
       assert.match(failed.stdout, /\(reviewer stopped automatic reviews after round 1\); ask the user to review it: /);
       assert.equal(codexStatus().state, 'capped');
       const again = cli(['pr', 'wait', String(number), '--timeout', '2s']);
-      await until(() => server.service.waiters.get(id), 'the author waits');
+      await until(() => server.service.authorWaiting(id), 'the author waits');
       assert.deepEqual(server.service.autoPublishChecklist(row()).filter((i) => !i.ok && i.key !== 'conflicts').map((i) => i.key), []);
       assert.equal((await again).code, 124);
       const html = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
@@ -1578,7 +1578,7 @@ test('setting a limit by hand while iterations are stopped resumes every reviewe
       // With the author waiting, Codex's limit set to the reviews it has done ends the stop, as Resume
       // does: Claude reviews at once, and the timeline says the reviews were resumed.
       const waiting = cli(['pr', 'wait', String(number), '--timeout', '10s']);
-      await until(() => server.service.waiters.get(pull.id), 'the author waits');
+      await until(() => server.service.authorWaiting(pull.id), 'the author waits');
       await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 1 });
       assert.equal((await human('GET', base)).iterations_stopped, null);
       const reviewed = await waiting;
@@ -3410,7 +3410,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
       s.service.bus.on('change', (e: ChangeEvent) => e.type === 'stopping' && heard.push(e));
       writeFileSync(gate, '');
       await finishing;
-      assert.deepEqual(heard, [{ pullId: null, type: 'stopping', actor: 'galley' }]);
+      assert.deepEqual(heard, [{ pullId: null, type: 'stopping', actor: null, source: 'galley' }]);
       s = await start();
       assert.deepEqual((await runs()).slice(9), [['manual', 'done', null]]);
 
@@ -4207,7 +4207,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
   /** This pull request's row on a list page. */
   const rowOf = (html: string) => html.split('<div class="Box-row pr-row').find((r) => r.includes(`href="/acme/widgets/pull/${number}"`));
   /** A wait counts for a few seconds after it ends, as pages show it (Service.setWaiting); until then the author still waits. */
-  const waitEnded = () => until(() => !server.service.waiters.has(id) && !server.service['waitingStopped'].has(id), 'the wait is over');
+  const waitEnded = () => until(() => !server.service.authorWaiting(id, { grace: true }), 'the wait is over');
   const threadId = async () => JSON.parse((await cli(['pr', 'view', String(number), '--json', 'reviewThreads'])).stdout).reviewThreads[0].databaseId;
   // Codex's first review waits for this gate, which stays open once opened.
   const gate = join(dir, 'turn-gate');
@@ -4281,11 +4281,11 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
           reasons: ['agent has not seen the latest feedback', 'agent is not waiting', `codex-review's findings in ${sha()} are answered`, 'changes requested', '1 unresolved thread'],
         });
         // While a wait hands it over, it is the author's.
-        server.service.waiters.set(id, 1);
+        server.service['waiters'].set(id, 1);
         try {
           assert.equal(server.service.turn(row()).whose, 'author');
         } finally {
-          server.service.waiters.delete(id);
+          server.service['waiters'].delete(id);
         }
         // Reading it is being handed it.
         await cli(['pr', 'view', String(number), '--comments']);
@@ -4556,7 +4556,7 @@ test("while the reviewer agents still have the head to review, it is theirs or t
   /** Whether the front page notifies about this pull request as your turn (data-your-turn). */
   const yours = async () => (await page('/')).match(/data-your-turn="([^"]*)"/)![1].includes(`/acme/widgets/pull/${number}&quot;`);
   const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
-  const waitEnded = () => until(() => !server.service.waiters.has(id) && !server.service['waitingStopped'].has(id), 'the wait is over');
+  const waitEnded = () => until(() => !server.service.authorWaiting(id, { grace: true }), 'the wait is over');
   const toStart = (login: string) => `${login} reviews ${sha()} when agent waits for review`;
   const codexGate = join(dir, 'agents-first-codex');
   const claudeGate = join(dir, 'agents-first-claude');
@@ -4695,20 +4695,20 @@ test("while the reviewer agents still have the head to review, it is theirs or t
 });
 
 test('published pull requests are followed until they are merged or closed on GitHub', async (t) => {
-  /** Stage a branch with one commit as the agent, publish it as the reviewer, and let the agent hear of the publish. */
-  const published = async (branch: string, file: string) => {
+  /** Stage a branch with one commit as the agent (`actor`), publish it as the reviewer, and let the agent hear of the publish. */
+  const published = async (branch: string, file: string, actor = 'agent') => {
     git('checkout', '-q', 'main');
     git('checkout', '-qb', branch);
     writeFileSync(join(repo, file), 'export {};\n');
     git('add', file);
     git('commit', '-qm', `Add ${file}`);
-    const created = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', '--no-review']);
+    const created = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', '--no-review'], { actor });
     assert.equal(created.code, 0, created.stderr);
     const number = Number(created.stdout.trim().split('/').pop());
     const base = `/api/repos/acme/widgets/pulls/${number}`;
     const { id } = await human('POST', `${base}/publish`, { sign: false });
     // The first wait after a publish reports it; the next one waits for GitHub.
-    const heard = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+    const heard = await cli(['pr', 'wait', String(number), '--timeout', '20s'], { actor });
     assert.match(heard.stdout, /^Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7$/m);
     assert.match(heard.stdout, new RegExp(`Run \`galley pr wait s${number}\` again to hear when it is merged or closed on GitHub`));
     return {
@@ -4808,6 +4808,19 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.equal((await human('GET', pr.base)).head.sha, mergedHead);
       assert.equal((await human('GET', `${pr.base}/commits`)).length, 1);
       assert.equal(JSON.parse((await cli(['pr', 'view', '--json', 'number'])).stdout).number, Number(again.stdout.trim().split('/').pop()));
+    });
+
+    await t.test('an author named "github" hears of the merge at once', async () => {
+      const pr = await published('feature/follow-github', 'github.js', 'github');
+      let ended = false;
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s'], { actor: 'github' }).finally(() => (ended = true));
+      await untilWaiting(pr.base);
+      // What galley learns from GitHub has no actor: the wait does not take it for the author's own change.
+      await githubSays({ [pr.id]: merged });
+      await until(() => ended, 'the wait ends on the merge, not at its timeout', 5000);
+      const r = await waiting;
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /^Merged on GitHub as e468a4e by laat: /m);
     });
 
     await t.test('commits GitHub did not merge: pr wait lists them and says to keep the branch', async () => {

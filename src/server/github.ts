@@ -119,7 +119,7 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     github_state: pull.github_state,
     github_closed_at: pull.github_closed_at,
     github_closed_by: pull.github_closed_by,
-    author_waiting: (s.waiters.get(pull.id) ?? 0) > 0,
+    author_waiting: s.authorWaiting(pull.id),
     auto_publish: autoPublishJson(s, pull),
     // Once the reviewer stopped automatic reviews: who did, when, and after which round; null while they go on.
     iterations_stopped: iterationsStoppedJson(s, pull),
@@ -425,7 +425,7 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('deletions', () => files.reduce((n, f) => n + f.deletions, 0));
   set('changedFiles', () => files.length);
   set('publishedUrl', () => pull.published_url);
-  set('waiting', () => (s.waiters.get(pull.id) ?? 0) > 0);
+  set('waiting', () => s.authorWaiting(pull.id));
   // Auto-merge on the published pull request, as galley last turned it on there.
   set('autoMergeRequest', () => {
     const merge = s.autoMerge(pull);
