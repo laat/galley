@@ -188,6 +188,7 @@ times to try signing again.
 | `GALLEY_PUBLIC_URL` | the local URL | Where other machines reach the server (`serve --public-url`): its links use it, and it accepts requests to its host |
 | `GALLEY_ALLOWED_HOSTS` | unset | More hosts, or host:port, the server accepts requests to, comma-separated (`serve --allowed-host`) |
 | `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
+| `GALLEY_CLONES` | unset | Keep a clone of each repository registered by its GitHub name in the data directory, which branches are pushed to over git ([docs/api.md](docs/api.md#git)). For staging from other machines; the CLI does not send branches yet |
 | `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
 | `GALLEY_USER` | your `gh` login | Your name in the UI |

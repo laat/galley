@@ -67,10 +67,12 @@ export function repoJson(s: Service, repo: RepoRow) {
     owner: { login: repo.owner },
     html_url: `${s.baseUrl}/${repo.owner}/${repo.name}`,
     url: apiBase(s, repo),
-    git_dir: repo.git_dir,
+    git_dir: s.gitDir(repo),
     work_dir: repo.work_dir,
     remote: repo.remote,
     github: repo.github_slug,
+    // Extension, for galley's own clone of a GitHub repository: where git pushes branches to it and fetches them.
+    ...(s.isClone(repo) ? { git_url: s.gitUrl(repo) } : {}),
   };
 }
 
@@ -337,6 +339,7 @@ export const GH_FIELDS = [
   'baseRefOid',
   'body',
   'changedFiles',
+  'client',
   'closed',
   'closedAt',
   'comments',
@@ -443,6 +446,8 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('changedFiles', () => files.length);
   set('publishedUrl', () => pull.published_url);
   set('waiting', () => s.authorWaiting(pull.id));
+  // galley extension: where the CLI that staged it ran, as its X-Galley-Client header said; null when it said nothing.
+  set('client', () => pull.client);
   // Auto-merge on the published pull request, as galley last turned it on there.
   set('autoMergeRequest', () => {
     const merge = s.autoMerge(pull);

@@ -167,7 +167,18 @@ const GIT_CONFIG = [
  * over any protocol.*.allow setting and over the one the server inherited; no ssh agent's socket
  * is in reach either.
  */
-const FETCH_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', GCM_INTERACTIVE: 'never', GIT_ALLOW_PROTOCOL: 'https:file', SSH_AUTH_SOCK: undefined };
+export const FETCH_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', GCM_INTERACTIVE: 'never', GIT_ALLOW_PROTOCOL: 'https:file', SSH_AUTH_SOCK: undefined };
+
+/**
+ * Config that signs in to GitHub with gh's credentials (`gh auth git-credential`, with `gh` the
+ * binary) in place of the user's credential helpers, and never goes over ssh: an insteadOf that
+ * turns the URL into an ssh one is refused. For fetches and pushes run with FETCH_ENV.
+ */
+export function ghCredentials(gh: string): string[] {
+  // An empty helper drops those configured before it; the shell runs the one after it.
+  const helper = `!'${gh.replace(/'/g, `'\\''`)}' auth git-credential`;
+  return ['-c', 'credential.helper=', '-c', `credential.helper=${helper}`, '-c', 'credential.interactive=false', '-c', 'protocol.ssh.allow=never'];
+}
 
 /** Results for commands whose inputs are all full SHAs never change, so they are safe to cache. */
 const cache = new Map<string, string>();
@@ -429,20 +440,28 @@ export class Repo {
   /**
    * Fetch `branch` from the repository at `url`, an https URL, into the ref `into` (a remote-tracking
    * branch), and nothing else: no tags, no FETCH_HEAD, no submodules, no maintenance afterwards.
-   * Local branches and the working tree are not touched. It signs in with gh's credentials
-   * (`gh auth git-credential`, with `gh` the binary) in place of the user's credential helpers, and
-   * never goes over ssh: an insteadOf that turns the URL into an ssh one is refused. Nothing asks for
-   * anything (FETCH_ENV), and with a timeout run() starts git in a session of its own, without a
-   * terminal. Returns git's message when it failed, and null when it worked or `signal` stopped it.
+   * Local branches and the working tree are not touched. It signs in with gh's credentials, and
+   * never goes over ssh (ghCredentials). Nothing asks for anything (FETCH_ENV), and with a timeout
+   * run() starts git in a session of its own, without a terminal. Returns git's message when it failed, and null when it worked or `signal` stopped it.
    */
   async fetchBranch(url: string, branch: string, into: string, opts: { gh: string; cwd: string; timeoutMs: number; signal?: AbortSignal }): Promise<string | null> {
-    // An empty helper drops those configured before it; the shell runs the one after it.
-    const helper = `!'${opts.gh.replace(/'/g, `'\\''`)}' auth git-credential`;
-    const args = ['-c', 'credential.helper=', '-c', `credential.helper=${helper}`, '-c', 'credential.interactive=false', '-c', 'protocol.ssh.allow=never'];
+    const args = ghCredentials(opts.gh);
     args.push('fetch', '--no-tags', '--no-write-fetch-head', '--no-prune', '--no-recurse-submodules', '--no-auto-maintenance', '--', url, `+refs/heads/${branch}:${into}`);
     const r = await this.run(args, { cwd: opts.cwd, env: FETCH_ENV, timeoutMs: opts.timeoutMs, signal: opts.signal, allowFail: true });
     if (r.code === 0 || opts.signal?.aborted) return null;
     return r.timedOut ? `git fetch timed out after ${opts.timeoutMs / 1000} seconds` : r.stderr.trim() || `git fetch exited with ${r.code}`;
+  }
+
+  /**
+   * The default branch of the repository at `url`, an https URL, as its HEAD names it, asked as
+   * fetchBranch fetches. Throws with git's message when it could not ask, or HEAD names no branch.
+   */
+  async defaultBranchAt(url: string, opts: { gh: string; cwd: string; timeoutMs: number; signal?: AbortSignal }): Promise<string> {
+    const r = await this.run([...ghCredentials(opts.gh), 'ls-remote', '--symref', '--', url, 'HEAD'], { cwd: opts.cwd, env: FETCH_ENV, timeoutMs: opts.timeoutMs, signal: opts.signal, allowFail: true });
+    if (r.code !== 0) throw new GitError(r.timedOut ? `git ls-remote timed out after ${opts.timeoutMs / 1000} seconds` : r.stderr.trim() || `git ls-remote exited with ${r.code}`, r.stderr, r.code);
+    const branch = r.stdout.match(/^ref: refs\/heads\/(\S+)\tHEAD$/m)?.[1];
+    if (!branch) throw new GitError(`${url} has no default branch`, r.stderr, r.code);
+    return branch;
   }
 
   /** Those of `shas` (full commit SHAs) that no remote-tracking branch of `remote` contains. */
