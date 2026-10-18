@@ -907,10 +907,15 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       return 0;
     }
     if (r.status === 'push_failed') {
+      // Refused for commits added on GitHub, galley fetched them where the author can rebase onto them.
+      const fetched = r.push.fetched?.sha ? r.push.fetched : null;
+      const bringIn = fetched ? `galley fetched the branch on GitHub into ${fetched.ref}: rebase onto it` : `fetch ${pr.headRefName} from origin and rebase onto it`;
       out(
         c.gray(
           'Nothing on GitHub was overwritten, and this commit is not tried again. Do not push or force-push to GitHub yourself: the user has been told, and decides. ' +
-            `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (fetch ${pr.headRefName} from origin and rebase onto it), or leaves out what GitHub declined.`,
+            (fetched?.rewritten
+              ? `The branch on GitHub was rewritten there: galley fetched it into ${fetched.ref}, and it no longer has the commit galley pushed last, so the commits you wait with are refused too until the user sorts it out.`
+              : `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (${bringIn}), or leaves out what GitHub declined.`),
         ),
       );
     }
