@@ -1,6 +1,7 @@
 // A pull request's timeline events (the events table), and what each type's JSON holds. Some of
 // it also decides what galley does next: whether a push signs (Service.signsUpdates), whether a
-// failed push is tried again (Service.pushFailed), and which merge method auto-merge asks for
+// failed push is tried again (Service.pushFailed), whether a push goes on top of a branch
+// rewritten on GitHub (Service.fetchedRewritten), and which merge method auto-merge asks for
 // again after a push. So events are written and read back here, typed by their type, and
 // reshaping one for the timeline fails typecheck where it is read.
 import { now, type Actor, type CancelReason, type Db, type EventRow, type PullRow } from './db.ts';
@@ -18,8 +19,11 @@ export interface EventData {
   ready_for_review: Record<string, never>;
   closed: Record<string, never>;
   reopened: Record<string, never>;
-  /** `head`: the commit GitHub got; `source`: the staged head it is (a copy of, when signed). `sign`: what the pushes after it do. */
-  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean };
+  /**
+   * `head`: the commit GitHub got; `source`: the staged head it is (a copy of, when signed). `sign`:
+   * what the pushes after it do. `rewritten`: on top of the branch as rewritten on GitHub (GithubPush).
+   */
+  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; rewritten?: { from: string; to: string } };
   /** A push when the author waited (Service.pushUpdate). */
   github_push: Omit<GithubPush, 'at'>;
   /** `at`: when GitHub merged or closed it; the event is from when galley learned of it. */
@@ -51,6 +55,11 @@ export function lastEvent<T extends EventType>(db: Db, pull: PullRow, type: T | 
   const types: string[] = Array.isArray(type) ? type : [type];
   const row = db.get<EventRow>(`SELECT * FROM events WHERE pull_id = ? AND type IN (${types.map(() => '?').join(', ')}) AND created_at > ? ORDER BY id DESC LIMIT 1`, pull.id, ...types, since);
   return row ? (readEvent(row) as TimelineEvent<T>) : null;
+}
+
+/** The events of the pull request of `type` after `since`, oldest first. */
+export function eventsSince<T extends EventType>(db: Db, pull: PullRow, type: T, since: string): TimelineEvent<T>[] {
+  return db.all<EventRow>('SELECT * FROM events WHERE pull_id = ? AND type = ? AND created_at > ? ORDER BY id', pull.id, type, since).map((row) => readEvent(row) as TimelineEvent<T>);
 }
 
 /** The row with its data read. */
