@@ -1,7 +1,7 @@
 // What each end-to-end test file in test/e2e starts from: a repository whose origin is GitHub's
 // acme/widgets, pushing to a bare repository beside it; stand-ins for gh, codex, claude and
-// sandbox-exec; and a galley server for them. Each file calls startHarness() and gets its own: node
-// runs test files in parallel, and the tests within a file one after another.
+// sandbox-exec or bwrap; and a galley server for them. Each file calls startHarness() and gets its
+// own: node runs test files in parallel, and the tests within a file one after another.
 import './env.ts';
 import { assertLeftAsFound, fakes } from './fakes.ts';
 import { after, afterEach, before } from 'node:test';
@@ -266,7 +266,7 @@ if (gate) {
 `,
   );
   chmodSync(claude, 0o755);
-  // A stand-in for sandbox-exec, which installs dependencies for Claude: it logs and runs nothing.
+  // A stand-in for sandbox-exec or bwrap, which install dependencies for Claude: it logs and runs nothing.
   const sandboxExec = join(dir, 'sandbox-exec');
   process.env.FAKE_SANDBOX_LOG = join(dir, 'sandbox-exec.log');
   writeFileSync(

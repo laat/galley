@@ -96,7 +96,7 @@ export interface StartOptions {
   ghBin?: string;
   codexBin?: string;
   claudeBin?: string;
-  /** Stands in for sandbox-exec, which installs dependencies for the Claude reviewer (in tests). */
+  /** Stands in for sandbox-exec on macOS or bwrap on Linux, which install dependencies for the Claude reviewer (in tests). */
   sandboxExec?: string;
   /** Where the custom reviewers' definitions are: by default reviewers/ in configDir(). */
   reviewersDir?: string;
