@@ -12,6 +12,7 @@ import { setField } from '../src/cli/api.ts';
 import { parseDuration } from '../src/cli/output.ts';
 import { parseReviewers } from '../src/cli/pr.ts';
 import { whoReviews } from '../src/cli/reviewers.ts';
+import { toGalley } from '../src/cli/send.ts';
 import { checkPriority, fillFromCommits, splitPriorityPrefix } from '../src/server/service.ts';
 import { Client } from '../src/cli/client.ts';
 import { cliActor, META } from '../src/config.ts';
@@ -176,6 +177,10 @@ test('the CLI starts no server for a galley on another machine, and says it does
   assert.equal(r.code, 1);
   assert.equal(r.stderr, 'galley does not answer at http://galley.invalid:24823. Is the server running there, and can this machine reach it (is it on the tailnet)?\n');
   assert.deepEqual(readdirSync(home), ['galley.db']);
+  // From Codex's sandbox without network access, it says that is why.
+  const sandboxed = await galley(t, { GALLEY_URL: 'http://galley.invalid:24823', GALLEY_HOME: home, CODEX_SANDBOX_NETWORK_DISABLED: '1' }, 'api', 'health');
+  assert.equal(sandboxed.code, 1);
+  assert.match(sandboxed.stderr, / Codex runs this command in its sandbox without network access \(CODEX_SANDBOX_NETWORK_DISABLED\), which keeps galley out of reach: tell the user, rather than work around it\.\n$/);
 });
 
 test('the CLI goes through the proxy the environment names, to a galley on another machine only', async (t) => {
@@ -219,10 +224,70 @@ test('the CLI goes through the proxy the environment names, to a galley on anoth
   const blocked = await galley(t, { ...env, GALLEY_URL: 'http://blocked.example:24823' }, 'api', 'health');
   assert.equal(blocked.code, 1);
   assert.match(blocked.stderr, /^could not reach galley at http:\/\/blocked\.example:24823: .*\b403\b/);
+  // From Codex's sandbox without network access, it says that is why.
+  const fromCodex = await galley(t, { ...env, GALLEY_URL: 'http://blocked.example:24823', CODEX_SANDBOX_NETWORK_DISABLED: '1' }, 'api', 'health');
+  assert.match(fromCodex.stderr, /\b403\b.*\. Codex runs this command in its sandbox without network access/);
   // A proxy in front of galley that answers for it while it is down, as `tailscale serve` does.
   const gateway = await galley(t, { ...env, GALLEY_URL: 'http://down.example:443' }, 'api', 'health');
   assert.equal(gateway.code, 1);
   assert.match(gateway.stderr, /^galley does not answer at http:\/\/down\.example:443\. Is the server running there/);
+});
+
+test('a pull request named by its URL in a checkout of its repository registers the checkout by its GitHub name alone, and goes on when galley registers by path', async (t) => {
+  const posted: unknown[] = [];
+  // What galley answers a registration by GitHub name alone: a galley that registers by path refuses it.
+  let byName: [number, unknown] = [422, { message: 'this galley registers repositories by path: path is required' }];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      if (req.url === '/api/meta') return res.end(JSON.stringify(META));
+      const json = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+      if (req.url === '/api/repos') {
+        const asked = JSON.parse(body);
+        posted.push(asked);
+        return asked.path ? json(200, { owner: { login: 'acme' }, name: 'widgets' }) : json(...byName);
+      }
+      json(200, { number: 3 });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const checkout = mkdtempSync(join(tmpdir(), 'galley-cli-'));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  await promisify(execFile)('git', ['init', '-q', checkout]);
+  await promisify(execFile)('git', ['-C', checkout, 'remote', 'add', 'origin', 'https://github.com/acme/widgets.git']);
+  const { stdout } = await promisify(execFile)(process.execPath, [join(import.meta.dirname, '..', 'bin', 'galley.ts'), 'pr', 'view', `${url}/acme/widgets/pull/3`, '--json', 'number'], {
+    cwd: checkout,
+    env: { ...process.env, GALLEY_URL: url, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1' },
+  });
+  assert.deepEqual(JSON.parse(stdout), { number: 3 });
+  assert.deepEqual(posted, [{ github: 'acme/widgets' }]);
+  // A registration by path at the same time, for a pull request named by number in the same wait, goes through.
+  const saved = { ...process.env };
+  process.env.GALLEY_ACTOR = 'agent';
+  try {
+    const client = new Client(url);
+    const [, repo] = await Promise.all([client.checkoutOf(checkout, { owner: 'acme', name: 'widgets' }), client.repoFor(checkout)]);
+    assert.deepEqual([repo.owner, repo.name], ['acme', 'widgets']);
+    // Any other answer is an error.
+    byName = [503, { message: 'galley is stopping' }];
+    await assert.rejects(new Client(url).checkoutOf(checkout, { owner: 'acme', name: 'widgets' }), /galley is stopping/);
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('git goes to galley through the proxy the CLI goes through, whatever its own http.proxy says', () => {
+  const proxy = (url: string, env: Record<string, string>) => toGalley(url, env).args;
+  assert.deepEqual(proxy('http://galley.example:24823', {}), ['-c', 'http.proxy=']);
+  assert.deepEqual(proxy('http://galley.example:24823', { HTTP_PROXY: 'http://upper:1', http_proxy: 'http://lower:1' }), ['-c', 'http.proxy=http://lower:1']);
+  // For https, as Node does: the http proxy when there is no https one.
+  assert.deepEqual(proxy('https://galley.example', { HTTP_PROXY: 'http://upper:1' }), ['-c', 'http.proxy=http://upper:1']);
+  assert.deepEqual(proxy('https://galley.example', { HTTPS_PROXY: 'http://secure:1', http_proxy: 'http://lower:1' }), ['-c', 'http.proxy=http://secure:1']);
+  // NO_PROXY decides, as for the CLI: this machine's by default.
+  assert.equal(toGalley('http://localhost:24823', { HTTP_PROXY: 'http://upper:1' }).env.NO_PROXY, 'localhost,127.0.0.1,[::1]');
 });
 
 test("pr wait keeps waiting while galley restarts or a proxy in front of it says it is down, not after an error of galley's own", async (t) => {

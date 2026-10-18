@@ -6,11 +6,12 @@ import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, s
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews } from './reviewers.ts';
 import { openPage } from './open.ts';
+import { fetchBack, fetchHead, hasBranch, sendHead, sendPull } from './send.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
-  'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseConflicts', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed', 'closedAt', 'comments',
+  'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseConflicts', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'client', 'closed', 'closedAt', 'comments',
   'commits', 'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'isPinned', 'latestReviews', 'mergeCommit',
   'mergeStateStatus', 'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'ref', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state',
   'statusCheckRollup', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
@@ -89,7 +90,11 @@ interface Target {
 async function resolvePull(client: Client, cwd: string, repoFlag: string | undefined, arg: string | undefined): Promise<Target> {
   if (arg) {
     const url = arg.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/[sS]?(\d+)/);
-    if (url) return { repo: { owner: url[1], name: url[2] }, number: Number(url[3]) };
+    if (url) {
+      const repo = { owner: url[1], name: url[2] };
+      await client.checkoutOf(cwd, repo);
+      return { repo, number: Number(url[3]) };
+    }
     const n = stagedNumber(arg);
     if (n !== null) return { repo: await client.repoFor(cwd, repoFlag), number: n };
   }
@@ -213,6 +218,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   } catch {}
   err(`Staging pull request for ${head} into ${(v.base as string) ?? 'the default branch'} in ${repo.owner}/${repo.name}\n`);
   if (v['dry-run']) return 0;
+  await sendHead(client, cwd, repo, head.replace(/^[^:]+:/, ''));
   const pr = await client.json('POST', `${repoPath(repo)}/pulls`, {
     title: v.title,
     body,
@@ -327,6 +333,7 @@ async function view(client: Client, cwd: string, args: string[]): Promise<number
     'download-images': { type: 'string' },
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  await sendPull(client, cwd, t.repo, t.number);
   if (v.web) {
     await openWeb(client, await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}`));
     return 0;
@@ -418,6 +425,7 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
     base: { type: 'string', short: 'B' },
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  await sendPull(client, cwd, t.repo, t.number);
   const patch: Record<string, unknown> = {};
   if (v.title !== undefined) patch.title = v.title;
   const body = readBody(v as any);
@@ -467,6 +475,7 @@ async function comment(client: Client, cwd: string, args: string[]): Promise<num
   });
   if (v.editor || v.web) throw new CliError('--editor and --web are not supported; pass --body or --body-file');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  await sendPull(client, cwd, t.repo, t.number);
   const body = readBody(v as any);
   if (v['delete-last'] || v['edit-last']) {
     const me = (await client.get('/api/user')).login;
@@ -523,6 +532,7 @@ async function review(client: Client, cwd: string, args: string[]): Promise<numb
     'body-file': { type: 'string', short: 'F' },
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  await sendPull(client, cwd, t.repo, t.number);
   const event = v.approve ? 'APPROVE' : v['request-changes'] ? 'REQUEST_CHANGES' : v.comment ? 'COMMENT' : null;
   if (!event) throw new CliError('--approve, --request-changes, or --comment required when not running interactively');
   const body = readBody(v as any) ?? '';
@@ -578,6 +588,7 @@ FLAGS
 async function ready(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v, positionals } = parse(args, READY_USAGE, { undo: { type: 'boolean' } });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  await sendPull(client, cwd, t.repo, t.number);
   await client.json('PATCH', pullPath(t), { draft: !!v.undo });
   err(`✓ Pull request ${named(t)} is ${v.undo ? 'converted to "draft"' : 'marked as "ready for review"'}`);
   return 0;
@@ -600,12 +611,17 @@ async function checkout(client: Client, cwd: string, args: string[]): Promise<nu
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const pr = await client.get(ghPath(t, ['headRefName', 'headRefOid']));
   const target = v.detach ? pr.headRefOid : pr.headRefName;
+  // From galley's clone, the head when it is not here, and the branch when there is none.
+  const here = await fetchHead(client, cwd, t.repo, pr.headRefName, pr.headRefOid, { detach: !!v.detach });
   try {
     process.stdout.write(git(cwd, ['checkout', ...(v.force ? ['--force'] : []), target]));
+    if (here === 'behind') git(cwd, ['merge', '--ff-only', '--quiet', pr.headRefOid]);
   } catch (e) {
     throw new CliError(String((e as { stderr?: string }).stderr ?? e).trim());
   }
   err(`Switched to ${v.detach ? 'commit' : 'branch'} '${target}'`);
+  if (here === 'behind') err(`Fast-forwarded it to galley's ${pr.headRefOid.slice(0, 7)}.`);
+  if (here === 'differs') err(`galley has it at ${pr.headRefOid.slice(0, 7)}, which your ${target} does not have.`);
   return 0;
 }
 
@@ -821,6 +837,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
   const again = (i: number) => (positionals[i] === undefined || stagedNumber(positionals[i]) !== null ? `s${targets[i].number}` : positionals[i]);
   const all = targets.map((_, i) => again(i)).join(' ');
   const deadline = v.timeout ? Date.now() + parseDuration(String(v.timeout)) : Infinity;
+  // What the author committed, before it waits: galley reviews and pushes what it has.
+  for (const t of targets) await sendPull(client, cwd, t.repo, t.number, { strict: true });
   if (isTTY) err(`Waiting for feedback on ${names}…`);
   while (true) {
     const left = Math.ceil((deadline - Date.now()) / 1000);
@@ -852,6 +870,14 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const { t, r } = first;
     const others = targets.flatMap((other, i) => (other === t ? [] : [again(i)]));
     const pr = r.pr;
+    // What galley fetched from GitHub for the author to rebase onto, fetched into the checkout too
+    // (from galley's clone), and named as it is there: the base the head conflicts with, and the
+    // branch on GitHub after a push GitHub refused.
+    if (pr.baseConflicts?.conflicting && pr.baseConflicts.ref === `origin/${pr.baseRefName}`) {
+      pr.baseConflicts.ref = (await fetchBack(client, cwd, t.repo, pr.baseRefName, pr.baseConflicts.oid)) ?? pr.baseConflicts.ref;
+    }
+    const onGithub = r.status === 'push_failed' && r.push.fetched?.sha && r.push.fetched.ref === `origin/${pr.headRefName}` ? r.push.fetched : null;
+    if (onGithub) onGithub.ref = (await fetchBack(client, cwd, t.repo, pr.headRefName, onGithub.sha)) ?? onGithub.ref;
     // The server's link, which starts with its public URL.
     const url = pr.url;
     // Waiting on several: say which one this is about.
@@ -922,7 +948,10 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         // One line of commits, each on the one before: a rebase carries over exactly these. Not a
         // merge, whose changes a rebase would drop.
         const line = commits.every((cm, i) => cm.parents.length === 1 && (i === 0 || cm.parents[0] === commits[i - 1].sha));
-        const restore = left.deleted ? `The branch ${branch} is gone here; bring it back with \`git branch ${branch} ${left.head}\`. ` : '';
+        // galley's clone keeps the branches sent to it: whether this one is gone is the checkout's to say.
+        const here = await hasBranch(client, cwd, t.repo, branch);
+        const deleted = here === null ? left.deleted : !here;
+        const restore = deleted ? `The branch ${branch} is gone here; bring it back with \`git branch ${branch} ${left.head}\`. ` : '';
         const others = `rebase the other open pull requests that touch the same files.${rest}`;
         out(
           c.gray(

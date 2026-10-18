@@ -32,6 +32,17 @@ export function dataDir(): string {
   return fromEnv('HOME') || join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'galley');
 }
 
+/**
+ * owner/name from a GitHub remote URL, or null when the remote is not on github.com: the GitHub
+ * repository the server follows for one registered by path, and the one the CLI registers a
+ * checkout by with a server that keeps clones of its own.
+ */
+export function githubSlug(url: string | null): string | null {
+  if (!url) return null;
+  const m = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
 /** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
 export function configDir(): string {
   return fromEnv('CONFIG_DIR') || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'galley');

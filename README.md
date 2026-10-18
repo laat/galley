@@ -69,9 +69,15 @@ GALLEY_PUBLIC_URL=https://<host>.<tailnet>.ts.net galley serve
 ```
 
 Links galley gives, such as **Copy link** and the ones agents print, then use that address, so
-they open on your other devices too. Agents still stage from the server's machine. Another proxy
-in front of galley should set `X-Forwarded-For`, or pages on your other devices try to open the
-[desktop app](#desktop-app) of the server's machine.
+they open on your other devices too. Another proxy in front of galley should set `X-Forwarded-For`,
+or pages on your other devices try to open the [desktop app](#desktop-app) of the server's machine.
+
+For agents on other machines to stage, start the server with `GALLEY_CLONES=1` too, and set
+`GALLEY_URL` to that address where they run. galley then keeps its own clone of each GitHub
+repository. Before the author's commands on a pull request, such as `galley pr wait`, the CLI
+sends the agent's branch there with git, and when galley tells the agent to rebase, it fetches
+what galley fetched from GitHub into the checkout. From an agent's sandbox, both go through the
+sandbox's proxy, which must let that address through.
 
 ## Desktop app
 
@@ -206,7 +212,7 @@ times to try signing again.
 | `GALLEY_PUBLIC_URL` | the local URL | Where other machines reach the server (`serve --public-url`): its links use it, and it accepts requests to its host |
 | `GALLEY_ALLOWED_HOSTS` | unset | More hosts, or host:port, the server accepts requests to, comma-separated (`serve --allowed-host`) |
 | `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
-| `GALLEY_CLONES` | unset | Keep a clone of each repository registered by its GitHub name in the data directory, which branches are pushed to over git ([docs/api.md](docs/api.md#git)). For staging from other machines; the CLI does not send branches yet |
+| `GALLEY_CLONES` | unset | Keep a clone of each GitHub repository in the data directory, which the CLI sends agents' branches to over git ([docs/api.md](docs/api.md#git)), for staging from other machines |
 | `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
 | `GALLEY_USER` | your `gh` login | Your name in the UI |

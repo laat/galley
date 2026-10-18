@@ -84,10 +84,10 @@ export function digitCommit(parent: string): string {
   }
 }
 
-export async function cli(args: string[], opts: { input?: string; actor?: string; cwd?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
+export async function cli(args: string[], opts: { input?: string; actor?: string; cwd?: string; env?: Record<string, string> } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   const child = execFile(process.execPath, [BIN, ...args], {
     cwd: opts.cwd ?? repo,
-    env: { ...process.env, GALLEY_URL: server.url, GALLEY_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' },
+    env: { ...process.env, GALLEY_URL: server.url, GALLEY_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1', ...opts.env },
   });
   if (opts.input !== undefined) child.stdin!.end(opts.input);
   else child.stdin!.end();
