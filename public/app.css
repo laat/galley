@@ -1,5 +1,6 @@
 /* galley: GitHub's look, using Primer's colour tokens, with the neutrals and the header
-   tinted purple so a galley tab is not mistaken for a GitHub one. */
+   tinted blue (OKLCH hue 255) so a galley tab is not mistaken for a GitHub one. Merged keeps
+   GitHub's purple. */
 
 :root {
   color-scheme: light;
@@ -7,12 +8,14 @@
   --fg-muted: #59636e;
   --fg-subtle: #68717b;
   --fg-on-emphasis: #ffffff;
-  --bg: #fbfaff;
-  --bg-subtle: #f7f5ff;
-  --bg-overlay: #fbfaff;
-  --header-bg: #e7ddff;
-  --border: #d8d5e7;
-  --border-muted: #d8d5e7b3;
+  --bg: #f8fbff;
+  --bg-subtle: #f1f7ff;
+  --bg-overlay: #f8fbff;
+  --header-bg: #d4e5fb;
+  /* galley's own blue, as in the favicon and the app's icon. */
+  --tint: #3d73b6;
+  --border: #cdd9e8;
+  --border-muted: #cdd9e8b3;
   --accent: #0969da;
   --accent-emphasis: #0969da;
   --accent-subtle: #ddf4ff;
@@ -33,9 +36,9 @@
   --neutral-emphasis: #59636e;
   --neutral-muted: #818b981f;
   --neutral-subtle: #818b9814;
-  --btn-bg: #f7f5ff;
-  --btn-hover: #f1eefb;
-  --btn-border: #d8d5e7;
+  --btn-bg: #f1f7ff;
+  --btn-hover: #e9f1fc;
+  --btn-border: #cdd9e8;
   --btn-primary-bg: #1f883d;
   --btn-primary-hover: #1c8139;
   --diff-add-bg: #dafbe1;
@@ -45,7 +48,7 @@
   --diff-hunk-bg: #ddf4ff;
   --diff-hunk-num: #b6e3ff;
   --diff-selected: #fff8c5;
-  --diff-empty: #f7f5ff;
+  --diff-empty: #f1f7ff;
   --shadow: 0 1px 0 #1f23280a;
   --shadow-overlay: 0 1px 3px #1f232812, 0 8px 24px #42474e2e;
   --hl-keyword: #cf222e;
@@ -66,12 +69,13 @@
     --fg: #f0f6fc;
     --fg-muted: #9198a1;
     --fg-subtle: #848d97;
-    --bg: #120f1c;
-    --bg-subtle: #1c1827;
-    --bg-overlay: #1c1827;
-    --header-bg: #2c2047;
-    --border: #454152;
-    --border-muted: #454152b3;
+    --bg: #09121d;
+    --bg-subtle: #111b28;
+    --bg-overlay: #111b28;
+    --header-bg: #172a41;
+    --tint: #5788c7;
+    --border: #3a4553;
+    --border-muted: #3a4553b3;
     --accent: #4493f8;
     --accent-emphasis: #1f6feb;
     --accent-subtle: #388bfd1a;
@@ -91,9 +95,9 @@
     --neutral-emphasis: #656c76;
     --neutral-muted: #656c7633;
     --neutral-subtle: #656c761a;
-    --btn-bg: #282535;
-    --btn-hover: #2d293a;
-    --btn-border: #454152;
+    --btn-bg: #1e2836;
+    --btn-hover: #222d3b;
+    --btn-border: #3a4553;
     --btn-primary-bg: #238636;
     --btn-primary-hover: #29903b;
     --diff-add-bg: #2ea04326;
@@ -103,9 +107,9 @@
     --diff-hunk-bg: #388bfd1a;
     --diff-hunk-num: #388bfd40;
     --diff-selected: #bb800926;
-    --diff-empty: #1c1827;
+    --diff-empty: #111b28;
     --shadow: none;
-    --shadow-overlay: 0 0 0 1px #454152, 0 8px 24px #05030a;
+    --shadow-overlay: 0 0 0 1px #3a4553, 0 8px 24px #01040b;
     --hl-keyword: #ff7b72;
     --hl-title: #d2a8ff;
     --hl-constant: #79c0ff;
@@ -120,7 +124,7 @@
 * { box-sizing: border-box; }
 html { font-size: 14px; }
 /* scrollbar-color is inherited, so this reaches every scrolling area. */
-:root { scrollbar-color: var(--done-emphasis) var(--bg-subtle); }
+:root { scrollbar-color: var(--tint) var(--bg-subtle); }
 body {
   margin: 0;
   font-family: var(--font);
