@@ -12,7 +12,7 @@ import { serverUrl } from '../src/config.ts';
 import { follow, type Follower } from './live.ts';
 import { trayMenu, trayTitle, trayToolTip } from './menu.ts';
 import { notAPage } from './pages.ts';
-import { attach, findNode, loginShellEnv, noAutostart, startServer, type Found } from './server.ts';
+import { attach, awayText, findNode, loginShellEnv, noAutostart, startServer } from './server.ts';
 import { openPulls, Turns, type Pull } from './turns.ts';
 
 const root = join(import.meta.dirname, '..');
@@ -176,17 +176,9 @@ function ensure(): Promise<void> {
       },
     });
     // The stream says when it answers.
-    if (found !== 'galley') setAway(awayText(found, why, log));
+    if (found !== 'galley') setAway(awayText(base, found, why, log));
   })().finally(() => (attaching = null));
   return attaching;
-}
-
-function awayText(found: Found, why: string | undefined, log: string): string {
-  if (found === 'other') return `Another program answers at ${base}`;
-  if (found === 'silent') return `Something at ${base} does not answer`;
-  if (found === 'starting') return `galley is starting at ${base}…`;
-  if (log) return `galley did not start at ${base}; see ${log}`;
-  return `galley is not running at ${base}${why ? ` (${why})` : ''}`;
 }
 
 function setAway(text: string): void {

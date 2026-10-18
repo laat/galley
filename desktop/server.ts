@@ -7,17 +7,36 @@ import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
-import { identify } from '../src/cli/client.ts';
+import { identify, isLocal, ranHere } from '../src/cli/client.ts';
 import { dataDir, DEFAULT_PORT, fromEnv } from '../src/config.ts';
 
 /** What answers at the server's URL (identify). */
 export type Found = Awaited<ReturnType<typeof identify>>;
 
-/** Why no server may be started at `base`, as the CLI starts none (client.ts autostart): null when one may. */
+/**
+ * Why no server may be started at `base`, as the CLI starts none (client.ts autostart): null when
+ * one may. Only on a computer where a galley server has run: on another, GALLEY_URL was likely
+ * forgotten, and a second galley there would hold pull requests the user never sees.
+ */
 export function noAutostart(base: string): string | null {
   if (fromEnv('NO_AUTOSTART')) return 'GALLEY_NO_AUTOSTART is set';
-  if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(base).hostname)) return `${base} is not on this computer`;
+  if (!isLocal(base)) return `${base} is not on this computer`;
+  if (!ranHere()) return "no galley server has run on this computer: run galley serve once, or set GALLEY_URL to your server's URL";
   return null;
+}
+
+/**
+ * What the app says while galley does not answer at `base`, from what attach found there, why it
+ * started none, and the log of one it started. A server on another computer is that computer's to
+ * run; the app only waits for it.
+ */
+export function awayText(base: string, found: Found, why: string | undefined, log: string): string {
+  if (found === 'other') return `Another program answers at ${base}`;
+  if (found === 'silent') return `Something at ${base} does not answer`;
+  if (found === 'starting') return `galley is starting at ${base}…`;
+  if (!isLocal(base)) return `galley does not answer at ${base}. Is the server running there, and can this computer reach it (is it on the tailnet)?`;
+  if (log) return `galley did not start at ${base}; see ${log}`;
+  return `galley is not running at ${base}${why ? ` (${why})` : ''}`;
 }
 
 /** The user's Node, which runs the server: the first `node` on `path` that is version 24 or newer, as galley needs. */

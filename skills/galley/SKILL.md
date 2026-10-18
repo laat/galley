@@ -14,6 +14,9 @@ description: Stage a pull request in galley, the user's local review server, ins
   your commits, and publishes your edits of the title and description. Never push to GitHub or
   edit the pull request there yourself.
 - Do not run `galley pr publish`, `pr close` or `pr review` unless the user asks.
+- When `galley` cannot reach the server, as from a sandbox that keeps it out, tell the user what
+  it printed and wait for them. Do not work around it: do not start a server yourself, run
+  `galley` outside the sandbox, or open the pull request on GitHub.
 - Commit on a branch, with at least one commit over the base.
 - Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
 - Write a staged pull request as `s#4` ("s" for staged), to the user and in galley's comments,

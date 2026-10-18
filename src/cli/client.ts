@@ -84,14 +84,14 @@ const unreachable = (e: unknown) => {
 };
 
 /** Whether `base` is on this machine, where the CLI may start a server. */
-const isLocal = (base: string) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(base).hostname);
+export const isLocal = (base: string) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(base).hostname);
 
 /**
  * Whether a galley server has run on this machine: it leaves its database in the data directory.
  * Only then does the CLI start one. On another machine GALLEY_URL was likely forgotten, and a
  * galley of its own there would hold pull requests the user never sees.
  */
-const ranHere = () => existsSync(join(dataDir(), 'galley.db'));
+export const ranHere = () => existsSync(join(dataDir(), 'galley.db'));
 
 /** Why nothing answers at `base`, after the CLI started no server there or one that did not answer. */
 function away(base: string): string {

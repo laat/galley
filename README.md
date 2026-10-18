@@ -80,9 +80,91 @@ Links galley gives, such as **Copy link** and the ones agents print, then use th
 they open on your other devices too. Another proxy in front of galley should set `X-Forwarded-For`,
 or pages on your other devices try to open the [desktop app](#desktop-app) of the server's machine.
 
-For agents on other machines to stage, set `GALLEY_URL` to that address where they run. From an
-agent's sandbox, the CLI and the git it runs go through the sandbox's proxy, which must let that
-address through.
+## Other machines
+
+For agents on another machine to stage on your galley, set `GALLEY_URL` to its tailnet address
+in the shell profile there, and restart them:
+
+```sh
+export GALLEY_URL=https://<host>.<tailnet>.ts.net
+```
+
+That machine needs only the checkout and the CLI, without `pnpm install`:
+
+```sh
+git clone https://github.com/laat/galley && cd galley
+ln -s "$PWD/bin/galley.ts" ~/.local/bin/galley
+```
+
+and the skill, as in [Install](#install). The desktop app there opens that galley and starts none.
+
+An agent's sandbox must let the CLI, and the git it runs, reach that address. When it does not,
+the agent tells you that it cannot reach galley.
+
+- Claude Code: add the host to `sandbox.network.allowedDomains` in `~/.claude/settings.json`:
+
+  ```json
+  { "sandbox": { "network": { "allowedDomains": ["<host>.<tailnet>.ts.net"] } } }
+  ```
+
+- Codex: turn on network access for its workspace-write sandbox in `~/.codex/config.toml`. This
+  lets the commands it runs reach any address, not only galley's:
+
+  ```toml
+  [sandbox_workspace_write]
+  network_access = true
+  ```
+
+galley itself can move to another machine, such as a Linux server that is always on. Besides
+the [requirements](#requirements), those for reviewer agents included, that machine needs:
+
+- gh logged in with the `workflow` scope, to publish changes to GitHub Actions workflows:
+  `gh auth login -s workflow`
+- your signing key in its global git config, and on GitHub as a signing key, to publish signed
+- the package managers your repositories use, for reviewer agents to install with
+
+`galley serve --check` says what of this it finds. Install galley there as above, give it a
+tailnet address with `tailscale serve --bg 24823`, and run it as a service with
+`GALLEY_PUBLIC_URL` set to that address. On Linux, a systemd user unit in
+`~/.config/systemd/user/galley.service`, with your paths; `PATH` must have node, git, gh, codex,
+claude and the package managers:
+
+```ini
+[Service]
+ExecStart=/usr/bin/node %h/galley/bin/galley.ts serve
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=GALLEY_PUBLIC_URL=https://<host>.<tailnet>.ts.net
+# Stopping it lets running reviews finish for up to 10 minutes.
+KillMode=mixed
+TimeoutStopSec=11min
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user enable --now galley
+loginctl enable-linger    # keep it running while you are logged out
+```
+
+On macOS, a launchd agent in `~/Library/LaunchAgents` does the same, with the two variables in
+`EnvironmentVariables`, `KeepAlive`, and an `ExitTimeOut` of 660 seconds.
+
+To bring your pull requests along, start galley once where it runs now, so that it moves every
+repository into a clone of its own. Then quit the desktop app, stop galley on both machines
+(`systemctl --user stop galley` on the new one), and copy the data and settings over whatever the
+new one has:
+
+```sh
+rsync -a --delete ~/.local/share/galley/ <host>:.local/share/galley/
+rsync -a --delete ~/.config/galley/ <host>:.config/galley/
+```
+
+Start the service again, and move `~/.local/share/galley` aside on the old machine, so that
+neither the CLI nor the desktop app starts a galley of its own there. Then set `GALLEY_URL` on
+every machine, the server's and the old one included: in an agent's sandbox, localhost may be the
+sandbox's own.
 
 ## Desktop app
 
@@ -91,11 +173,11 @@ when a pull request has been your turn for 10 seconds (clicking it opens the pul
 menu-bar status. Next to its icon is the number waiting for you and, after ↻, the number the agents
 or auto-publish are working on. Its menu lists the open pull requests in the front page's groups,
 each with what it waits for, and has a Start at login switch. It is a window onto the server the
-CLI uses: it starts one when none is running, and quitting it leaves the server running. Its window
-has no title bar of its own: galley's header holds the window's buttons, drags the window, and
-stays at the top as you scroll. Uploaded images and raw files open in windows of their own, with a
-title bar. As in Chrome, a two-finger swipe sideways goes back or forward, and so do the mouse's
-side buttons, ⌘[ and ⌘], and ⌘← and ⌘→ outside a text field.
+CLI uses: it starts one when none is running, as the CLI does, and quitting it leaves the server
+running. Its window has no title bar of its own: galley's header holds the window's buttons,
+drags the window, and stays at the top as you scroll. Uploaded images and raw files open in
+windows of their own, with a title bar. As in Chrome, a two-finger swipe sideways goes back or
+forward, and so do the mouse's side buttons, ⌘[ and ⌘], and ⌘← and ⌘→ outside a text field.
 
 ```sh
 pnpm --dir desktop install
