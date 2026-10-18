@@ -662,7 +662,7 @@ export class Reviewer {
     // It found something in this commit and reviews the author's next one, unless the author answers it without one.
     // A reviewer of the description has only a new version of it for an answer.
     if (this.reviews !== 'description' && this.answered(pull, last)) return { state: 'answered', commit, automatic };
-    return { state: 'findings', commit, automatic };
+    return { state: 'findings', commit, automatic, ...(last.review_id !== null && !this.seen(pull, last) ? { unseen: true } : {}) };
   }
 
   /**
@@ -671,10 +671,14 @@ export class Reviewer {
    * body (on lines outside the diff) have no thread to reply in, so seeing them is enough.
    */
   answered(pull: PullRow, run: ReviewRunRow): boolean {
+    return this.seen(pull, run) && unansweredThreads(this.s.db, pull, run.review_id) === 0;
+  }
+
+  /** Whether the author has been shown the run's review (Service.markSeen). */
+  private seen(pull: PullRow, run: ReviewRunRow): boolean {
     if (run.review_id === null) return false;
     const review = this.s.db.get<{ submitted_at: string }>('SELECT submitted_at FROM reviews WHERE id = ?', run.review_id);
-    if (!review || review.submitted_at > pull.author_seen_at) return false;
-    return unansweredThreads(this.s.db, pull, run.review_id) === 0;
+    return !!review && review.submitted_at <= pull.author_seen_at;
   }
 
   /** This pull request's own values, from its columns for this reviewer; null follows the setting. */

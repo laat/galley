@@ -366,6 +366,8 @@ export interface TurnReason {
   reviewer?: string;
   /** A reviewer agent of the title, description and commit messages (HeadStatus.description): only a new version of them answers its findings. */
   description?: boolean;
+  /** A reviewer agent's findings in a review the author has not been shown yet (HeadStatus.unseen). An API extension. */
+  unseen?: boolean;
 }
 
 /**
@@ -2610,7 +2612,8 @@ export class Service {
     const stopped = pull.state === 'staged' ? this.stoppedText(pull) : null;
     for (const { login, engine, reviewer, status } of r.reviewers) {
       const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
-      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, to_review: toReview(status.state), text, since: status.startedAt, engine, reviewer, ...(status.description ? { description: true } : {}) });
+      const flags = { ...(status.description ? { description: true } : {}), ...(status.unseen ? { unseen: true } : {}) };
+      if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, to_review: toReview(status.state), text, since: status.startedAt, engine, reviewer, ...flags });
     }
     // Once, whatever each reviewer agent is at.
     if (stopped) reasons.push({ kind: 'reviewer_agent', state: 'capped', to_review: false, text: stopped });
