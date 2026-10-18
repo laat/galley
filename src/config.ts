@@ -1,4 +1,4 @@
-import { homedir, userInfo } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export const VERSION = '0.1.0';
@@ -45,12 +45,4 @@ export function cliActor(): { login: string; type: 'User' | 'Bot' } | null {
   if (env.AI_AGENT) return { login: env.AI_AGENT.split('_')[0].replace(/-code$/, ''), type: 'Bot' };
   // A person at a terminal acts as the reviewer; anything else driving the CLI is an agent.
   return process.stdin.isTTY ? null : { login: 'agent', type: 'Bot' };
-}
-
-export function osUser(): string {
-  try {
-    return userInfo().username;
-  } catch {
-    return 'you';
-  }
 }

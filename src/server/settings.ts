@@ -30,8 +30,6 @@ export interface ReviewerSettings {
   skipOwnKind: boolean;
 }
 
-export type CodexSettings = ReviewerSettings;
-
 export const MERGE_METHODS = ['squash', 'merge', 'rebase'] as const;
 export type MergeMethod = (typeof MERGE_METHODS)[number];
 
@@ -41,13 +39,12 @@ export interface PublishSettings {
 }
 
 export interface Settings {
-  codex: CodexSettings;
+  codex: ReviewerSettings;
   claude: ReviewerSettings;
   publish: PublishSettings;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  // "codex" until it became "codex-review", beside "claude-review" (see CodexReviewer.leaveFormerDefault).
   codex: { enabled: false, name: 'codex-review', model: '', effort: '', maxIterations: 3, runTests: true, localhost: false, skipOwnKind: false },
   // Not "claude": that is what the CLI calls an author agent running in Claude Code.
   claude: { enabled: false, name: 'claude-review', model: '', effort: '', maxIterations: 3, runTests: true, localhost: false, skipOwnKind: false },

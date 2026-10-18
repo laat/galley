@@ -227,8 +227,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   });
   for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
-  // A server from before reviewer_agents does not say.
-  if (pr.reviewer_agents) err(whoReviews(pr.reviewer_agents));
+  err(whoReviews(pr.reviewer_agents));
   if (v.web) openBrowser(pr.html_url);
   err(c.gray(`Review happens in the browser. Run \`galley pr wait s${pr.number}\` to block until the reviewer agents or the user respond.`));
   return 0;
