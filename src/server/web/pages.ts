@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, andList, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type EditField, type GithubEdit, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
@@ -644,6 +644,29 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         { cls: 'timeline-badge--danger' },
       );
     }
+    case 'github_edit': {
+      const to = githubPull(data.url);
+      const them = (fields: EditField[]) => (fields.length > 1 ? 'them' : 'it');
+      const published = data.published.length
+        ? timelineBadge('pencil', html`Published the ${andList(data.published)} to ${to} when ${p.author.login} waited ${when}`, { cls: 'timeline-badge--open' })
+        : '';
+      const onGithub = data.edited_on_github.length
+        ? timelineBadge(
+            'x',
+            html`Did not publish the ${andList(data.edited_on_github)} to ${to} when ${p.author.login} waited ${when}: someone edited ${them(data.edited_on_github)} on GitHub since galley published ${them(data.edited_on_github)}, and GitHub's was kept`,
+            { cls: 'timeline-badge--danger' },
+          )
+        : '';
+      const failed = data.failed.length
+        ? timelineBadge(
+            'x',
+            html`Could not publish the ${andList(data.failed)} to ${to} when ${p.author.login} waited ${when}; nothing on GitHub was changed${data.retry ? `, and it is tried again when ${p.author.login} waits` : ''}
+            <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error ?? ''}</pre></details>`,
+            { cls: 'timeline-badge--danger' },
+          )
+        : '';
+      return html`${published}${onGithub}${failed}`;
+    }
     case 'auto_publish_enabled': {
       const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null, data.auto_merge ? `with auto-merge (${data.auto_merge}) on GitHub` : null].filter(Boolean);
       return timelineBadge('clock', html`${who} enabled auto-publish${options.length ? ` (${options.join(', ')})` : ''} ${when}`);
@@ -785,6 +808,11 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   // Published, a commit the author waited with that could not be pushed: the reviewer's to sort out.
   const pushFailed = changed.includes('commits') && stagingState(pull) === 'published' ? s.pushFailed(pull) : null;
   if (pushFailed) rows.push(pushFailedRow(p, pushFailed));
+  // So are the author's edits of the title and description that publishing left (Service.editsLeft); the others its wait publishes.
+  const authorEdits = s.authorEdits(pull);
+  const left = s.editsLeft(pull, authorEdits);
+  if (left.size) rows.push(editsLeftRow(p, left));
+  const edits = authorEdits.filter((f) => !left.has(f));
   const unsigned = await s.unsignedCommits(p.ctx, p.commits);
   const signer = unsigned.length ? await s.signer(p.ctx) : null;
   const signByDefault = unsigned.length ? await s.signsByDefault(p.ctx) : false;
@@ -806,7 +834,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   if (!target) {
     publishRow = html`<div class="merge-row merge-actions">${icon('alert', { cls: 'color-fg-attention' })}<div><strong>No GitHub remote</strong><div class="color-fg-muted">Remote <code>${repo.remote}</code> is not a github.com repository, so this pull request can not be published.</div></div></div>`;
   } else if (pull.published_url && changed.length === 0) {
-    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-open' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version. Each commit ${p.author.login} waits with is pushed there.</div></div>
+    publishRow = html`<div class="merge-row merge-actions">${icon('mark-github', { cls: 'color-fg-open' })}<div class="flex-auto"><strong>Published</strong><div class="color-fg-muted">GitHub has the same commits, title and description as this staged version. Each commit ${p.author.login} waits with is pushed there, and its edits of the title and description are published.</div></div>
       <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div>`;
   } else {
     publishable = true;
@@ -814,7 +842,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const back = pull.published_url ? await s.bringsBack(p.ctx) : null;
     const verb = pull.published_url ? 'Publish update' : 'Publish pull request';
     const what = pull.published_url
-      ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.${changed.includes('commits') && !pushFailed ? ` The commits are also pushed when ${p.author.login} waits.` : ''}`
+      ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.${changed.includes('commits') && !pushFailed ? ` The commits are also pushed when ${p.author.login} waits.` : ''}${edits.length ? ` ${p.author.login}'s edits of the ${andList(edits)} are also published when it waits.` : ''}`
       : html`Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>) to <code>${repo.remote}</code> and opens a pull request on <strong>${target}</strong> with this title and description.`;
     // Images pasted into the description live on this machine; GitHub has no API to upload them to.
     const images = uploadsIn(pull.body).length;
@@ -1019,6 +1047,35 @@ function pushFailedRow(p: PullPage, push: GithubPush): Safe {
   return html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Could not ${push.force ? 'force-push' : 'push'} <code>${shortSha(push.source)}</code> to GitHub ${relTime(push.at)}</strong>
     <div class="color-fg-muted">Nothing on GitHub was overwritten. ${next}</div>
     <pre class="merge-error">${push.error ?? ''}</pre></div></div>`;
+}
+
+/**
+ * Published, the author's edits of the title and description that publishing them when it waited
+ * left (Service.publishEdits): someone edited them on GitHub since galley published them, or it
+ * failed. Not tried again with the same text, unless GitHub could not be reached: then when the
+ * author next waits.
+ */
+function editsLeftRow(p: PullPage, left: Map<EditField, GithubEdit>): Safe {
+  const { author } = p;
+  const tries = [...left];
+  const onGithub = tries.filter(([f, e]) => e.edited_on_github.includes(f)).map(([f]) => f);
+  const failed = tries.filter(([f, e]) => e.failed.includes(f));
+  const at = tries.map(([, e]) => e.at).sort().at(-1)!;
+  const was = (fields: EditField[]) => (fields.length > 1 ? 'were' : 'was');
+  const title = failed.length
+    ? html`Could not publish the ${andList(failed.map(([f]) => f))} to GitHub ${relTime(at)}`
+    : html`The ${andList(onGithub)} ${was(onGithub)} edited on GitHub`;
+  const text = [
+    onGithub.length ? `Someone edited the ${andList(onGithub)} on GitHub since galley published ${onGithub.length > 1 ? 'them' : 'it'}, so ${author.login}'s ${onGithub.length > 1 ? 'edits were' : 'edit was'} not published over ${onGithub.length > 1 ? 'them' : 'it'}.` : null,
+    failed.length && onGithub.length ? `Publishing the ${andList(failed.map(([f]) => f))} failed.` : null,
+    tries.every(([f, e]) => e.retry && e.failed.includes(f))
+      ? `It is tried again each time ${author.login} waits, every few minutes while it does. Publish the update yourself to publish ${tries.length > 1 ? 'them' : 'it'} now.`
+      : `${author.login} was told, and it is not tried again with this text. Publish the update yourself to publish ${tries.length > 1 ? 'them' : 'it'} anyway.`,
+  ].filter(Boolean);
+  const error = failed.map(([, e]) => e.error).find(Boolean);
+  return html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>${title}</strong>
+    <div class="color-fg-muted">${text.join(' ')}</div>${error ? html`
+    <pre class="merge-error">${error}</pre>` : ''}</div></div>`;
 }
 
 /** What came of the last time galley turned on auto-merge on GitHub. */

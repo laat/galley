@@ -11,7 +11,8 @@ description: Stage a pull request in galley, the user's local review server, ins
 
 - Do not `git push` or run `gh pr create`. galley publishes, for the user or, when the user asks,
   for you ([Publishing](#publishing)). After that, commit and run `galley pr wait`: it pushes
-  your commits. Never push to GitHub yourself.
+  your commits, and publishes your edits of the title and description. Never push to GitHub or
+  edit the pull request there yourself.
 - Do not run `galley pr publish`, `pr close` or `pr review` unless the user asks.
 - Commit on a branch, with at least one commit over the base.
 - Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
@@ -123,7 +124,9 @@ description: Stage a pull request in galley, the user's local review server, ins
    publishes. With auto-merge, GitHub merges it, not you.
 
 8. After `Published to GitHub: <url>`, tell the user the GitHub URL and wait again. From now on
-   no reviewer agent reviews your commits, and each commit you wait with is pushed to GitHub:
+   no reviewer agent reviews your commits, and each commit you wait with is pushed to GitHub. Your
+   edits of the title and description (`galley pr edit`) are published at your next wait too,
+   like commits, unless the user edited them since publishing:
 
    - `Merged on GitHub as e468a4e by laat: <url>`: clean up as in [After the merge](#after-the-merge).
    - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
@@ -131,7 +134,10 @@ description: Stage a pull request in galley, the user's local review server, ins
    - New feedback: address it as in step 4, commit, and wait again.
    - `This branch conflicts with origin/main …`: rebase as in step 3 and wait again. The wait
      force-pushes the rebase; do not push it yourself.
-   - `Pushed 3f2a1c9 to GitHub: <url>`: wait again.
+   - `Pushed 3f2a1c9 to GitHub: <url>` or `Published the description to GitHub: <url>`: wait
+     again.
+   - `Could not publish the description to GitHub: …`: nothing on GitHub was changed. Tell the
+     user why, and wait again.
    - `Could not push 3f2a1c9 to GitHub: …`: nothing was pushed. Do not push or force-push it
      yourself; the user decides. When it says galley fetched the branch, rebase onto it as it
      says; do not merge it in. Tell the user why, and wait again.

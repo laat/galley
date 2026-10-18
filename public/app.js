@@ -245,6 +245,8 @@
     auto_publish_failed: 'Auto-publish failed',
     github_pushed: 'Pushed to GitHub',
     github_push_failed: 'Pushing to GitHub failed',
+    github_edited: 'Published the edits to GitHub',
+    github_edit_failed: 'Publishing the edits to GitHub failed',
     auto_merge_enabled: 'Auto-merge enabled on GitHub',
     auto_merge_failed: 'Enabling auto-merge on GitHub failed',
     merged: 'Merged on GitHub',

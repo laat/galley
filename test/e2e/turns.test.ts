@@ -179,7 +179,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.match(rowOf(await page('/'))!, new RegExp(`<a class="Label Label--success" href="/acme/widgets/pull/${number}">.*?Approved</a>`));
       });
 
-      await t.test("published: nobody's, until a commit is not pushed: the author's, whose wait pushes it", async () => {
+      await t.test("published: nobody's, until a commit is not pushed: the author's, whose wait pushes it; the reviewer's title is the reviewer's", async () => {
         // Codex's review of this commit failed before it was published: that holds nothing up now.
         await human('POST', `${base}/publish`, {});
         assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
@@ -213,7 +213,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
         writeFileSync(join(repo, 'turns.js'), 'export const rounds = 2;\n');
         git('commit', '-qam', 'Count two rounds');
-        assert.equal((await cli(['pr', 'edit', String(number), '--title', 'Take turns, in rounds'])).code, 0);
+        // The reviewer edits the title, which the author's wait leaves to the reviewer to publish.
+        await human('PATCH', base, { title: 'Take turns, in rounds' });
         await waitEnded();
         // A commit GitHub does not have is the author's: its wait pushes it.
         assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not waited since its last commit', 'approved', 'update not published: commits, title'] });
@@ -233,7 +234,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.ok(!yourTurn(await page('/')).some((x) => x.id === id), 'not your turn');
       });
 
-      await t.test("an update: the author's wait pushes its commit, which Codex does not review; the title is the reviewer's to publish", async () => {
+      await t.test("an update: the author's wait pushes its commit, which Codex does not review; the reviewer's title is the reviewer's to publish", async () => {
         // An automatic review to spare, which a published pull request does not get.
         await human('PATCH', `${base}/reviewers/codex`, { max_iterations: 3 });
         const runs = (await human('GET', `${base}/reviewers/codex`)).runs.length;

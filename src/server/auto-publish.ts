@@ -1,9 +1,10 @@
 // Auto-publish, after GitHub's auto-merge. The reviewer approves the first publish in advance, or
 // the author agent when the user asked it to publish, and galley publishes on its own, as whoever
 // approved, once the agents are done with the pull request: the reviewer agents with its head,
-// and the author with their feedback (Service.readiness). After that, each
-// commit the author waits with is pushed to the published pull request, with no approval and no
-// review here (Service.pushUpdate): GitHub's reviews and checks take over. A signing that failed
+// and the author with their feedback (Service.readiness). After that, each commit the author
+// waits with is pushed to the published pull request, and its edits of the title and description
+// published, with no approval and no review here (Service.pushUpdate): GitHub's reviews and
+// checks take over. A signing that failed
 // for now is tried again later, on the server's poll, whether the author still waits or not
 // (Service.autoPublishSigningFailed, Service.pushReady).
 import type { PullRow } from './db.ts';
@@ -81,11 +82,11 @@ export class AutoPublisher {
     const known = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
     // Most checks end here, without running git: the poll syncs pushes, and announces them.
     if (!known) return;
-    const pushing = this.s.pushReady(known);
+    const pushing = this.s.pushReady(known) || this.s.editsReady(known);
     if (!pushing && !this.s.autoPublishReady(known)) return;
     const repo = this.s.repoById(known.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, known.number);
-    // Published: the head the author waits with goes to GitHub.
+    // Published: the head the author waits with goes to GitHub, and its edits.
     if (pushing) return this.s.pushUpdate(ctx);
     const pull = ctx.pull;
     if (!this.s.autoPublishReady(pull)) return;
