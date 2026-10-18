@@ -1,11 +1,12 @@
 // A pull request's timeline events (the events table), and what each type's JSON holds. Some of
 // it also decides what galley does next: whether a push signs (Service.signsUpdates), whether a
-// failed push is tried again (Service.pushFailed), when auto-publish tries signing again
+// failed push is tried again (Service.pushFailed), whose edits of the title and description a wait
+// publishes (Service.authorEdits, Service.editsLeft), when auto-publish tries signing again
 // (Service.autoPublishRetry), whether a push goes on top of a branch rewritten on GitHub
 // (Service.fetchedRewritten), and which merge method auto-merge asks for again after a push. So events are written and read back here, typed by their type, and
 // reshaping one for the timeline fails typecheck where it is read.
 import { now, type Actor, type CancelReason, type Db, type EventRow, type PullRow } from './db.ts';
-import type { AutoPublishOff, GithubPush, SigningFailure } from './service.ts';
+import type { AutoPublishOff, GithubEdit, GithubPush, SigningFailure } from './service.ts';
 import type { MergeMethod } from './settings.ts';
 
 /** What each type of event holds. Fields marked optional are missing from events written before them. */
@@ -23,10 +24,13 @@ export interface EventData {
    * `head`: the commit GitHub got; `source`: the staged head it is (a copy of, when signed). `sign`:
    * what the pushes after it do. `rewritten`: on top of the branch as rewritten on GitHub (GithubPush).
    * `brought_back`: commits that rewrite removed, which the user confirmed bringing back.
+   * `read_upto`: the edits the title and description it published include (GithubEdit.read_upto).
    */
-  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; rewritten?: { from: string; to: string }; brought_back?: string[] };
+  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; rewritten?: { from: string; to: string }; brought_back?: string[]; read_upto?: number };
   /** A push when the author waited (Service.pushUpdate). */
   github_push: Omit<GithubPush, 'at'>;
+  /** The author's edits of the title and description, published when it waited (Service.publishEdits). */
+  github_edit: Omit<GithubEdit, 'at'>;
   /** `at`: when GitHub merged or closed it; the event is from when galley learned of it. */
   merged: { url: string | null; by: string | null; at: string; commit: string | null };
   closed_on_github: { url: string | null; by: string | null; at: string; commit: string | null };
@@ -62,6 +66,11 @@ export function lastEvent<T extends EventType>(db: Db, pull: PullRow, type: T | 
   const types: string[] = Array.isArray(type) ? type : [type];
   const row = db.get<EventRow>(`SELECT * FROM events WHERE pull_id = ? AND type IN (${types.map(() => '?').join(', ')}) AND created_at > ? ORDER BY id DESC LIMIT 1`, pull.id, ...types, since);
   return row ? (readEvent(row) as TimelineEvent<T>) : null;
+}
+
+/** The events of the pull request of `type` after the event `id`, oldest first. */
+export function eventsAfter<T extends EventType>(db: Db, pull: PullRow, type: T, id: number): TimelineEvent<T>[] {
+  return db.all<EventRow>('SELECT * FROM events WHERE pull_id = ? AND type = ? AND id > ? ORDER BY id', pull.id, type, id).map((row) => readEvent(row) as TimelineEvent<T>);
 }
 
 /** The events of the pull request of `type` after `since`, oldest first. */

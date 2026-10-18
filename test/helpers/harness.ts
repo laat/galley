@@ -165,19 +165,32 @@ async function setUp({ clones = false }: { clones?: boolean }): Promise<void> {
   const gh = join(dir, 'gh');
   writeFileSync(
     gh,
-    // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error, FAKE_GH_API_FAIL `gh api ...`. A file gh-merge-fail makes
-    // the next `gh pr merge` fail with its contents. `gh pr view` answers FAKE_GH_VIEW, or an open pull request. With
-    // FAKE_GH_GATE, `gh pr create` answers once that file exists, with FAKE_GH_EDIT_GATE, `gh pr edit`, and with
+    // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error, FAKE_GH_API_FAIL `gh api ...`, FAKE_GH_EDIT_FAIL `gh pr
+    // edit`. A file gh-merge-fail makes the next `gh pr merge` fail with its contents. GitHub keeps the title and description
+    // the last `gh pr create` or `gh pr edit` gave it, in gh-title and gh-body. `gh pr view` answers FAKE_GH_VIEW, or an open
+    // pull request, with that title and description when asked for the body (ghView). With
+    // FAKE_GH_GATE, `gh pr create` answers once that file exists, with FAKE_GH_EDIT_GATE, `gh pr edit`, with
+    // FAKE_GH_VIEW_GATE, `gh pr view`, and with
     // FAKE_GH_FOLLOW_GATE, following's question about published pull requests, which creates <that file>.asked when asked.
     // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. What GitHub
     // says about published pull requests comes from gh-pulls.json (see githubSays), an earlier page of their review threads
     // from gh-pulls-earlier.json. With FAKE_GH_NO_READ_ORG, GitHub refuses to name requested teams, as for a token without read:org.
-    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_EDIT_GATE" ] && [ "$1 $2" = "pr edit" ]; then while [ ! -f "$FAKE_GH_EDIT_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FOLLOW_GATE" ] && [ "$1 $2" = "api graphql" ]; then case "$4" in *"pullRequest("*) touch "$FAKE_GH_FOLLOW_GATE.asked"; while [ ! -f "$FAKE_GH_FOLLOW_GATE" ]; do sleep 0.05; done ;; esac; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
+    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\nin="${join(dir, 'gh-stdin')}.$$"\ntrap 'rm -f "$in"' EXIT\ncat > "$in"\ncat "$in" >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_EDIT_GATE" ] && [ "$1 $2" = "pr edit" ]; then while [ ! -f "$FAKE_GH_EDIT_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_VIEW_GATE" ] && [ "$1 $2" = "pr view" ]; then while [ ! -f "$FAKE_GH_VIEW_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FOLLOW_GATE" ] && [ "$1 $2" = "api graphql" ]; then case "$4" in *"pullRequest("*) touch "$FAKE_GH_FOLLOW_GATE.asked"; while [ ! -f "$FAKE_GH_FOLLOW_GATE" ]; do sleep 0.05; done ;; esac; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_EDIT_FAIL" ] && [ "$1 $2" = "pr edit" ]; then echo "$FAKE_GH_EDIT_FAIL" >&2; exit 1; fi\n` +
+      `case "$1 $2" in "pr create"|"pr edit") prev=; for a in "$@"; do if [ "$prev" = --title ]; then printf %s "$a" > "${join(dir, 'gh-title')}"; elif [ "$prev" = --body-file ]; then cp "$in" "${join(dir, 'gh-body')}"; fi; prev="$a"; done ;; esac\n` +
+      `case "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
-      `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
+      `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else case "$5" in *body*) "${process.execPath}" "${join(dir, 'gh-view.cjs')}" ;; *) echo '{"state":"OPEN"}' ;; esac; fi ;;\n` +
       `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) case "$4" in *combinedSlug*) if [ -n "$FAKE_GH_NO_READ_ORG" ]; then echo '{"errors":[{"type":"INSUFFICIENT_SCOPES","message":"Your token has not been granted the required scopes to execute this query."}]}'; echo 'gh: Your token has not been granted the required scopes to execute this query.' >&2; exit 1; fi ;; esac; cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
   );
   chmodSync(gh, 0o755);
+  // ghView: an open pull request with the title and description GitHub has.
+  writeFileSync(
+    join(dir, 'gh-view.cjs'),
+    `const fs = require('fs');
+const read = (name) => fs.existsSync(name) ? fs.readFileSync(name, 'utf8') : '';
+console.log(JSON.stringify({ state: 'OPEN', title: read(${JSON.stringify(join(dir, 'gh-title'))}), body: read(${JSON.stringify(join(dir, 'gh-body'))}) }));
+`,
+  );
 
   // A stand-in for the Codex CLI: a model catalog, `sandbox` standing in for the package manager
   // it runs (failing with FAKE_INSTALL_FAIL), and `exec` answering with FAKE_CODEX_REVIEW (or

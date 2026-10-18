@@ -556,6 +556,8 @@ export function api(s: Service): Hono {
       conflicts: r.conflicts ?? null,
       // With status pushed or push_failed: the push of the head the author waited with, published.
       push: r.push ?? null,
+      // With status edited or edit_failed, or with a push: the author's edits of the title and description, published.
+      edit: r.edit ?? null,
       // Whether the author has anything to address once it has read this, and what the reviewer
       // agents still to review the head are at (WaitResult.asksAuthor), so the CLI need not work it out.
       asks_author: r.asksAuthor ?? null,
