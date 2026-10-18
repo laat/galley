@@ -1,6 +1,6 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
-import type { Actor, CancelReason, CommentRow, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow, RevisionRow } from '../db.ts';
+import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
 import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
 import { doneForAutoPublish, type HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
@@ -687,7 +687,7 @@ function lineDiff(a: string, b: string): Safe {
 }
 
 async function mergeBox(p: PullPage): Promise<Safe> {
-  const { s, pull, repo, viewer } = p;
+  const { s, pull, repo } = p;
   if (pull.github_state === 'merged') {
     const sha = pull.github_merge_sha ? html` as <code>${shortSha(pull.github_merge_sha)}</code>` : '';
     return html`<div class="merge-box merge-box--merged">

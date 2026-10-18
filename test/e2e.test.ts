@@ -15,10 +15,8 @@ import { createServer, type AddressInfo } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../src/server/server.ts';
 import { Db, now, type PullRow } from '../src/server/db.ts';
-import { readSettings, saveSettings } from '../src/server/settings.ts';
 import { AUTHOR_STALL_MS, Service, WAIT_GRACE_MS, type ChangeEvent } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
-import { ClaudeReviewer } from '../src/server/reviewers/claude.ts';
 import { doneForAutoPublish } from '../src/server/reviewers/head-status.ts';
 import { Repo } from '../src/server/git.ts';
 
@@ -1206,39 +1204,6 @@ test('a reviewer can not take a name that --reviewer would take for the other on
   const { codex: codexSettings, claude: claudeSettings } = await human('GET', '/api/settings');
   assert.deepEqual([codexSettings.name, claudeSettings.name], [codex, 'claude-review']);
   assert.deepEqual([server.service.codex!.actor().login, server.service.claude!.actor().login], [codex, 'claude-review']);
-});
-
-test('runs of a Codex bot called "claude", from before there was a Claude reviewer, stay Codex\'s', async () => {
-  const db = new Db(':memory:');
-  try {
-    const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
-    const registered = await s.registerRepo(repo);
-    const pull = await s.createPull(registered, { title: 'Reviewed by a bot called claude', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
-    // An older version recorded the bot's login in its runs, and "claude" was a name it could have.
-    const review = await s.createReview(await s.ctx(registered.owner, registered.name, pull.number), { event: 'COMMENT', body: 'Fine.' }, db.actor('claude', 'Bot'));
-    const run = { pull_id: pull.id, head_sha: pull.head_sha, trigger: 'auto', status: 'done', review_id: review.id, findings: 0 };
-    db.insert('review_runs', { ...run, reviewer: 'claude', started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z' });
-    const start = () => {
-      s.codex = new CodexReviewer(s, join(dir, 'codex'));
-      s.claude = new ClaudeReviewer(s, join(dir, 'claude'));
-      for (const r of s.reviewerAgents()) r.start();
-    };
-    const reviewers = () => db.all<{ reviewer: string }>('SELECT reviewer FROM review_runs ORDER BY id').map((r) => r.reviewer);
-    start();
-    // Codex's run, counted as Codex's automatic review; Claude has not reviewed the head.
-    const row = db.get<any>('SELECT * FROM pulls WHERE id = ?', pull.id);
-    assert.deepEqual(reviewers(), ['codex']);
-    assert.equal(s.codex!.automaticReviews(row), 1);
-    assert.equal(s.claude!.headStatus(row).state, 'off');
-    // A run of the Claude reviewer stays Claude's, also when the server starts again.
-    db.insert('review_runs', { ...run, reviewer: 'claude', started_at: now(), finished_at: now() });
-    for (const r of s.reviewerAgents()) await r.stop();
-    start();
-    assert.deepEqual(reviewers(), ['codex', 'claude']);
-    for (const r of s.reviewerAgents()) await r.stop();
-  } finally {
-    db.sql.close();
-  }
 });
 
 test('a reviewer can leave pull requests by its own kind of agent to the other', async (t) => {
@@ -3513,115 +3478,6 @@ test('closing the server waits for a running poll before it closes the database'
     assert.deepEqual(errors.mock.calls.map((c) => c.arguments.join(' ')), []);
   } finally {
     errors.mock.restore();
-  }
-});
-
-test('an author an older CLI called "codex" moves to "codex-agent" when the reviewer starts', async () => {
-  // As the reviewer took the name "codex", it moved such an author; on its new default it does so when it starts.
-  for (const current of [false, true]) {
-    const data = mkdtempSync(join(tmpdir(), 'galley-upgrade-'));
-    const db = new Db(join(data, 'galley.db'));
-    try {
-      const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
-      const registered = await s.registerRepo(repo);
-      const old = db.actor('codex', 'Bot');
-      // When "codex-agent" exists too, both are the same kind of author and become one.
-      const agent = current ? db.actor('codex-agent', 'Bot') : old;
-      const pull = await s.createPull(registered, { title: 'From an older Codex agent', head: 'feature/mul', base: 'main' }, old);
-      const reviewer = new CodexReviewer(s, join(dir, 'codex'));
-      reviewer.start();
-      await reviewer.stop();
-      assert.equal(reviewer.actor().login, 'codex-review');
-      const author = db.get<{ author_id: number }>('SELECT author_id FROM pulls WHERE id = ?', pull.id)!.author_id;
-      assert.equal(author, agent.id);
-      assert.equal(db.actorById(author).login, 'codex-agent', 'the agent the CLI now calls codex-agent keeps its pull request');
-      assert.equal(db.get('SELECT 1 FROM actors WHERE login = ?', 'codex'), undefined);
-      // So it can wait for feedback on it.
-      const waited = await s.wait(await s.ctx(registered.owner, registered.name, pull.number), db.actorById(author), 0);
-      assert.equal(waited.status === 'timeout' || waited.status === 'agents_done', true, waited.status);
-    } finally {
-      db.sql.close();
-      rmSync(data, { recursive: true, force: true });
-    }
-  }
-});
-
-test('a Codex reviewer on the former default name "codex" becomes "codex-review", one with a name of its own stays', async () => {
-  /** An install from before, its reviewer named `login` (by default "codex"), with a review; `stored` is the setting. */
-  const upgrade = async (login: string, stored?: string) => {
-    const db = new Db(':memory:');
-    if (stored) saveSettings(db, { ...readSettings(db), codex: { ...readSettings(db).codex, name: stored } });
-    const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
-    const registered = await s.registerRepo(repo);
-    const pull = await s.createPull(registered, { title: 'Reviewed before', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
-    const bot = db.actor(login, 'Bot');
-    db.setMeta('codex_actor_id', String(bot.id));
-    const review = await s.createReview(await s.ctx(registered.owner, registered.name, pull.number), { event: 'COMMENT', body: 'Fine.' }, bot);
-    db.insert('review_runs', { pull_id: pull.id, reviewer: 'codex', head_sha: pull.head_sha, trigger: 'auto', status: 'done', review_id: review.id, findings: 0, started_at: now(), finished_at: now() });
-    const reviewer = new CodexReviewer(s, join(dir, 'codex'));
-    reviewer.start();
-    await reviewer.stop();
-    const result = { login: reviewer.actor().login, reviewedBy: db.actorById(review.author_id).login, setting: readSettings(db).codex.name };
-    db.sql.close();
-    return result;
-  };
-  // On the default, set or not: the one actor is renamed, so its earlier reviews show the new name.
-  assert.deepEqual(await upgrade('codex'), { login: 'codex-review', reviewedBy: 'codex-review', setting: 'codex-review' });
-  assert.deepEqual(await upgrade('codex', 'codex'), { login: 'codex-review', reviewedBy: 'codex-review', setting: 'codex-review' });
-  // A name of its own stays.
-  assert.deepEqual(await upgrade('robo', 'robo'), { login: 'robo', reviewedBy: 'robo', setting: 'robo' });
-});
-
-test('Codex reviews from before findings were counted are counted from their review', async () => {
-  const data = mkdtempSync(join(tmpdir(), 'galley-findings-'));
-  const db = new Db(join(data, 'galley.db'));
-  const s = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
-  const reviewer = new CodexReviewer(s, join(dir, 'codex'));
-  s.codex = reviewer;
-  try {
-    for (const branch of ['feature/legacy-counted', 'feature/legacy-uncounted']) {
-      git('checkout', '-q', 'main');
-      git('checkout', '-qb', branch);
-      writeFileSync(join(repo, 'legacy.js'), 'export {};\n');
-      git('add', 'legacy.js');
-      git('commit', '-qm', 'Add legacy.js');
-    }
-    const registered = await s.registerRepo(repo);
-    const author = db.actor('agent', 'Bot');
-    const counted = await s.createPull(registered, { title: 'Counted', head: 'feature/legacy-counted', base: 'main' }, author);
-    const uncounted = await s.createPull(registered, { title: 'Uncounted', head: 'feature/legacy-uncounted', base: 'main' }, author);
-    // Codex is on for both, so a clean head is not mistaken for Codex being off.
-    db.run('UPDATE pulls SET codex_enabled = 1');
-    const row = (id: number) => db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
-    // Runs as an older version left them: done, linked to their review, and no count.
-    const run = (pullId: number, head: string, reviewId: number | null) =>
-      db.insert('review_runs', { pull_id: pullId, reviewer: 'codex', head_sha: head, trigger: 'auto', status: 'done', review_id: reviewId, started_at: now(), finished_at: now() });
-    const ctx = await s.ctx(registered.owner, registered.name, counted.number);
-    const nothing = await s.createReview(ctx, { event: 'COMMENT', body: 'Codex found nothing to comment on.\n\n<sub>Codex reviewed it.</sub>' }, reviewer.actor());
-    const nothingRun = run(counted.id, counted.head_sha, nothing.id);
-    const found = await s.createReview(
-      ctx,
-      {
-        event: 'COMMENT',
-        body: 'Three things.\n\n**Comments on lines outside the diff**\n\n- `math.js:1`: First.\n- `math.js:2-3` (low priority): Second,\n  over two lines.\n\n<sub>Codex reviewed it.</sub>',
-        comments: [{ path: 'legacy.js', line: 1, body: 'Third.' }],
-      },
-      reviewer.actor(),
-    );
-    const foundRun = run(counted.id, '0'.repeat(40), found.id);
-    const lostRun = run(uncounted.id, uncounted.head_sha, null);
-    reviewer.start();
-    const findings = (id: number) => db.get<{ findings: number | null }>('SELECT findings FROM review_runs WHERE id = ?', id)!.findings;
-    assert.deepEqual([findings(nothingRun), findings(foundRun), findings(lostRun)], [0, 3, null]);
-    // A review that found nothing lets the head through; one that cannot be counted is reviewed again.
-    assert.equal(reviewer.headStatus(row(counted.id)).state, 'clean');
-    assert.equal(reviewer.headStatus(row(uncounted.id)).state, 'unreviewed');
-    reviewer.consider(uncounted.id);
-    assert.equal(reviewer.atWork(row(uncounted.id))?.status, 'QUEUED');
-  } finally {
-    await reviewer.stop();
-    db.sql.close();
-    rmSync(data, { recursive: true, force: true });
   }
 });
 

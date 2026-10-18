@@ -56,7 +56,7 @@ export interface PullRow {
   claude_enabled: number | null;
   /** The same for custom reviewers, by name: a ReviewerOverrides as JSON; null when none has its own. */
   reviewer_overrides: string | null;
-  /** The commit messages from base to head, hashed: what reviewers of the description read besides the title and description. Null until a reviewer needs it. */
+  /** The commit messages from base to head, hashed: what reviewers of the description read besides the title and description. Null for a pull request staged before galley hashed them, until its next push. */
   messages_sha: string | null;
   /** Auto-publish, when it is on (until the first publish): an AutoPublish as JSON (see Service.autoPublish). */
   auto_publish: string | null;
@@ -373,10 +373,6 @@ export class Db {
       const cols = this.sql.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
     }
-    // A staged pull request was stored as open, GitHub's word for what others can see.
-    this.sql.exec("UPDATE pulls SET state = 'staged' WHERE state = 'open'");
-    // Auto-publish approves the first publish only; one left on after it, from before, is used up.
-    this.sql.exec('UPDATE pulls SET auto_publish = NULL WHERE auto_publish IS NOT NULL AND published_url IS NOT NULL');
     const dir = file === ':memory:' ? file : dirname(realpathSync(file));
     let instance = this.getMeta('instance_id');
     if (!instance || this.getMeta('data_dir') !== dir) {

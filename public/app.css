@@ -9,7 +9,6 @@
   --fg-on-emphasis: #ffffff;
   --bg: #fbfaff;
   --bg-subtle: #f7f5ff;
-  --bg-inset: #f7f5ff;
   --bg-overlay: #fbfaff;
   --header-bg: #e7ddff;
   --border: #d8d5e7;
@@ -20,13 +19,11 @@
   --accent-muted: #54aeff66;
   --success: #1a7f37;
   --success-emphasis: #1f883d;
-  --success-subtle: #dafbe1;
   --danger: #d1242f;
   --danger-emphasis: #cf222e;
   --danger-subtle: #ffebe9;
   --done: #8250df;
   --done-emphasis: #8250df;
-  --done-subtle: #fbefff;
   /* Staged: only here, not open on GitHub, so not GitHub's green for open. */
   --staged: #0969da;
   --staged-emphasis: #0969da;
@@ -71,7 +68,6 @@
     --fg-subtle: #848d97;
     --bg: #120f1c;
     --bg-subtle: #1c1827;
-    --bg-inset: #05030a;
     --bg-overlay: #1c1827;
     --header-bg: #2c2047;
     --border: #454152;
@@ -82,13 +78,11 @@
     --accent-muted: #4493f866;
     --success: #3fb950;
     --success-emphasis: #238636;
-    --success-subtle: #2ea04326;
     --danger: #f85149;
     --danger-emphasis: #da3633;
     --danger-subtle: #f851491a;
     --done: #ab7df8;
     --done-emphasis: #8957e5;
-    --done-subtle: #ab7df826;
     --staged: #4493f8;
     --staged-emphasis: #1f6feb;
     --attention: #d29922;
@@ -138,7 +132,7 @@ body {
 }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-code, kbd, pre, .mono { font-family: var(--mono); }
+code, kbd, pre { font-family: var(--mono); }
 button { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
 details > summary { cursor: pointer; }
@@ -1070,7 +1064,7 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
   transition: transform 0.1s;
 }
 .add-line-comment:hover { transform: scale(1); }
-.blob-code[data-line]:hover .add-line-comment, body.selecting .add-line-comment.is-anchor { display: inline-flex; }
+.blob-code[data-line]:hover .add-line-comment { display: inline-flex; }
 body.selecting { user-select: none; cursor: ns-resize; }
 
 .inline-comments-cell { padding: 8px 16px; background: var(--bg-subtle); border-top: 1px solid var(--border-muted); border-bottom: 1px solid var(--border-muted); font-family: var(--font); white-space: normal; }

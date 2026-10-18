@@ -119,7 +119,7 @@ export class ClaudeEngine implements Engine {
         '--permission-prompts',
         'none',
         '--settings',
-        JSON.stringify({ sandbox: this.sandbox(job, own) }),
+        JSON.stringify({ sandbox: this.sandbox(job) }),
       ];
       if (settings.model) args.push('--model', settings.model);
       if (settings.effort) args.push('--effort', settings.effort);
@@ -160,7 +160,7 @@ export class ClaudeEngine implements Engine {
    * Code would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude Code
    * fall back to it. It may not leave the sandbox.
    */
-  private sandbox(job: EngineJob, own: string) {
+  private sandbox(job: EngineJob) {
     const uid = process.getuid?.();
     return {
       enabled: true,

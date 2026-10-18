@@ -1044,11 +1044,7 @@ export class Service {
     const baseTip = await this.baseCommit(repo, pull.base_ref);
     this.observeBase(pull.id, baseTip);
     const mergeBase = (baseTip && (await git.mergeBase(baseTip, head))) ?? pull.base_sha;
-    if (head === pull.head_sha && mergeBase === pull.base_sha) {
-      // Hashed once for a pull request staged before galley hashed them.
-      if (pull.messages_sha === null) this.db.update('pulls', pull.id, { messages_sha: messagesSha(await git.log(mergeBase, head)) });
-      return current();
-    }
+    if (head === pull.head_sha && mergeBase === pull.base_sha) return current();
 
     const forced = !(await git.isAncestor(pull.head_sha, head));
     const newCommits = forced ? [] : (await git.log(pull.head_sha, head)).map((c) => c.sha);

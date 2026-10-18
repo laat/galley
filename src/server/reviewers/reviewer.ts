@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
-import { now, type Actor, type CancelReason, type Db, type CommentRow, type Priority, type PullRow, type RepoRow, type ReviewRow, type ReviewRunRow, type Side } from '../db.ts';
+import { now, type Actor, type CancelReason, type Db, type Priority, type PullRow, type RepoRow, type ReviewRow, type ReviewRunRow, type Side } from '../db.ts';
 import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type ChangeEvent, type Ctx, type ReviewColumns, type Service, type Thread } from '../service.ts';
 import type { HeadStatus } from './head-status.ts';
 import { unansweredThreads } from '../feedback.ts';
@@ -345,7 +345,7 @@ export class Reviewer {
    */
   subject(pull: Pick<PullRow, 'head_sha' | 'title' | 'body' | 'messages_sha'>, reads: Reviews = this.reviews): string {
     if (reads === 'code') return pull.head_sha;
-    // Before galley has hashed the messages (Service.doSync does), the head stands in for them.
+    // For a pull request staged before galley hashed the messages, the head stands in for them until its next push.
     const read = createHash('sha256').update(`${pull.title}\0${pull.body}\0${pull.messages_sha ?? pull.head_sha}`).digest('hex');
     return `description:${read}`;
   }
@@ -358,7 +358,7 @@ export class Reviewer {
     let name = this.settings().name;
     const taken = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', name);
     // A name the reviewer can not take leaves it with "<name>-reviewer".
-    if (taken && !this.onlyReviewedForUs(taken) && !this.takeOver(taken, name)) {
+    if (taken && !this.onlyReviewedForUs(taken)) {
       const base = `${name}-reviewer`;
       name = base;
       for (let i = 2; this.s.db.get('SELECT 1 FROM actors WHERE login = ?', name); i++) name = `${base}-${i}`;
@@ -366,11 +366,6 @@ export class Reviewer {
     const actor = this.s.db.actor(name, 'Bot');
     this.s.db.setMeta(this.actorKey, String(actor.id));
     return actor;
-  }
-
-  /** Make room for the reviewer under `name`, which `taken` has; false leaves `taken` as it is. */
-  protected takeOver(_taken: Actor, _name: string): boolean {
-    return false;
   }
 
   /** What it is, in a few words under its name, when its name does not say (custom reviewers). */
@@ -468,7 +463,6 @@ export class Reviewer {
   start(): void {
     // The human is set up before the reviewer picks a name, so they can never share one.
     this.s.claimViewerLogin();
-    this.migrate();
     // Runs the server stopped under, or that were still running when it was killed, run again.
     this.s.db.run("UPDATE review_runs SET status = 'interrupted', finished_at = ? WHERE status = 'running' AND reviewer = ?", now(), this.key);
     this.s.bus.on('author-waiting', this.onWaiting);
@@ -522,9 +516,6 @@ export class Reviewer {
     if (!this.appliesToPull(ctx.pull)) return;
     this.launch(ctx, 'manual');
   }
-
-  /** Bring what earlier versions stored up to date, before the reviewer starts. */
-  protected migrate(): void {}
 
   /**
    * Stop reacting, give running reviews up to `graceMs` to post, then interrupt the rest, and
@@ -843,13 +834,11 @@ export class Reviewer {
 
   /**
    * The latest review of what the reviewer reads now (subject), running, done, failed or
-   * cancelled. One the server stopped under does not count, nor does a review whose findings were
-   * never counted (one from an older version that could not be counted later), so the reviewer
-   * reviews the commit again.
+   * cancelled. One the server stopped under does not count.
    */
   private attempt(pull: PullRow): ReviewRunRow | undefined {
     return this.s.db.get<ReviewRunRow>(
-      "SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? AND COALESCE(subject, head_sha) = ? AND status != 'interrupted' AND NOT (status = 'done' AND findings IS NULL) ORDER BY id DESC",
+      "SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? AND COALESCE(subject, head_sha) = ? AND status != 'interrupted' ORDER BY id DESC",
       pull.id,
       this.key,
       this.subject(pull),

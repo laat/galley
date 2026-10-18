@@ -5,10 +5,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
-import { now, type Actor, type CommentRow } from '../db.ts';
-import { splitPriorityPrefix, type Service } from '../service.ts';
-import { customActorKey, EngineError, lastLines, outsideTheDiff, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
-import { DEFAULT_SETTINGS, readSettings, REVIEWER_KINDS, saveSettings } from '../settings.ts';
+import type { Service } from '../service.ts';
+import { EngineError, lastLines, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
 import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCallLocation, type ToolCallStatus, type ToolKind } from './transcript.ts';
 
 /**
@@ -46,8 +44,6 @@ function untrusted(checkout: string): string[] {
 
 /** What the CLI calls an author agent running in Codex (see cliActor in src/config.ts). */
 const CODEX_AUTHOR = 'codex-agent';
-/** The reviewer's default name before "codex-review". */
-const FORMER_DEFAULT = 'codex';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 
 export class CodexEngine implements Engine {
@@ -264,100 +260,8 @@ export function unwrapShell(command: string): string {
   return arg;
 }
 
-/** The Codex reviewer, with what earlier versions stored about it brought up to date. */
 export class CodexReviewer extends Reviewer {
   constructor(s: Service, bin = 'codex') {
     super(s, new CodexEngine(bin));
-  }
-
-  /**
-   * Older CLIs called author agents running in Codex "codex". That author moves to the name
-   * the CLI uses now, keeping its pull requests, so the agent can still work on them; if that
-   * name exists too, both are the same kind of author and become one.
-   */
-  protected takeOver(taken: Actor, name: string): boolean {
-    if (taken.id === this.s.viewer().id || name !== FORMER_DEFAULT) return false;
-    const current = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', CODEX_AUTHOR);
-    if (current) this.s.db.transaction(() => this.absorb(taken, current));
-    else this.s.db.run('UPDATE actors SET login = ? WHERE id = ?', CODEX_AUTHOR, taken.id);
-    return true;
-  }
-
-  protected migrate(): void {
-    this.leaveFormerDefault();
-    // Earlier versions recorded the reviewer's login in review_runs; fold those identities into
-    // one. Runs from before galley knew another engine are all Codex's, also under a login that
-    // is another engine's kind now (the bot could be called "claude"). A custom reviewer's runs
-    // are under its name, which has its bot in meta from before its first run (CustomReviewers.load).
-    let since = this.s.db.getMeta('engines_since');
-    if (!since) this.s.db.setMeta('engines_since', (since = now()));
-    const kinds = REVIEWER_KINDS.map((k) => `'${k}'`).join(', ');
-    const custom = `SELECT substr(key, ${customActorKey('').length + 1}) FROM meta WHERE key LIKE '${customActorKey('')}%'`;
-    const legacy = `reviewer != '${this.engine}' AND ((reviewer NOT IN (${kinds}) AND reviewer NOT IN (${custom})) OR started_at < ?)`;
-    for (const { reviewer } of this.s.db.all<{ reviewer: string }>(`SELECT DISTINCT reviewer FROM review_runs WHERE ${legacy}`, since)) {
-      const old = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', reviewer);
-      const me = this.actor();
-      this.s.db.transaction(() => {
-        if (old && old.id !== me.id && this.onlyReviewedForUs(old)) this.absorb(old, me);
-        this.s.db.run(`UPDATE review_runs SET reviewer = ? WHERE reviewer = ? AND ${legacy}`, this.engine, reviewer, since);
-      });
-    }
-    // Runs from before findings were counted: count them from the review each posted, its
-    // comments and the findings its body lists. Without a review the count stays unknown.
-    for (const run of this.s.db.all<{ id: number; review_id: number }>("SELECT id, review_id FROM review_runs WHERE reviewer = ? AND status = 'done' AND findings IS NULL AND review_id IS NOT NULL", this.engine)) {
-      const review = this.s.db.get<{ body: string }>('SELECT body FROM reviews WHERE id = ?', run.review_id);
-      if (!review) continue;
-      const inline = this.s.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE review_id = ?', run.review_id)!.n;
-      this.s.db.update('review_runs', run.id, { findings: inline + outsideTheDiff(review.body).length });
-    }
-    // Earlier reviews carried the priority in the text ("[P1] ..."); move it into the field.
-    const me = this.actor();
-    for (const c of this.s.db.all<Pick<CommentRow, 'id' | 'body'>>('SELECT id, body FROM comments WHERE author_id = ? AND priority IS NULL', me.id)) {
-      const split = splitPriorityPrefix(c.body);
-      if (split.priority) this.s.db.update('comments', c.id, { priority: split.priority, body: split.body });
-    }
-  }
-
-  /**
-   * The reviewer was "codex" by default until it became "codex-review", beside "claude-review".
-   * An install on the former default moves to the new one, earlier reviews and all, as renaming
-   * it in settings does; one that chose a name of its own keeps it. The name stays when someone
-   * else has the new one. Once: "codex" chosen later stays.
-   */
-  private leaveFormerDefault(): void {
-    if (this.s.db.getMeta('codex_left_former_default')) return;
-    this.s.db.setMeta('codex_left_former_default', '1');
-    let stored: unknown;
-    try {
-      stored = JSON.parse(this.s.db.getMeta('settings') ?? '{}').codex?.name;
-    } catch {}
-    if (stored !== undefined && stored !== FORMER_DEFAULT) return;
-    const id = Number(this.s.db.getMeta('codex_actor_id'));
-    let me = id ? this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id) : undefined;
-    if (!me) {
-      // From before its id was kept: the actor that only ever posted its reviews.
-      const old = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', FORMER_DEFAULT);
-      if (old && this.onlyReviewedForUs(old)) {
-        this.s.db.setMeta('codex_actor_id', String(old.id));
-        me = old;
-      }
-    }
-    // Older CLIs called author agents running in Codex "codex". Taking that name, the reviewer
-    // moved such an author to the name the CLI uses now (takeOver). On the new default it never
-    // takes the name, so the author moves here, or its agent could not wait on its pull requests.
-    const author = this.s.db.get<Actor>('SELECT * FROM actors WHERE login = ?', FORMER_DEFAULT);
-    if (author && author.id !== me?.id) this.takeOver(author, FORMER_DEFAULT);
-    let name = DEFAULT_SETTINGS.codex.name;
-    if (me?.login === FORMER_DEFAULT) {
-      try {
-        this.rename(name);
-      } catch {
-        name = FORMER_DEFAULT;
-      }
-    }
-    if (stored !== undefined || name !== DEFAULT_SETTINGS.codex.name) {
-      const settings = readSettings(this.s.db);
-      saveSettings(this.s.db, { ...settings, codex: { ...settings.codex, name } });
-    }
   }
 }
