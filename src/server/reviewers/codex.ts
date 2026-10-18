@@ -13,9 +13,9 @@ import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCallLo
  * Codex's workspace-write sandbox: it writes only to the checkout and the TMPDIR it is given
  * beside it. Every setting is given here, or Codex takes it from the user's config.toml, where
  * writable_roots or network_access may open more. /tmp and the server's own TMPDIR are left
- * out, since repositories and other agents' worktrees can live there. The user's repository
- * stays read-only: Codex protects the checkout's .git and the worktree's git directory it
- * points to, and the rest of the repository is outside what it may write. Network is only for
+ * out, since repositories and other agents' worktrees can live there. galley's clone stays
+ * read-only: Codex protects the checkout's .git and the worktree's git directory it points to,
+ * and the rest of the clone is outside what it may write. Network is only for
  * installing dependencies: with it, code from the pull request could reach galley's API on
  * localhost and act as the user.
  */
@@ -34,7 +34,7 @@ function workspaceWrite(network: boolean): string[] {
 
 /**
  * Codex loads a trusted project's .codex/config.toml, whose MCP servers it starts outside the
- * sandbox, and on a writable checkout it marks the user's repository trusted in their
+ * sandbox, and on a writable checkout it marks the repository trusted in the user's
  * config.toml. Marking the checkout untrusted turns both off; it outranks the repository's
  * own trust.
  */

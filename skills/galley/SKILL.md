@@ -184,8 +184,6 @@ Unless the user wants to keep something:
 3. Rebase your other pull requests that touch the merged files onto `origin/<base>` (compare
    `galley pr diff s4 --name-only`).
 
-Leave the `refs/galley/...` refs alone.
-
 ## Several pull requests
 
 `galley pr wait s5 s6` returns when one has news and says which. Leave a merged or closed one out

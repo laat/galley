@@ -68,10 +68,9 @@ export function repoJson(s: Service, repo: RepoRow) {
     html_url: `${s.baseUrl}/${repo.owner}/${repo.name}`,
     url: apiBase(s, repo),
     git_dir: s.gitDir(repo),
-    work_dir: repo.work_dir,
     remote: repo.remote,
     github: repo.github_slug,
-    // Extension, for galley's own clone of a GitHub repository: where git pushes branches to it and fetches them.
+    // Extension: where git pushes branches to galley's clone of the repository and fetches them; none for one registered by path before galley kept clones.
     ...(s.isClone(repo) ? { git_url: s.gitUrl(repo) } : {}),
   };
 }

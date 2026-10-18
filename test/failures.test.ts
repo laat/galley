@@ -16,6 +16,8 @@ process.env.GIT_CONFIG_NOSYSTEM = '1';
 
 let dir: string;
 let repo: string;
+/** GitHub's acme/widgets, which galley's clones fetch from. */
+let remote: string;
 let gh: string;
 /** The FAKE_* variables every test starts with. */
 let startingFakes: Record<string, string>;
@@ -26,13 +28,17 @@ function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
 }
 
-/** A server's service on a database of its own, with a pull request staged from feature/mul. */
-async function staged(): Promise<{ s: Service; pull: PullRow }> {
-  const db = new Db(join(mkdtempSync(join(dir, 'data-')), 'galley.db'));
-  const s = new Service({ db, baseUrl: 'http://localhost:0', ghBin: gh, viewerLogin: 'reviewer' });
+/** A server's service on a data directory of its own, with a pull request staged from feature/mul, sent to its clone; and where the clone is. */
+async function staged(): Promise<{ s: Service; pull: PullRow; clone: string }> {
+  const data = mkdtempSync(join(dir, 'data-'));
+  const db = new Db(join(data, 'galley.db'));
+  const s = new Service({ db, baseUrl: 'http://localhost:0', ghBin: gh, viewerLogin: 'reviewer', dataDir: data, githubUrl: () => remote });
   services.push(s);
-  const pull = await s.createPull(await s.registerRepo(repo), { title: 'Add mul', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
-  return { s, pull };
+  const row = await s.registerGithub('acme/widgets');
+  const clone = s.gitDir(row);
+  git('push', '-q', clone, 'feature/mul');
+  const pull = await s.createPull(row, { title: 'Add mul', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
+  return { s, pull, clone };
 }
 
 before(() => {
@@ -42,6 +48,9 @@ before(() => {
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\n');
   git('add', '.');
   git('commit', '-qm', 'Initial commit');
+  remote = join(dir, 'remote.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  git('push', '-q', remote, 'main');
   git('checkout', '-qb', 'feature/mul');
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\nexport const mul = (a, b) => a * b;\n');
   git('commit', '-qam', 'Add mul');
@@ -104,9 +113,10 @@ test("a failure of GitHub's GraphQL API is logged once per repository, whatever 
 });
 
 test('a sync the poll could not do is tried again at the next poll, and its failure logged once', async () => {
-  const { s, pull } = await staged();
-  // The agent rewrites its commit; git fails the poll's first two syncs, each time naming where the branch was.
+  const { s, pull, clone } = await staged();
+  // The agent rewrites its commit and sends it; git fails the poll's first two syncs, each time naming where the branch was.
   git('commit', '-q', '--amend', '-m', 'Add mul, reworded');
+  git('push', '-qf', clone, 'feature/mul');
   const head = git('rev-parse', 'HEAD');
   const sync = s.sync.bind(s);
   const failures = [`is at ${head} but expected ${pull.head_sha}`, `is at ${pull.head_sha} but expected ${head}`];
@@ -126,28 +136,22 @@ test('a sync the poll could not do is tried again at the next poll, and its fail
 });
 
 test("a base branch galley could not fetch is logged once while it fails the same way, whatever git's timings, and again when it fails another way", async (t) => {
-  git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git');
-  git('update-ref', 'refs/remotes/origin/main', 'main');
-  try {
-    const { s, pull } = await staged();
-    const repoRow = s.repoById(pull.repo_id);
-    const unreachable = (ms: number) => `fatal: unable to access 'https://github.com/acme/widgets.git/': Failed to connect to 127.0.0.1 port 1 after ${ms} ms: Couldn't connect to server`;
-    const refused = (status: number) => `fatal: unable to access 'https://github.com/acme/widgets.git/': The requested URL returned error: ${status}`;
-    const answers = [unreachable(0), unreachable(1), refused(403), refused(403), refused(404), null, unreachable(2)];
-    t.mock.method(Repo.prototype, 'fetchBranch', async () => answers.shift() ?? null);
-    const logged = t.mock.method(console, 'error', () => {});
-    const shown: (string | null)[] = [];
-    while (answers.length) {
-      await s.fetchBases(repoRow, { base: 'main' });
-      shown.push(s.fetchError(repoRow, 'main'));
-    }
-    // The page keeps the first message while it fails the same way.
-    assert.deepEqual(shown, [unreachable(0), unreachable(0), refused(403), refused(403), refused(404), null, unreachable(2)]);
-    assert.deepEqual(
-      logged.mock.calls.map((c) => c.arguments.join(' ')).filter((l) => l.startsWith('could not fetch')).map((l) => l.replace(/ into \S+:/, ' into <repo>:')),
-      [unreachable(0), refused(403), refused(404), unreachable(2)].map((e) => `could not fetch origin/main into <repo>: ${e}`),
-    );
-  } finally {
-    git('remote', 'remove', 'origin');
+  const { s, pull } = await staged();
+  const repoRow = s.repoById(pull.repo_id);
+  const unreachable = (ms: number) => `fatal: unable to access 'https://github.com/acme/widgets.git/': Failed to connect to 127.0.0.1 port 1 after ${ms} ms: Couldn't connect to server`;
+  const refused = (status: number) => `fatal: unable to access 'https://github.com/acme/widgets.git/': The requested URL returned error: ${status}`;
+  const answers = [unreachable(0), unreachable(1), refused(403), refused(403), refused(404), null, unreachable(2)];
+  t.mock.method(Repo.prototype, 'fetchBranch', async () => answers.shift() ?? null);
+  const logged = t.mock.method(console, 'error', () => {});
+  const shown: (string | null)[] = [];
+  while (answers.length) {
+    await s.fetchBases(repoRow, { base: 'main' });
+    shown.push(s.fetchError(repoRow, 'main'));
   }
+  // The page keeps the first message while it fails the same way.
+  assert.deepEqual(shown, [unreachable(0), unreachable(0), refused(403), refused(403), refused(404), null, unreachable(2)]);
+  assert.deepEqual(
+    logged.mock.calls.map((c) => c.arguments.join(' ')).filter((l) => l.startsWith('could not fetch')).map((l) => l.replace(/ into \S+:/, ' into <repo>:')),
+    [unreachable(0), refused(403), refused(404), unreachable(2)].map((e) => `could not fetch origin/main into <repo>: ${e}`),
+  );
 });

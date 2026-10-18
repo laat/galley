@@ -42,6 +42,11 @@ before(async () => {
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\n');
   git('add', '.');
   git('commit', '-qm', 'Initial commit');
+  // GitHub's acme/repo, which galley's clone fetches from.
+  const remote = join(dir, 'remote.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  git('push', '-q', remote, 'main');
+  git('remote', 'add', 'origin', 'https://github.com/acme/repo.git');
   git('checkout', '-qb', 'feature/mul');
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\nexport const mul = (a, b) => a * b;\n');
   git('commit', '-qam', 'Add mul');
@@ -57,6 +62,7 @@ before(async () => {
     viewerLogin: 'reviewer',
     pollMs: 60_000,
     followMs: 60 * 60_000,
+    githubUrl: () => remote,
   });
 });
 
@@ -95,8 +101,11 @@ test("requests addressed to the public URL's host and the allowed hosts are take
 
 test('links start with the public URL, and avatars on pages load from wherever the page was opened', async () => {
   const json = { 'content-type': 'application/json' };
-  const registered = await (await fetch(`${server.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const registered = await (await fetch(`${server.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ github: 'acme/repo' }) })).json();
   assert.equal(registered.html_url, `${PUBLIC}/${registered.full_name}`);
+  assert.equal(registered.git_url, `${PUBLIC}/git/${registered.full_name}.git`);
+  // The agent's branch, as the CLI sends it.
+  git('push', '-q', registered.git_dir, 'feature/mul');
   const api = `/api/repos/${registered.full_name}`;
   const created = await (await fetch(`${server.url}${api}/pulls`, { method: 'POST', headers: { ...json, 'x-galley-actor': 'agent' }, body: JSON.stringify({ title: 'Add mul', head: 'feature/mul', base: 'main' }) })).json();
   const pull = `${PUBLIC}/${registered.full_name}/pull/${created.number}`;

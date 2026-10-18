@@ -10,7 +10,8 @@ title, description and commits are right, you publish it to GitHub.
 
 - Node 24 or newer
 - git 2.38 or newer
-- [gh](https://cli.github.com), logged in, for publishing
+- [gh](https://cli.github.com), logged in, where the server runs: galley fetches from GitHub and
+  publishes with its credentials
 - jq, for `--jq`
 - For reviewer agents: Codex or Claude Code, installed and logged in
 - On Linux, for reviewer agents: unprivileged user namespaces, which Ubuntu 23.10 and later
@@ -56,9 +57,13 @@ a forgotten `GALLEY_URL` fails instead of starting a second galley. `GALLEY_NO_A
 turns starting off. When another program has the port, the CLI and `galley serve` say so;
 `GALLEY_PORT` moves galley to another.
 
-The server publishes with your `git push`, `gh` and signing key, so they must work where it
-runs. If an agent's sandbox blocks them, start the server yourself. Stopping the server lets
-running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
+galley stages pull requests of GitHub repositories, and keeps its own clone of each in its data
+directory. Before the author's commands on a pull request, such as `galley pr wait`, the CLI
+sends the agent's branch there with git, and when galley tells the agent to rebase, it fetches
+what galley fetched from GitHub into the checkout. The server publishes from its clone with
+`gh`'s credentials and your signing key, so they must work where it runs. If an agent's sandbox
+blocks them, start the server yourself. Stopping the server lets running reviews finish for up to
+10 minutes; a second Ctrl-C stops it at once.
 
 To open galley from your other devices on a [Tailscale](https://tailscale.com) network, keep it
 on 127.0.0.1 and let `tailscale serve` give it an HTTPS address on the tailnet:
@@ -72,12 +77,9 @@ Links galley gives, such as **Copy link** and the ones agents print, then use th
 they open on your other devices too. Another proxy in front of galley should set `X-Forwarded-For`,
 or pages on your other devices try to open the [desktop app](#desktop-app) of the server's machine.
 
-For agents on other machines to stage, start the server with `GALLEY_CLONES=1` too, and set
-`GALLEY_URL` to that address where they run. galley then keeps its own clone of each GitHub
-repository. Before the author's commands on a pull request, such as `galley pr wait`, the CLI
-sends the agent's branch there with git, and when galley tells the agent to rebase, it fetches
-what galley fetched from GitHub into the checkout. From an agent's sandbox, both go through the
-sandbox's proxy, which must let that address through.
+For agents on other machines to stage, set `GALLEY_URL` to that address where they run. From an
+agent's sandbox, the CLI and the git it runs go through the sandbox's proxy, which must let that
+address through.
 
 ## Desktop app
 
@@ -111,7 +113,7 @@ this off.
 ## The review loop
 
 1. **The agent stages its branch** with `galley pr create` and waits with `galley pr wait`.
-   Nothing is pushed.
+   The CLI sends the branch to galley; nothing goes to GitHub.
 2. **Reviewer agents review it.** The agent answers them, commits and waits again, until they
    find nothing or reach their limit. Then it asks you to review.
 3. **You review it.** Comment on lines, commit messages and the description, approve or request
@@ -213,7 +215,6 @@ times to try signing again.
 | `GALLEY_PUBLIC_URL` | the local URL | Where other machines reach the server (`serve --public-url`): its links use it, and it accepts requests to its host |
 | `GALLEY_ALLOWED_HOSTS` | unset | More hosts, or host:port, the server accepts requests to, comma-separated (`serve --allowed-host`) |
 | `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
-| `GALLEY_CLONES` | unset | Keep a clone of each GitHub repository in the data directory, which the CLI sends agents' branches to over git ([docs/api.md](docs/api.md#git)), for staging from other machines |
 | `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
 | `GALLEY_USER` | your `gh` login | Your name in the UI |
@@ -225,7 +226,8 @@ times to try signing again.
 ## Security
 
 - The server listens on 127.0.0.1 and refuses requests from web pages on other sites. Any
-  process running as you can still call its API as you, publishing included. An agent may
+  process running as you can still call its API as you, publishing included, and send branches
+  to its clones. An agent may
   publish the pull requests it staged; other agents are kept from publishing only by the name
   the CLI gives them, which `GALLEY_ACTOR` overrides
   ([#52](https://github.com/laat/galley/issues/52)).

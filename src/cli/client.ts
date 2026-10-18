@@ -42,7 +42,7 @@ export interface Checkout extends RepoRef {
   top: string;
   /**
    * galley's git URL for its clone of the repository, at the URL the CLI reaches galley at; unset
-   * for a repository galley reads where it is (registered by path), or a server older than clones.
+   * for one registered by path before galley kept clones, which galley could not move into one.
    */
   gitUrl?: string;
   /** The remote that names the GitHub repository, whose remote-tracking branches what galley fetched from GitHub is fetched into. */
@@ -187,10 +187,8 @@ export class Client {
   private linksBase: string | null = null;
   /** Whether the desktop app on this computer follows the server and opens galley links, as it said when it answered. */
   private appOpensLinks = false;
-  /** The checkouts registered (repoFor), by directory: each once per command. */
+  /** The checkouts registered (repoFor, checkoutOf), by directory: each once per command. */
   private checkouts = new Map<string, Promise<Checkout>>();
-  /** The checkouts registered by their GitHub name alone (checkoutOf), by directory; null where the server registers by path. */
-  private named = new Map<string, Promise<Checkout | null>>();
   /** Where the CLI runs, for X-Galley-Client: this machine and the checkout's git directory, once it registered one. */
   private client: string | null = null;
   constructor(base = serverUrl(), { probeMs = PROBE_MS } = {}) {
@@ -329,31 +327,21 @@ export class Client {
    * (send.ts). Outside a checkout, or in one of another repository, nothing.
    */
   async checkoutOf(cwd: string, repo: RepoRef): Promise<void> {
-    if (this.checkouts.has(cwd) || this.named.has(cwd) || remoteOf(cwd).github?.toLowerCase() !== `${repo.owner}/${repo.name}`.toLowerCase()) return;
-    // By its GitHub name alone, which only a server that keeps clones of its own registers it by.
-    // One that registers repositories by path (422) is not asked to read the checkout, which may not
-    // be on its machine; the command goes on without it. Kept apart from repoFor's registration, which
-    // such a server takes.
-    const named = this.register(cwd, { byPath: false }).catch((e) => {
-      if (e instanceof ApiError && e.status === 422) return null;
-      throw e;
-    });
-    this.named.set(cwd, named);
-    await named;
+    if (remoteOf(cwd).github?.toLowerCase() !== `${repo.owner}/${repo.name}`.toLowerCase()) return;
+    await this.repoFor(cwd);
   }
 
   /** The checkout at `cwd`, when this command registered it (repoFor, checkoutOf); null otherwise. */
   async registered(cwd: string): Promise<Checkout | null> {
-    return (await this.checkouts.get(cwd)?.catch(() => null)) ?? (await this.named.get(cwd)?.catch(() => null)) ?? null;
+    return (await this.checkouts.get(cwd)?.catch(() => null)) ?? null;
   }
 
   /**
-   * Register the repository at `cwd`: by its path, and by the GitHub repository its remote names
-   * (origin, else its first), which a server that keeps clones of its own registers it by; without
-   * `byPath`, by that alone. Such a server answers with the clone's git URL, which the CLI sends
-   * branches to (send.ts).
+   * Register the repository at `cwd` by the GitHub repository its remote names (origin, else its
+   * first): galley answers with its clone's git URL, which the CLI sends branches to (send.ts).
+   * galley stages pull requests of GitHub repositories only.
    */
-  private async register(cwd: string, { byPath = true } = {}): Promise<Checkout> {
+  private async register(cwd: string): Promise<Checkout> {
     let top: string;
     try {
       top = git(cwd, ['rev-parse', '--show-toplevel']);
@@ -365,11 +353,15 @@ export class Client {
       }
     }
     const { remote, github } = remoteOf(cwd);
+    if (!github) {
+      throw new CliError(`galley stages pull requests of GitHub repositories only, and ${remote ? `the remote ${remote} of this checkout is not on github.com: ${tryGit(cwd, ['remote', 'get-url', remote])}` : 'this checkout has no remote'}`);
+    }
     // One per checkout: worktrees of one repository share its branches, and so its id. A header
     // takes ASCII only.
     const gitDir = tryGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
     if (gitDir) this.client = `${hostname()}:${gitDir}`.replace(/[^\x20-\x7e]/gu, encodeURIComponent);
-    const repo = await this.json<{ owner: { login: string }; name: string; git_url?: string }>('POST', '/api/repos', byPath ? { path: top, ...(github ? { github } : {}) } : { github });
+    // The path, for a server older than the CLI, which registers repositories by path; this one goes by the name.
+    const repo = await this.json<{ owner: { login: string }; name: string; git_url?: string }>('POST', '/api/repos', { github, path: top });
     // At the URL the CLI reaches galley at, which its public URL may not be from here (on the server's machine, or from a sandbox).
     const gitUrl = repo.git_url ? this.base + new URL(repo.git_url).pathname : undefined;
     return { owner: repo.owner.login, name: repo.name, top, gitUrl, remote };
@@ -389,10 +381,7 @@ function tryGit(cwd: string, args: string[]): string {
   }
 }
 
-/**
- * The remote of the checkout at `cwd` that names its GitHub repository, origin or else its first,
- * as the server follows one registered by path, and that repository's owner/name (githubSlug).
- */
+/** The remote of the checkout at `cwd` that names its GitHub repository, origin or else its first, and that repository's owner/name (githubSlug). */
 function remoteOf(cwd: string): { remote: string | undefined; github: string | null } {
   const remotes = tryGit(cwd, ['remote']).split('\n').filter(Boolean);
   const remote = remotes.includes('origin') ? 'origin' : remotes[0];

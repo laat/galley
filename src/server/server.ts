@@ -129,9 +129,7 @@ export interface StartOptions {
   followMs?: number;
   /** How long after fetching a repository's base branches they may be fetched again (Service.fetchBases). */
   fetchMs?: number;
-  /** Keep a clone of each repository registered by its GitHub owner/name in the data directory, which the CLI pushes branches to (GALLEY_CLONES; Service.registerGithub). */
-  clones?: boolean;
-  /** Where to fetch a GitHub repository from and push it to, for clones, in place of GitHub (in tests). */
+  /** Where to fetch a GitHub repository from and push it to, for galley's clones, in place of GitHub (in tests). */
   githubUrl?: (slug: string) => string;
 }
 
@@ -197,13 +195,12 @@ export async function startServer(opts: StartOptions): Promise<{
     viewerLogin: opts.viewerLogin ?? fromEnv('USER'),
     fetchEveryMs: opts.fetchMs,
     dataDir,
-    clones: opts.clones ?? !!fromEnv('CLONES'),
     githubUrl: opts.githubUrl,
   });
-  // A new instance id (a copied database, or one from before namespaces) pins what it has first.
+  // Repositories registered by path, from before galley kept clones of its own, move into clones first.
+  await service.migrateRepos();
+  // A new instance id (a copied data directory, or a database from before namespaces) pins what it has first.
   await service.pinRevisions();
-  // A repository whose remote names another GitHub repository now (renamed there) takes its name before the first page.
-  await service.followRemotes();
   // localhost's, the address it listens on when that is one, the public URL's, and those it is told.
   const allowedHosts = [...new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, new URL(url).host, ...(publicUrl ? [publicUrl.host] : []), ...(opts.allowedHosts ?? [])])];
   service.codex = new CodexReviewer(service, opts.codexBin ?? fromEnv('CODEX') ?? 'codex');

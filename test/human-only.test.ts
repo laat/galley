@@ -35,11 +35,15 @@ before(async () => {
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\n');
   git('add', '.');
   git('commit', '-qm', 'Initial commit');
+  // GitHub's acme/repo, which galley's clone fetches from.
+  const remote = join(dir, 'remote.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  git('push', '-q', remote, 'main');
   git('checkout', '-qb', 'feature/mul');
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\nexport const mul = (a, b) => a * b;\n');
   git('commit', '-qam', 'Add mul');
   // Nothing here runs gh, Codex or Claude: each is refused first.
-  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: 'false', codexBin: 'false', claudeBin: 'false', reviewersDir: join(dir, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000, followMs: 60 * 60_000 });
+  server = await startServer({ port: 0, dataDir: join(dir, 'data'), ghBin: 'false', codexBin: 'false', claudeBin: 'false', reviewersDir: join(dir, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000, followMs: 60 * 60_000, githubUrl: () => remote });
 });
 
 after(async () => {
@@ -48,14 +52,17 @@ after(async () => {
 });
 
 test("an agent is refused each of the user's actions that docs/api.md lists, through the API and in Service, and another than the author publishing too", async () => {
-  assert.equal((await call('POST', '/api/repos', { path: repo })).status, 200);
-  const created = await call('POST', '/api/repos/local/repo/pulls', { title: 'Add mul', head: 'feature/mul', base: 'main' }, 'agent');
+  const registered = await call('POST', '/api/repos', { github: 'acme/repo' });
+  assert.equal(registered.status, 200);
+  // The agent's branch, as the CLI sends it.
+  git('push', '-q', registered.body.git_dir, 'feature/mul');
+  const created = await call('POST', '/api/repos/acme/repo/pulls', { title: 'Add mul', head: 'feature/mul', base: 'main' }, 'agent');
   assert.equal(created.status, 201, JSON.stringify(created.body));
-  const pull = `/api/repos/local/repo/pulls/${created.body.number}`;
+  const pull = `/api/repos/acme/repo/pulls/${created.body.number}`;
   const s = server.service;
   const agent = s.db.actor('agent', 'Bot');
   const other = s.db.actor('other', 'Bot');
-  const x = await s.ctx('local', 'repo', created.body.number);
+  const x = await s.ctx('acme', 'repo', created.body.number);
   const before = { pull: (await call('GET', pull)).body, settings: (await call('GET', '/api/settings')).body };
   const doc = readFileSync(join(import.meta.dirname, '..', 'docs', 'api.md'), 'utf8');
 

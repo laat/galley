@@ -1,6 +1,6 @@
 // Auto-publish: galley publishes a pull request once the agents are done with it.
 import '../helpers/env.ts';
-import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -41,7 +41,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
   };
   const defaults = { enabled: false, model: '', effort: '', maxIterations: 3 };
   const comment = (number: number, body: string) => human('POST', `/api/repos/acme/widgets/issues/${number}/comments`, { body });
-  /** Make signing wait for a gate, as it would for a passphrase or a 1Password prompt. */
+  /** Make signing, in galley's clone, wait for a gate, as it would for a passphrase or a 1Password prompt. */
   const gateSigning = () => {
     const signing = join(dir, 'signing');
     const gate = join(dir, 'sign-gate');
@@ -53,13 +53,13 @@ test('auto-publish publishes once the agents are done', async (t) => {
     reset();
     writeFileSync(program, `#!/bin/sh\ntouch "${signing}"\nwhile [ ! -f "${gate}" ]; do sleep 0.02; done\nexec ssh-keygen "$@"\n`);
     chmodSync(program, 0o755);
-    git('config', 'gpg.ssh.program', program);
+    inClone('config', 'gpg.ssh.program', program);
     return {
       started: () => existsSync(signing),
       open: () => writeFileSync(gate, ''),
       reset,
       restore: () => {
-        git('config', '--unset', 'gpg.ssh.program');
+        inClone('config', '--unset', 'gpg.ssh.program');
         reset();
       },
     };
@@ -341,6 +341,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     }
 
     // The agent editing the title leaves it on; the reviewer's own change request, a new base and a close turn it off.
+    await send('feature/mul');
     await human('PUT', `${pr.base}/auto-publish`, {});
     assert.equal((await cli(['pr', 'edit', String(pr.number), '--title', 'Add failed.js, renamed'])).code, 0);
     assert.ok((await human('GET', pr.base)).auto_publish);
@@ -361,7 +362,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
   await t.test('checks again after signing, which can wait for a prompt', async () => {
     const pr = await stage('feature/auto-sign', 'sign.js');
     const signing = gateSigning();
-    const signedCopy = () => git('for-each-ref', '--format=%(objectname)', `refs/galley/${server.service.db.instance}/pull/${pr.number}/published`);
+    const signedCopy = () => inClone('for-each-ref', '--format=%(objectname)', `refs/galley/${server.service.db.instance}/pull/${pr.number}/published`);
     try {
       // Cancelled while signing waits: nothing is pushed.
       await human('PUT', `${pr.base}/auto-publish`, {});
@@ -445,6 +446,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     git('push', '-q', 'origin', 'feature/auto-lease');
     const theirs = git('rev-parse', 'HEAD');
     git('commit', '-q', '--amend', '-m', 'Add lease.js, reworded');
+    await send('feature/auto-lease');
     await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the rewrite is recorded');
     // Hold publish's look-up of the branch on GitHub, which decides force and the lease (not the page's).
     const resolve = Repo.prototype.resolve;
@@ -516,9 +518,8 @@ test('auto-publish publishes once the agents are done', async (t) => {
     git('push', '-q', 'origin', 'feature/auto-force');
     const theirs = git('rev-parse', 'HEAD');
     git('commit', '-q', '--amend', '-m', 'Add force.js, reworded');
+    await send('feature/auto-force');
     await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the rewrite is recorded');
-    // As for publishing by hand, the box offers to force-push.
-    assert.match(await pr.page(), /<label class="js-force-option"><input type="checkbox" name="force" checked> Force-push/);
     const on = await cli(['pr', 'publish', String(pr.number), '--auto', '--force'], { actor: 'reviewer' });
     assert.equal(on.code, 0, on.stderr);
     const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '10s']);
@@ -558,13 +559,14 @@ test('auto-publish publishes once the agents are done', async (t) => {
     git('push', '-q', 'origin', 'feature/manual-unsigned');
     const theirs = git('rev-parse', 'HEAD');
     await until(async () => (await human('GET', pr.base)).head.sha === theirs, 'the pull request is synced');
-    // The history did not change, but the signed copy does not contain the commit on GitHub.
-    assert.match(await pr.page(), /<label class="js-force-option"><input type="checkbox" name="force" checked> Force-push/);
-    // Without force it is refused before anything is pushed.
+    // The history did not change, but the signed copy does not contain the commit on GitHub, which
+    // galley learns of as it publishes: without force it is refused before anything is pushed.
     const refused = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ force: false }) });
     assert.equal(refused.status, 409);
     assert.match((await refused.json()).message, /force-pushing was not chosen\.$/);
     assert.equal(remoteTip('feature/manual-unsigned').sha, theirs);
+    // The box offers to force-push then.
+    assert.match(await pr.page(), /<label class="js-force-option"><input type="checkbox" name="force" checked> Force-push/);
     const pull = await human('POST', `${pr.base}/publish`, { force: true });
     assert.equal(pull.staging_state, 'published');
     assert.equal((await pr.timeline()).findLast((e) => e.event === 'published').force, true);

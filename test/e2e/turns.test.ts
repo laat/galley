@@ -1,6 +1,6 @@
 // Whose turn it is: the author agent's, the reviewer agents', the reviewer's or nobody's.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, handedOver, human, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -135,6 +135,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.equal((await cli(['pr', 'comment', String(number), '--reply-to', String(await threadId()), '--resolve', '-b', 'Renamed.'])).code, 0);
         writeFileSync(join(repo, 'turns.js'), 'export const rounds = 1;\n');
         git('commit', '-qam', 'Count rounds');
+        await send('feature/turns');
         // Codex reviews the new commit once the author waits: until then, the author's turn.
         await until(async () => (await turn()).whose === 'author', "the author's turn after its push");
         assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not asked for review yet (pr wait)', `codex-review reviews ${sha()} when agent waits for review`, 'changes requested'] });
@@ -213,6 +214,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.deepEqual(await turn(), { whose: 'none', reasons: [] });
         writeFileSync(join(repo, 'turns.js'), 'export const rounds = 2;\n');
         git('commit', '-qam', 'Count two rounds');
+        await send('feature/turns');
         // The reviewer edits the title, which the author's wait leaves to the reviewer to publish.
         await human('PATCH', base, { title: 'Take turns, in rounds' });
         await waitEnded();
@@ -299,16 +301,19 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         // A second repository, named so that a pull request's path in it has "pull" twice.
         const other = join(dir, 'pull');
         execFileSync('git', ['init', '-q', '-b', 'main', other]);
+        execFileSync('git', ['init', '-q', '--bare', '-b', 'main', join(dir, 'pull.git')]);
         const g = (...args: string[]) => execFileSync('git', ['-C', other, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
         g('remote', 'add', 'origin', 'https://github.com/acme/pull.git');
         writeFileSync(join(other, 'a.js'), 'export const a = 1;\n');
         g('add', '.');
         g('commit', '-qm', 'Initial commit');
+        g('push', '-q', join(dir, 'pull.git'), 'main');
         g('update-ref', 'refs/remotes/origin/main', 'main');
         g('checkout', '-qb', 'feature');
         writeFileSync(join(other, 'a.js'), 'export const a = 2;\n');
         g('commit', '-qam', 'Change a');
-        await human('POST', '/api/repos', { path: other });
+        await human('POST', '/api/repos', { github: 'acme/pull' });
+        await send('feature', { cwd: other, github: 'acme/pull' });
         const res = await fetch(`${server.url}/api/repos/acme/pull/pulls`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
@@ -480,6 +485,7 @@ test("while the reviewer agents still have the head to review, it is theirs or t
       await waitEnded();
       writeFileSync(join(repo, 'agents-first.js'), 'export const first = 2;\n');
       git('commit', '-qam', 'Count from two');
+      await send('feature/agents-first');
       await until(() => row().head_sha === git('rev-parse', 'HEAD'), 'the push is seen');
       server.service.db.insert('review_runs', { pull_id: id, reviewer: 'codex', head_sha: row().head_sha, trigger: 'auto', status: 'done', findings: 0, started_at: now(), finished_at: now() });
       assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not asked for review yet (pr wait)', `codex-review found nothing in ${sha()}`, toStart('claude-review')] });
@@ -511,6 +517,7 @@ test("while the reviewer agents still have the head to review, it is theirs or t
       assert.equal(await group(), 'published: Waiting on GitHub');
       writeFileSync(join(repo, 'agents-first.js'), 'export const first = 3;\n');
       git('commit', '-qam', 'Count from three');
+      await send('feature/agents-first');
       await until(() => row().head_sha === git('rev-parse', 'HEAD'), 'the push is seen');
       // No reviewer agent reviews it on its own once it is published: the author's wait pushes it.
       assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not waited since its last commit', 'update not published: commits'] });
@@ -568,6 +575,7 @@ test("feedback the author acted on since it came, without being handed it: the a
     assert.deepEqual(reasons.slice(0, 2).map((r) => r.text), ['agent has not seen the latest feedback', 'agent is not waiting']);
     // A base with the first commit in it moves the merge base alone, which galley records as a push of the author's.
     git('branch', 'acted-on-base', 'HEAD~1');
+    await send('acted-on-base');
     await human('PATCH', base, { base: 'acted-on-base' });
     const moved = JSON.parse(server.service.db.get<{ data: string }>("SELECT data FROM events WHERE pull_id = ? AND type = 'pushed' ORDER BY id DESC LIMIT 1", id)!.data);
     assert.equal(moved.before, moved.after);
@@ -578,6 +586,7 @@ test("feedback the author acted on since it came, without being handed it: the a
     const asked = server.service.db.get<{ at: string }>('SELECT MAX(created_at) AS at FROM comments WHERE pull_id = ?', id)!.at;
     writeFileSync(join(repo, 'acted-on.js'), 'export const acted = 2;\n');
     git('commit', '-qam', 'Count from two');
+    await send('feature/acted-on');
     await until(async () => (await turn()).whose === 'author', "the author's turn after its push");
     await working(asked);
     assert.ok(!(await texts()).includes('agent has not seen the latest feedback'));

@@ -1,7 +1,7 @@
 // The author agent publishes when the user asks it to: now, or with auto-publish, which then
 // publishes as the agent. Other agents are refused, and the timeline names the agent.
 import '../helpers/env.ts';
-import { cli, dir, git, human, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, human, inClone, repo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -129,7 +129,7 @@ test('the author agent publishes its own pull request', async (t) => {
       writeFileSync(program, `#!/bin/sh\n${failing}exec ssh-keygen "$@"\n`);
       chmodSync(program, 0o755);
     };
-    git('config', 'gpg.ssh.program', program);
+    inClone('config', 'gpg.ssh.program', program);
     try {
       fail('1Password: failed to fill whole buffer');
       const unanswered = await cli(['pr', 'publish', pr.n, '-R', 'acme/widgets', '--auto-merge', 'rebase']);
@@ -158,7 +158,7 @@ test('the author agent publishes its own pull request', async (t) => {
         update.stderr,
       );
     } finally {
-      git('config', '--unset', 'gpg.ssh.program');
+      inClone('config', '--unset', 'gpg.ssh.program');
     }
   });
 });

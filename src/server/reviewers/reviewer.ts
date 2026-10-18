@@ -146,7 +146,7 @@ export interface EngineJob {
   dir: string;
   /** The checkout of the head; an empty directory for a review of the description. */
   checkout: string;
-  /** The repository's git directory (the user's, or galley's clone of it), which the checkout's .git points into: it stays read-only. Null without a checkout. */
+  /** galley's clone of the repository, which the checkout's .git points into: it stays read-only. Null without a checkout. */
   gitDir: string | null;
   /** The review's TMPDIR, beside the checkout, when it may run the tests; null when it only reads. */
   tmp: string | null;
@@ -918,8 +918,10 @@ export class Reviewer {
     const tmp = join(dir, 'tmp');
     const timeoutMs = reads === 'description' ? DESCRIPTION_TIMEOUT_MS : settings.runTests ? TEST_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS;
     try {
-      // A review of the description reads no code: it runs in an empty directory.
+      // A review of the description reads no code: it runs in an empty directory. The code, in a
+      // worktree of galley's clone, never of a repository registered by path (Service.ownClone).
       if (reads === 'description') mkdirSync(checkout);
+      else if (!this.s.isClone(ctx.repo)) throw new Error(`galley keeps no clone of ${ctx.repo.owner}/${ctx.repo.name} to review it in`);
       else await git.run(['worktree', 'add', '--detach', checkout, pull.head_sha]);
       let env: NodeJS.ProcessEnv | undefined;
       let installed: Installed | null = null;

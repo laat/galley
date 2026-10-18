@@ -1,6 +1,6 @@
 // Servers that stop and start: reviews and waits across a restart, and the CLI starting a server.
 import '../helpers/env.ts';
-import { BIN, dir, exec, git, human, repo, reviewCheckouts, scratchRepo, server, startHarness } from '../helpers/harness.ts';
+import { BIN, dir, exec, git, gitToGalley, human, remote, repo, reviewCheckouts, scratchRepo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { mock, test } from 'node:test';
@@ -18,6 +18,14 @@ import { CodexReviewer } from '../../src/server/reviewers/codex.ts';
 
 startHarness();
 
+/** Register acme/widgets with the server at `url`, which clones it, and send it `branch`, as the CLI does. */
+async function register(url: string, branch: string): Promise<{ full_name: string; git_dir: string }> {
+  const registered = await (await fetch(`${url}/api/repos`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ github: 'acme/widgets' }) })).json();
+  const pushed = await gitToGalley(['push', `${url}/git/acme/widgets.git`, branch]);
+  assert.equal(pushed.code, 0, pushed.stderr);
+  return registered;
+}
+
 test('a review the server stops under is interrupted, runs again when it starts, and does not count', async (t) => {
   const checkedOut = git('rev-parse', '--abbrev-ref', 'HEAD');
   git('checkout', '-q', 'main');
@@ -26,7 +34,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
   git('add', 'restart.js');
   git('commit', '-qm', 'Add restart.js');
   const data = mkdtempSync(join(tmpdir(), 'galley-stop-'));
-  const start = ({ port = 0, gh = 'false' } = {}) => startServer({ port, dataDir: data, ghBin: gh, codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  const start = ({ port = 0, gh = 'false' } = {}) => startServer({ port, dataDir: data, ghBin: gh, codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000, githubUrl: () => remote });
   let s = await start();
   t.after(async () => {
     await s.close();
@@ -35,7 +43,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
   const port = s.port;
   // Later restarts take a new port: fetch would send its first request to one on the same port over a connection the old server closed.
   const json = { 'content-type': 'application/json' };
-  const registered = await (await fetch(`${s.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const registered = await register(s.url, 'feature/restart-review');
   const pulls = `/api/repos/${registered.full_name}/pulls`;
   // Codex gets one automatic review.
   const pr = await (
@@ -64,7 +72,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
       const started = Date.now();
       await s.close();
       assert.ok(Date.now() - started < 5000, `close took ${Date.now() - started} ms`);
-      assert.deepEqual(reviewCheckouts(), []);
+      assert.deepEqual(reviewCheckouts(registered.git_dir), []);
 
       // Interrupted, not failed: it runs again once the author's wait is back (on the same port), and the wait gets its review.
       writeFileSync(gate, '');
@@ -112,7 +120,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
       {
         const db = new Db(join(data, 'galley.db'));
         const pull = db.get<any>('SELECT * FROM pulls WHERE id = ?', pr.id);
-        const service = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer' });
+        const service = new Service({ db, baseUrl: 'http://localhost:0', viewerLogin: 'reviewer', dataDir: data });
         service.codex = new CodexReviewer(service, join(dir, 'codex'));
         const status = service.codex.headStatus(pull);
         assert.equal(status.state, 'interrupted');
@@ -130,12 +138,13 @@ test('a review the server stops under is interrupted, runs again when it starts,
       assert.ok(row().auto_publish, 'auto-publish is still on, never having tried');
       assert.equal((await fetch(`${s.url}${base}/auto-publish`, { method: 'DELETE' })).status, 204);
 
-      // Not when the branch moved on while the server was down.
+      // Not when the branch moved on in the clone, as a push the server stopped under before it synced it.
       rmSync(gate);
       await ask();
       await s.close();
       writeFileSync(join(repo, 'restart.js'), 'export const moved = true;\n');
       git('commit', '-qam', 'Change restart.js');
+      git('push', '-q', registered.git_dir, 'feature/restart-review');
       writeFileSync(gate, '');
       s = await start();
       await s.service.codex!.settle(pr.id);
@@ -308,14 +317,14 @@ test('a reviewer never takes the human reviewer\'s own name', async () => {
 
 test('pr wait keeps waiting when the server restarts under it', async (t) => {
   const data = mkdtempSync(join(tmpdir(), 'galley-restart-'));
-  const first = await startServer({ port: 0, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  const first = await startServer({ port: 0, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000, githubUrl: () => remote });
   t.after(async () => {
     await first.close();
     rmSync(data, { recursive: true, force: true });
   });
   const port = first.port;
   const json = { 'content-type': 'application/json' };
-  const registered = await (await fetch(`${first.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const registered = await register(first.url, 'feature/mul');
   const pr = await (
     await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
       method: 'POST',
@@ -330,7 +339,7 @@ test('pr wait keeps waiting when the server restarts under it', async (t) => {
   // Close the server while the wait's request is open, then bring it back on the same port.
   await until(async () => (await (await fetch(`${first.url}/api/repos/${registered.full_name}/pulls/${pr.number}`)).json()).author_waiting, 'the author waits');
   await first.close();
-  const second = await startServer({ port, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 });
+  const second = await startServer({ port, dataDir: data, ghBin: 'false', reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000, githubUrl: () => remote });
   try {
     // The wait tries again every 3 seconds.
     await until(async () => (await (await fetch(`${second.url}/api/repos/${registered.full_name}/pulls/${pr.number}`)).json()).author_waiting, 'the wait is back');
@@ -422,14 +431,14 @@ test('auto-publish stays on when the server restarts', async (t) => {
   git('add', 'restart.js');
   git('commit', '-qm', 'Add restart');
   const data = mkdtempSync(join(tmpdir(), 'galley-auto-restart-'));
-  const options = { port: 0, dataDir: data, ghBin: join(dir, 'gh'), codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000 };
+  const options = { port: 0, dataDir: data, ghBin: join(dir, 'gh'), codexBin: join(dir, 'codex'), reviewersDir: join(data, 'reviewers'), viewerLogin: 'reviewer', pollMs: 60_000, githubUrl: () => remote };
   const json = { 'content-type': 'application/json' };
   const first = await startServer(options);
   t.after(async () => {
     await first.close();
     rmSync(data, { recursive: true, force: true });
   });
-  const registered = await (await fetch(`${first.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ path: repo }) })).json();
+  const registered = await register(first.url, 'feature/auto-restart');
   const pr = await (
     await fetch(`${first.url}/api/repos/${registered.full_name}/pulls`, {
       method: 'POST',

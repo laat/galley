@@ -34,8 +34,7 @@ export function dataDir(): string {
 
 /**
  * owner/name from a GitHub remote URL, or null when the remote is not on github.com: the GitHub
- * repository the server follows for one registered by path, and the one the CLI registers a
- * checkout by with a server that keeps clones of its own.
+ * repository the CLI registers a checkout by, which galley keeps a clone of.
  */
 export function githubSlug(url: string | null): string | null {
   if (!url) return null;

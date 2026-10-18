@@ -1,6 +1,6 @@
 // Publishing with auto-merge on GitHub.
 import '../helpers/env.ts';
-import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, human, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -77,6 +77,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.equal(refused.status, 422);
     writeFileSync(join(repo, 'manual-merge.js'), 'export const merged = 1;\n');
     git('commit', '-qam', 'Change manual-merge.js');
+    await send('feature/merge-manual');
     await until(async () => (await human('GET', pr.base)).head.sha === git('rev-parse', 'HEAD'), 'the push is recorded');
     // The page sends the method it shows; open pages hear when the setting changes.
     // Auto-merge is on for it, so the update asks for it again unless unchecked.

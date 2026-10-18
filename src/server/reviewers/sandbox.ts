@@ -1,8 +1,8 @@
 // A sandbox for installing a pull request's dependencies, for a reviewing tool that has no way
 // to run a command in a sandbox of its own (Claude Code sandboxes only the commands it runs
 // itself). It may use the network and read everything, and it writes only to the given
-// directories; the paths kept read-only (the checkout's .git, which points into the user's
-// repository) stay so even inside them. On macOS it is Seatbelt, as Codex's and Claude Code's
+// directories; the paths kept read-only (the checkout's .git, which points into galley's clone)
+// stay so even inside them. On macOS it is Seatbelt, as Codex's and Claude Code's
 // sandboxes are: everything is denied but what a package manager needs. On Linux it is
 // bubblewrap, as theirs are there: the whole filesystem mounted read-only with the writable
 // directories over it, in namespaces of its own but for the network. Elsewhere there is none.

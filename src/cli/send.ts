@@ -1,7 +1,7 @@
 // Sending the author's branch to galley's clone of the repository (Service.registerGithub), and
 // fetching back what galley fetched from GitHub, with git over HTTP at the clone's git URL
-// (git-http.ts). Only for a repository galley keeps a clone of, from a checkout of it: galley reads
-// one registered by path where it is, so nothing is sent or fetched for it.
+// (git-http.ts), from a checkout of the repository. Nothing for one registered by path before
+// galley kept clones, which galley could not move into one (Service.migrateRepos).
 //
 // Only the pull request's author sends, as an agent (cliActor): a person at a terminal reviews, and
 // may have the branch at something else. It sends a fast-forward of what galley has, or a rewrite
@@ -45,7 +45,7 @@ export function toGalley(url: string, env = process.env): { args: string[]; env:
 /** What git said last, for a message. */
 const lastLine = (text: string) => text.trim().split('\n').filter((l) => !/^(To |Done$)/.test(l)).pop()?.trim() ?? '';
 
-/** The checkout this command registered, when it is `repo`'s and galley keeps a clone of it; null otherwise. */
+/** The checkout this command registered, when it is `repo`'s and galley has a clone of it; null otherwise. */
 async function cloneCheckout(client: Client, cwd: string, repo: RepoRef): Promise<CloneCheckout | null> {
   const checkout = await client.registered(cwd);
   if (!checkout?.gitUrl) return null;
@@ -152,6 +152,21 @@ export async function sendHead(client: Client, cwd: string, repo: RepoRef, branc
 }
 
 /**
+ * Before `pr create --base`: send the base, a branch of this checkout's that galley does not have,
+ * which is not on GitHub either as far as the checkout knows (it has no remote-tracking branch of
+ * it): the branch of another pull request, not staged yet, that this one is stacked on. galley
+ * fetches one that is on GitHub from there.
+ */
+export async function sendBase(client: Client, cwd: string, repo: RepoRef, base: string): Promise<void> {
+  const checkout = await cloneCheckout(client, cwd, repo);
+  if (!checkout || !cliActor()) return;
+  const here = async (ref: string) => (await run(checkout, ['rev-parse', '--verify', '--quiet', ref])).code === 0;
+  if (!(await here(`refs/heads/${base}`)) || (checkout.remote && (await here(`refs/remotes/${checkout.remote}/${base}`)))) return;
+  if (await galleyCommit(client, repo, `refs/heads/${base}`)) return;
+  await send(client, checkout, base, true);
+}
+
+/**
  * Before a command on pull request `number` of `repo`, as its author: send its branch from the
  * checkout, so galley reviews and links to what the author has. With `strict` (pr wait), what keeps
  * it from being sent ends the command; otherwise it is said, and the command goes on.
@@ -190,17 +205,19 @@ export async function sendCommit(client: Client, cwd: string, repo: RepoRef, sha
  * After `pr wait`: fetch what galley fetched from GitHub, galley's refs/remotes/origin/<branch> at
  * `sha`, into the checkout's remote-tracking branch, for the author to rebase onto, as it may not
  * reach GitHub from its sandbox: the base the head conflicts with, or the branch on GitHub after a
- * push GitHub refused. One here that has `sha` in it, fetched from GitHub since, stays; one that is
- * older, or another (rewritten on GitHub), becomes galley's. Says what it is called here
- * (<remote>/<branch>), or null when it could not be fetched, or galley keeps no clone of `repo`.
+ * push GitHub refused. With `staged`, the base is a branch staged in galley (stacked pull
+ * requests): galley's refs/heads/<branch>, into refs/remotes/galley/<branch>, never a local branch.
+ * One here that has `sha` in it, fetched since, stays; one that is older, or another (rewritten),
+ * becomes galley's. Says what it is called here (<remote>/<branch>, or galley/<branch>), or null
+ * when it could not be fetched, or galley has no clone of `repo`.
  */
-export async function fetchBack(client: Client, cwd: string, repo: RepoRef, branch: string, sha: string): Promise<string | null> {
+export async function fetchBack(client: Client, cwd: string, repo: RepoRef, branch: string, sha: string, { staged = false } = {}): Promise<string | null> {
   const checkout = await cloneCheckout(client, cwd, repo);
   if (!checkout?.remote) return null;
-  const local = `${checkout.remote}/${branch}`;
+  const local = `${staged ? 'galley' : checkout.remote}/${branch}`;
   const here = (await run(checkout, ['rev-parse', '--verify', '--quiet', `refs/remotes/${local}`])).stdout.trim();
   if (here && (await run(checkout, ['merge-base', '--is-ancestor', sha, here])).code === 0) return local;
-  const spec = `+refs/remotes/origin/${branch}:refs/remotes/${local}`;
+  const spec = `+refs/${staged ? 'heads' : 'remotes/origin'}/${branch}:refs/remotes/${local}`;
   const { args, env } = toGalley(checkout.gitUrl);
   const r = await run(checkout, [...args, 'fetch', '--no-tags', '--no-prune', '--no-write-fetch-head', '--recurse-submodules=no', checkout.gitUrl, spec], env);
   if (r.code === 0) return local;
@@ -209,9 +226,8 @@ export async function fetchBack(client: Client, cwd: string, repo: RepoRef, bran
 }
 
 /**
- * Whether the checkout has `branch`, when galley keeps a clone of `repo`: galley keeps the branches
- * sent to it, so whether one is gone is the checkout's to say. Null for a repository galley reads
- * where it is, which says so itself.
+ * Whether the checkout has `branch`, when galley has a clone of `repo`: galley keeps the branches
+ * sent to it, so whether one is gone is the checkout's to say. Null otherwise.
  */
 export async function hasBranch(client: Client, cwd: string, repo: RepoRef, branch: string): Promise<boolean | null> {
   const checkout = await cloneCheckout(client, cwd, repo);
