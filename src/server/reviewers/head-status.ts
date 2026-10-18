@@ -22,6 +22,11 @@ export interface HeadStatus {
   automatic?: { used: number; limit: number };
   /** It reviews the title, description and commit messages the head has, not the commit's code. */
   description?: boolean;
+  /**
+   * With `findings`: the author has not been shown the review yet. Its `pr wait` holds it while
+   * other reviewer agents are at work, to hand their reviews over together (Service.agentsStillReviewing).
+   */
+  unseen?: boolean;
 }
 
 /**

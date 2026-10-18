@@ -848,8 +848,17 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       for (const t of targets) {
         const pull = await client.get<any>(pullPath(t)).catch(() => null);
         const which = targets.length > 1 ? `${named(t)}: ` : '';
-        for (const r of pull?.turn.reasons ?? []) {
+        const reasons = pull?.turn.reasons ?? [];
+        for (const r of reasons) {
           if (r.state !== 'findings') continue;
+          // Not shown to the author yet: the wait holds the review while other reviewer agents are
+          // at work, to hand their reviews over together, so there is nothing to answer yet.
+          if (r.unseen) {
+            const toCome = reasons.filter((o: any) => o.to_review).map((o: any) => o.text);
+            const held = toCome.length ? `is held until the other reviewer agents are done (${toCome.join('; ')}), to come with theirs` : 'comes with the next wait';
+            err(`${which}${r.text}. Its review ${held}: nothing to answer until then.`);
+            continue;
+          }
           const answer = r.description ? 'edit the title or description, or reword the commits, as it asks; a reply does not answer it' : 'reply to or resolve each of its threads, or push a commit';
           err(`${which}${r.text}: ${answer}. The reviewer agents are not done with it until then.`);
         }

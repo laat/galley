@@ -611,6 +611,17 @@ test('with two reviewer agents, pr wait hands the author both reviews of a commi
       assert.match(html, /<span class="flex-auto">claude-review<\/span> <span title="Reviewing [0-9a-f]{7}">/);
       assert.match(html, /<span class="flex-auto">codex-review<\/span> <svg[^>]*octicon-comment/);
       assert.match(html, /<strong>Claude is still reviewing this commit<\/strong>/);
+      // A wait that times out meanwhile says Codex's review is held for Claude's, and asks nothing
+      // of the author, who has not been shown it.
+      const sha = git('rev-parse', '--short=7', 'HEAD');
+      const timedOut = await cli(['pr', 'wait', String(number), '--timeout', '1s']);
+      assert.equal(timedOut.code, 124, timedOut.stdout);
+      assert.match(
+        timedOut.stderr,
+        new RegExp(`^codex-review commented on ${sha}\\. Its review is held until the other reviewer agents are done \\(claude-review is reviewing ${sha}\\), to come with theirs: nothing to answer until then\\.$`, 'm'),
+      );
+      assert.doesNotMatch(timedOut.stderr, /reply to or resolve/);
+      assert.equal(returned, false, 'pr wait returned before Claude reviewed');
 
       // Then both reviews come back together.
       writeFileSync(gate, '');
