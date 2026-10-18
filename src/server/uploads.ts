@@ -43,8 +43,19 @@ export function sniffImage(b: Uint8Array): ImageType | null {
   return null;
 }
 
-/** The request body, or null once it is larger than `limit` bytes. */
-async function readUpTo(req: Request, limit: number): Promise<Buffer | null> {
+/**
+ * How much more of a body over the limit is read and dropped before it is refused. A client still
+ * sending when the server closes the connection gets a reset, which can throw away the answer it
+ * has not read yet; one that has sent it all reads the 413. Node's request timeout (five minutes)
+ * bounds how long a client may take to send it.
+ */
+const DISCARD_BYTES = 10 * MAX_UPLOAD_BYTES;
+
+/**
+ * The request body. Larger than `limit` bytes: 'too big' once the rest is read and dropped, or
+ * 'cut off' when the rest is more than DISCARD_BYTES, which is left unread.
+ */
+async function readUpTo(req: Request, limit: number): Promise<Buffer | 'too big' | 'cut off'> {
   if (!req.body) return Buffer.alloc(0);
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -53,13 +64,14 @@ async function readUpTo(req: Request, limit: number): Promise<Buffer | null> {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > limit) {
+    if (size <= limit) chunks.push(value);
+    else if (size <= limit + DISCARD_BYTES) chunks.length = 0;
+    else {
       await reader.cancel();
-      return null;
+      return 'cut off';
     }
-    chunks.push(value);
   }
-  return Buffer.concat(chunks);
+  return size > limit ? 'too big' : Buffer.concat(chunks);
 }
 
 /** POST /api/uploads (the raw bytes of one image) and GET /uploads/<sha256>.<ext>. */
@@ -77,8 +89,9 @@ export function uploads(dir: string): Hono {
     // Node reads and drops a body that was never touched, so the connection can carry on.
     if (Number(c.req.header('content-length') ?? 0) > MAX_UPLOAD_BYTES) return refuse(413, tooBig);
     const bytes = await readUpTo(c.req.raw, MAX_UPLOAD_BYTES);
-    // Half of a body is left on the connection, so it cannot be used again.
-    if (!bytes) return refuse(413, tooBig, { connection: 'close' });
+    if (bytes === 'too big') return refuse(413, tooBig);
+    // Part of the body is left on the connection, so it cannot be used again.
+    if (bytes === 'cut off') return refuse(413, tooBig, { connection: 'close' });
     if (!bytes.length) return refuse(422, 'The upload is empty.');
     const image = sniffImage(bytes);
     if (!image) return refuse(415, 'Only PNG, JPEG, GIF and WebP images can be uploaded, and this file is none of them.');

@@ -526,14 +526,14 @@ export class Service {
 
   // --------------------------------------------------------- GitHub repos
 
-  /** The failures of GitHub's GraphQL API logged so far, as `<slug> <message>`: each is logged once, until a restart. */
+  /** The failures of GitHub's GraphQL API logged so far, as `<slug> <failureKey>`: each is logged once, until a restart. */
   private graphqlErrors = new Set<string>();
 
   /**
    * Ask GitHub's GraphQL API with gh about the repository `slug`: the query gets its `owner` and
    * `name` as variables, and `vars`. GitHub answers what it could alongside its errors (a number
    * that is not there, a scope the token lacks), so both come back; null when gh gave no answer
-   * (not logged in, offline, timed out). Each failure is logged once per repository and message.
+   * (not logged in, offline, timed out). Each failure is logged once per repository (failureKey).
    */
   private async graphql(slug: string, query: string, vars: Record<string, string> = {}): Promise<GraphqlAnswer | null> {
     const [owner, name] = slug.split('/');
@@ -556,8 +556,9 @@ export class Service {
       failures = [(e as Error).message];
     }
     for (const message of failures) {
-      if (this.graphqlErrors.has(`${slug} ${message}`)) continue;
-      this.graphqlErrors.add(`${slug} ${message}`);
+      const key = `${slug} ${failureKey(message)}`;
+      if (this.graphqlErrors.has(key)) continue;
+      this.graphqlErrors.add(key);
       console.error(`asking GitHub about ${slug} failed: ${message}`);
     }
     return answer;
@@ -1155,8 +1156,8 @@ export class Service {
             this.syncErrors.delete(pull.id);
           } catch (e) {
             const error = (e as Error).message;
-            if (error !== this.syncErrors.get(pull.id)) console.error(`could not sync ${pull.head_ref} (s#${pull.number}) in ${repo.git_dir}: ${error}`);
-            this.syncErrors.set(pull.id, error);
+            if (failureKey(error) !== this.syncErrors.get(pull.id)) console.error(`could not sync ${pull.head_ref} (s#${pull.number}) in ${repo.git_dir}: ${error}`);
+            this.syncErrors.set(pull.id, failureKey(error));
           }
         }
         this.observeBase(pull.id, base ?? null);
@@ -1165,14 +1166,14 @@ export class Service {
   }
   /** The branches each pull request was last synced at by the poll, as `<head> <base>`. */
   private lastPolled = new Map<number, string>();
-  /** The error the poll's last sync of each pull request failed with, logged once. */
+  /** How the poll's last sync of each pull request failed (failureKey), logged once. */
   private syncErrors = new Map<number, string>();
 
   // ---------------------------------------------------------- fetching bases
 
   /** Per repository: when galley last started to fetch its base branches, which, and the fetch under way. */
   private fetchRounds = new Map<number, FetchRound>();
-  /** git's message for each base branch whose last fetch failed, by `<repo id> <branch>`. */
+  /** git's message for each base branch whose last fetch failed, by `<repo id> <branch>`: the first while it fails the same way (failureKey). */
   private fetchErrors = new Map<string, string>();
   /** Aborted when the server closes (stopFetching). */
   private fetchAbort = new AbortController();
@@ -1251,7 +1252,9 @@ export class Service {
       const error = await git.fetchBranch(url, branch, tracking, { gh: this.ghBin, cwd: repo.work_dir ?? tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
       if (signal.aborted) continue;
       const key = `${repo.id} ${branch}`;
-      if (error === (this.fetchErrors.get(key) ?? null)) continue;
+      const was = this.fetchErrors.get(key) ?? null;
+      // Failed as before, if in other words (failureKey): the page and the log have it.
+      if (error === was || (error !== null && was !== null && failureKey(error) === failureKey(was))) continue;
       changed = true;
       if (error) {
         console.error(`could not fetch ${repo.remote}/${branch} into ${repo.git_dir}: ${error}`);
@@ -3247,6 +3250,29 @@ export function afterRound(round: number): string {
 function failure(r: RunResult, waitedFor?: string): string {
   if (r.timedOut) return `timed out after ${UNATTENDED_TIMEOUT_MS / 1000} seconds${waitedFor ? ` (${waitedFor})` : ''}`;
   return (r.stderr || r.stdout).trim();
+}
+
+/**
+ * What changes in a failure's message from one try to the next while the failure stays the same:
+ * how long it took and how much came (git's "after 0 ms", "with 0 out of 0 bytes received"),
+ * addresses and ports (gh's "read tcp 192.168.1.10:54321->140.82.121.6:443"), and SHAs and
+ * GitHub's request IDs ("Please include `C0DE:2B1F:1A2B3C:4D5E6F:65F0A1B2`"). Other numbers, such
+ * as an HTTP status or an exit code, say what failed, and stay.
+ */
+const VOLATILE = new RegExp(
+  [
+    String.raw`\b\d+(?:\.\d+)?(?: out of \d+)? ?(?:ms|milliseconds?|seconds?|bytes?)\b`,
+    String.raw`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?`,
+    String.raw`\[[\da-f:.]+\](?::\d+)?`,
+    String.raw`\b[\da-f]+(?::[\da-f]+){2,}\b`,
+    String.raw`\b(?=[a-f]*\d)[\da-f]{7,}\b`,
+  ].join('|'),
+  'gi',
+);
+
+/** A failure's message as galley tells failures apart, to log each once: without what changes from one try to the next (VOLATILE). */
+function failureKey(message: string): string {
+  return message.replace(VOLATILE, '#');
 }
 
 /** Title and body from the branch's commits, like `gh pr create --fill`. */
