@@ -172,9 +172,11 @@ On macOS, `desktop/` has an app: galley in a window of its own with a Dock icon,
 when a pull request has been your turn for 10 seconds (clicking it opens the pull request), and a
 menu-bar status. Next to its icon is the number waiting for you and, after ↻, the number the agents
 or auto-publish are working on. Its menu lists the open pull requests in the front page's groups,
-each with what it waits for, and has a Start at login switch. It is a window onto the server the
-CLI uses: it starts one when none is running, as the CLI does, and quitting it leaves the server
-running. Its window has no title bar of its own: galley's header holds the window's buttons,
+each with what it waits for, and has a Start at login switch. A published pull request whose next
+move is on GitHub (checks, a review there, the merge) opens on GitHub, marked ↗ in the menu, from
+the menu and from a notification alike; the others open in galley. It is a window onto the server
+the CLI uses: it starts one when none is running, as the CLI does, and quitting it leaves the
+server running. Its window has no title bar of its own: galley's header holds the window's buttons,
 drags the window, and stays at the top as you scroll. Uploaded images and raw files open in
 windows of their own, with a title bar. As in Chrome, a two-finger swipe sideways goes back or
 forward, and so do the mouse's side buttons, ⌘[ and ⌘], and ⌘← and ⌘→ outside a text field.

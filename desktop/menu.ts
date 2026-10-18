@@ -1,5 +1,6 @@
 // The menu-bar status: next to the icon, how many pull requests wait for the user and how many are
-// in motion without them; in the menu, the open pull requests in the front page's groups.
+// in motion without them; in the menu, the open pull requests in the front page's groups, which
+// open in galley, or on GitHub when GitHub has the next move.
 import { yourTurns, type Pull, type Reason } from './turns.ts';
 
 /** A menu item as Electron's Menu.buildFromTemplate takes it. */
@@ -28,6 +29,8 @@ export interface MenuState {
 export interface MenuActions {
   /** Show the web UI at `path`, or as it was. */
   open(path?: string): void;
+  /** Open `url` in the default browser: a pull request on GitHub. */
+  openOutside(url: string): void;
   setOpenAtLogin(on: boolean): void;
   quit(): void;
 }
@@ -69,8 +72,8 @@ const MAX_PER_GROUP = 10;
 
 /**
  * The menu: what it says about the server, or that nothing waits for the user, then each group
- * with pull requests in it (repository, s#N and title, and under it the main reasons), then the
- * app's own items.
+ * with pull requests in it (repository, s#N and title, ↗ when it opens on GitHub, and under it the
+ * main reasons), then the app's own items.
  */
 export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
   const items: MenuItem[] = [];
@@ -85,7 +88,13 @@ export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
     for (const p of pulls.slice(0, MAX_PER_GROUP)) {
       const name = p.title.length > MAX_TITLE ? p.title.slice(0, MAX_TITLE - 1) + '…' : p.title;
       const ranked = rankedReasons(p);
-      items.push({ label: `${p.repo} s#${p.number}  ${name}`, sublabel: sublabel(p, ranked), toolTip: ranked.map((r) => r.text).join(' · '), click: () => a.open(p.path) });
+      const github = githubTarget(p);
+      items.push({
+        label: `${p.repo} s#${p.number}  ${name}${github ? ' ↗' : ''}`,
+        sublabel: sublabel(p, ranked),
+        toolTip: ranked.map((r) => r.text).join(' · '),
+        click: () => (github ? a.openOutside(github) : a.open(p.path)),
+      });
     }
     // The rest, on the front page's tab that has them all: staged, published, or both.
     const rest = pulls.slice(MAX_PER_GROUP);
@@ -122,6 +131,20 @@ export function rankedReasons(p: Pull): Reason[] {
     return r.kind === 'author' ? 1 : 2;
   };
   return [...p.reasons].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * Where a click on a pull request (in the menu, or its notification) opens it: on GitHub when it is
+ * published and GitHub has the next move, as the front page's title opens it there. That is when
+ * its main reason is GitHub's (checks, a review or a conflict there, the merge), or when it is
+ * nobody's turn with nothing to say, waiting on GitHub. Otherwise in galley, where what it waits
+ * for is done: an update to publish, auto-publish, signing, the agents, a review, a stall. Its URL
+ * on GitHub, or null for its page in galley.
+ */
+export function githubTarget(p: Pull): string | null {
+  if (!p.published) return null;
+  const [main] = rankedReasons(p);
+  return (main ? main.kind === 'github' : p.whose === 'none') ? p.published : null;
 }
 
 /**
