@@ -70,9 +70,10 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 6. **After that, GitHub's reviews and checks take over.** The agent commits and waits, and
    galley pushes each commit it waits with, without reviews here: signed as you published,
    force-pushed only over what galley pushed last, and with auto-merge asked for again if it
-   was on. A push GitHub refuses is not tried again, and you and the agent hear why; one that
-   fails otherwise (GitHub out of reach, a signing prompt nobody answered) is tried again when
-   the agent next waits.
+   was on. A push GitHub refuses is not tried again, and you and the agent hear why; when
+   someone added commits to the branch on GitHub, galley fetches them for the agent to rebase
+   onto. One that fails otherwise (GitHub out of reach, a signing prompt nobody answered) is
+   tried again when the agent next waits.
 
 The conversation stays in galley; GitHub gets the branch, title and description.
 

@@ -109,6 +109,7 @@ export interface GithubThread {
 
 /** What galley last saw of an open published pull request on GitHub (pulls.github_status). */
 export interface GithubStatus {
+  /** When galley asked GitHub, not when it answered: asked before a push, the answer may be about the commit that push replaced. */
   checkedAt: string;
   /** The head commit on GitHub, which the checks are about. */
   head: string | null;

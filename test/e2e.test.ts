@@ -15,7 +15,7 @@ import { createServer, type AddressInfo } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../src/server/server.ts';
 import { Db, now, type PullRow } from '../src/server/db.ts';
-import { AUTHOR_STALL_MS, Service, WAIT_GRACE_MS, type ChangeEvent } from '../src/server/service.ts';
+import { AUTHOR_STALL_MS, githubStatus, Service, WAIT_GRACE_MS, type ChangeEvent } from '../src/server/service.ts';
 import { CodexReviewer } from '../src/server/reviewers/codex.ts';
 import { doneForAutoPublish } from '../src/server/reviewers/head-status.ts';
 import { Repo } from '../src/server/git.ts';
@@ -149,11 +149,12 @@ before(async () => {
     gh,
     // FAKE_GH_FAIL makes `gh pr ...` fail with its value as the error, FAKE_GH_API_FAIL `gh api ...`. A file gh-merge-fail makes
     // the next `gh pr merge` fail with its contents. `gh pr view` answers FAKE_GH_VIEW, or an open pull request. With
-    // FAKE_GH_GATE, `gh pr create` answers once that file exists, and with FAKE_GH_EDIT_GATE, `gh pr edit`.
+    // FAKE_GH_GATE, `gh pr create` answers once that file exists, with FAKE_GH_EDIT_GATE, `gh pr edit`, and with
+    // FAKE_GH_FOLLOW_GATE, following's question about published pull requests, which creates <that file>.asked when asked.
     // The repository allows auto-merge and squash merges unless FAKE_GH_AUTO_MERGE or FAKE_GH_SQUASH is false. What GitHub
     // says about published pull requests comes from gh-pulls.json (see githubSays), an earlier page of their review threads
     // from gh-pulls-earlier.json. With FAKE_GH_NO_READ_ORG, GitHub refuses to name requested teams, as for a token without read:org.
-    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_EDIT_GATE" ] && [ "$1 $2" = "pr edit" ]; then while [ ! -f "$FAKE_GH_EDIT_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
+    `#!/bin/sh\necho "$@" >> "${join(dir, 'gh.log')}"\ncat >> "${join(dir, 'gh-stdin.log')}"\nif [ -n "$FAKE_GH_GATE" ] && [ "$1 $2" = "pr create" ]; then while [ ! -f "$FAKE_GH_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_EDIT_GATE" ] && [ "$1 $2" = "pr edit" ]; then while [ ! -f "$FAKE_GH_EDIT_GATE" ]; do sleep 0.05; done; fi\nif [ -n "$FAKE_GH_FOLLOW_GATE" ] && [ "$1 $2" = "api graphql" ]; then case "$4" in *"pullRequest("*) touch "$FAKE_GH_FOLLOW_GATE.asked"; while [ ! -f "$FAKE_GH_FOLLOW_GATE" ]; do sleep 0.05; done ;; esac; fi\nif [ -n "$FAKE_GH_FAIL" ] && [ "$1" = pr ]; then echo "$FAKE_GH_FAIL" >&2; exit 1; fi\nif [ -n "$FAKE_GH_API_FAIL" ] && [ "$1" = api ]; then echo "$FAKE_GH_API_FAIL" >&2; exit 1; fi\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/widgets/pull/7" ;;\n` +
       `  "pr merge") if [ -f "${join(dir, 'gh-merge-fail')}" ]; then cat "${join(dir, 'gh-merge-fail')}" >&2; rm "${join(dir, 'gh-merge-fail')}"; exit 1; fi ;;\n` +
       `  "pr view") if [ -n "$FAKE_GH_VIEW" ]; then echo "$FAKE_GH_VIEW"; else echo '{"state":"OPEN"}'; fi ;;\n` +
       `  "api graphql") case "$4" in\n    *issueOrPullRequest*) echo '{"data":{"repository":{"i12":{"__typename":"Issue","title":"Widgets wobble","state":"OPEN","stateReason":null}}}}' ;;\n    *before:*) cat "${join(dir, 'gh-pulls-earlier.json')}" ;;\n    *"pullRequest("*) case "$4" in *combinedSlug*) if [ -n "$FAKE_GH_NO_READ_ORG" ]; then echo '{"errors":[{"type":"INSUFFICIENT_SCOPES","message":"Your token has not been granted the required scopes to execute this query."}]}'; echo 'gh: Your token has not been granted the required scopes to execute this query.' >&2; exit 1; fi ;; esac; cat "${join(dir, 'gh-pulls.json')}" 2>/dev/null || echo '{"data":{"repository":{}}}' ;;\n    *) printf '{"data":{"repository":{"autoMergeAllowed":%s,"squashMergeAllowed":%s,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}}}\\n' "\${FAKE_GH_AUTO_MERGE:-true}" "\${FAKE_GH_SQUASH:-true}" ;;\n  esac ;;\nesac\n`,
@@ -5357,48 +5358,90 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.deepEqual(older.tip(), { sha: git('rev-parse', 'HEAD'), signed: false, parent: tip.sha });
   });
 
-  await t.test('a branch that moved on GitHub is not overwritten: the author and the reviewer hear why, and it is not tried again', async () => {
-    const pr = await published('feature/push-moved');
-    // Someone pushes to the branch on GitHub ...
-    const at = pr.tip().sha;
+  /** Runs `fn` with galley's fetches from GitHub, over https, going to the bare repository. */
+  const fetchingFromBare = async (fn: () => Promise<void>) => {
+    // The remote's URL is the ssh one meanwhile, so `git remote get-url` still gives GitHub's; pushes go to the bare repository too.
+    git('remote', 'set-url', 'origin', 'git@github.com:acme/widgets.git');
+    git('config', 'remote.origin.pushurl', remote);
+    git('config', `url.${remote}.insteadOf`, 'https://github.com/acme/widgets.git');
+    try {
+      await fn();
+    } finally {
+      git('config', '--unset', `url.${remote}.insteadOf`);
+      git('config', '--unset', 'remote.origin.pushurl');
+      git('remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git');
+    }
+  };
+  /** A commit with `at`'s tree on top of `parent` on GitHub, made there (a suggestion committed, a rebase); its SHA. */
+  const madeOnGithub = (at: string, parent: string, message: string) => {
     const tree = execFileSync('git', ['--git-dir', remote, 'rev-parse', `${at}^{tree}`], { encoding: 'utf8' }).trim();
-    const theirs = execFileSync('git', ['--git-dir', remote, 'commit-tree', tree, '-p', at, '-m', 'Commit suggestion'], {
+    return execFileSync('git', ['--git-dir', remote, 'commit-tree', tree, '-p', parent, '-m', message], {
       encoding: 'utf8',
       env: { ...process.env, GIT_AUTHOR_NAME: 'GitHub', GIT_AUTHOR_EMAIL: 'gh@example.com', GIT_COMMITTER_NAME: 'GitHub', GIT_COMMITTER_EMAIL: 'gh@example.com' },
     }).trim();
-    execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-moved', theirs]);
-    // ... while the agent rewrites its commit, which needs a force-push.
-    git('commit', '-q', '--amend', '-m', 'Add push-moved.js, reworded');
-    const sha = git('rev-parse', '--short=7', 'HEAD');
-    const r = await pr.wait();
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, new RegExp(`^Could not push ${sha} to GitHub: git push failed \\(the branch on GitHub changed since it was last published`, 'm'));
-    assert.match(r.stdout, /stale info/);
-    assert.match(r.stdout, /Nothing on GitHub was overwritten, and this commit is not tried again\. Do not push or force-push to GitHub yourself/);
-    assert.equal(pr.tip().sha, theirs);
-    const [push] = await pr.pushes();
-    assert.deepEqual([push.result, push.source, push.head, push.before, push.force, push.retry], ['failed', git('rev-parse', 'HEAD'), null, at, true, false]);
+  };
 
-    // The reviewer sees why, and it is the reviewer's to sort out.
-    const page = await pr.page();
-    assert.match(page, new RegExp(`<strong>Could not force-push <code>${sha}</code> to GitHub <relative-time [^]*?<pre class="merge-error">git push failed \\(the branch on GitHub changed since it was last published`));
-    assert.match(page, new RegExp(`Could not force-push <code>${sha}</code> to <a [^>]*>acme/widgets#7</a> [^]*?; nothing on GitHub was overwritten`));
-    const { turn } = await human('GET', pr.base);
-    assert.equal(turn.whose, 'reviewer');
-    assert.ok(turn.reasons.some((x: any) => x.text === `update not published: commits; pushing ${sha} failed`), JSON.stringify(turn.reasons));
+  await t.test('a branch that moved on GitHub is not overwritten: the author and the reviewer hear why, it is not tried again, and galley fetches the branch', () =>
+    fetchingFromBare(async () => {
+      const pr = await published('feature/push-moved');
+      // Someone pushes to the branch on GitHub ...
+      const at = pr.tip().sha;
+      const theirs = madeOnGithub(at, at, 'Commit suggestion');
+      execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-moved', theirs]);
+      // ... while the agent rewrites its commit, which needs a force-push.
+      git('commit', '-q', '--amend', '-m', 'Add push-moved.js, reworded');
+      const sha = git('rev-parse', '--short=7', 'HEAD');
+      const r = await pr.wait();
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`^Could not push ${sha} to GitHub: git push failed \\(the branch on GitHub changed since it was last published`, 'm'));
+      assert.match(r.stdout, /stale info/);
+      assert.match(r.stdout, /Nothing on GitHub was overwritten, and this commit is not tried again\. Do not push or force-push to GitHub yourself/);
+      // galley fetched the branch, which the agent may not be able to do from its sandbox: only its remote-tracking branch moved.
+      assert.match(r.stdout, /one that has the commits added there \(galley fetched the branch on GitHub into origin\/feature\/push-moved: rebase onto it\)/);
+      assert.equal(git('rev-parse', 'refs/remotes/origin/feature/push-moved'), theirs);
+      assert.equal(git('rev-parse', '--short=7', 'feature/push-moved'), sha);
+      assert.equal(pr.tip().sha, theirs);
+      const [push] = await pr.pushes();
+      assert.deepEqual([push.result, push.source, push.head, push.before, push.force, push.retry], ['failed', git('rev-parse', 'HEAD'), null, at, true, false]);
+      assert.deepEqual(push.fetched, { ref: 'origin/feature/push-moved', sha: theirs, rewritten: false });
 
-    // Not tried again for this commit: the next wait waits, and GitHub keeps its commit.
-    assert.equal((await pr.wait('1s')).code, 124);
-    assert.equal(pr.tip().sha, theirs);
-    assert.equal((await pr.pushes()).length, 1);
+      // The reviewer sees why, and it is the reviewer's to sort out.
+      const page = await pr.page();
+      assert.match(page, new RegExp(`<strong>Could not force-push <code>${sha}</code> to GitHub <relative-time [^]*?<pre class="merge-error">git push failed \\(the branch on GitHub changed since it was last published`));
+      assert.match(page, new RegExp(`Could not force-push <code>${sha}</code> to <a [^>]*>acme/widgets#7</a> [^]*?; nothing on GitHub was overwritten`));
+      const { turn } = await human('GET', pr.base);
+      assert.equal(turn.whose, 'reviewer');
+      assert.ok(turn.reasons.some((x: any) => x.text === `update not published: commits; pushing ${sha} failed`), JSON.stringify(turn.reasons));
 
-    // The agent brings in the commit added on GitHub: its next commit is pushed on top of it.
-    git('fetch', '-q', remote, '+refs/heads/feature/push-moved:refs/remotes/origin/feature/push-moved');
-    git('reset', '-q', '--hard', 'origin/feature/push-moved');
-    const next = pr.commit('export const moved = 1;\n');
-    assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${next} to GitHub`, 'm'));
-    assert.deepEqual([pr.tip().sha, pr.tip().parent], [git('rev-parse', 'HEAD'), theirs]);
-  });
+      // Not tried again for this commit: the next wait waits, and GitHub keeps its commit.
+      assert.equal((await pr.wait('1s')).code, 124);
+      assert.equal(pr.tip().sha, theirs);
+      assert.equal((await pr.pushes()).length, 1);
+
+      // The agent rebases onto what galley fetched: its next commit is pushed on top of the commit added on GitHub.
+      git('rebase', '-q', 'origin/feature/push-moved');
+      const next = pr.commit('export const moved = 1;\n');
+      assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${next} to GitHub`, 'm'));
+      assert.deepEqual([pr.tip().sha, pr.tip().parent], [git('rev-parse', 'HEAD'), theirs]);
+    }));
+
+  await t.test('a branch rewritten on GitHub is fetched, and the author hears that a commit rebased onto it would be refused too', () =>
+    fetchingFromBare(async () => {
+      const pr = await published('feature/push-rewritten');
+      // GitHub's "Update with rebase", or a force-push there: a copy of the commit galley pushed, which the branch no longer has.
+      const at = pr.tip().sha;
+      const theirs = madeOnGithub(at, git('rev-parse', 'main'), 'Add push-rewritten.js, rebased');
+      execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-rewritten', theirs]);
+      pr.commit('export const rewritten = 1;\n');
+      const r = await pr.wait();
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /stale info/);
+      assert.match(r.stdout, /The branch on GitHub was rewritten there: galley fetched it into origin\/feature\/push-rewritten, and it no longer has the commit galley pushed last, so the commits you wait with are refused too until the user sorts it out\./);
+      assert.doesNotMatch(r.stdout, /rebase onto it/);
+      assert.equal(git('rev-parse', 'refs/remotes/origin/feature/push-rewritten'), theirs);
+      const [push] = await pr.pushes();
+      assert.deepEqual(push.fetched, { ref: 'origin/feature/push-rewritten', sha: theirs, rewritten: true });
+    }));
 
   await t.test('signed, the commit added on GitHub that the author brought in is kept as it is, and its commit goes on top', async () => {
     const pr = await published('feature/push-kept', { sign: true });
@@ -5502,6 +5545,33 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
       writeFileSync(gate, '');
       await waiting;
       for (const f of [pushing, gate, join(dir, 'gh-pulls.json')]) rmSync(f, { force: true });
+    }
+  });
+
+  await t.test('GitHub\'s answer to a question galley asked before a push counts as being about the commit before it, also when it comes after the push', async () => {
+    const pr = await published('feature/push-asked');
+    const first = pr.tip().sha;
+    // GitHub would merge the first commit, and auto-merge is off.
+    const node = { state: 'OPEN', mergedAt: null, closedAt: null, mergedBy: null, mergeCommit: null, timelineItems: { nodes: [] }, headRefOid: first, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', autoMergeRequest: null };
+    writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${pr.id}`]: node } } }));
+    const gate = join(dir, 'follow-gate');
+    try {
+      await withFakes({ FAKE_GH_FOLLOW_GATE: gate }, async () => {
+        // galley asks GitHub, which takes its time to answer ...
+        const asking = server.service.followGithub();
+        await until(() => existsSync(`${gate}.asked`), 'galley asked GitHub');
+        // ... while the agent's next commit is pushed.
+        const sha = pr.commit('export const asked = 1;\n');
+        assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
+        writeFileSync(gate, '');
+        await asking;
+      });
+      // The answer is about the commit the push replaced: the merge it offers is nobody's turn.
+      assert.equal(githubStatus(server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pr.id)!)?.head, first);
+      const { whose, reasons } = (await human('GET', pr.base)).turn;
+      assert.deepEqual([whose, reasons.filter((r: any) => r.kind === 'github')], ['none', []]);
+    } finally {
+      for (const f of [gate, `${gate}.asked`, join(dir, 'gh-pulls.json')]) rmSync(f, { force: true });
     }
   });
 

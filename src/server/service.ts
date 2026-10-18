@@ -178,6 +178,14 @@ export interface GithubPush {
    * to the author meanwhile. A refusal is final for the commit.
    */
   retry?: boolean;
+  /**
+   * Refused because the branch on GitHub has commits galley does not have: galley fetched the
+   * branch into its remote-tracking branch `ref` (`origin/feature`), at `sha`, for the author to
+   * rebase onto; or could not, and `error` says why. `rewritten`: the branch there no longer has
+   * the commit galley pushed last (a rebase or a force-push on GitHub), so a commit rebased onto it
+   * is refused too (preparePush).
+   */
+  fetched?: { ref: string; sha: string; rewritten: boolean } | { ref: string; error: string };
 }
 
 /** The tip of a base branch (Service.baseTip). */
@@ -390,7 +398,7 @@ export const UNATTENDED_TIMEOUT_MS = 2 * 60 * 1000;
 
 /** How long after fetching a repository's base branches galley may fetch them again (Service.fetchBases). */
 export const FETCH_EVERY_MS = 60_000;
-/** How long fetching a base branch may take. */
+/** How long fetching a branch may take: a base branch, or a pull request's after a refused push (Service.fetchHead). */
 const FETCH_TIMEOUT_MS = 30_000;
 
 /** A repository's latest round of fetching its base branches (Service.fetchBases): when it started, which, and while it runs, the fetch. */
@@ -673,6 +681,9 @@ export class Service {
         const pulls = items.map(({ pull, number }) => `p${pull.id}:pullRequest(number:${number}){${fields}}`);
         return this.graphql(slug, `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${pulls.join(' ')}}}`);
       };
+      // What GitHub says counts as of when galley asked, not when the answer came: a question asked
+      // before a push may be answered after it, about the commit that push replaced (turn).
+      const sentAt = now();
       let answer = await ask(this.githubTeamNames ? PULL_FIELDS : PULL_FIELDS_WITHOUT_TEAMS);
       // Refused for the teams' names: ask again without them, from now on.
       if (this.githubTeamNames && answer?.errors.some((e) => e.type === 'INSUFFICIENT_SCOPES')) {
@@ -683,13 +694,13 @@ export class Service {
       // Those without an answer (gh failed, or the pull request is gone) are asked again next time.
       for (const { pull, number } of items) {
         const node = found?.[`p${pull.id}`];
-        if (node?.state) await this.recordGithub(pull.id, node, slug, number);
+        if (node?.state) await this.recordGithub(pull.id, node, slug, number, sentAt);
       }
     }
   }
 
-  /** Record what GitHub says about a published pull request: merged or closed there, or how it stands while open. */
-  async recordGithub(pullId: number, node: GithubPull, slug: string, number: number): Promise<void> {
+  /** Record what GitHub says about a published pull request, asked at `sentAt`: merged or closed there, or how it stands while open. */
+  async recordGithub(pullId: number, node: GithubPull, slug: string, number: number, sentAt: string): Promise<void> {
     if (node.state !== 'OPEN') return this.recordGithubEnd(pullId, node);
     const complete = await this.readEarlierThreads(slug, number, node);
     const type = this.db.transaction(() => {
@@ -699,7 +710,7 @@ export class Service {
       // What was seen before, also when a publish followed it again after a close on GitHub.
       const previous = pull.github_status ? (JSON.parse(pull.github_status) as GithubStatus) : null;
       // Threads on pages it could not read stay as they were.
-      const status = readGithub(node, previous, now(), complete);
+      const status = readGithub(node, previous, sentAt, complete);
       this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status) });
       // Pages show the status; tell them when it changed, not each time galley asked. The first
       // answer since galley's latest push or publish is news even when GitHub says the same: what it
@@ -3019,6 +3030,11 @@ export class Service {
     } catch (e) {
       // What changed brings another try, or ends it: a merge or close on GitHub, which the author hears of.
       if (e instanceof HttpError && e.status === 412) return;
+      // Refused because the branch on GitHub has commits galley does not have (the lease): fetch it,
+      // as galley fetches base branches, for the author to rebase onto, which it may not be able to
+      // fetch itself from its sandbox. Its next commit then goes on top of them (preparePush).
+      const moved = e instanceof HttpError && e.status === 409 && /stale info|fetch first/.test(e.message);
+      const fetched = moved ? await this.fetchHead(ctx, pull) : undefined;
       const failed: Omit<GithubPush, 'at'> = {
         url,
         source: pull.head_sha,
@@ -3031,6 +3047,7 @@ export class Service {
         error: (e instanceof Error ? e.message : String(e)).slice(0, 4000),
         // GitHub refused it (409): final for this commit. Anything else is tried again.
         retry: !(e instanceof HttpError && e.status === 409),
+        ...(fetched ? { fetched } : {}),
       };
       // The same failure again, tried again: the timeline has it already.
       const last = this.pushFailed(pull);
@@ -3052,6 +3069,23 @@ export class Service {
     const github = githubStatus(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!);
     const off = github?.autoMerge === false && !!merge && github.checkedAt > merge.created_at;
     if (merge && !off) await this.enableAutoMerge(ctx, url, plan.pushed, merge.data.method, viewer, timeoutMs);
+  }
+
+  /**
+   * Fetch the pull request's branch from GitHub into its remote-tracking branch, as fetchRepo
+   * fetches base branches, and nothing else: the ref preparePush pushes on top of, as long as it
+   * has the commit galley pushed last. Stopped when the server stops (stopFetching).
+   */
+  private async fetchHead(ctx: Ctx, pull: PullRow): Promise<NonNullable<GithubPush['fetched']>> {
+    const { repo, git } = ctx;
+    const signal = this.fetchAbort.signal;
+    const ref = `${repo.remote}/${pull.head_ref}`;
+    const url = `https://github.com/${repo.github_slug}.git`;
+    const error = await git.fetchBranch(url, pull.head_ref, `refs/remotes/${ref}`, { gh: this.ghBin, cwd: repo.work_dir ?? tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
+    if (signal.aborted) return { ref, error: 'galley stopped before the fetch was done' };
+    const sha = error ? null : await git.resolve(`refs/remotes/${ref}`);
+    if (!sha) return { ref, error: error ?? `git fetch left no ${ref}` };
+    return { ref, sha, rewritten: !!pull.published_head_sha && !(await git.isAncestor(pull.published_head_sha, sha)) };
   }
 
   /**
