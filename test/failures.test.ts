@@ -1,6 +1,7 @@
 // Failures of gh and git in the background, where nobody waits for an answer: each is logged once,
 // and what failed is tried again.
-import { after, before, mock, test } from 'node:test';
+import { assertLeftAsFound, fakes, withFakes } from './helpers/fakes.ts';
+import { after, afterEach, before, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -15,6 +16,10 @@ process.env.GIT_CONFIG_NOSYSTEM = '1';
 let dir: string;
 let repo: string;
 let gh: string;
+/** The FAKE_* variables every test starts with. */
+let startingFakes: Record<string, string>;
+/** The services the test staged on. */
+let services: Service[] = [];
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
@@ -24,6 +29,7 @@ function git(...args: string[]): string {
 async function staged(): Promise<{ s: Service; pull: PullRow }> {
   const db = new Db(join(mkdtempSync(join(dir, 'data-')), 'galley.db'));
   const s = new Service({ db, baseUrl: 'http://localhost:0', ghBin: gh, viewerLogin: 'reviewer' });
+  services.push(s);
   const pull = await s.createPull(await s.registerRepo(repo), { title: 'Add mul', head: 'feature/mul', base: 'main' }, db.actor('agent', 'Bot'));
   return { s, pull };
 }
@@ -42,6 +48,12 @@ before(() => {
   gh = join(dir, 'gh');
   writeFileSync(gh, `#!${process.execPath}\nif (process.env.FAKE_GH_ANSWER) console.log(process.env.FAKE_GH_ANSWER);\nconsole.error(process.env.FAKE_GH_STDERR);\nprocess.exit(1);\n`);
   chmodSync(gh, 0o755);
+  startingFakes = fakes();
+});
+
+afterEach(() => {
+  assertLeftAsFound(services, startingFakes);
+  services = [];
 });
 
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -53,25 +65,25 @@ test("a failure of GitHub's GraphQL API is logged once per repository and messag
   try {
     // GitHub answers with an error: what merging allows, issue titles and following each ask, twice.
     const error = 'Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug.';
-    process.env.FAKE_GH_ANSWER = JSON.stringify({ data: null, errors: [{ message: error }] });
-    process.env.FAKE_GH_STDERR = `gh: ${error}`;
-    for (let i = 0; i < 2; i++) {
-      await s.refreshGithubRepo('acme/widgets');
-      await s.refreshGithubIssues('acme/widgets', [12]);
-      await s.followGithub();
-    }
-    // The same about another repository.
-    await s.refreshGithubRepo('acme/gadgets');
+    await withFakes({ FAKE_GH_ANSWER: JSON.stringify({ data: null, errors: [{ message: error }] }), FAKE_GH_STDERR: `gh: ${error}` }, async () => {
+      for (let i = 0; i < 2; i++) {
+        await s.refreshGithubRepo('acme/widgets');
+        await s.refreshGithubIssues('acme/widgets', [12]);
+        await s.followGithub();
+      }
+      // The same about another repository.
+      await s.refreshGithubRepo('acme/gadgets');
+    });
     // A token GitHub no longer takes: its REST error, without GraphQL's errors.
-    process.env.FAKE_GH_ANSWER = JSON.stringify({ message: 'Bad credentials', documentation_url: 'https://docs.github.com/graphql', status: '401' });
-    process.env.FAKE_GH_STDERR = 'gh: Bad credentials (HTTP 401)';
-    await s.refreshGithubRepo('acme/widgets');
-    await s.followGithub();
+    await withFakes({ FAKE_GH_ANSWER: JSON.stringify({ message: 'Bad credentials', documentation_url: 'https://docs.github.com/graphql', status: '401' }), FAKE_GH_STDERR: 'gh: Bad credentials (HTTP 401)' }, async () => {
+      await s.refreshGithubRepo('acme/widgets');
+      await s.followGithub();
+    });
     // Not logged in: gh says so on stderr alone.
-    delete process.env.FAKE_GH_ANSWER;
-    process.env.FAKE_GH_STDERR = 'To get started with GitHub CLI, please run:  gh auth login';
-    await s.refreshGithubRepo('acme/widgets');
-    await s.followGithub();
+    await withFakes({ FAKE_GH_ANSWER: undefined, FAKE_GH_STDERR: 'To get started with GitHub CLI, please run:  gh auth login' }, async () => {
+      await s.refreshGithubRepo('acme/widgets');
+      await s.followGithub();
+    });
     assert.deepEqual(
       logged.mock.calls.map((c) => c.arguments.join(' ')),
       [
@@ -83,8 +95,6 @@ test("a failure of GitHub's GraphQL API is logged once per repository and messag
     );
   } finally {
     logged.mock.restore();
-    delete process.env.FAKE_GH_ANSWER;
-    delete process.env.FAKE_GH_STDERR;
   }
 });
 

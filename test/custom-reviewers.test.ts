@@ -1,9 +1,9 @@
 // Custom reviewers: definition files, and reviewers of the description and of the code that
 // review only their repositories, may approve, and are one bot each.
 import { gitconfig } from './helpers/env.ts';
-import { withFakes } from './helpers/fakes.ts';
+import { assertLeftAsFound, fakes, withFakes } from './helpers/fakes.ts';
 import { until } from './helpers/until.ts';
-import { after, before, test } from 'node:test';
+import { after, afterEach, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -92,6 +92,8 @@ let reviewersDir: string;
 let server: Awaited<ReturnType<typeof startServer>>;
 /** How the server is started: again on the same data, or for a server of its own. */
 let options: Parameters<typeof startServer>[0];
+/** The FAKE_* variables every test starts with. */
+let startingFakes: Record<string, string>;
 const BIN = join(import.meta.dirname, '..', 'bin', 'galley.ts');
 
 appendFileSync(gitconfig, '[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n');
@@ -202,7 +204,10 @@ if (gate) { const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t)
   writeFileSync(join(reviewersDir, 'broken.md'), '---\nengine: claude\nrepos: [acme/*\n---\n');
   options = { port: 0, dataDir: join(dir, 'data'), ghBin: 'false', codexBin: codex, claudeBin: claude, viewerLogin: 'reviewer', pollMs: 50, reviewersDir };
   server = await startServer(options);
+  startingFakes = fakes();
 });
+
+afterEach(() => assertLeftAsFound([server.service], startingFakes));
 
 after(async () => {
   await server?.close();
@@ -257,55 +262,56 @@ test('definitions are read when the server starts; those that can not run say wh
 });
 
 test('a reviewer of the description reads no code, and approves what follows its rules; the approval is its own', async () => {
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] });
-  const { number, stderr } = await stage(acme);
-  assert.match(stderr, /^When you wait, house-rules reviews the title, description and commit messages\.$/m);
-  const base = `/api/repos/acme/widgets/pulls/${number}`;
-  const out = await wait(acme, number);
-  assert.match(out, /house-rules reviewed: approved/);
-  assert.match(out, /Follows the rules\./);
-  assert.doesNotMatch(out, /Approved with nothing left open/, 'not the reviewer\'s approval');
-  // The only reviewer agent, done: nothing to address, and the next wait hands the commit over.
-  assert.match(out, new RegExp(`^Nothing to address\\. Run \`galley pr wait s${number}\` again\\.$`, 'm'));
-  assert.doesNotMatch(out, /Address the feedback/);
+  await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] }) }, async () => {
+    const { number, stderr } = await stage(acme);
+    assert.match(stderr, /^When you wait, house-rules reviews the title, description and commit messages\.$/m);
+    const base = `/api/repos/acme/widgets/pulls/${number}`;
+    const out = await wait(acme, number);
+    assert.match(out, /house-rules reviewed: approved/);
+    assert.match(out, /Follows the rules\./);
+    assert.doesNotMatch(out, /Approved with nothing left open/, 'not the reviewer\'s approval');
+    // The only reviewer agent, done: nothing to address, and the next wait hands the commit over.
+    assert.match(out, new RegExp(`^Nothing to address\\. Run \`galley pr wait s${number}\` again\\.$`, 'm'));
+    assert.doesNotMatch(out, /Address the feedback/);
 
-  // Claude Code in an empty directory, with no tools, the instructions, and what it reviews in the prompt.
-  const call = calls(process.env.FAKE_CLAUDE_LOG!).at(-1);
-  const flag = (name: string) => call.args[call.args.indexOf(name) + 1];
-  assert.deepEqual(call.files, []);
-  assert.equal(flag('--tools'), '');
-  assert.ok(!call.args.includes('--allowedTools'));
-  assert.equal(flag('--model'), 'haiku');
-  const schema = JSON.parse(flag('--json-schema'));
-  assert.deepEqual(schema.required, ['summary', 'verdict', 'comments']);
-  assert.deepEqual(schema.items?.required ?? schema.properties.comments.items.required, ['about', 'commit', 'priority', 'body']);
-  assert.match(call.prompt, /The title is in the imperative\. The description says why\./);
-  assert.match(call.prompt, /Title: Add mul\n\nDescription:\nThe widgets multiply\./);
-  assert.match(call.prompt, new RegExp(`commit ${sha(acme)}\n    Add mul\n    \n    Multiplication, for the widgets\\.`));
-  assert.match(call.prompt, /Answer with the verdict approve when nothing needs to change/);
+    // Claude Code in an empty directory, with no tools, the instructions, and what it reviews in the prompt.
+    const call = calls(process.env.FAKE_CLAUDE_LOG!).at(-1);
+    const flag = (name: string) => call.args[call.args.indexOf(name) + 1];
+    assert.deepEqual(call.files, []);
+    assert.equal(flag('--tools'), '');
+    assert.ok(!call.args.includes('--allowedTools'));
+    assert.equal(flag('--model'), 'haiku');
+    const schema = JSON.parse(flag('--json-schema'));
+    assert.deepEqual(schema.required, ['summary', 'verdict', 'comments']);
+    assert.deepEqual(schema.items?.required ?? schema.properties.comments.items.required, ['about', 'commit', 'priority', 'body']);
+    assert.match(call.prompt, /The title is in the imperative\. The description says why\./);
+    assert.match(call.prompt, /Title: Add mul\n\nDescription:\nThe widgets multiply\./);
+    assert.match(call.prompt, new RegExp(`commit ${sha(acme)}\n    Add mul\n    \n    Multiplication, for the widgets\\.`));
+    assert.match(call.prompt, /Answer with the verdict approve when nothing needs to change/);
 
-  const review = (await human('GET', `${base}/reviews`)).at(-1);
-  assert.equal(review.state, 'APPROVED');
-  assert.equal(review.user.login, 'house-rules');
-  assert.match(review.body, new RegExp(`<sub>house-rules \\(Claude, haiku, low effort\\) reviewed the title, description and commit messages at \`${sha(acme).slice(0, 7)}\`, automatic review 1 of 3\\.</sub>$`));
-  // Done with the head, as one that found nothing is; the decision is still the reviewer's to make.
-  const status = server.service.readiness(row('acme', number)).reviewers.find((r) => r.login === 'house-rules')!.status;
-  assert.deepEqual([status.state, status.description], ['approved', true]);
-  const view = await cli(acme, ['pr', 'view', String(number), '--json', 'reviewDecision,turn']);
-  assert.equal(JSON.parse(view.stdout).reviewDecision, 'REVIEW_REQUIRED');
-  assert.match(await wait(acme, number), new RegExp(`^The reviewer agents are done with ${sha(acme).slice(0, 7)} \\(house-rules approved the description\\); ask the user to review it`, 'm'));
-  const turn = server.service.turn(row('acme', number));
-  assert.ok(turn.reasons.some((r) => r.text === 'house-rules approved the description' && r.reviewer === 'house-rules'));
-  assert.ok(!turn.reasons.some((r) => r.kind === 'approved'));
+    const review = (await human('GET', `${base}/reviews`)).at(-1);
+    assert.equal(review.state, 'APPROVED');
+    assert.equal(review.user.login, 'house-rules');
+    assert.match(review.body, new RegExp(`<sub>house-rules \\(Claude, haiku, low effort\\) reviewed the title, description and commit messages at \`${sha(acme).slice(0, 7)}\`, automatic review 1 of 3\\.</sub>$`));
+    // Done with the head, as one that found nothing is; the decision is still the reviewer's to make.
+    const status = server.service.readiness(row('acme', number)).reviewers.find((r) => r.login === 'house-rules')!.status;
+    assert.deepEqual([status.state, status.description], ['approved', true]);
+    const view = await cli(acme, ['pr', 'view', String(number), '--json', 'reviewDecision,turn']);
+    assert.equal(JSON.parse(view.stdout).reviewDecision, 'REVIEW_REQUIRED');
+    assert.match(await wait(acme, number), new RegExp(`^The reviewer agents are done with ${sha(acme).slice(0, 7)} \\(house-rules approved the description\\); ask the user to review it`, 'm'));
+    const turn = server.service.turn(row('acme', number));
+    assert.ok(turn.reasons.some((r) => r.text === 'house-rules approved the description' && r.reviewer === 'house-rules'));
+    assert.ok(!turn.reasons.some((r) => r.kind === 'approved'));
 
-  // The page: its row in the sidebar, and its approval in the timeline as its own.
-  const html = await page(`/acme/widgets/pull/${number}`);
-  assert.match(html, /<a class="agent-name" href="\/settings\/reviewers\/house-rules" title="Claude · reviews the title, description and commit messages, and approves when it finds nothing">house-rules<\/a>/);
-  assert.match(html, /title="Approved the description at [0-9a-f]{7}"><svg class="octicon octicon-check color-fg-success"[^>]*>[^]*?<\/svg><span>Approved · <code>[0-9a-f]{7}<\/code><\/span>/);
-  assert.match(html, /house-rules<\/a><span class="Label Label--bot">bot<\/span> approved the description/);
-  assert.match(html, /Ask house-rules to review/);
-  // In the merge box's last round too, its approval reads as one.
-  assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules approved');
+    // The page: its row in the sidebar, and its approval in the timeline as its own.
+    const html = await page(`/acme/widgets/pull/${number}`);
+    assert.match(html, /<a class="agent-name" href="\/settings\/reviewers\/house-rules" title="Claude · reviews the title, description and commit messages, and approves when it finds nothing">house-rules<\/a>/);
+    assert.match(html, /title="Approved the description at [0-9a-f]{7}"><svg class="octicon octicon-check color-fg-success"[^>]*>[^]*?<\/svg><span>Approved · <code>[0-9a-f]{7}<\/code><\/span>/);
+    assert.match(html, /house-rules<\/a><span class="Label Label--bot">bot<\/span> approved the description/);
+    assert.match(html, /Ask house-rules to review/);
+    // In the merge box's last round too, its approval reads as one.
+    assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules approved');
+  });
 });
 
 test('it reviews again when the title, description or commit messages change, not for a commit that leaves them as they are', async () => {
@@ -318,77 +324,80 @@ test('it reviews again when the title, description or commit messages change, no
   assert.equal((await runs()).length, 1);
 
   // A new title: it says what to change, a commit's message on the commit. Approving with comments is commenting.
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({
-    summary: 'Two things.',
-    verdict: 'approve',
-    comments: [
-      { about: 'title', commit: null, priority: 'medium', body: 'Say what it adds.' },
-      { about: 'commit', commit: sha(acme).slice(0, 8), priority: null, body: '[P3] Say why.' },
-      { about: 'commit', commit: 'deadbeef', priority: 'low', body: 'No such commit.' },
-    ],
+  await withFakes({
+    FAKE_CLAUDE_REVIEW: JSON.stringify({
+      summary: 'Two things.',
+      verdict: 'approve',
+      comments: [
+        { about: 'title', commit: null, priority: 'medium', body: 'Say what it adds.' },
+        { about: 'commit', commit: sha(acme).slice(0, 8), priority: null, body: '[P3] Say why.' },
+        { about: 'commit', commit: 'deadbeef', priority: 'low', body: 'No such commit.' },
+      ],
+    }),
+  }, async () => {
+    assert.equal((await cli(acme, ['pr', 'edit', String(number), '--title', 'Multiply'])).code, 0);
+    const out = await wait(acme, number);
+    assert.match(out, /house-rules reviewed: commented/);
+    assert.match(out, new RegExp(`thread \\d+ on the message of commit ${sha(acme).slice(0, 7)} "Add mul"`));
+    const review = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviews`)).at(-1);
+    assert.equal(review.state, 'COMMENTED');
+    assert.match(review.body, /\*\*Comments on the title and description\*\*\n\n- Title \(medium priority\): Say what it adds\.\n- Commit `deadbee` \(low priority\): No such commit\./);
+    const thread = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/comments`)).at(-1);
+    assert.deepEqual([thread.subject_type, thread.commit_id, thread.priority, thread.body], ['commit', sha(acme), 'low', 'Say why.']);
+    assert.deepEqual((await runs()).map((r: any) => [r.status, r.findings]), [['done', 0], ['done', 3]]);
+    // The merge box's last round counts them: the thread on the commit, and those in the body.
+    assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 Medium 2 Low');
+    assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
+    // Only a new version answers it: with its findings seen and its thread replied to, auto-publish still waits for one.
+    assert.equal((await cli(acme, ['pr', 'comment', String(number), '--reply-to', String(thread.id), '-b', 'The description says why.'])).code, 0);
+    await human('PUT', `/api/repos/acme/widgets/pulls/${number}/auto-publish`, {});
+    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
+    assert.equal(held.code, 124);
+    assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\. The reviewer agents are not done with it until then\.$/m);
+    await server.autoPublisher.settle(row('acme', number).id);
+    assert.ok((await human('GET', `/api/repos/acme/widgets/pulls/${number}`)).auto_publish, 'auto-publish is still on, and nothing was published');
+    assert.match(await page(`/acme/widgets/pull/${number}`), /house-rules found problems in the description, and reviews it again once it changes/);
+    assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
   });
-  assert.equal((await cli(acme, ['pr', 'edit', String(number), '--title', 'Multiply'])).code, 0);
-  let out = await wait(acme, number);
-  assert.match(out, /house-rules reviewed: commented/);
-  assert.match(out, new RegExp(`thread \\d+ on the message of commit ${sha(acme).slice(0, 7)} "Add mul"`));
-  let review = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviews`)).at(-1);
-  assert.equal(review.state, 'COMMENTED');
-  assert.match(review.body, /\*\*Comments on the title and description\*\*\n\n- Title \(medium priority\): Say what it adds\.\n- Commit `deadbee` \(low priority\): No such commit\./);
-  const thread = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/comments`)).at(-1);
-  assert.deepEqual([thread.subject_type, thread.commit_id, thread.priority, thread.body], ['commit', sha(acme), 'low', 'Say why.']);
-  assert.deepEqual((await runs()).map((r: any) => [r.status, r.findings]), [['done', 0], ['done', 3]]);
-  // The merge box's last round counts them: the thread on the commit, and those in the body.
-  assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 Medium 2 Low');
-  assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
-  // Only a new version answers it: with its findings seen and its thread replied to, auto-publish still waits for one.
-  assert.equal((await cli(acme, ['pr', 'comment', String(number), '--reply-to', String(thread.id), '-b', 'The description says why.'])).code, 0);
-  await human('PUT', `/api/repos/acme/widgets/pulls/${number}/auto-publish`, {});
-  const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
-  assert.equal(held.code, 124);
-  assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\. The reviewer agents are not done with it until then\.$/m);
-  await server.autoPublisher.settle(row('acme', number).id);
-  assert.ok((await human('GET', `/api/repos/acme/widgets/pulls/${number}`)).auto_publish, 'auto-publish is still on, and nothing was published');
-  assert.match(await page(`/acme/widgets/pull/${number}`), /house-rules found problems in the description, and reviews it again once it changes/);
-  assert.match(server.service.turn(row('acme', number)).reasons.map((r) => r.text).join('; '), /house-rules commented on the description/);
 
   // A reworded commit: a verdict that is not approve, with nothing to point at, is a finding; one it may not give is a comment.
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'The message does not say why.', verdict: 'request_changes', comments: [] });
-  git(acme, 'commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Widgets multiply now.');
-  out = await wait(acme, number);
-  assert.match(out, /The message does not say why\./);
-  assert.match(out, /^Address the feedback\./m, 'with nothing to point at, its summary is the finding');
-  await human('DELETE', `/api/repos/acme/widgets/pulls/${number}/auto-publish`);
-  review = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviews`)).at(-1);
-  assert.equal(review.state, 'COMMENTED');
-  assert.deepEqual((await runs()).map((r: any) => r.findings), [0, 3, 1]);
-  // Its three automatic reviews are used up.
-  assert.equal(server.service.readiness(row('acme', number)).reviewers.find((r) => r.login === 'house-rules')!.status.state, 'capped');
-  // With one more to go, the merge box counts its summary for the finding.
-  await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`, { max_iterations: 4 });
-  assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 unprioritized');
-  await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`, { max_iterations: null });
+  await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'The message does not say why.', verdict: 'request_changes', comments: [] }) }, async () => {
+    git(acme, 'commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Widgets multiply now.');
+    const out = await wait(acme, number);
+    assert.match(out, /The message does not say why\./);
+    assert.match(out, /^Address the feedback\./m, 'with nothing to point at, its summary is the finding');
+    await human('DELETE', `/api/repos/acme/widgets/pulls/${number}/auto-publish`);
+    const review = (await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviews`)).at(-1);
+    assert.equal(review.state, 'COMMENTED');
+    assert.deepEqual((await runs()).map((r: any) => r.findings), [0, 3, 1]);
+    // Its three automatic reviews are used up.
+    assert.equal(server.service.readiness(row('acme', number)).reviewers.find((r) => r.login === 'house-rules')!.status.state, 'capped');
+    // With one more to go, the merge box counts its summary for the finding.
+    await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`, { max_iterations: 4 });
+    assert.equal(await round(`/acme/widgets/pull/${number}`), 'Last round: house-rules 1 unprioritized');
+    await human('PATCH', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`, { max_iterations: null });
+  });
 });
 
 test('a review of the description is cancelled when the title or description is edited, not by a push that leaves the messages as they are', async () => {
   const number = 1;
   const base = `/api/repos/acme/widgets/pulls/${number}`;
   const gate = join(dir, 'gate');
-  process.env.FAKE_CLAUDE_GATE = gate;
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine.', verdict: 'approve', comments: [] });
-  try {
-    const { run_id } = await human('POST', `${base}/reviewers/house-rules`);
-    writeFileSync(join(acme, 'math.js'), 'export const mul = (a, b) => a * b;\n');
-    git(acme, 'commit', '-qa', '--amend', '--no-edit');
-    await cli(acme, ['pr', 'view', String(number)]);
-    assert.ok(reviewer('house-rules').isRunning(row('acme', number).id), 'a new commit with the same messages leaves it');
-    await human('PATCH', base, { body: 'The widgets multiply, as asked in #12.' });
-    const run = (await human('GET', `${base}/reviewers/house-rules`)).runs.find((r: any) => r.id === run_id);
-    assert.deepEqual([run.status, run.reason], ['cancelled', 'edited']);
-  } finally {
-    writeFileSync(gate, '');
-    await reviewer('house-rules').settle(row('acme', number).id);
-    delete process.env.FAKE_CLAUDE_GATE;
-  }
+  await withFakes({ FAKE_CLAUDE_GATE: gate, FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine.', verdict: 'approve', comments: [] }) }, async () => {
+    try {
+      const { run_id } = await human('POST', `${base}/reviewers/house-rules`);
+      writeFileSync(join(acme, 'math.js'), 'export const mul = (a, b) => a * b;\n');
+      git(acme, 'commit', '-qa', '--amend', '--no-edit');
+      await cli(acme, ['pr', 'view', String(number)]);
+      assert.ok(reviewer('house-rules').isRunning(row('acme', number).id), 'a new commit with the same messages leaves it');
+      await human('PATCH', base, { body: 'The widgets multiply, as asked in #12.' });
+      const run = (await human('GET', `${base}/reviewers/house-rules`)).runs.find((r: any) => r.id === run_id);
+      assert.deepEqual([run.status, run.reason], ['cancelled', 'edited']);
+    } finally {
+      writeFileSync(gate, '');
+      await reviewer('house-rules').settle(row('acme', number).id);
+    }
+  });
   assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Title or description edited<\/span>/);
 });
 
@@ -396,19 +405,18 @@ test('a review goes by the definition it started with, also when the definition 
   const number = 1;
   const base = `/api/repos/acme/widgets/pulls/${number}`;
   const gate = join(dir, 'gate-redefined');
-  process.env.FAKE_CLAUDE_GATE = gate;
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'The title.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'Shorter.' }] });
   const before = reviewer('house-rules');
-  try {
-    await human('POST', `${base}/reviewers/house-rules`);
-    // Made a reviewer of the code, with Codex, while it reads the description.
-    await human('PATCH', '/api/settings/reviewers/house-rules', { reviews: 'code', engine: 'codex' });
-    assert.equal(reviewer('house-rules').reviews, 'code');
-  } finally {
-    writeFileSync(gate, '');
-    await before.settle(row('acme', number).id);
-    delete process.env.FAKE_CLAUDE_GATE;
-  }
+  await withFakes({ FAKE_CLAUDE_GATE: gate, FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'The title.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'Shorter.' }] }) }, async () => {
+    try {
+      await human('POST', `${base}/reviewers/house-rules`);
+      // Made a reviewer of the code, with Codex, while it reads the description.
+      await human('PATCH', '/api/settings/reviewers/house-rules', { reviews: 'code', engine: 'codex' });
+      assert.equal(reviewer('house-rules').reviews, 'code');
+    } finally {
+      writeFileSync(gate, '');
+      await before.settle(row('acme', number).id);
+    }
+  });
   const review = (await human('GET', `${base}/reviews`)).at(-1);
   assert.match(review.body, /\*\*Comments on the title and description\*\*\n\n- Title \(low priority\): Shorter\./);
   assert.doesNotMatch(review.body, /undefined/);
@@ -478,21 +486,23 @@ test('a custom reviewer with the head still to review keeps the pull request wit
 });
 
 test('an edit while the author waits has the reviewer of the description review the new version at once', async () => {
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] });
   git(acme, 'checkout', '-qb', 'feature/sub', 'main');
   writeFileSync(join(acme, 'sub.js'), 'export const sub = (a, b) => a - b;\n');
   git(acme, 'add', 'sub.js');
   git(acme, 'commit', '-qm', 'Add sub');
   const { number } = await stage(acme);
-  assert.match(await wait(acme, number), /house-rules reviewed: approved/);
-  assert.match(await wait(acme, number), /The reviewer agents are done with/);
+  await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] }) }, async () => {
+    assert.match(await wait(acme, number), /house-rules reviewed: approved/);
+    assert.match(await wait(acme, number), /The reviewer agents are done with/);
+  });
   // Nothing more to say about this version: the author waits for the reviewer.
   const id = row('acme', number).id;
   const waiting = wait(acme, number);
   await until(() => (server.service.waiters.get(id) ?? 0) > 0, 'the author waits');
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Say what it subtracts.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'What is subtracted?' }] });
-  await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { title: 'Subtract' });
-  assert.match(await waiting, /Say what it subtracts\./);
+  await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Say what it subtracts.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'What is subtracted?' }] }) }, async () => {
+    await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { title: 'Subtract' });
+    assert.match(await waiting, /Say what it subtracts\./);
+  });
   await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });
 });
 
@@ -501,19 +511,21 @@ test('findings on the description keep the reviewer agents from being done until
   writeFileSync(join(acme, 'mod.js'), 'export const mod = (a, b) => a % b;\n');
   git(acme, 'add', 'mod.js');
   git(acme, 'commit', '-qm', 'Add mod');
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'The title.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'Say what it adds.' }] });
   const { number } = await stage(acme);
   try {
-    assert.match(await wait(acme, number), /house-rules reviewed: commented/);
-    // Seen, with no thread to reply in: the next wait does not hand the commit to the reviewer, and says what would.
-    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
-    assert.equal(held.code, 124);
-    assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\./m);
+    await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'The title.', verdict: 'comment', comments: [{ about: 'title', commit: null, priority: 'low', body: 'Say what it adds.' }] }) }, async () => {
+      assert.match(await wait(acme, number), /house-rules reviewed: commented/);
+      // Seen, with no thread to reply in: the next wait does not hand the commit to the reviewer, and says what would.
+      const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
+      assert.equal(held.code, 124);
+      assert.match(held.stderr, /^house-rules commented on the description: edit the title or description, or reword the commits, as it asks; a reply does not answer it\./m);
+    });
     // An edited title: it reviews the new version, and once that finds nothing, the reviewer agents are done.
-    process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] });
-    assert.equal((await cli(acme, ['pr', 'edit', String(number), '--title', 'Add mod, the remainder'])).code, 0);
-    assert.match(await wait(acme, number), /house-rules reviewed: approved/);
-    assert.match(await wait(acme, number), /^The reviewer agents are done with [0-9a-f]{7} \(house-rules approved the description\); ask the user to review it/m);
+    await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Follows the rules.', verdict: 'approve', comments: [] }) }, async () => {
+      assert.equal((await cli(acme, ['pr', 'edit', String(number), '--title', 'Add mod, the remainder'])).code, 0);
+      assert.match(await wait(acme, number), /house-rules reviewed: approved/);
+      assert.match(await wait(acme, number), /^The reviewer agents are done with [0-9a-f]{7} \(house-rules approved the description\); ask the user to review it/m);
+    });
     assert.equal((await human('GET', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`)).runs.length, 2);
   } finally {
     await human('PATCH', `/api/repos/acme/widgets/pulls/${number}`, { state: 'closed' });
@@ -532,19 +544,18 @@ test('a review of the description is cancelled when the base moves and changes t
   const { number } = await stage(acme);
   const base = `/api/repos/acme/widgets/pulls/${number}`;
   const gate = join(dir, 'gate-base');
-  process.env.FAKE_CLAUDE_GATE = gate;
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine.', verdict: 'approve', comments: [] });
-  try {
-    const { run_id } = await human('POST', `${base}/reviewers/house-rules`);
-    // Onto a base that has the first commit: the review read a message that is no longer there.
-    await human('PATCH', base, { base: 'with-two' });
-    const run = (await human('GET', `${base}/reviewers/house-rules`)).runs.find((r: any) => r.id === run_id);
-    assert.deepEqual([run.status, run.reason], ['cancelled', 'base_moved']);
-  } finally {
-    writeFileSync(gate, '');
-    await reviewer('house-rules').settle(row('acme', number).id);
-    delete process.env.FAKE_CLAUDE_GATE;
-  }
+  await withFakes({ FAKE_CLAUDE_GATE: gate, FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine.', verdict: 'approve', comments: [] }) }, async () => {
+    try {
+      const { run_id } = await human('POST', `${base}/reviewers/house-rules`);
+      // Onto a base that has the first commit: the review read a message that is no longer there.
+      await human('PATCH', base, { base: 'with-two' });
+      const run = (await human('GET', `${base}/reviewers/house-rules`)).runs.find((r: any) => r.id === run_id);
+      assert.deepEqual([run.status, run.reason], ['cancelled', 'base_moved']);
+    } finally {
+      writeFileSync(gate, '');
+      await reviewer('house-rules').settle(row('acme', number).id);
+    }
+  });
   assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">The base moved<\/span>/);
   await human('PATCH', base, { state: 'closed' });
 });
@@ -572,51 +583,53 @@ test('a reviewer of the code with its own instructions, run by Codex, staged for
   writeFileSync(join(acme, 'div.js'), 'export const div = (a, b) => a / b;\n');
   git(acme, 'add', 'div.js');
   git(acme, 'commit', '-qm', 'Add div');
-  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Division by zero.', comments: [{ path: 'div.js', line: 1, start_line: null, side: 'RIGHT', priority: 'high', body: 'b may be 0.' }] });
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine.', verdict: 'approve', comments: [] });
-  const { number } = await stage(acme, ['--reviewer', 'error-handling:1']);
-  const base = `/api/repos/acme/widgets/pulls/${number}`;
-  assert.deepEqual((await human('GET', `${base}/reviewers/error-handling`)).overrides, { enabled: true, max_iterations: 1 });
-  assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: true, max_iterations: 1 } });
-  const out = await wait(acme, number);
-  assert.match(out, /error-handling reviewed: commented/);
-  assert.match(out, /house-rules reviewed: approved/, 'the reviews of a commit come together');
-  const call = calls(process.env.FAKE_CODEX_LOG!).at(-1);
-  assert.ok(call.files.includes('div.js'), 'in a checkout of the head');
-  assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-s') + 2), ['-s', 'read-only']);
-  assert.deepEqual(call.schema.required, ['summary', 'comments']);
-  assert.match(call.prompt, /\nCheck the error handling\.\n\nIf the pull request is fine, say so in the summary and leave no comments\./);
-  assert.doesNotMatch(call.prompt, /Look for bugs/);
-  assert.match((await human('GET', `${base}/reviews`)).find((r: any) => r.user.login === 'error-handling').body, /<sub>error-handling \(Codex, default model\) reviewed `[0-9a-f]{7}`, automatic review 1 of 1\.<\/sub>/);
+  await withFakes({
+    FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Division by zero.', comments: [{ path: 'div.js', line: 1, start_line: null, side: 'RIGHT', priority: 'high', body: 'b may be 0.' }] }),
+    FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine.', verdict: 'approve', comments: [] }),
+  }, async () => {
+    const { number } = await stage(acme, ['--reviewer', 'error-handling:1']);
+    const base = `/api/repos/acme/widgets/pulls/${number}`;
+    assert.deepEqual((await human('GET', `${base}/reviewers/error-handling`)).overrides, { enabled: true, max_iterations: 1 });
+    assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: true, max_iterations: 1 } });
+    const out = await wait(acme, number);
+    assert.match(out, /error-handling reviewed: commented/);
+    assert.match(out, /house-rules reviewed: approved/, 'the reviews of a commit come together');
+    const call = calls(process.env.FAKE_CODEX_LOG!).at(-1);
+    assert.ok(call.files.includes('div.js'), 'in a checkout of the head');
+    assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-s') + 2), ['-s', 'read-only']);
+    assert.deepEqual(call.schema.required, ['summary', 'comments']);
+    assert.match(call.prompt, /\nCheck the error handling\.\n\nIf the pull request is fine, say so in the summary and leave no comments\./);
+    assert.doesNotMatch(call.prompt, /Look for bugs/);
+    assert.match((await human('GET', `${base}/reviews`)).find((r: any) => r.user.login === 'error-handling').body, /<sub>error-handling \(Codex, default model\) reviewed `[0-9a-f]{7}`, automatic review 1 of 1\.<\/sub>/);
 
-  // Turned off for this pull request: the other reviewer's setting stays.
-  await human('PATCH', `${base}/reviewers/error-handling`, { enabled: false });
-  await human('PATCH', `${base}/reviewers/house-rules`, { max_iterations: 5 });
-  assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 }, 'house-rules': { enabled: null, max_iterations: 5 } });
-  await human('PATCH', `${base}/reviewers/house-rules`, { max_iterations: null });
-  assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 } });
-  assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Automatic: off for this pull request<\/span>/);
+    // Turned off for this pull request: the other reviewer's setting stays.
+    await human('PATCH', `${base}/reviewers/error-handling`, { enabled: false });
+    await human('PATCH', `${base}/reviewers/house-rules`, { max_iterations: 5 });
+    assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 }, 'house-rules': { enabled: null, max_iterations: 5 } });
+    await human('PATCH', `${base}/reviewers/house-rules`, { max_iterations: null });
+    assert.deepEqual(JSON.parse(row('acme', number).reviewer_overrides!), { 'error-handling': { enabled: false, max_iterations: 1 } });
+    assert.match(await page(`/acme/widgets/pull/${number}`), /<span class="agent-chunk">Automatic: off for this pull request<\/span>/);
+  });
 });
 
 test('a running review is cancelled for a change to what it reads as it started, whatever its definition says now', async () => {
   const number = server.service.db.get<{ number: number }>("SELECT number FROM pulls WHERE head_ref = 'feature/div'")!.number;
   const base = `/api/repos/acme/widgets/pulls/${number}`;
   const gate = join(dir, 'gate-codex');
-  process.env.FAKE_CODEX_GATE = gate;
-  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
   const before = reviewer('error-handling');
-  let runId: number;
-  try {
-    ({ run_id: runId } = await human('POST', `${base}/reviewers/error-handling`));
-    // A reviewer of the description now, while it reviews the code: an edit leaves the code as it was.
-    await human('PATCH', '/api/settings/reviewers/error-handling', { reviews: 'description' });
-    await human('PATCH', base, { title: 'Divide' });
-    assert.equal(runStatus(runId), 'running');
-  } finally {
-    writeFileSync(gate, '');
-    await before.settle(row('acme', number).id);
-    delete process.env.FAKE_CODEX_GATE;
-  }
+  const runId: number = await withFakes({ FAKE_CODEX_GATE: gate, FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Fine.', comments: [] }) }, async () => {
+    try {
+      const { run_id } = await human('POST', `${base}/reviewers/error-handling`);
+      // A reviewer of the description now, while it reviews the code: an edit leaves the code as it was.
+      await human('PATCH', '/api/settings/reviewers/error-handling', { reviews: 'description' });
+      await human('PATCH', base, { title: 'Divide' });
+      assert.equal(runStatus(run_id), 'running');
+      return run_id;
+    } finally {
+      writeFileSync(gate, '');
+      await before.settle(row('acme', number).id);
+    }
+  });
   assert.equal(runStatus(runId), 'done');
   await human('PATCH', '/api/settings/reviewers/error-handling', { reviews: 'code' });
 });
@@ -734,29 +747,29 @@ test('a deleted custom reviewer\'s review is still a reviewer agent\'s: held whi
   const { number } = await stage(acme, ['--no-review']);
   const base = `/api/repos/acme/widgets/pulls/${number}`;
   const id = row('acme', number).id;
-  process.env.FAKE_CLAUDE_REVIEW = JSON.stringify({ summary: 'Fine.', comments: [] });
   const gone = reviewer('gone');
-  await human('POST', `${base}/reviewers/gone`);
-  await gone.settle(id);
+  await withFakes({ FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine.', comments: [] }) }, async () => {
+    await human('POST', `${base}/reviewers/gone`);
+    await gone.settle(id);
+  });
   await human('DELETE', '/api/settings/reviewers/gone');
   const gate = join(dir, 'gate-gone');
-  process.env.FAKE_CODEX_GATE = gate;
-  process.env.FAKE_CODEX_REVIEW = JSON.stringify({ summary: 'Fine too.', comments: [] });
-  try {
-    await human('POST', `${base}/reviewers/codex`);
-    // While Codex reviews, its review waits for Codex's, as it would have before its file was deleted.
-    const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
-    assert.equal(held.code, 124, held.stdout);
-    writeFileSync(gate, '');
-    const out = await wait(acme, number);
-    assert.match(out, /gone reviewed: commented/);
-    assert.match(out, /codex-review reviewed: commented/);
-  } finally {
-    writeFileSync(gate, '');
-    await server.service.codex!.settle(id);
-    delete process.env.FAKE_CODEX_GATE;
-    await human('PATCH', base, { state: 'closed' });
-  }
+  await withFakes({ FAKE_CODEX_GATE: gate, FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Fine too.', comments: [] }) }, async () => {
+    try {
+      await human('POST', `${base}/reviewers/codex`);
+      // While Codex reviews, its review waits for Codex's, as it would have before its file was deleted.
+      const held = await cli(acme, ['pr', 'wait', String(number), '--timeout', '1s']);
+      assert.equal(held.code, 124, held.stdout);
+      writeFileSync(gate, '');
+      const out = await wait(acme, number);
+      assert.match(out, /gone reviewed: commented/);
+      assert.match(out, /codex-review reviewed: commented/);
+    } finally {
+      writeFileSync(gate, '');
+      await server.service.codex!.settle(id);
+      await human('PATCH', base, { state: 'closed' });
+    }
+  });
 });
 
 test('a restart leaves custom reviewers their runs: Codex takes no other reviewer\'s', async () => {
@@ -774,16 +787,12 @@ test('an interrupted review does not run again for a repository its reviewer no 
   const number = 1;
   const id = row('acme', number).id;
   const runs = () => server.service.db.all("SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = 'house-rules'", id).length;
-  process.env.FAKE_CLAUDE_GATE = join(dir, 'gate-never');
-  let run_id: number;
-  let count: number;
-  try {
-    ({ run_id } = await human('POST', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`));
-    count = runs();
+  const { run_id, count } = await withFakes({ FAKE_CLAUDE_GATE: join(dir, 'gate-never') }, async () => {
+    const { run_id } = await human('POST', `/api/repos/acme/widgets/pulls/${number}/reviewers/house-rules`);
+    const count = runs();
     await server.close();
-  } finally {
-    delete process.env.FAKE_CLAUDE_GATE;
-  }
+    return { run_id, count };
+  });
   writeFileSync(join(reviewersDir, 'house-rules.md'), '---\nengine: claude\nrepos: [other/*]\nreviews: description\n---\nThe title is in the imperative.\n');
   server = await startServer(options);
   await reviewer('house-rules').settle(id);
