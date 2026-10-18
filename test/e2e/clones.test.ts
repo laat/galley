@@ -289,6 +289,15 @@ async function stageWithCli(branch: string, file: string, ...flags: string[]) {
   return { number, id, url: created.stdout.trim(), base: `${API}/pulls/${number}`, wait: (opts: Parameters<typeof cli>[1] = {}) => cli(['pr', 'wait', String(number), '--timeout', '20s'], opts) };
 }
 
+/** A setting in the git config of the agent's repository (or of `cwd`), all its values; null when it has none. */
+function setting(key: string, cwd = repo): string | null {
+  try {
+    return execFileSync('git', ['-C', cwd, 'config', '--get-all', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
 const revisions = (id: number) => server.service.db.all<{ seq: number; head_sha: string; forced: number }>('SELECT seq, head_sha, forced FROM revisions WHERE pull_id = ? ORDER BY seq', id);
 
 /** A commit made on GitHub, in the bare repository: `at`'s tree on top of `parent` (a rebase there), its SHA. */
@@ -343,7 +352,7 @@ test('pr create and pr wait send the author’s branch to galley’s clone first
   assert.equal(clone('rev-parse', 'refs/heads/feature/sent'), git('rev-parse', 'HEAD'));
 });
 
-test('when the head conflicts with the base galley fetched, pr wait fetches that base into the checkout’s origin/main, unless the one there is newer', async () => {
+test('when the head conflicts with the base galley fetched, pr wait fetches that base into the checkout’s galley/main, leaving origin/main, unless the one there is newer', async () => {
   const { clone, row } = await widgets();
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/clash');
@@ -368,35 +377,38 @@ test('when the head conflicts with the base galley fetched, pr wait fetches that
 
   let r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /^This branch conflicts with origin\/main in math\.js; rebase onto origin\/main\./m);
-  assert.equal(git('rev-parse', 'refs/remotes/origin/main'), moved);
-  assert.equal(git('merge-base', '--is-ancestor', older, moved), '');
+  assert.match(r.stdout, /^This branch conflicts with galley\/main in math\.js; rebase onto galley\/main\./m);
+  assert.match(r.stdout, /^Rebase onto galley\/main, resolve the conflicts and run the tests/m);
+  assert.equal(git('rev-parse', 'refs/remotes/galley/main'), moved);
+  // origin/main is what the checkout last fetched from GitHub.
+  assert.equal(git('rev-parse', 'refs/remotes/origin/main'), older);
 
-  // One the agent fetched from GitHub since, newer than galley's, stays.
+  // One fetched from galley since, newer than what galley fetched then, stays.
   git('checkout', '-q', '--detach', moved);
   writeFileSync(join(repo, 'newer.js'), 'export {};\n');
   git('add', 'newer.js');
   git('commit', '-qm', 'Newer on GitHub');
   const newer = git('rev-parse', 'HEAD');
   git('checkout', '-q', 'feature/clash');
-  git('update-ref', 'refs/remotes/origin/main', newer);
+  git('update-ref', 'refs/remotes/galley/main', newer);
   await human('POST', `${API}/issues/${number}/comments`, { body: 'Rebase, please.' });
   r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /^This branch conflicts with origin\/main in math\.js; rebase onto origin\/main\./m);
+  assert.match(r.stdout, /^This branch conflicts with galley\/main in math\.js; rebase onto galley\/main\./m);
   assert.equal(r.stderr, '');
-  assert.equal(git('rev-parse', 'refs/remotes/origin/main'), newer);
+  assert.equal(git('rev-parse', 'refs/remotes/galley/main'), newer);
   // One that is another (main rewritten on GitHub) becomes galley's.
   git('checkout', '-q', '--detach', older);
   writeFileSync(join(repo, 'other.js'), 'export {};\n');
   git('add', 'other.js');
   git('commit', '-qm', 'Another main');
-  git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD'));
+  git('update-ref', 'refs/remotes/galley/main', git('rev-parse', 'HEAD'));
   git('checkout', '-q', 'feature/clash');
   await human('POST', `${API}/issues/${number}/comments`, { body: 'Rebase onto the right one, please.' });
   r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(git('rev-parse', 'refs/remotes/origin/main'), moved);
+  assert.equal(git('rev-parse', 'refs/remotes/galley/main'), moved);
+  assert.equal(git('rev-parse', 'refs/remotes/origin/main'), older);
 });
 
 test('pr create sends a base galley does not have, of a pull request stacked on a branch not staged yet, and pr wait fetches it into galley/<base> when the head conflicts with it', async () => {
@@ -457,11 +469,11 @@ test('after GitHub refused a push for the branch rewritten there, pr wait fetche
   let r = await pr.wait();
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^Could not push [0-9a-f]{7} to GitHub: /m);
-  assert.ok(r.stdout.includes(`\`git rebase --onto origin/feature/rewritten ${since.slice(0, 7)}\``), r.stdout);
-  assert.equal(git('rev-parse', 'refs/remotes/origin/feature/rewritten'), theirs);
+  assert.ok(r.stdout.includes(`\`git rebase --onto galley/feature/rewritten ${since.slice(0, 7)}\``), r.stdout);
+  assert.equal(git('rev-parse', 'refs/remotes/galley/feature/rewritten'), theirs);
 
   // The rebase it says works here; it is a rewrite of what galley has, sent with a lease, and pushed on top of GitHub's.
-  git('rebase', '-q', '--onto', 'origin/feature/rewritten', since);
+  git('rebase', '-q', '--onto', 'galley/feature/rewritten', since);
   r = await pr.wait();
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^Pushed [0-9a-f]{7} to GitHub: /m);
@@ -480,11 +492,14 @@ test('merged without commits only the checkout had: pr wait sends them first, an
   const merged = { state: 'MERGED', mergedAt: '2026-10-18T09:00:00Z', closedAt: '2026-10-18T09:00:00Z', mergedBy: { login: 'laat' }, mergeCommit: { oid: 'e468a4e' + '2'.repeat(33) }, timelineItems: { nodes: [] } };
   writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${pr.id}`]: merged } } }));
   await server.service.followGithub();
+  assert.equal(setting('branch.feature/late.pushRemote'), 'galley');
   let r = await pr.wait();
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^Merged on GitHub as e468a4e by laat: /m);
   assert.ok(r.stdout.includes(`  ${late.slice(0, 7)} Too late\n`), r.stdout);
   assert.doesNotMatch(r.stdout, /is gone here/);
+  // Merged, a plain git push of the branch goes where it went before it was staged.
+  assert.equal(setting('branch.feature/late.pushRemote'), null);
   // Deleted here: galley's clone still has it, but the checkout says it is gone.
   git('checkout', '-q', 'main');
   git('branch', '-qD', 'feature/late');
@@ -494,6 +509,7 @@ test('merged without commits only the checkout had: pr wait sends them first, an
   // The name used again, for new work: galley's branch of it, the merged pull request's, is nobody's, and is replaced.
   const next = await stageWithCli('feature/late', 'later.js');
   assert.equal(clone('rev-parse', 'refs/heads/feature/late'), git('rev-parse', 'HEAD'));
+  assert.equal(setting('branch.feature/late.pushRemote'), 'galley');
   assert.notEqual(next.number, pr.number);
   // Commands on the merged one send nothing to the branch the new one has now.
   writeFileSync(join(repo, 'later.js'), 'export const later = 1;\n');
@@ -658,6 +674,154 @@ test('another checkout with a branch of the same name replaces galley’s only o
   assert.equal(r.code, 1);
   assert.match(r.stderr, new RegExp(`^galley did not take feature/shared at ${stale.slice(0, 7)} \\(.+\\): its feature/shared moved while this was sent\\. Nothing was sent\\. Run this again\\.$`, 'm'));
   assert.equal(tip(), onTop);
+});
+
+test('the CLI keeps a remote called galley at galley’s URL, which a staged branch’s plain git push goes to, and which fetches what galley fetched from GitHub', async () => {
+  const { clone } = await widgets();
+  const url = `${server.url}/git/acme/widgets.git`;
+  // As in a checkout the CLI never ran in.
+  if (setting('remote.galley.url')) git('config', '--remove-section', 'remote.galley');
+  const pr = await stageWithCli('feature/remote', 'remote.js');
+  assert.equal(setting('remote.galley.url'), url);
+  assert.equal(setting('remote.galley.fetch'), '+refs/remotes/origin/*:refs/remotes/galley/*\n^refs/remotes/origin/HEAD');
+  assert.equal(setting('branch.feature/remote.pushRemote'), 'galley');
+  assert.equal(git('remote', 'get-url', 'origin'), 'https://github.com/acme/widgets.git');
+
+  // A plain git push from the branch goes to galley, not GitHub: a fast-forward is taken, and
+  // staged. With push.autoSetupRemote, it makes galley the branch's upstream too.
+  writeFileSync(join(repo, 'remote.js'), 'export const pushed = 1;\n');
+  git('commit', '-qam', 'Push by hand');
+  const byHand = git('rev-parse', 'HEAD');
+  const pushed = await gitToGalley(['-c', 'push.autoSetupRemote=true', 'push']);
+  assert.equal(pushed.code, 0, pushed.stderr);
+  assert.equal(setting('branch.feature/remote.remote'), 'galley');
+  assert.equal(clone('rev-parse', 'refs/heads/feature/remote'), byHand);
+  assert.equal(revisions(pr.id).at(-1)!.head_sha, byHand);
+  assert.equal(execFileSync('git', ['--git-dir', remote, 'for-each-ref', 'refs/heads/feature/remote'], { encoding: 'utf8' }), '');
+  // A rewrite needs the lease the CLI sends.
+  git('commit', '-q', '--amend', '-m', 'Push by hand, reworded');
+  const forced = await gitToGalley(['push', '--force']);
+  assert.notEqual(forced.code, 0);
+  assert.match(forced.stderr, /^remote: galley: feature\/remote: /m);
+  assert.equal(clone('rev-parse', 'refs/heads/feature/remote'), byHand);
+
+  // git fetch galley fetches what galley fetched from GitHub, not the branches sent to it.
+  const fetched = await gitToGalley(['fetch', '-q', 'galley']);
+  assert.equal(fetched.code, 0, fetched.stderr);
+  assert.equal(git('rev-parse', 'refs/remotes/galley/main'), clone('rev-parse', 'refs/remotes/origin/main'));
+  assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/remotes/galley/HEAD', 'refs/remotes/galley/feature/remote'), '');
+
+  // The server moved: the next command points the remote at it, and its push URL should it have
+  // one, unless the checkout's git config can not be written (a sandbox), which it says, and goes on by URL.
+  git('config', 'remote.galley.url', 'http://127.0.0.1:1/git/acme/widgets.git');
+  git('config', 'remote.galley.pushurl', 'http://127.0.0.1:1/git/acme/widgets.git');
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const sandbox = join(dir, 'config-refused-bin');
+  mkdirSync(sandbox, { recursive: true });
+  writeFileSync(join(sandbox, 'git'), `#!/bin/sh\ncase " $* " in *" config --get"*) ;; *" config "*) echo "error: could not lock config file .git/config: Operation not permitted" >&2; exit 255 ;; esac\nexec "${realGit}" "$@"\n`);
+  chmodSync(join(sandbox, 'git'), 0o755);
+  let r = await cli(['pr', 'view', String(pr.number)], { env: { PATH: `${sandbox}:${process.env.PATH}` } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stderr.includes(`Could not set the remote galley at ${url} in this checkout: error: could not lock config file .git/config: Operation not permitted. The CLI sends and fetches by that URL all the same, but a plain \`git push\` here does not go to galley.\n`), r.stderr);
+  assert.equal(setting('remote.galley.url'), 'http://127.0.0.1:1/git/acme/widgets.git');
+  r = await cli(['pr', 'view', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(setting('remote.galley.url'), url);
+  assert.equal(setting('remote.galley.pushurl'), url);
+  git('config', '--unset', 'remote.galley.pushurl');
+
+  // A checkout whose remote on GitHub is not origin is still registered by it, not by the galley remote the CLI added.
+  const upstream = join(dir, 'upstream');
+  execFileSync('git', ['clone', '-q', '-o', 'upstream', remote, upstream]);
+  execFileSync('git', ['-C', upstream, 'remote', 'set-url', 'upstream', 'https://github.com/acme/widgets.git']);
+  for (let i = 0; i < 2; i++) {
+    r = await cli(['pr', 'view', String(pr.number), '--json', 'number'], { cwd: upstream });
+    assert.equal(r.code, 0, r.stderr);
+  }
+  assert.equal(setting('remote.galley.url', upstream), url);
+
+  // Closed, a plain git push of the branch goes where it went before it was staged, and galley is
+  // no longer its upstream.
+  await human('PATCH', pr.base, { state: 'closed' });
+  r = await pr.wait();
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /without publishing it/);
+  assert.deepEqual(['pushRemote', 'remote', 'merge'].map((key) => setting(`branch.feature/remote.${key}`)), [null, null, null]);
+  // Reopened, to galley again; closed with pr close, no more.
+  r = await cli(['pr', 'reopen', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(setting('branch.feature/remote.pushRemote'), 'galley');
+  r = await cli(['pr', 'close', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(setting('branch.feature/remote.pushRemote'), null);
+  // An author's command on an open one staged before the CLI kept the remote points it at galley.
+  const older = await stageWithCli('feature/older', 'older.js');
+  git('config', '--unset', 'branch.feature/older.pushRemote');
+  r = await cli(['pr', 'view', String(older.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(setting('branch.feature/older.pushRemote'), 'galley');
+});
+
+test('a remote called galley the user has at another URL is left alone: the CLI goes to galley by its URL, and fetches into origin', async () => {
+  const { row } = await widgets();
+  const theirs = join(dir, 'theirs');
+  execFileSync('git', ['clone', '-q', remote, theirs]);
+  const t = (...args: string[]) => execFileSync('git', ['-C', theirs, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args], { encoding: 'utf8' }).trim();
+  t('remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git');
+  t('remote', 'add', 'galley', 'https://github.com/someone/galley.git');
+  const before = setting('remote.galley.fetch', theirs);
+  t('checkout', '-qb', 'feature/theirs');
+  writeFileSync(join(theirs, 'theirs.js'), 'export const theirs = 1;\n');
+  t('add', 'theirs.js');
+  t('commit', '-qm', 'Add theirs.js');
+  const created = await cli(['pr', 'create', '--title', 'Add theirs.js', '--body', 'x'], { cwd: theirs });
+  assert.equal(created.code, 0, created.stderr);
+  const said = `This checkout has a remote called galley at https://github.com/someone/galley.git, which is not galley's. The CLI leaves it alone, and goes to galley by its URL, ${server.url}/git/acme/widgets.git.`;
+  assert.equal(created.stderr.split('\n').filter((l) => l === said).length, 1, created.stderr);
+  assert.match(created.stderr, new RegExp(`^Sent feature/theirs at ${t('rev-parse', '--short=7', 'HEAD')} to galley\\.$`, 'm'));
+  assert.equal(setting('remote.galley.url', theirs), 'https://github.com/someone/galley.git');
+  assert.equal(setting('remote.galley.fetch', theirs), before);
+  assert.equal(setting('branch.feature/theirs.pushRemote', theirs), null);
+  const number = Number(created.stdout.trim().split('/').pop());
+  // Nor one that has galley's URL too, which git would push to with the other, or that pushes to GitHub.
+  let r = { code: 0, stdout: '', stderr: '' };
+  t('config', '--add', 'remote.galley.url', `${server.url}/git/acme/widgets.git`);
+  for (const pushTo of [null, 'https://github.com/acme/widgets.git']) {
+    if (pushTo) {
+      t('remote', 'remove', 'galley');
+      t('remote', 'add', 'galley', `${server.url}/git/acme/widgets.git`);
+      t('remote', 'set-url', '--push', 'galley', pushTo);
+    }
+    r = await cli(['pr', 'view', String(number)], { cwd: theirs });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.stderr.includes(`This checkout has a remote called galley at ${pushTo ?? 'https://github.com/someone/galley.git'}, which is not galley's.`), r.stderr);
+    assert.equal(setting('branch.feature/theirs.pushRemote', theirs), null);
+  }
+  assert.equal(setting('remote.galley.url', theirs), `${server.url}/git/acme/widgets.git`);
+  assert.equal(setting('remote.galley.pushurl', theirs), 'https://github.com/acme/widgets.git');
+  t('remote', 'remove', 'galley');
+  t('remote', 'add', 'galley', 'https://github.com/someone/galley.git');
+  // A pushRemote the user set on it stays when the pull request is done with.
+  t('config', 'branch.feature/theirs.pushRemote', 'galley');
+
+  // The base moves on GitHub, in the same file: the wait fetches it into origin/main, as the remote galley is not galley's.
+  t('checkout', '-q', '--detach', 'feature/theirs~1');
+  writeFileSync(join(theirs, 'theirs.js'), 'export const theirs = 2;\n');
+  t('add', 'theirs.js');
+  t('commit', '-qm', 'Add theirs.js on GitHub');
+  const moved = t('rev-parse', 'HEAD');
+  t('push', '-q', remote, 'HEAD:refs/heads/main');
+  t('checkout', '-q', 'feature/theirs');
+  await server.service.fetchBases(row, { base: 'main' });
+  await until(async () => (await asAgent('GET', `${API}/gh/pulls/${number}?fields=baseConflicts`)).json.baseConflicts?.oid === moved, 'galley finds the conflict');
+  r = await cli(['pr', 'wait', String(number), '--timeout', '20s'], { cwd: theirs });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^This branch conflicts with origin\/main in theirs\.js; rebase onto origin\/main\./m);
+  assert.equal(t('rev-parse', 'refs/remotes/origin/main'), moved);
+  assert.equal(t('for-each-ref', 'refs/remotes/galley'), '');
+  r = await cli(['pr', 'close', String(number)], { cwd: theirs });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(setting('branch.feature/theirs.pushRemote', theirs), 'galley');
 });
 
 /** Runs `fn` as the CLI does for a person at a terminal: no agent's name, and stdin a terminal. */

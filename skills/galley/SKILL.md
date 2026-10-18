@@ -78,9 +78,9 @@ description: Stage a pull request in galley, the user's local review server, ins
      matters, as its author judged it.
    - A ```` ```suggestion ```` block replaces the commented lines. Apply it unless it is wrong.
    - Comments without a thread: about the whole pull request, often the title or description.
-   - `This branch conflicts with origin/main …; rebase onto origin/main`: rebase onto it (it is
-     fetched), resolve the conflicts, run the tests, and wait again. Only behind
-     (`mergeStateStatus` `BEHIND`): leave it unless the user asks for a rebase.
+   - `This branch conflicts with galley/main …; rebase onto galley/main`: rebase onto it (the
+     wait fetched it from galley), resolve the conflicts, run the tests, and wait again. Only
+     behind (`mergeStateStatus` `BEHIND`): leave it unless the user asks for a rebase.
    - `Image: <url>`: add `--download-images <dir>` to `pr wait` or `pr view --comments`, and
      read the files it prints.
 
@@ -132,7 +132,7 @@ description: Stage a pull request in galley, the user's local review server, ins
    - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
      user says otherwise.
    - New feedback: address it as in step 4, commit, and wait again.
-   - `This branch conflicts with origin/main …`: rebase as in step 3 and wait again. The wait
+   - `This branch conflicts with galley/main …`: rebase as in step 3 and wait again. The wait
      force-pushes the rebase; do not push it yourself.
    - `Pushed 3f2a1c9 to GitHub: <url>` or `Published the description to GitHub: <url>`: wait
      again.
@@ -209,6 +209,9 @@ says otherwise when asking you to stage. Add to `galley pr create`:
 
 - `galley browse <path>[:<line>[-<line>]] [--commit <sha>]` prints a link to those lines in the
   web UI. Give it to the user when you point at code.
+- The CLI keeps a git remote called `galley`: `galley/<branch>` is what galley fetched from
+  GitHub for you to rebase onto, and `git push` from a staged branch goes to galley, not GitHub.
+  Leave the remote and the branch's `pushRemote` as they are.
 - `galley api <endpoint>` takes GitHub REST paths with `-f`, `-F`, `-X`, `--input` and `--jq`.
   No GraphQL.
 - Your comments are attributed to your agent: `claude` in Claude Code, `codex-agent` in Codex,

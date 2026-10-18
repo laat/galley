@@ -24,9 +24,10 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     assert.match(r.stdout, new RegExp(`^Could not push ${sha} to GitHub: git push failed \\(the branch on GitHub changed since it was last published`, 'm'));
     assert.match(r.stdout, /stale info/);
     assert.match(r.stdout, /Nothing on GitHub was overwritten, and this commit is not tried again\. Do not push or force-push to GitHub yourself/);
-    // galley fetched the branch, which the agent may not be able to do from its sandbox: only its remote-tracking branch moved.
-    assert.match(r.stdout, /one that has the commits added there \(galley fetched the branch on GitHub into origin\/feature\/push-moved: rebase onto it\)/);
-    assert.equal(git('rev-parse', 'refs/remotes/origin/feature/push-moved'), theirs);
+    // galley fetched the branch, which the agent may not be able to do from its sandbox: only galley/<branch> moved here.
+    assert.match(r.stdout, /one that has the commits added there \(galley fetched the branch on GitHub into galley\/feature\/push-moved: rebase onto it\)/);
+    assert.equal(git('rev-parse', 'refs/remotes/galley/feature/push-moved'), theirs);
+    assert.equal(git('for-each-ref', 'refs/remotes/origin/feature/push-moved'), '');
     assert.equal(git('rev-parse', '--short=7', 'feature/push-moved'), sha);
     assert.equal(pr.tip().sha, theirs);
     const [push] = await pr.pushes();
@@ -47,7 +48,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     assert.equal((await pr.pushes()).length, 1);
 
     // The agent rebases onto what galley fetched: its next commit is pushed on top of the commit added on GitHub.
-    git('rebase', '-q', 'origin/feature/push-moved');
+    git('rebase', '-q', 'galley/feature/push-moved');
     const next = pr.commit('export const moved = 1;\n');
     assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${next} to GitHub`, 'm'));
     assert.deepEqual([pr.tip().sha, pr.tip().parent], [git('rev-parse', 'HEAD'), theirs]);
@@ -55,7 +56,8 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
 
   await t.test('a branch rewritten on GitHub is fetched, and the commits the author rebases onto it go on top of it, but not a merge of it, nor once it moved again', async () => {
     const pr = await published('feature/push-rewritten', { sign: true });
-    const ref = 'origin/feature/push-rewritten';
+    // Where pr wait fetches it into the checkout, and where galley's clone has it (`fetched`).
+    const [ref, there] = ['galley/feature/push-rewritten', 'origin/feature/push-rewritten'];
     // GitHub's "Update with rebase", or a force-push there: a copy of the commit galley pushed (a signed copy of `since`), which the branch no longer has.
     const at = pr.tip().sha;
     const since = git('rev-parse', 'HEAD');
@@ -68,21 +70,21 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     const told = `The branch on GitHub was rewritten there, and galley fetched it into ${ref}. Rebase the commits you made after ${since.slice(0, 7)} onto it, leaving out the ones before (\`git rebase --onto ${ref} ${since.slice(0, 7)}\`), and wait: galley pushes them on top of it. Do not merge ${ref} in`;
     assert.ok(r.stdout.includes(told), r.stdout);
     assert.equal(git('rev-parse', `refs/remotes/${ref}`), theirs);
-    assert.deepEqual((await pr.pushes()).at(-1).fetched, { ref, sha: theirs, rewritten: true, since });
+    assert.deepEqual((await pr.pushes()).at(-1).fetched, { ref: there, sha: theirs, rewritten: true, since });
 
     // Merged in, the commit the rewrite removed would come back: refused before any push, also when publishing by hand.
     git('merge', '-q', '-s', 'ours', '--no-edit', ref);
     const merge = git('rev-parse', '--short=7', 'HEAD');
     r = await pr.wait();
-    const refusal = `The branch on GitHub was rewritten there (galley fetched it into ${ref} at ${theirs.slice(0, 7)}), and this head has a commit the rewrite removed, which pushing it would bring back: ${since.slice(0, 7)}.`;
-    assert.ok(r.stdout.includes(`Could not push ${merge} to GitHub: ${refusal}`), r.stdout);
+    const refusal = (into: string) => `The branch on GitHub was rewritten there (galley fetched it into ${into} at ${theirs.slice(0, 7)}), and this head has a commit the rewrite removed, which pushing it would bring back: ${since.slice(0, 7)}.`;
+    assert.ok(r.stdout.includes(`Could not push ${merge} to GitHub: ${refusal(ref)}`), r.stdout);
     assert.ok(r.stdout.includes(told), r.stdout);
     assert.equal(pr.tip().sha, theirs);
     const refused = (await pr.pushes()).at(-1);
-    assert.deepEqual([refused.result, refused.retry, refused.fetched], ['failed', false, { ref, sha: theirs, rewritten: true, since }]);
+    assert.deepEqual([refused.result, refused.retry, refused.fetched], ['failed', false, { ref: there, sha: theirs, rewritten: true, since }]);
     const byHand = await fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: true, force: true }) });
     assert.equal(byHand.status, 409);
-    assert.equal((await byHand.json()).message, refusal);
+    assert.equal((await byHand.json()).message, refusal(there));
     assert.equal(pr.tip().sha, theirs);
 
     // Rebased onto it without the commit from before, but the branch moved again on GitHub after the fetch: the lease on what galley fetched refuses it,
@@ -96,7 +98,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     assert.match(r.stdout, new RegExp(`^Could not push ${rebased} to GitHub: git push failed \\(the branch on GitHub changed since it was last published[^]*stale info`, 'm'));
     assert.equal(pr.tip().sha, again);
     const moved = (await pr.pushes()).at(-1);
-    assert.deepEqual([moved.result, moved.before, moved.force, moved.fetched], ['failed', theirs, false, { ref, sha: again, rewritten: true, since: theirs }]);
+    assert.deepEqual([moved.result, moved.before, moved.force, moved.fetched], ['failed', theirs, false, { ref: there, sha: again, rewritten: true, since: theirs }]);
 
     // Rebased onto where it is now: pushed on top of it, GitHub's commits as they are and the agent's signed, as the publish was.
     git('rebase', '-q', ref);
@@ -119,7 +121,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
 
   await t.test('rewritten again before galley could push: the author rebases what it made after the first rewrite, and a merge that brings that one back is refused', async () => {
     const pr = await published('feature/push-twice');
-    const ref = 'origin/feature/push-twice';
+    const [ref, there] = ['galley/feature/push-twice', 'origin/feature/push-twice'];
     const at = pr.tip().sha;
     const rewrite = (message: string) => {
       const sha = madeOnGithub(at, git('rev-parse', 'main'), message);
@@ -136,7 +138,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     let r = await pr.wait();
     assert.match(r.stdout, /stale info/);
     assert.ok(r.stdout.includes(`\`git rebase --onto ${ref} ${first.slice(0, 7)}\``), r.stdout);
-    assert.deepEqual((await pr.pushes()).at(-1).fetched, { ref, sha: second, rewritten: true, since: first });
+    assert.deepEqual((await pr.pushes()).at(-1).fetched, { ref: there, sha: second, rewritten: true, since: first });
 
     // Merged in, the first rewrite would come back: refused.
     git('merge', '-q', '-s', 'ours', '--no-edit', ref);
@@ -155,7 +157,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
 
   await t.test('rewritten, and reset there to what galley pushed before galley could push: a merge that brings the rewrite back is refused', async () => {
     const pr = await published('feature/push-reset');
-    const ref = 'origin/feature/push-reset';
+    const [ref, there] = ['galley/feature/push-reset', 'origin/feature/push-reset'];
     const at = pr.tip().sha;
     const first = madeOnGithub(at, git('rev-parse', 'main'), 'Add push-reset.js, rebased');
     execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-reset', first]);
@@ -167,7 +169,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-reset', at]);
     let r = await pr.wait();
     assert.ok(r.stdout.includes(`\`git rebase --onto ${ref} ${first.slice(0, 7)}\``), r.stdout);
-    assert.deepEqual((await pr.pushes()).at(-1).fetched, { ref, sha: at, rewritten: true, since: first });
+    assert.deepEqual((await pr.pushes()).at(-1).fetched, { ref: there, sha: at, rewritten: true, since: first });
 
     // Merged in, the rewrite would come back: refused.
     git('merge', '-q', '-s', 'ours', '--no-edit', ref);

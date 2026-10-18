@@ -6,7 +6,7 @@ import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, s
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews } from './reviewers.ts';
 import { openPage } from './open.ts';
-import { fetchBack, fetchHead, hasBranch, sendBase, sendHead, sendPull } from './send.ts';
+import { clearPushRemote, fetchBack, fetchHead, hasBranch, sendBase, sendHead, sendPull, setPushRemote } from './send.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
@@ -230,6 +230,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
     reviewers,
     automatic_reviews: v['no-review'] ? false : undefined,
   });
+  await setPushRemote(client, cwd, repo, head.replace(/^[^:]+:/, ''));
   for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
   err(whoReviews(pr.reviewer_agents));
@@ -571,6 +572,8 @@ async function setState(client: Client, cwd: string, args: string[], state: 'ope
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.comment) await client.json('POST', `${repoPath(t.repo)}/issues/${t.number}/comments`, { body: v.comment });
   const pr = await client.json('PATCH', pullPath(t), { state });
+  if (state === 'closed') await clearPushRemote(client, cwd, t.repo, pr.head.ref);
+  else await setPushRemote(client, cwd, t.repo, pr.head.ref);
   err(`✓ ${state === 'closed' ? 'Closed' : 'Reopened'} pull request ${named(t)} (${pr.title})`);
   if (v['delete-branch']) err('The branch was left alone; galley never deletes branches.');
   return 0;
@@ -883,14 +886,19 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const others = targets.flatMap((other, i) => (other === t ? [] : [again(i)]));
     const pr = r.pr;
     // What galley fetched from GitHub for the author to rebase onto, fetched into the checkout too
-    // (from galley's clone), and named as it is there: the base the head conflicts with, and the
-    // branch on GitHub after a push GitHub refused. A base staged in galley (stacked) comes as galley/<base>.
+    // (from galley's clone), and named as it is there, galley/<branch>: the base the head conflicts
+    // with, and the branch on GitHub after a push GitHub refused. So does a base staged in galley (stacked).
     if (pr.baseConflicts?.conflicting && [`origin/${pr.baseRefName}`, pr.baseRefName].includes(pr.baseConflicts.ref)) {
       const staged = pr.baseConflicts.ref === pr.baseRefName;
       pr.baseConflicts.ref = (await fetchBack(client, cwd, t.repo, pr.baseRefName, pr.baseConflicts.oid, { staged })) ?? pr.baseConflicts.ref;
     }
     const onGithub = r.status === 'push_failed' && r.push.fetched?.sha && r.push.fetched.ref === `origin/${pr.headRefName}` ? r.push.fetched : null;
-    if (onGithub) onGithub.ref = (await fetchBack(client, cwd, t.repo, pr.headRefName, onGithub.sha)) ?? onGithub.ref;
+    if (onGithub) {
+      const there = onGithub.ref;
+      onGithub.ref = (await fetchBack(client, cwd, t.repo, pr.headRefName, onGithub.sha)) ?? there;
+      // A refusal for commits the rewrite removed names it as galley's clone has it.
+      if (r.push.error) r.push.error = r.push.error.replace(`fetched it into ${there} at`, `fetched it into ${onGithub.ref} at`);
+    }
     // The server's link, which starts with its public URL.
     const url = pr.url;
     // Waiting on several: say which one this is about.
@@ -946,7 +954,9 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         await new Promise((res) => setTimeout(res, 3000));
       }
     }
-    // Done with, here or on GitHub: every wait on it says so, so leave it out of the next one.
+    // Done with, here or on GitHub: a plain `git push` of the branch no longer goes to galley, and
+    // every wait on it says so, so leave it out of the next one.
+    if (r.status === 'merged' || r.status === 'closed_on_github' || r.status === 'closed') await clearPushRemote(client, cwd, t.repo, pr.headRefName);
     const rest = others.length ? ` Wait on the others with \`galley pr wait ${others.join(' ')}\`.` : '';
     if (r.status === 'merged') {
       const sha = pr.mergeCommit?.oid ? ` as ${String(pr.mergeCommit.oid).slice(0, 7)}` : '';

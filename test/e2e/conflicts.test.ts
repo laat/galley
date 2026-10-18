@@ -83,8 +83,8 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     await moved();
     const told = await waiting;
     assert.equal(told.code, 0, told.stderr);
-    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
-    assert.match(told.stdout, /Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait s\d+` again\./);
+    assert.match(told.stdout, /^This branch conflicts with galley\/main in a\.js; rebase onto galley\/main\.$/m);
+    assert.match(told.stdout, /Rebase onto galley\/main, resolve the conflicts and run the tests, then run `galley pr wait s\d+` again\./);
     assert.deepEqual(await pr.view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
     assert.match((await cli(['pr', 'view', pr.n], { cwd: path })).stdout, /^conflicts:\twith origin\/main in a\.js; rebase onto origin\/main\.$/m);
   });
@@ -118,11 +118,11 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     }
     const first = await late.wait();
     assert.equal(first.code, 0, first.stderr);
-    assert.match(first.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.match(first.stdout, /^This branch conflicts with galley\/main in a\.js; rebase onto galley\/main\.$/m);
     assert.doesNotMatch(first.stdout, /ask the user/);
     // The author waits again without rebasing: the reviewer is asked, and still hears of the conflict.
     const second = await late.wait();
-    assert.match(second.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.\nNo reviewer agent reviews [0-9a-f]{7}; ask the user to review it: /m);
+    assert.match(second.stdout, /^This branch conflicts with galley\/main in a\.js; rebase onto galley\/main\.\nNo reviewer agent reviews [0-9a-f]{7}; ask the user to review it: /m);
     await human('PATCH', `${api}/${late.n}`, { state: 'closed' });
   });
 
@@ -172,7 +172,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
       release();
     }
     const told = await waiting!;
-    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.match(told.stdout, /^This branch conflicts with galley\/main in a\.js; rebase onto galley\/main\.$/m);
     assert.deepEqual(await moving.published(), []);
     // The agent waits again without rebasing: the user's turn, and still while the conflict is
     // checked again for a base that moved since.
@@ -246,7 +246,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     await send('pushed');
     const told = await waiting;
     assert.equal(told.code, 0, told.stderr);
-    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.match(told.stdout, /^This branch conflicts with galley\/main in a\.js; rebase onto galley\/main\.$/m);
     await human('PATCH', `${api}/${pushed.n}`, { state: 'closed' });
   });
 
@@ -266,8 +266,8 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     const told = await approved.wait();
     assert.equal(told.code, 0, told.stderr);
     assert.match(told.stdout, /^reviewer reviewed: approved /m);
-    assert.match(told.stdout, /^This branch conflicts with origin\/main in d\.js; rebase onto origin\/main\.$/m);
-    assert.match(told.stdout, /^Rebase onto origin\/main, resolve the conflicts and run the tests, then run `galley pr wait s\d+` again\.$/m);
+    assert.match(told.stdout, /^This branch conflicts with galley\/main in d\.js; rebase onto galley\/main\.$/m);
+    assert.match(told.stdout, /^Rebase onto galley\/main, resolve the conflicts and run the tests, then run `galley pr wait s\d+` again\.$/m);
     assert.doesNotMatch(told.stdout, /nothing left open/);
     // The wait that hands it the conflict is not an action on it: it is the author's turn until it acts.
     assert.equal(approved.row().author_waited_at, waited);
@@ -309,7 +309,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.deepEqual(await view(), { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: true, files: [], messages: [said], behindBy: 1 } });
     const told = await cli(['pr', 'wait', n, '--timeout', '10s'], { cwd: path });
     assert.equal(told.code, 0, told.stderr);
-    assert.ok(told.stdout.includes(`This branch conflicts with origin/main; rebase onto origin/main. git says: ${said}\n`), told.stdout);
+    assert.ok(told.stdout.includes(`This branch conflicts with galley/main; rebase onto galley/main. git says: ${said}\n`), told.stdout);
     const box = await (await fetch(`${server.url}/${fullName}/pull/${n}`)).text();
     assert.match(box, /<strong>This branch has conflicts with <span class="branch-name branch-name-sm">origin\/main<\/span><\/strong>\s*<div class="color-fg-muted">Merging it into <code>[0-9a-f]{7}<\/code>, its tip in this repository, conflicts\. /);
     assert.ok(box.includes(`<span>${said}</span>`), 'git says why in the merge box');
@@ -747,11 +747,12 @@ test('a published pull request that comes to conflict with its base: the author 
     await page();
     await until(() => inClone(fullName)('rev-parse', 'refs/remotes/origin/main') === merged, 'origin/main is fetched');
     const told = await waiting;
-    // And into the checkout's, from galley.
-    assert.equal(g('rev-parse', 'refs/remotes/origin/main'), merged);
+    // And into the checkout's galley/main, from galley, leaving its origin/main as it was.
+    assert.equal(g('rev-parse', 'refs/remotes/galley/main'), merged);
+    assert.notEqual(g('rev-parse', 'refs/remotes/origin/main'), merged);
     assert.equal(told.code, 0, told.stderr);
-    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
-    assert.ok(told.stdout.includes(`Rebase onto origin/main, resolve the conflicts and run the tests, then run \`galley pr wait ${url}\` again: it force-pushes the rebase to GitHub.\nIt is published: commit and wait, and galley pushes each commit you wait with to GitHub. Never push to GitHub yourself.\n`), told.stdout);
+    assert.match(told.stdout, /^This branch conflicts with galley\/main in a\.js; rebase onto galley\/main\.$/m);
+    assert.ok(told.stdout.includes(`Rebase onto galley/main, resolve the conflicts and run the tests, then run \`galley pr wait ${url}\` again: it force-pushes the rebase to GitHub.\nIt is published: commit and wait, and galley pushes each commit you wait with to GitHub. Never push to GitHub yourself.\n`), told.stdout);
     // galley's check is for the author; mergeability stays GitHub's to say, which it has not yet.
     const view = await human('GET', `/api/repos/${fullName}/gh/pulls/${number}?fields=mergeable,mergeStateStatus,baseConflicts`);
     assert.deepEqual(view, { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: merged, conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
@@ -772,7 +773,7 @@ test('a published pull request that comes to conflict with its base: the author 
   });
 
   await t.test('the author rebases, and its next wait force-pushes the rebase', async () => {
-    g('reset', '-q', '--hard', 'origin/main');
+    g('reset', '-q', '--hard', 'galley/main');
     writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
     g('commit', '-qam', 'Set a to 1');
     const rebased = g('rev-parse', 'mine');
