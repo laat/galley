@@ -9,7 +9,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, type AddressInfo } from 'node:net';
+import { connect, createServer, type AddressInfo } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { startServer } from '../../src/server/server.ts';
 import { Db } from '../../src/server/db.ts';
@@ -477,6 +477,29 @@ test('the CLI starts a server when none is running', async () => {
   const off = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_NO_AUTOSTART: '1' } }).catch((e) => e);
   assert.equal(off.code, 1);
   assert.match(off.stderr, /not running/);
+});
+
+test('the server leaves an idle connection open until the client closes it', async () => {
+  // Node's default closes one after 6 seconds, and a request sent on it as it does fails (see startServer).
+  const port = new URL(server.url).port;
+  const socket = connect(Number(port), '127.0.0.1');
+  let got = '';
+  let closed = false;
+  socket.on('data', (d) => (got += d));
+  socket.on('close', () => (closed = true));
+  socket.on('error', () => {});
+  const answers = () => got.match(/HTTP\/1\.1 200 /g)?.length ?? 0;
+  const ask = () => socket.write(`GET /api/meta HTTP/1.1\r\nHost: localhost:${port}\r\n\r\n`);
+  try {
+    ask();
+    await until(() => answers() === 1, 'the server answers');
+    await new Promise((r) => setTimeout(r, 7000));
+    assert.equal(closed, false);
+    ask();
+    await until(() => answers() === 2, 'the server answers again on the same connection');
+  } finally {
+    socket.destroy();
+  }
 });
 
 test('the server says it is galley, and serve says who has its port', async () => {

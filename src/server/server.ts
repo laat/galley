@@ -132,7 +132,13 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
         if (--inflight === 0) drained.emit('idle');
       }
     };
-    server = serve({ fetch, port: opts.port, hostname: host }, (info) => resolve(info.port));
+    // Idle connections stay open until the client closes them (fetch after 4 seconds, browsers
+    // after minutes) or close() does. Node's default closes them after 6 seconds, and fetch, told
+    // 5 in the Keep-Alive header, after 3. A client whose event loop is busy from before its 3
+    // seconds until after the server's 6 (a test running git, a CLI under load) then sends a
+    // request on a connection the server closes before reading it, and gets ECONNRESET, which
+    // fetch does not retry.
+    server = serve({ fetch, port: opts.port, hostname: host, serverOptions: { keepAliveTimeout: 0 } }, (info) => resolve(info.port));
     server.once('error', reject);
   });
   // The database opens once the port is ours: a second server on the port stops before it.
