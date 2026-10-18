@@ -1,5 +1,6 @@
 // Signing that fails for now, as when nobody answers a 1Password prompt: auto-publish and the pushes
-// after publishing try again later, whether the agent still waits or not, up to the setting.
+// after publishing try again later, whether the agent still waits or not, up to the setting. A
+// prompt the user denied is final at once.
 import '../helpers/env.ts';
 import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
@@ -164,12 +165,37 @@ test('a signing that fails for now is tried again later, up to the limit', async
       assert.match(r.stdout, /ask the user to review it/);
       assert.deepEqual(await pr.events('auto_publish_retry'), []);
       const [failed] = await pr.events('auto_publish_failed');
-      assert.deepEqual(failed.signing, { why: null, failures: 1, retries: 3, next_at: null });
+      assert.deepEqual(failed.signing, { why: null, final: true, failures: 1, retries: 3, next_at: null });
       assert.match(await pr.page(), /Signing failed, in a way trying again can not get past, and it turned itself off\./);
     } finally {
       await restore();
     }
   });
+
+  for (const [what, branch, message, why] of [
+    ['a denied 1Password prompt', 'feature/sign-denied', '1Password: agent returned an error', '1Password prompt denied'],
+    ['a cancelled pinentry', 'feature/sign-cancelled', 'gpg: signing failed: Operation cancelled', 'passphrase prompt dismissed'],
+  ]) {
+    await t.test(`${what} turns it off at once, and says what happened`, async () => {
+      const pr = await stage(branch);
+      const signer = failSigning(1000, message);
+      try {
+        await human('PUT', `${pr.base}/auto-publish`, {});
+        const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+        assert.match(r.stdout, /ask the user to review it/);
+        assert.equal((await human('GET', pr.base)).auto_publish, null);
+        assert.deepEqual(await pr.events('auto_publish_retry'), []);
+        assert.equal(signer.tries(), 1);
+        const [failed] = await pr.events('auto_publish_failed');
+        assert.deepEqual(failed.signing, { why, final: true, failures: 1, retries: 3, next_at: null });
+        const page = await pr.page();
+        assert.match(page, new RegExp(`Signing failed \\(${why}\\), and it turned itself off\\. Publish by hand, or turn it on again\\.`));
+        assert.match(page, new RegExp(`Auto-publish failed and turned itself off <relative-time [^]*?</relative-time>: signing failed \\(${why}\\)\\s*<details`));
+      } finally {
+        await restore();
+      }
+    });
+  }
 
   await t.test('feedback handed to the agent after signing failed holds the retry until the agent waits again', async () => {
     const pr = await stage('feature/sign-feedback');
@@ -277,10 +303,18 @@ test('a signing that fails for now is tried again later, up to the limit', async
       const final = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
       assert.match(final.stdout, /^Could not push [0-9a-f]{7} to GitHub: signing commit/m);
       const last = (await failedPushes()).at(-1);
-      assert.deepEqual([last.retry, last.signing], [false, { why: null, failures: 1, retries: 1, next_at: null }]);
+      assert.deepEqual([last.retry, last.signing], [false, { why: null, final: true, failures: 1, retries: 1, next_at: null }]);
       assert.match(await pr.page(), /Signing failed, in a way trying again can not get past\. agent was told/);
       const row = server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pr.id)!;
       assert.equal(server.service.pushReady(row), false);
+
+      // So is a prompt the user denied, and the page says so.
+      failSigning(1000, '1Password: agent returned an error');
+      pr.commit('export const pushed = 4;\n');
+      assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /^Could not push [0-9a-f]{7} to GitHub: signing commit/m);
+      const denied = (await failedPushes()).at(-1);
+      assert.deepEqual([denied.retry, denied.signing], [false, { why: '1Password prompt denied', final: true, failures: 1, retries: 1, next_at: null }]);
+      assert.match(await pr.page(), /Signing failed \(1Password prompt denied\)\. agent was told, and it is not tried again/);
     } finally {
       await restore();
     }

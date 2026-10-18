@@ -46,15 +46,24 @@ export class HttpError extends Error {
 }
 
 /**
- * Signing a commit failed. `transient`: what went wrong in a few words, when trying again later
- * may get past it (transientSigning); null when it can not.
+ * Signing a commit failed. `why`: what went wrong in a few words, when galley can tell from what
+ * the signing program said (signingCause); null when it can not. `transient`: trying again later
+ * may get past it.
  */
 export class SigningError extends HttpError {
-  transient: string | null;
-  constructor(message: string, transient: string | null, status = 502) {
+  why: string | null;
+  transient: boolean;
+  constructor(message: string, cause: SigningCause | null, status = 502) {
     super(status, message);
-    this.transient = transient;
+    this.why = cause?.why ?? null;
+    this.transient = cause?.transient ?? false;
   }
+}
+
+/** What went wrong when signing failed, as far as galley can tell, and whether trying again later may get past it (signingCause). */
+interface SigningCause {
+  why: string;
+  transient: boolean;
 }
 
 /**
@@ -212,13 +221,15 @@ export interface GithubPush {
 
 /**
  * A signing that failed (SigningError), as auto-publish and pushes after publishing record it
- * (Service.signingFailure). `why`: what went wrong in a few words when trying again may get past
- * it, null when it can not. `failures`: how many times in a row signing failed so, this time
- * included. Tried again at `next_at` while that is at most `retries`, the setting then
- * (signingRetries); null when it is not tried again.
+ * (Service.signingFailure). `why`: what went wrong in a few words, when galley can tell; null
+ * when it can not, which is final. `final`: trying again can not get past it, such as a prompt
+ * the user denied. `failures`: how many times in a row signing failed so, this time included.
+ * Tried again at `next_at` while that is at most `retries`, the setting then (signingRetries);
+ * null when it is not tried again.
  */
 export interface SigningFailure {
   why: string | null;
+  final?: true;
   failures: number;
   retries: number;
   next_at: string | null;
@@ -2594,9 +2605,9 @@ export class Service {
    */
   private signingFailure(e: SigningError, failures: number): SigningFailure {
     const retries = readSettings(this.db).publish.signingRetries;
-    if (e.transient === null) return { why: null, failures: 1, retries, next_at: null };
+    if (!e.transient) return { why: e.why, final: true, failures: 1, retries, next_at: null };
     const again = failures <= retries ? new Date(Date.now() + this.signingRetryMs * 3 ** (failures - 1)).toISOString() : null;
-    return { why: e.transient, failures, retries, next_at: again };
+    return { why: e.why, failures, retries, next_at: again };
   }
 
   /** An auto-publish attempt under `approval` may go on: it is still the approval in force, and the agents are still done. */
@@ -2816,7 +2827,7 @@ export class Service {
         allowFail: true,
         timeoutMs,
       });
-      if (r.code !== 0) throw new SigningError(`signing commit ${sha.slice(0, 7)} failed:\n${failure(r, 'a passphrase or a 1Password prompt nobody answered?')}`, transientSigning(r));
+      if (r.code !== 0) throw new SigningError(`signing commit ${sha.slice(0, 7)} failed:\n${failure(r, 'a passphrase or a 1Password prompt nobody answered?')}`, signingCause(r));
       const copy = r.stdout.trim();
       this.db.run(
         'INSERT INTO signed_commits (repo_id, source_sha, signed_sha) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET signed_sha = excluded.signed_sha',
@@ -3213,7 +3224,7 @@ export class Service {
    */
   private signingFailures(pull: PullRow): number {
     const pushes = eventsSince(this.db, pull, 'github_push', pull.published_at ?? '');
-    return Math.max(0, ...pushes.map((e) => (e.data.source === pull.head_sha && e.data.signing?.why ? e.data.signing.failures : 0)));
+    return Math.max(0, ...pushes.map((e) => (e.data.source === pull.head_sha && e.data.signing?.why && !e.data.signing.final ? e.data.signing.failures : 0)));
   }
 
   /** The latest push of the pull request made when its author waited (pushUpdate), or the latest after `since`. */
@@ -3503,34 +3514,47 @@ function failure(r: RunResult, waitedFor?: string): string {
 
 /**
  * Signing failures that trying again later may get past, by what git passed on from the signing
- * program, with the few words the pages say each in: a prompt nobody answered in time or that was
- * dismissed, and an agent that is locked or could not be reached. git's exit status is the same
- * for every signing failure; only an unattended step that ran out of time (UNATTENDED_TIMEOUT_MS)
- * has none, and that is a prompt nobody answered too.
+ * program, with the few words the pages say each in: a prompt nobody answered in time, and an
+ * agent that could not be reached. git's exit status is the same for every signing failure; only
+ * an unattended step that ran out of time (UNATTENDED_TIMEOUT_MS) has none, and that is a prompt
+ * nobody answered too.
  */
 const TRANSIENT_SIGNING: [RegExp, string][] = [
   // 1Password's op-ssh-sign: the agent hung up before it signed, as when its prompt timed out or was closed.
   [/failed to fill whole buffer/, '1Password prompt not answered'],
-  // 1Password's agent answered with a failure: its prompt was denied.
-  [/1Password: agent returned an error/, '1Password prompt denied'],
-  // OpenSSH's ssh-agent: locked (ssh-add -x), or its confirmation (ssh-add -c) was denied.
-  [/agent refused operation/, 'SSH agent locked or prompt denied'],
   [/Could not connect to socket|communication with agent failed|agent not present|can't connect to the agent|No agent running/i, 'signing agent not reachable'],
   // gpg's pinentry.
   [/signing failed: Timeout/, 'passphrase prompt not answered'],
-  [/signing failed: Operation cancelled/, 'passphrase prompt dismissed'],
 ];
 
 /**
- * What went wrong when signing failed in a way trying again later may get past (TRANSIENT_SIGNING),
- * in a few words; null for anything else, which trying again can not: no signing key configured,
- * a key that can not be read or is not in the agent, a signing program that is not there, git's
- * configuration.
+ * Signing failures that are the user's answer to a prompt, which trying again would only ask
+ * again: final, as any failure galley can not tell, but said in a few words, so the user knows
+ * why auto-publish turned off and can turn it on again when they want it.
  */
-function transientSigning(r: RunResult): string | null {
-  if (r.timedOut) return 'prompt not answered';
+const DENIED_SIGNING: [RegExp, string][] = [
+  // 1Password's agent answered with a failure: its prompt was denied.
+  [/1Password: agent returned an error/, '1Password prompt denied'],
+  // gpg's pinentry, dismissed: as deliberate as a denial.
+  [/signing failed: Operation cancelled/, 'passphrase prompt dismissed'],
+  // OpenSSH's ssh-agent: its confirmation (ssh-add -c) was denied. It says the same when it is
+  // locked (ssh-add -x), when nobody touched a security key (sk-* keys), and when it could not
+  // show the confirmation (no askpass). galley can not tell those apart, so all of them are final.
+  [/agent refused operation/, 'SSH agent refused to sign'],
+];
+
+/**
+ * What went wrong when signing failed (TRANSIENT_SIGNING, DENIED_SIGNING); null for anything
+ * else, which trying again can not get past: no signing key configured, a key that can not be
+ * read or is not in the agent, a signing program that is not there, git's configuration.
+ */
+function signingCause(r: RunResult): SigningCause | null {
+  if (r.timedOut) return { why: 'prompt not answered', transient: true };
   const said = `${r.stderr}\n${r.stdout}`;
-  return TRANSIENT_SIGNING.find(([pattern]) => pattern.test(said))?.[1] ?? null;
+  const denied = DENIED_SIGNING.find(([pattern]) => pattern.test(said));
+  if (denied) return { why: denied[1], transient: false };
+  const transient = TRANSIENT_SIGNING.find(([pattern]) => pattern.test(said));
+  return transient ? { why: transient[1], transient: true } : null;
 }
 
 /**
