@@ -1126,18 +1126,56 @@
     const index = (!last ? 0 : ids.includes(last.id) ? ids.indexOf(last.id) + 1 : last.index) % ids.length;
     treeThread.set(path, { id: ids[index], index });
     const thread = document.getElementById(`thread-${ids[index]}`);
-    if (!thread) return;
-    const file = thread.closest('.file');
-    if (file.classList.contains('is-collapsed') && $('.file-body', file).contains(thread)) {
+    if (thread) showComment(thread);
+  }
+
+  // ------------------------------------------------------ linked comments
+  // A link to a comment (#discussion_r12, #issuecomment-3, as the API's html_url and Copy link
+  // give them) or a thread (#thread-12) goes to it on load and when the hash changes. The tab
+  // shown may not have it: the Conversation tab shows every thread but those of the viewer's
+  // pending review, and Files changed leaves out outdated threads and those on a commit's message.
+  // Such a link goes on to the tab that has it (#main's data-comment-tabs, else the Conversation tab).
+
+  const COMMENT_LINK = /^#(?:(?:discussion_r|thread-)(\d+)|issuecomment-\d+|pullrequestreview-\d+|pullrequest-description)$/;
+
+  function goToLinked() {
+    const m = location.hash.match(COMMENT_LINK);
+    if (!m) return;
+    const target = document.getElementById(location.hash.slice(1));
+    if (target) return showComment(target);
+    const tabs = JSON.parse(ds().commentTabs || '{}');
+    const url = (m[1] && tabs[m[1]]) || ds().conversationUrl;
+    if (url && url !== location.pathname + location.search) location.replace(url + location.hash);
+  }
+  window.addEventListener('hashchange', goToLinked);
+  // Until the page has loaded, the browser keeps the linked element at the top of the window, where
+  // the sticky headers cover a thread's first lines: show it again after that.
+  window.addEventListener('load', () => {
+    const target = COMMENT_LINK.test(location.hash) && document.getElementById(location.hash.slice(1));
+    if (target) showComment(target);
+  });
+
+  /**
+   * Open the file and the thread a comment is in, as live refreshes will keep them, scroll it into
+   * view under the sticky headers (their scroll-margin in app.css) and flash it. A thread's first
+   * comment stands for the thread.
+   */
+  function showComment(target) {
+    const file = target.closest('.file');
+    if (file && file.classList.contains('is-collapsed') && $('.file-body', file).contains(target)) {
       userState.collapsed.set(file.dataset.path, false);
       setCollapsed(file, false);
     }
-    thread.open = true;
-    userState.threads.set(thread.dataset.thread, true);
-    thread.scrollIntoView({ block: thread.offsetHeight > innerHeight / 2 ? 'start' : 'center' });
-    for (const t of $$('.review-thread.is-flash')) t.classList.remove('is-flash');
-    void thread.offsetWidth; // restart the animation
-    thread.classList.add('is-flash');
+    const thread = target.closest('details.review-thread');
+    if (thread) {
+      thread.open = true;
+      userState.threads.set(thread.dataset.thread, true);
+    }
+    const box = thread && target === $('.review-comment', thread) ? thread : target.matches('.timeline-comment-group') ? $('.timeline-comment', target) : target;
+    box.scrollIntoView({ block: box.offsetHeight > innerHeight / 2 ? 'start' : 'center' });
+    for (const el of $$('.is-flash')) el.classList.remove('is-flash');
+    void box.offsetWidth; // restart the animation
+    box.classList.add('is-flash');
   }
 
   // ----------------------------------------------------- browser file tree
@@ -1359,6 +1397,14 @@
     } else if ((el = on('.js-title-cancel'))) {
       $('.js-title-view').hidden = false;
       $('.js-title-form').hidden = true;
+    } else if ((el = on('.js-copy-link'))) {
+      el.closest('details').open = false;
+      try {
+        await navigator.clipboard.writeText(el.dataset.copy);
+        toast('Copied the link');
+      } catch {
+        toast(el.dataset.copy);
+      }
     } else if ((el = on('.js-comment-edit'))) {
       el.closest('details').open = false;
       const box = el.closest('.timeline-comment, .review-comment');
@@ -1690,6 +1736,7 @@
   for (const img of $$('img[data-fallback]')) if (img.complete && !img.naturalWidth) avatarFallback(img);
   afterRender();
   markLines(true);
+  goToLinked();
   setUpBrowseTree();
   connectLive();
   setInterval(updateTimes, 30_000);

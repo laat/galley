@@ -81,6 +81,9 @@ The conversation stays in galley; GitHub gets the branch, title and description.
 Staged pull requests are numbered s#1, s#2, … ("s" for staged), so they are not mistaken for
 GitHub's #1, #2. `s#4` in a comment or description links to it here; `#4` is GitHub's.
 
+**Copy link** in a comment's **…** menu gives a link to it, and agents print one for each
+thread. Opening it unfolds the thread or file the comment is in and scrolls to it.
+
 The front page lists the pull requests waiting for you first, each with the reason, then those
 the agents are working on. A published pull request is your turn once GitHub can merge it and
 auto-merge is off, and its title opens it on GitHub. **Notify me** shows a desktop notification when one becomes your

@@ -836,10 +836,14 @@ code.wrap { word-break: break-all; }
 /* Takes only the room the rest leaves, and drops out whole when that is too little: it wraps to a second line, cut off. */
 .review-thread-resolved-note { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; height: 20px; overflow: hidden; line-height: 20px; }
 .review-thread-resolved-note::before { content: ''; flex: 1 0 0; height: 20px; }
-/* The conversation the file tree went to; a tall one starts under the sticky headers. */
-.files .review-thread { scroll-margin-top: calc(var(--files-toolbar-height) + 59px); }
-.review-thread.is-flash { animation: thread-flash 2s ease-out; }
+/* The conversation, comment or review the file tree or a link went to; a tall one starts under the sticky headers. */
+.review-thread, .review-comment, .timeline-comment, .timeline-review { scroll-margin-top: 16px; }
+.files .review-thread, .files .review-comment { scroll-margin-top: calc(var(--files-toolbar-height) + 59px); }
+.review-thread.is-flash, .timeline-comment.is-flash { animation: thread-flash 2s ease-out; }
 @keyframes thread-flash { from { box-shadow: 0 0 0 2px var(--accent-emphasis); } to { box-shadow: 0 0 0 2px transparent; } }
+.review-comment.is-flash, .timeline-review.is-flash > .timeline-item .timeline-body { animation: comment-flash 2s ease-out; }
+.timeline-review > .timeline-item .timeline-body { border-radius: 6px; }
+@keyframes comment-flash { from { background: var(--accent-subtle); } }
 .review-thread .diff-snippet { border-bottom: 1px solid var(--border); }
 .review-comment { padding: 12px 16px 0; }
 .review-comment + .review-comment { border-top: 1px solid var(--border-muted); }

@@ -1,7 +1,7 @@
 import { PRIORITIES, type Actor, type CommentRow, type Priority, type PullRow, type RepoRow } from '../db.ts';
 import { githubStatus, type Service, type Thread } from '../service.ts';
 import { checksSummary } from '../github-follow.ts';
-import { avatarUrl } from '../github.ts';
+import { avatarUrl, commentUrl } from '../github.ts';
 import { avatar, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 import type { ReferenceContext } from './references.ts';
@@ -121,6 +121,8 @@ export interface CommentView {
   pending?: boolean;
   isAuthor?: boolean;
   anchor: string;
+  /** Where its menu's Copy link points: the API's `html_url` (commentUrl). */
+  link: string;
   markdownCtx?: Parameters<typeof renderMarkdown>[1];
   deletable?: boolean;
 }
@@ -149,7 +151,7 @@ export function timelineComment(s: Service, c: CommentView, header?: Safe): Safe
       <h3 class="timeline-comment-header-text">${header ?? html`${authorLink(s, c.author)} commented <a href="#${c.anchor}" class="link-muted">${relTime(c.createdAt)}</a>`}${edited ? html` <span class="edited">· edited</span>` : ''}</h3>
       <div class="timeline-comment-actions">
         ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
-        ${c.editPath ? commentMenu(c) : ''}
+        ${commentMenu(c)}
       </div>
     </div>
     ${commentBodyAndEditor(c)}
@@ -161,8 +163,14 @@ function commentMenu(c: CommentView): Safe {
   return html`<details class="dropdown details-reset">
     <summary class="timeline-comment-action" aria-label="Show options">${icon('kebab-horizontal')}</summary>
     <div class="dropdown-menu dropdown-menu-sw">
+      <button type="button" class="dropdown-item js-copy-link" data-copy="${c.link}">Copy link</button>
+      ${
+        c.editPath
+          ? html`<div class="dropdown-divider"></div>
       <button type="button" class="dropdown-item js-comment-edit">Edit</button>
-      ${c.deletable !== false ? html`<button type="button" class="dropdown-item dropdown-item-danger js-comment-delete" data-path="${c.editPath}">Delete</button>` : ''}
+      ${c.deletable !== false ? html`<button type="button" class="dropdown-item dropdown-item-danger js-comment-delete" data-path="${c.editPath}">Delete</button>` : ''}`
+          : ''
+      }
     </div>
   </details>`;
 }
@@ -193,7 +201,7 @@ export function threadComment(s: Service, c: CommentView): Safe {
     ${c.pending ? html`<span class="Label Label--attention">Pending</span>` : ''}
     ${c.isAuthor ? html`<span class="Label">Author</span>` : ''}
     <span class="flex-auto"></span>
-    ${c.editPath ? commentMenu(c) : ''}
+    ${commentMenu(c)}
   </div>
   <div class="review-comment-body">${commentBodyAndEditor(c)}</div>
 </div>`;
@@ -231,6 +239,8 @@ export interface ThreadOpts {
   /** Show the file header and code snippet (conversation view) rather than sitting inside a diff. */
   standalone: boolean;
   apiBase: string;
+  /** Service.pullUrl, which the comments' links start from. */
+  pullUrl: string;
   viewer: Actor;
   pull: PullRow;
   commitTitle?: (sha: string) => string | undefined;
@@ -270,6 +280,7 @@ export function reviewThread(s: Service, t: Thread, o: ThreadOpts): Safe {
     pending: t.pending,
     isAuthor: c.author_id === o.pull.author_id,
     anchor: `discussion_r${c.id}`,
+    link: commentUrl(o.pullUrl, c),
     markdownCtx: { suggestionLines, suggestionLang: lang, references: o.references },
   });
   const range = root.start_line && root.start_line !== root.line ? `L${root.start_line}–${root.line}` : root.line ? `L${root.line}` : '';

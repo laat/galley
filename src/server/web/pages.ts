@@ -7,7 +7,7 @@ import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnS
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { lastEvent, readEvent } from '../events.ts';
-import { avatarUrl, reasonText } from '../github.ts';
+import { avatarUrl, commentUrl, reasonText } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
 import { avatar, fileAnchor, html, icon, plural, raw, relTime, shortSha, since, type Safe } from './html.ts';
@@ -499,8 +499,23 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files' | nul
     crumbs: repoCrumbs(repo, html`<span class="crumb-sep">/</span><a href="${p.htmlBase}">s#${pull.number}</a>`),
     body: html`${header}${content}`,
     live: pull.id,
-    data: { 'api-base': p.apiBase, 'pull-id': pull.id, ...extraData },
+    // Where public/app.js sends a link to a comment the tab does not show: the Conversation tab,
+    // or for a comment of the viewer's pending review, the tab that shows it.
+    data: { 'api-base': p.apiBase, 'pull-id': pull.id, 'conversation-url': p.htmlBase, 'comment-tabs': JSON.stringify(pendingCommentTabs(p)), ...extraData },
   });
+}
+
+/**
+ * The tab each comment of the viewer's pending review is on: Commits for a commit's message, else
+ * Files changed, showing the diff it was made on when the pull request's diff no longer has it.
+ */
+function pendingCommentTabs(p: PullPage): Record<number, string> {
+  const tab = ({ root, placement }: Thread) => {
+    if (root.subject_type === 'commit') return `${p.htmlBase}/commits`;
+    if (placement.outdated && root.base_commit_id && root.commit_id) return `${p.htmlBase}/files?range=${root.base_commit_id}..${root.commit_id}`;
+    return `${p.htmlBase}/files`;
+  };
+  return Object.fromEntries(p.threads.filter((t) => t.pending).flatMap((t) => [t.root, ...t.replies].map((c) => [c.id, tab(t)])));
 }
 
 /** Pins the pull request to the top of the front page, filled while it is pinned. */
@@ -512,7 +527,7 @@ function pinButton(p: PullPage): Safe {
 
 function threadOpts(p: PullPage, standalone: boolean) {
   const titles = new Map(p.commits.map((c) => [c.sha, c.message.split('\n')[0]]));
-  return { standalone, apiBase: p.apiBase, viewer: p.viewer, pull: p.pull, commitTitle: (sha: string) => titles.get(sha), references: p.references };
+  return { standalone, apiBase: p.apiBase, pullUrl: p.s.pullUrl(p.repo, p.pull), viewer: p.viewer, pull: p.pull, commitTitle: (sha: string) => titles.get(sha), references: p.references };
 }
 
 // ----------------------------------------------------------- conversation
@@ -1404,6 +1419,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
         editPath: c.author_id === viewer.id ? `/api/repos/${p.repo.owner}/${p.repo.name}/issues/comments/${c.id}` : undefined,
         isAuthor: c.author_id === pull.author_id,
         anchor: `issuecomment-${c.id}`,
+        link: commentUrl(s.pullUrl(p.repo, pull), c),
         markdownCtx: { references: p.references },
       }),
     });
@@ -1455,6 +1471,7 @@ export async function conversationPage(p: PullPage): Promise<string> {
       deletable: false,
       isAuthor: true,
       anchor: 'pullrequest-description',
+      link: `${s.pullUrl(p.repo, pull)}#pullrequest-description`,
       markdownCtx: { references: p.references },
     },
     html`${authorLink(s, p.author)} staged this pull request ${relTime(pull.created_at)}`,

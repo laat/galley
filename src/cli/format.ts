@@ -203,7 +203,9 @@ function location(t: any, pr?: GhPull): string {
 export function formatThread(t: any, newIds?: Set<number>, pr?: GhPull, images?: ImageRef): string {
   const flags = [t.isResolved ? 'resolved' : 'unresolved', t.isOutdated ? 'outdated' : null].filter(Boolean).join(', ');
   const priority = t.priority ? ` (${t.priority === 'high' ? c.red('high priority') : `${t.priority} priority`})` : '';
-  const out = [c.bold(`thread ${t.databaseId}`) + ` on ${location(t, pr)} [${flags}]${priority}`];
+  // The thread's link in galley, its first comment's, for the agent to give the user.
+  const url = t.comments[0]?.url;
+  const out = [c.bold(`thread ${t.databaseId}`) + ` on ${location(t, pr)} [${flags}]${priority}${url ? ` ${url}` : ''}`];
   if (t.diffHunk) {
     const hunk = t.diffHunk.split('\n');
     const shown = hunk.length > 5 ? hunk.slice(-4) : hunk;
