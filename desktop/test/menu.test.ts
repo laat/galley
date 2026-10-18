@@ -1,7 +1,7 @@
 // The desktop app's menu-bar status: the counts next to the icon, and the menu.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupOf, rankedReasons, trayMenu, trayTitle, trayToolTip, type MenuActions } from '../menu.ts';
+import { githubTarget, groupOf, rankedReasons, trayMenu, trayTitle, trayToolTip, type MenuActions } from '../menu.ts';
 import type { Pull } from '../turns.ts';
 
 const pull = (id: number, o: Partial<Pull>): Pull => ({
@@ -64,13 +64,14 @@ function actions() {
   const done: string[] = [];
   const a: MenuActions = {
     open: (path) => done.push(`open ${path ?? '(as it was)'}`),
+    openOutside: (url) => done.push(`browser ${url}`),
     setOpenAtLogin: (on) => done.push(`start at login ${on}`),
     quit: () => done.push('quit'),
   };
   return { a, done };
 }
 
-test("the menu groups the open pull requests as the front page does, each with its repository, number, title and main reasons, and opens each", () => {
+test("the menu groups the open pull requests as the front page does, each with its repository, number, title and main reasons, and opens each in galley or on GitHub", () => {
   const { a, done } = actions();
   // As the API lists them: latest update first.
   const items = trayMenu({ status: null, pulls: [onGithub, publishing, working, reviewing, retry, merge], openAtLogin: false }, a);
@@ -78,7 +79,7 @@ test("the menu groups the open pull requests as the front page does, each with i
     items.map((i) => (i.sublabel ? `${i.label} | ${i.sublabel}` : (i.label ?? i.type))),
     [
       'Your turn',
-      'acme/app s#31  A title much longer than a menu should be wide, which the m… | ready to merge on GitHub · approved',
+      'acme/app s#31  A title much longer than a menu should be wide, which the m… ↗ | ready to merge on GitHub · approved',
       'acme/widgets s#4  Add retry to the uploader | no review from laat yet · codex-review found nothing in 1a2b3c4',
       'separator',
       'Agents at work',
@@ -89,7 +90,7 @@ test("the menu groups the open pull requests as the front page does, each with i
       'acme/widgets s#8  Bump the parser | auto-publish is publishing it',
       'separator',
       'Waiting on GitHub',
-      'acme/widgets s#12  Drop the old API | acme/widgets#40 · waiting for review from bob',
+      'acme/widgets s#12  Drop the old API ↗ | acme/widgets#40 · waiting for review from bob',
       'separator',
       'Open galley',
       'Start at login',
@@ -102,12 +103,12 @@ test("the menu groups the open pull requests as the front page does, each with i
   assert.equal(items[2].toolTip, 'no review from laat yet · codex-review found nothing in 1a2b3c4 · claude is waiting for review');
   for (const i of items) i.click?.();
   assert.deepEqual(done, [
-    'open /acme/app/pull/31',
+    'browser https://github.com/acme/app/pull/7',
     'open /acme/widgets/pull/4',
     'open /acme/widgets/pull/6',
     'open /acme/widgets/pull/5',
     'open /acme/widgets/pull/8',
-    'open /acme/widgets/pull/12',
+    'browser https://github.com/acme/widgets/pull/40',
     'open (as it was)',
     'start at login true',
     'quit',
@@ -146,6 +147,70 @@ test("the main reason first: on your turn what to see to, then what changed sinc
     ],
   });
   assert.deepEqual(texts(toStart), ['claude has not asked for review yet (pr wait)', 'codex-review reviews 1a2b3c4 when claude waits for review']);
+});
+
+test('a published pull request opens on GitHub when its main reason is GitHub\'s, and in galley when it is something done in galley', () => {
+  const published = (o: Partial<Pull>) => pull(1, { published: 'https://github.com/acme/widgets/pull/9', ...o });
+  const kinds = ['author', 'reviewer_agent', 'changes', 'approved', 'changes_requested', 'threads', 'unpublished', 'conflicts', 'github', 'auto_publish'];
+  // The user's turn with that reason alone.
+  assert.deepEqual(
+    kinds.filter((kind) => githubTarget(published({ reasons: [{ kind, text: kind }] })) !== null),
+    ['github'],
+  );
+  // The main reason decides, not the first the API lists: on the user's turn GitHub's comes
+  // before what changed since the review, the decision and the update not published.
+  assert.equal(
+    githubTarget(published({ reasons: [{ kind: 'changes', text: '1 push since laat\'s review' }, { kind: 'approved', text: 'approved' }, { kind: 'unpublished', text: 'update not published: title' }, { kind: 'github', text: '2 checks failed on GitHub' }] })),
+    'https://github.com/acme/widgets/pull/9',
+  );
+  // A stalled author is the user's to see to as much as GitHub is, and comes first, as the API lists it.
+  assert.equal(githubTarget(published({ reasons: [{ kind: 'author', state: 'stalled', text: 'claude stopped without waiting since its last commit' }, { kind: 'github', text: 'ready to merge on GitHub' }] })), null);
+  // Auto-publish held up, the user's to see to.
+  assert.equal(githubTarget(published({ reasons: [{ kind: 'auto_publish', text: 'auto-merge needs a merge method' }, { kind: 'github', text: 'ready to merge on GitHub' }] })), null);
+  // The agents at work on a push since publishing.
+  assert.equal(githubTarget(published({ whose: 'reviewer_agents', reasons: [{ kind: 'github', text: 'conflicts with main on GitHub' }, { kind: 'reviewer_agent', state: 'reviewing', to_review: true, text: 'codex-review is reviewing 1a2b3c4' }] })), null);
+  assert.equal(githubTarget(published({ whose: 'author', reasons: [{ kind: 'author', state: 'working', text: 'claude is working on the feedback' }] })), null);
+  // Waiting on GitHub: for a review there, or for nothing it says.
+  assert.equal(githubTarget(published({ whose: 'none', reasons: [{ kind: 'github', text: 'waiting for review from bob' }] })), 'https://github.com/acme/widgets/pull/9');
+  assert.equal(githubTarget(published({ whose: 'none', reasons: [] })), 'https://github.com/acme/widgets/pull/9');
+  // Nobody's turn while the push waits to try signing again: galley's.
+  assert.equal(githubTarget(published({ whose: 'none', reasons: [{ kind: 'unpublished', text: 'the push of 1a2b3c4 waits to try signing again' }, { kind: 'github', text: 'waiting for review from bob' }] })), null);
+});
+
+test('a staged pull request always opens in galley', () => {
+  for (const kind of ['github', 'auto_publish', 'author']) assert.equal(githubTarget(pull(1, { reasons: [{ kind, text: kind }] })), null);
+  for (const p of [retry, reviewing, working, publishing]) assert.equal(githubTarget(p), null);
+});
+
+test('ready to merge with no review from you yet, and waiting on GitHub with nothing more to say, open on GitHub', () => {
+  const { a, done } = actions();
+  const ready = pull(2, {
+    repo: 'nrkno/pin-delta-auth',
+    path: '/nrkno/pin-delta-auth/pull/2',
+    title: 'feat!: publish to GitHub Packages as @nrkno/pin-delta-auth',
+    published: 'https://github.com/nrkno/pin-delta-auth/pull/3',
+    reasons: [
+      { kind: 'changes', text: 'no review from laat yet' },
+      { kind: 'github', text: 'ready to merge on GitHub' },
+    ],
+  });
+  const waits = pull(1, {
+    repo: 'nrkno/innlogging-integration-kit',
+    path: '/nrkno/innlogging-integration-kit/pull/1',
+    title: 'fix(client): remove shouldHandleComingFromAuthority',
+    published: 'https://github.com/nrkno/innlogging-integration-kit/pull/388',
+    whose: 'none',
+  });
+  const items = trayMenu({ status: null, pulls: [ready, waits], openAtLogin: null }, a).filter((i) => i.label?.includes('s#'));
+  assert.deepEqual(
+    items.map((i) => `${i.label} | ${i.sublabel}`),
+    [
+      'nrkno/pin-delta-auth s#2  feat!: publish to GitHub Packages as @nrkno/pin-delta-auth ↗ | ready to merge on GitHub · no review from laat yet',
+      'nrkno/innlogging-integration-kit s#1  fix(client): remove shouldHandleComingFromAuthority ↗ | nrkno/innlogging-integration-kit#388',
+    ],
+  );
+  for (const i of items) i.click!();
+  assert.deepEqual(done, ['browser https://github.com/nrkno/pin-delta-auth/pull/3', 'browser https://github.com/nrkno/innlogging-integration-kit/pull/388']);
 });
 
 test('under the title, the main reason alone when the next does not fit, cut short when it is long itself', () => {

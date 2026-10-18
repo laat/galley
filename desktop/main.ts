@@ -10,7 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { APP_SCHEME, appLinkPath } from '../src/app-link.ts';
 import { serverUrl } from '../src/config.ts';
 import { follow, type Follower } from './live.ts';
-import { trayMenu, trayTitle, trayToolTip } from './menu.ts';
+import { githubTarget, trayMenu, trayTitle, trayToolTip } from './menu.ts';
 import { notAPage } from './pages.ts';
 import { attach, awayText, findNode, loginShellEnv, noAutostart, startServer } from './server.ts';
 import { openPulls, Turns, type Pull } from './turns.ts';
@@ -428,6 +428,7 @@ function render(): void {
     Menu.buildFromTemplate(
       trayMenu(state, {
         open: openWindow,
+        openOutside,
         setOpenAtLogin: (on) => {
           app.setLoginItemSettings({ openAtLogin: on });
           render();
@@ -447,7 +448,10 @@ function notify(t: Pull): void {
   notifications.add(n);
   n.on('click', () => {
     notifications.delete(n);
-    openWindow(t.path);
+    // Where the menu opens it.
+    const github = githubTarget(t);
+    if (github) openOutside(github);
+    else openWindow(t.path);
   });
   n.on('close', () => notifications.delete(n));
   n.show();
