@@ -2,10 +2,11 @@ import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
 import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type BaseConflicts, type Ctx, type GithubPush, type Readiness, type Service, type Thread, type Turn, type TurnReason } from '../service.ts';
-import { doneForAutoPublish, type HeadStatus } from '../reviewers/head-status.ts';
+import type { HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
+import { lastEvent, readEvent } from '../events.ts';
 import { avatarUrl, reasonText } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
@@ -554,9 +555,9 @@ const AUTO_PUBLISH_OFF: Record<string, string> = {
 async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
   const actor = p.s.db.actorById(e.actor_id);
   const who = html`${avatar(avatarUrl(p.s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(p.s, actor)}`;
-  const data = JSON.parse(e.data);
+  const { type, data } = readEvent(e);
   const when = relTime(e.created_at);
-  switch (e.type) {
+  switch (type) {
     case 'pushed': {
       if (data.forced) {
         return timelineBadge(
@@ -776,7 +777,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     const method = approved ?? mergeOption?.method;
     const checked = !!(approved || mergeOn);
     // What publishing now asks a second click for, and what that click tells the server (Service.publish).
-    const acknowledge = [busy.length ? 'during_review' : null, conflicts?.clean === false ? 'during_conflict' : null].filter((a) => a !== null);
+    const acknowledge = s.publishAsks(pull).map((a) => a.field);
     publishRow = html`<form class="merge-row merge-actions js-api-form js-publish-form" data-api="${p.apiBase}/publish" data-method="POST">
       <input type="hidden" name="expected" value="${publishFingerprint(pull)}">
       ${icon('rocket', { cls: 'color-fg-open' })}
@@ -822,11 +823,11 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   if (auto) rows.push(autoPublishRow(p, auto));
   else if (publishable) {
     // Auto-publish turns itself off when publishing fails; say so until it is on again or the pull request is published.
-    const last = s.events(pull).findLast((e) => e.type.startsWith('auto_publish_') || e.type === 'published');
+    const last = lastEvent(s.db, pull, ['auto_publish_enabled', 'auto_publish_disabled', 'auto_publish_failed', 'published']);
     if (last?.type === 'auto_publish_failed') {
       rows.push(html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Auto-publish failed ${relTime(last.created_at)}</strong>
         <div class="color-fg-muted">It turned itself off. Publish by hand, or turn it on again.</div>
-        <pre class="merge-error">${JSON.parse(last.data).error}</pre></div></div>`);
+        <pre class="merge-error">${last.data.error}</pre></div></div>`);
     }
   }
   if (merge) rows.push(autoMergeRow(p, merge));
@@ -1036,31 +1037,13 @@ function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
 /** Auto-publish while it is on: what it is waiting for, and a way to turn it off. */
 function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   const { s, pull, author } = p;
-  const r = s.readiness(pull);
   const by = s.db.actorById(auto.by);
   const options = [auto.sign ? 'signed' : null, auto.draft ? 'as a draft' : null, auto.force ? 'with force if needed' : null].filter(Boolean);
-  const item = (state: 'done' | 'waiting' | 'failed', text: Safe | string) =>
-    html`<li>${state === 'done' ? icon('check', { cls: 'color-fg-success' }) : state === 'failed' ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' })} <span>${text}</span></li>`;
-  const items = r.reviewers.map(({ login, status }) => item(doneForAutoPublish(status.state) ? 'done' : status.state === 'failed' ? 'failed' : 'waiting', reviewerText(login, status, pull, author)));
-  items.push(
-    r.authorWaiting && !r.unseen
-      ? item('done', `${author.login} is waiting for review, with all feedback seen`)
-      : item('waiting', r.authorWaiting ? `${author.login} has feedback it has not seen yet` : `${author.login} is working (not waiting for review)`),
-  );
-  if (r.openThreads) items.push(item('waiting', `${plural(r.openThreads, 'conversation')} you started ${r.openThreads === 1 ? 'is' : 'are'} unresolved`));
-  // For the base as it is now; GitHub answers for the head it has.
-  if (s.headUnpublished(pull)) {
-    const conflicts = s.currentConflicts(pull);
-    if (!conflicts) items.push(item('waiting', `Checking for conflicts with ${pull.base_ref}`));
-    else if (conflicts.clean === null) items.push(item('failed', `Could not check for conflicts with ${conflicts.ref}: ${conflicts.error}`));
-    else if (!conflicts.clean) items.push(item('failed', `Conflicts with ${conflicts.ref}: nothing is published until ${author.login} rebases it`));
-    else items.push(item('done', `No conflicts with ${conflicts.ref}`));
-  }
-  // GitHub's settings may have changed since it was turned on; publishing refuses then.
   const method = auto.autoMerge;
-  const merging = method && p.repo.github_slug ? s.githubRepo(p.repo.github_slug)?.merging : null;
-  if (merging && !merging.autoMerge) items.push(item('failed', `${p.repo.github_slug} does not allow auto-merge, so publishing will fail`));
-  else if (merging && method && !merging.methods.includes(method)) items.push(item('failed', `${p.repo.github_slug} does not allow ${method} merges, so publishing will fail`));
+  const items = s.autoPublishChecklist(pull).map((i) => {
+    const mark = i.ok ? icon('check', { cls: 'color-fg-success' }) : i.failed ? icon('x', { cls: 'color-fg-danger' }) : icon('dot-fill', { cls: 'color-fg-attention' });
+    return html`<li>${mark} <span>${'text' in i ? i.text : reviewerText(i.reviewer.login, i.reviewer.status, pull, author)}</span></li>`;
+  });
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-open' })}<div class="flex-auto">
     <strong>Auto-publish is on</strong>
     <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the pull request${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with the latest commit and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method})` : ''}. After that, each commit ${author.login} waits with is pushed.</div>
