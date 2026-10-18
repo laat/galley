@@ -14,7 +14,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { PullRow, RepoRow } from '../../src/server/db.ts';
 import { Client } from '../../src/cli/client.ts';
-import { sendPull } from '../../src/cli/send.ts';
+import { clearPushRemote, sendPull } from '../../src/cli/send.ts';
 
 startHarness();
 
@@ -483,6 +483,8 @@ test('after GitHub refused a push for the branch rewritten there, pr wait fetche
 
 test('merged without commits only the checkout had: pr wait sends them first, and the checkout says whether the branch is gone', async () => {
   const { clone } = await widgets();
+  // A branch the user pushes to a fork.
+  git('config', 'branch.feature/late.pushRemote', 'fork');
   const pr = await stageWithCli('feature/late', 'late.js');
   await human('POST', `${pr.base}/publish`, { sign: false });
   assert.match((await pr.wait()).stdout, /^Published to GitHub: /m);
@@ -499,7 +501,8 @@ test('merged without commits only the checkout had: pr wait sends them first, an
   assert.ok(r.stdout.includes(`  ${late.slice(0, 7)} Too late\n`), r.stdout);
   assert.doesNotMatch(r.stdout, /is gone here/);
   // Merged, a plain git push of the branch goes where it went before it was staged.
-  assert.equal(setting('branch.feature/late.pushRemote'), null);
+  assert.equal(setting('branch.feature/late.pushRemote'), 'fork');
+  assert.equal(setting('branch.feature/late.pushRemoteBeforeGalley'), null);
   // Deleted here: galley's clone still has it, but the checkout says it is gone.
   git('checkout', '-q', 'main');
   git('branch', '-qD', 'feature/late');
@@ -746,7 +749,7 @@ test('the CLI keeps a remote called galley at galley’s URL, which a staged bra
   r = await pr.wait();
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /without publishing it/);
-  assert.deepEqual(['pushRemote', 'remote', 'merge'].map((key) => setting(`branch.feature/remote.${key}`)), [null, null, null]);
+  assert.deepEqual(['pushRemote', 'remote', 'merge', 'pushRemoteBeforeGalley', 'remoteBeforeGalley'].map((key) => setting(`branch.feature/remote.${key}`)), [null, null, null, null, null]);
   // Reopened, to galley again; closed with pr close, no more.
   r = await cli(['pr', 'reopen', String(pr.number)]);
   assert.equal(r.code, 0, r.stderr);
@@ -760,6 +763,56 @@ test('the CLI keeps a remote called galley at galley’s URL, which a staged bra
   r = await cli(['pr', 'view', String(older.number)]);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(setting('branch.feature/older.pushRemote'), 'galley');
+});
+
+test('what a staged branch pushed to before comes back when its pull request is done with, unless the user changed it since', async () => {
+  await widgets();
+  const branch = (key: string) => setting(`branch.feature/fork.${key}`);
+  // A branch the user pushes to a fork, with no upstream: its remote has no merge.
+  git('config', 'branch.feature/fork.pushRemote', 'fork');
+  git('config', 'branch.feature/fork.remote', 'fork');
+  const pr = await stageWithCli('feature/fork', 'fork.js');
+  assert.equal(branch('pushRemote'), 'galley');
+  // A plain git push with push.autoSetupRemote makes galley its upstream, over that remote.
+  const pushed = await gitToGalley(['-c', 'push.autoSetupRemote=true', 'push']);
+  assert.equal(pushed.code, 0, pushed.stderr);
+  assert.deepEqual([branch('remote'), branch('merge')], ['galley', 'refs/heads/feature/fork']);
+  let r = await cli(['pr', 'close', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(['pushRemote', 'remote', 'merge', 'pushRemoteBeforeGalley', 'remoteBeforeGalley'].map(branch), ['fork', 'fork', null, null, null]);
+  // Reopened, to galley again. Closed, two cleanups at once put it back, as `pr wait` hearing of the
+  // close while `pr close` closes it: one finds it at galley, and asks galley whether an open pull
+  // request has the branch only once the other put it back.
+  r = await cli(['pr', 'reopen', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(branch('pushRemote'), 'galley');
+  await human('PATCH', pr.base, { state: 'closed' });
+  const [first, second] = [new Client(server.url), new Client(server.url)];
+  let asked!: () => void, answer!: () => void;
+  const asking = new Promise<void>((resolve) => (asked = resolve));
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const get = second.get.bind(second);
+  second.get = async (path: string, signal?: AbortSignal) => {
+    if (path.includes('state=open')) {
+      asked();
+      await answered;
+    }
+    return get(path, signal);
+  };
+  const late = clearPushRemote(second, repo, await second.repoFor(repo), 'feature/fork');
+  await asking;
+  await clearPushRemote(first, repo, await first.repoFor(repo), 'feature/fork');
+  answer();
+  await late;
+  assert.deepEqual(['pushRemote', 'pushRemoteBeforeGalley'].map(branch), ['fork', null]);
+  // A pushRemote the user sets while it is staged stays when it is closed.
+  r = await cli(['pr', 'reopen', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(branch('pushRemote'), 'galley');
+  git('config', 'branch.feature/fork.pushRemote', 'mine');
+  r = await cli(['pr', 'close', String(pr.number)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual([branch('pushRemote'), branch('remote')], ['mine', 'fork']);
 });
 
 test('a remote called galley the user has at another URL is left alone: the CLI goes to galley by its URL, and fetches into origin', async () => {

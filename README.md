@@ -63,10 +63,10 @@ sends the agent's branch there with git, and when galley tells the agent to reba
 what galley fetched from GitHub into the checkout. The CLI keeps a remote called `galley` in the
 checkout for this: what galley fetched is in `galley/<branch>`, and `origin` stays as you last
 fetched it. A staged branch's `git push` goes to galley, not GitHub, until its pull request is
-merged or closed. A remote called `galley` of your own is left alone. The server publishes from
-its clone with `gh`'s credentials and your signing key, so they must work where it runs. If an
-agent's sandbox blocks them, start the server yourself. Stopping the server lets running reviews
-finish for up to 10 minutes; a second Ctrl-C stops it at once.
+merged or closed, and then where it went before. A remote called `galley` of your own is left
+alone. The server publishes from its clone with `gh`'s credentials and your signing key, so they
+must work where it runs. If an agent's sandbox blocks them, start the server yourself. Stopping
+the server lets running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 
 To open galley from your other devices on a [Tailscale](https://tailscale.com) network, keep it
 on 127.0.0.1 and let `tailscale serve` give it an HTTPS address on the tailnet:

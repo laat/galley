@@ -215,8 +215,36 @@ export async function sendHead(client: Client, cwd: string, repo: RepoRef, branc
   await send(client, checkout, branch, true, { replace: named.every((p) => p.state === 'MERGED' || !p.publishedUrl), kept });
 }
 
-/** A setting in the checkout's git config, or empty. */
-const setting = async (checkout: Checkout, key: string) => (await run(checkout, ['config', '--get', key])).stdout.trim();
+/** The settings of `branch` in the checkout's git config (branch.<name>.<setting>), read at once: a setting's value, or empty. */
+async function branchSettings(checkout: Checkout, branch: string): Promise<(name: string) => string> {
+  const prefix = `branch.${branch}.`;
+  const r = await run(checkout, ['config', '-z', '--get-regexp', `^${prefix.replace(/[.*+?^${}()|[\]]/g, '\\$&')}[^.]+$`]);
+  // Each `<key>\n<value>`, the key's section and name in lower case; a setting's last value wins.
+  const settings = new Map(r.stdout.split('\0').filter(Boolean).map((entry) => [entry.split('\n')[0].slice(prefix.length), entry.slice(entry.indexOf('\n') + 1)]));
+  return (name) => settings.get(name.toLowerCase()) ?? '';
+}
+
+/**
+ * Write settings of `branch` to the checkout's git config in order, unsetting those with no value:
+ * the first that could not be written, and why, or null when all were.
+ */
+async function writeSettings(checkout: Checkout, branch: string, settings: [name: string, value: string][]): Promise<{ key: string; value: string; why: string } | null> {
+  for (const [name, value] of settings) {
+    const key = `branch.${branch}.${name}`;
+    const r = await run(checkout, value ? ['config', key, value] : ['config', '--unset', key]);
+    // Exit code 5: there was none to unset.
+    if (r.code !== 0 && (value || r.code !== 5)) return { key, value, why: lastLine(r.stderr) || `git exited with ${r.code}` };
+  }
+  return null;
+}
+
+/**
+ * Where setPushRemote keeps a setting of the branch's from before it was staged, for
+ * clearPushRemote to put back: its pushRemote, such as a fork the user pushes it to, and its remote
+ * when it has no upstream's merge, which a first push with push.autoSetupRemote replaces with
+ * galley. In the branch's section, which `git branch -D` removes with it.
+ */
+const before = (name: 'pushRemote' | 'remote') => `${name}BeforeGalley`;
 
 /**
  * After `pr create` or `pr reopen`, and before the author's commands on an open pull request
@@ -225,37 +253,46 @@ const setting = async (checkout: Checkout, key: string) => (await run(checkout, 
  * CLI's (sendBranch): galley takes a fast-forward from it, but refuses the whole push when it
  * brings a tag (push.followTags), and git-lfs's hook fails it; nothing goes to GitHub either way.
  * A rewrite needs the lease that only the CLI sends. Only for the agent, whose branches the CLI
- * sends.
+ * sends. What the branch pushed to before is kept (before), and comes back when the pull request
+ * is done with.
  */
 export async function setPushRemote(client: Client, cwd: string, repo: RepoRef, branch: string): Promise<void> {
   const checkout = await cloneCheckout(client, cwd, repo);
   if (!checkout || !cliActor() || (await galleyRemote(checkout)) !== 'galley') return;
-  const key = `branch.${branch}.pushRemote`;
-  if ((await setting(checkout, key)) === REMOTE) return;
+  const get = await branchSettings(checkout, branch);
+  if (get('pushRemote') === REMOTE) return;
   if ((await run(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code !== 0) return;
-  const r = await run(checkout, ['config', key, REMOTE]);
-  if (r.code !== 0) err(`Could not point \`git push\` of ${branch} at galley in this checkout: ${lastLine(r.stderr) || `git exited with ${r.code}`}.`);
+  const replaceable = get('remote') !== REMOTE && !get('merge');
+  // Unset when there was none, so that one kept from an earlier pull request of the branch does not come back.
+  const failed = await writeSettings(checkout, branch, [
+    [before('pushRemote'), get('pushRemote')],
+    [before('remote'), replaceable ? get('remote') : ''],
+    ['pushRemote', REMOTE],
+  ]);
+  if (failed) err(`Could not point \`git push\` of ${branch} at galley in this checkout: ${failed.why}.`);
 }
 
 /**
  * After the pull request of `branch` was merged or closed: its plain `git push` goes where it went
- * before it was staged, unless an open pull request has the branch (its name used again). An
- * upstream on galley goes too: the one a first push set with push.autoSetupRemote. Only on
- * galley's remote, not one of the user's by that name.
+ * before it was staged (before), unless an open pull request has the branch (its name used again).
+ * An upstream on galley goes too: the one a first push set with push.autoSetupRemote. Only on
+ * galley's remote, not one of the user's by that name, and only while the branch pushes to galley:
+ * a pushRemote the user set since stays, and what was kept with it.
  */
 export async function clearPushRemote(client: Client, cwd: string, repo: RepoRef, branch: string): Promise<void> {
   const checkout = await cloneCheckout(client, cwd, repo);
   if (!checkout || (await galleyRemote(checkout)) !== 'galley') return;
-  if ((await setting(checkout, `branch.${branch}.pushRemote`)) !== REMOTE) return;
+  const get = await branchSettings(checkout, branch);
+  if (get('pushRemote') !== REMOTE) return;
   // Left as it is when galley does not say: the wait's news comes first.
   const open = await client.get<any[]>(`${repoPath(repo)}/gh/pulls?state=open&head=${encodeURIComponent(branch)}&limit=1&fields=number`).catch(() => null);
   if (open?.length !== 0) return;
-  const keys = ['pushRemote', ...((await setting(checkout, `branch.${branch}.remote`)) === REMOTE ? ['remote', 'merge'] : [])];
-  for (const key of keys) {
-    const r = await run(checkout, ['config', '--unset', `branch.${branch}.${key}`]);
-    // Exit code 5: it was not set (an upstream's merge).
-    if (r.code !== 0 && r.code !== 5) err(`Could not unset branch.${branch}.${key} in this checkout: ${lastLine(r.stderr) || `git exited with ${r.code}`}.`);
-  }
+  // In this order, so that while pushRemote is galley, what was kept is still there: a cleanup at
+  // the same time (`pr close` while `pr wait` hears of the close) puts back the same, and one cut
+  // short by a failure is tried again by the next command.
+  const upstream: [string, string][] = get('remote') === REMOTE ? [['remote', get(before('remote'))], ['merge', '']] : [];
+  const failed = await writeSettings(checkout, branch, [...upstream, ['pushRemote', get(before('pushRemote'))], [before('pushRemote'), ''], [before('remote'), '']]);
+  if (failed) err(`Could not ${failed.value ? `set ${failed.key} back to ${failed.value}` : `unset ${failed.key}`} in this checkout: ${failed.why}.`);
 }
 
 /**
