@@ -4,6 +4,7 @@ import type { Definition } from '../reviewers/definition.ts';
 import { readSettings, MAX_ITERATIONS_LIMIT, MAX_SIGNING_RETRIES, MERGE_METHODS } from '../settings.ts';
 import { html, icon, raw, type Safe } from './html.ts';
 import { layout } from './components.ts';
+import { askingComputer } from '../computer.ts';
 
 /** Merge methods as GitHub's merge button names them. */
 const MERGE_METHOD_NAMES: Record<string, string> = { squash: 'Squash and merge', merge: 'Create a merge commit', rebase: 'Rebase and merge' };
@@ -18,6 +19,7 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
     ${item('/settings', 'code-review', 'Code review')}
     ${item('/settings/reviewers', 'checklist', 'Custom reviewers')}
     ${item('/settings/publishing', 'mark-github', 'Publishing')}
+    ${item('/settings/desktop', 'device-desktop', 'Desktop app')}
   </nav>
   <div class="settings-main">${main}</div>
 </div>`;
@@ -257,6 +259,34 @@ async function modelChoices(s: Service, d: Omit<Definition, 'name'>): Promise<{ 
         </select>`;
   }
   return { models, efforts };
+}
+
+/**
+ * The desktop app and galley links: whether the app runs and opens them, and this browser's own
+ * choice, kept in the browser (public/app.js): "Stay in the browser" turns it off, this turns it on again.
+ */
+export function desktopSettingsPage(s: Service): string {
+  const desktop = s.desktopApp(askingComputer());
+  const status = desktop.openLinks
+    ? 'The desktop app is running on this computer and opens galley links.'
+    : desktop.connected
+      ? "The desktop app is running on this computer and leaves galley links to the browser: its menu's Open galley links in the app is off, or it runs from the checkout rather than as galley.app."
+      : 'The desktop app is not running on this computer.';
+  return settingsLayout(
+    s,
+    '/settings/desktop',
+    html`<div class="Subhead">
+      <h2 class="Subhead-heading">Desktop app</h2>
+      <p class="Subhead-description">On macOS, galley's desktop app shows galley in a window of its own. While it runs, galley links open there: a page you open in the browser, from a terminal or another app, switches to the app, and the browser's tab says so.</p>
+    </div>
+    <p>${status}</p>
+    <div class="settings-form js-open-in-app-setting">
+      <div class="form-checkbox">
+        <label><input type="checkbox" class="js-open-in-app"> Open galley links in the app from this browser</label>
+        <p class="note">Kept in this browser. Stay in the browser, on a page that went to the app, turns it off.</p>
+      </div>
+    </div>`,
+  );
 }
 
 export function publishingSettingsPage(s: Service): string {

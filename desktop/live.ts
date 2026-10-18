@@ -7,6 +7,8 @@ import type { ChangeEvent } from '../src/server/service.ts';
 
 export interface Follower {
   stop(): void;
+  /** End the stream and open it again at once, at the path `path` gives now, without a `down` in between. */
+  reopen(): void;
 }
 
 /**
@@ -14,10 +16,16 @@ export interface Follower {
  * change to a pull request, and `down` when an attempt fails or the stream ends, after which it
  * tries again every `retryMs` until stopped. A stream that says nothing for `idleMs` (the server
  * pings every 20 seconds) counts as ended. Only galley's counts: another program on its port
- * is an attempt that fails.
+ * is an attempt that fails. `path` is the stream's path and query, asked again for each attempt.
  */
-export function follow(base: string, on: { up(): void; down(): void; change(e: ChangeEvent): void }, o: { retryMs?: number; idleMs?: number } = {}): Follower {
+export function follow(
+  base: string,
+  on: { up(): void; down(): void; change(e: ChangeEvent): void },
+  o: { retryMs?: number; idleMs?: number; path?: () => string } = {},
+): Follower {
   const stopping = new AbortController();
+  let current: AbortController | null = null;
+  let reopening = false;
   const call = (fn: () => void) => {
     try {
       fn();
@@ -28,6 +36,7 @@ export function follow(base: string, on: { up(): void; down(): void; change(e: C
   (async () => {
     while (!stopping.signal.aborted) {
       const attempt = new AbortController();
+      current = attempt;
       const abort = () => attempt.abort();
       stopping.signal.addEventListener('abort', abort);
       let idle: NodeJS.Timeout | undefined;
@@ -39,7 +48,7 @@ export function follow(base: string, on: { up(): void; down(): void; change(e: C
         alive();
         // As the CLI makes sure before its first request (Client.check).
         if ((await identify(base)) !== 'galley') throw new Error(`galley does not answer at ${base}`);
-        const res = await fetch(`${base}/events`, { headers: { accept: 'text/event-stream' }, signal: attempt.signal });
+        const res = await fetch(base + (o.path?.() ?? '/events'), { headers: { accept: 'text/event-stream' }, signal: attempt.signal });
         if (!res.ok || !res.body) throw new Error(`/events answered ${res.status}`);
         call(on.up);
         let buffer = '';
@@ -53,14 +62,27 @@ export function follow(base: string, on: { up(): void; down(): void; change(e: C
           }
         }
       } catch {}
+      current = null;
       clearTimeout(idle);
       stopping.signal.removeEventListener('abort', abort);
       if (stopping.signal.aborted) return;
+      if (reopening) {
+        reopening = false;
+        continue;
+      }
       call(on.down);
       await sleep(o.retryMs ?? 1000, undefined, { signal: stopping.signal }).catch(() => {});
     }
   })();
-  return { stop: () => stopping.abort() };
+  return {
+    stop: () => stopping.abort(),
+    reopen: () => {
+      // Between attempts, the next one asks for the path anyway.
+      if (!current) return;
+      reopening = true;
+      current.abort();
+    },
+  };
 }
 
 /** One server-sent event: the message the server sent ({ type, event }), or null for a ping. */

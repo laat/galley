@@ -105,7 +105,7 @@ export async function identify(base: string, ms = PROBE_MS): Promise<'galley' | 
 }
 
 /** What answers at `base` (identify), and what galley says of itself there: GET /api/meta. */
-async function probe(base: string, ms: number): Promise<{ found: 'galley' | 'starting' | 'other' | 'silent' | 'none'; meta?: { url?: string } }> {
+async function probe(base: string, ms: number): Promise<{ found: 'galley' | 'starting' | 'other' | 'silent' | 'none'; meta?: { url?: string; desktop_app?: { open_links?: boolean } } }> {
   const signal = AbortSignal.timeout(ms);
   let res: Response;
   try {
@@ -157,6 +157,8 @@ export class Client {
   private probeMs: number;
   /** Where the server's links point, as it says (its public URL), once it answered. */
   private linksBase: string | null = null;
+  /** Whether the desktop app on this computer follows the server and opens galley links, as it said when it answered. */
+  private appOpensLinks = false;
   constructor(base = serverUrl(), { probeMs = PROBE_MS } = {}) {
     this.base = base;
     this.probeMs = probeMs;
@@ -198,6 +200,7 @@ export class Client {
     try {
       const { found, meta } = await probe(this.base, this.probeMs);
       if (meta?.url) this.linksBase = meta.url;
+      this.appOpensLinks = !!meta?.desktop_app?.open_links;
       return found;
     } catch (e) {
       if ((e as { cause?: { code?: string } }).cause?.code === 'UND_ERR_SOCKET') throw e;
@@ -221,6 +224,12 @@ export class Client {
   async url(path = ''): Promise<string> {
     await this.ready();
     return (this.linksBase ?? this.base) + path;
+  }
+
+  /** Whether the desktop app on this computer follows the server and opens galley links (src/cli/open.ts). */
+  async desktopAppOpensLinks(): Promise<boolean> {
+    await this.ready();
+    return this.appOpensLinks;
   }
 
   async raw(method: string, path: string, opts: { body?: unknown; rawBody?: string; headers?: Record<string, string>; signal?: AbortSignal } = {}): Promise<Response> {

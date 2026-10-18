@@ -69,7 +69,9 @@ GALLEY_PUBLIC_URL=https://<host>.<tailnet>.ts.net galley serve
 ```
 
 Links galley gives, such as **Copy link** and the ones agents print, then use that address, so
-they open on your other devices too. Agents still stage from the server's machine.
+they open on your other devices too. Agents still stage from the server's machine. Another proxy
+in front of galley should set `X-Forwarded-For`, or pages on your other devices try to open the
+[desktop app](#desktop-app) of the server's machine.
 
 ## Desktop app
 
@@ -91,6 +93,13 @@ pnpm --dir desktop build     # or build galley.app, unsigned, in desktop/out
 
 The built app runs the checkout's code, so it follows `git pull`; keep the checkout where it is.
 Its windows leave notifications to the app and have no **Notify me**.
+
+While the built app runs, galley links on its computer open in its window: a link you click in
+a terminal or another app, `galley browse` and `--web`. A page you open in the browser switches
+to the app and says so in the tab, with **Stay in the browser** to keep that browser's links
+there (**Settings > Desktop app** undoes it). Chrome asks before it opens the app; check
+**Always allow** to skip that. **Open galley links in the app**, in the app's menu, turns all of
+this off.
 
 ## The review loop
 

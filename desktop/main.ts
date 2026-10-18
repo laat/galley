@@ -1,12 +1,15 @@
 // galley's desktop app: a window onto the galley server the CLI uses, a notification when it
 // becomes the user's turn on a pull request, and a menu-bar status of what waits for the user and
 // what the agents are at.
-// It is never a second server, and quitting it leaves the server running for the agents.
+// It is never a second server, and quitting it leaves the server running for the agents. It opens
+// galley:// links (src/app-link.ts), which pages opened in the browser hand off to while it runs.
 import { app, BrowserWindow, Menu, nativeImage, Notification, session, shell, Tray, type BrowserWindowConstructorOptions, type MenuItemConstructorOptions } from 'electron';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { APP_SCHEME, appLinkPath } from '../src/app-link.ts';
 import { serverUrl } from '../src/config.ts';
-import { follow } from './live.ts';
+import { follow, type Follower } from './live.ts';
 import { trayMenu, trayTitle, trayToolTip } from './menu.ts';
 import { notAPage } from './pages.ts';
 import { attach, findNode, loginShellEnv, noAutostart, startServer, type Found } from './server.ts';
@@ -23,6 +26,8 @@ let connected = false;
 let away = '';
 let tray: Tray;
 let turns: Turns;
+let live: Follower;
+let settings: Settings;
 /** Windows that show the waiting page, and where each goes once galley answers. */
 const waiting = new Map<BrowserWindow, string>();
 /** The page each window last failed to load as galley did not answer, and how often in a row since the stream last opened. */
@@ -32,9 +37,10 @@ let lastFocused: BrowserWindow | null = null;
 const headerIsTitleBar = process.platform === 'darwin';
 /** Windows showing an uploaded image or a raw file, with no header: they keep a title bar of their own, and show no page. */
 const headerless = new WeakSet<BrowserWindow>();
-/** Whether start has run; until then, a window asked for opens once it has. */
+/** Whether start has run; until then, a window asked for opens once it has, and so does a link, at its page. */
 let started = false;
 let openWhenStarted = false;
+let linkWhenStarted: string | null = null;
 /** Kept until clicked or closed: a notification that is garbage-collected no longer hears its click. */
 const notifications = new Set<Notification>();
 
@@ -42,7 +48,19 @@ if (!app.requestSingleInstanceLock()) {
   // Opened again (or at login, when it already runs): the running app shows its window instead.
   app.quit();
 } else {
-  app.on('second-instance', () => (started ? openWindow() : (openWhenStarted = true)));
+  // A galley:// link comes as an event on macOS, the one that opens the app before it is ready.
+  // Elsewhere it is on the command line: the app's own, or a second one's, which hands it over.
+  app.on('open-url', (e, url) => {
+    e.preventDefault();
+    openLink(url);
+  });
+  linkWhenStarted = linkIn(process.argv);
+  app.on('second-instance', (_e, argv) => {
+    const link = linkIn(argv);
+    if (link) openLink(link);
+    else if (started) openWindow();
+    else openWhenStarted = true;
+  });
   // The menu-bar status and the notifications go on without a window.
   app.on('window-all-closed', () => {});
   app.on('web-contents-created', (_e, contents) => {
@@ -84,6 +102,10 @@ async function start(): Promise<void> {
   if (app.isPackaged) Object.assign(process.env, await loginShellEnv());
   base = serverUrl();
   origin = new URL(base).origin;
+  settings = readSettings();
+  // galley:// links come here: the built app says it opens them (build.ts), and this makes it the
+  // one that does. Not from the checkout, where it would make Electron's own app theirs.
+  if (app.isPackaged && !app.isDefaultProtocolClient(APP_SCHEME)) app.setAsDefaultProtocolClient(APP_SCHEME);
   if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(join(icons, 'icon.png'));
   Menu.setApplicationMenu(Menu.buildFromTemplate(appMenu()));
 
@@ -101,7 +123,7 @@ async function start(): Promise<void> {
 
   let answered = () => {};
   const firstAnswer = new Promise<void>((resolve) => (answered = resolve));
-  follow(base, {
+  live = follow(base, {
     up() {
       connected = true;
       away = '';
@@ -118,12 +140,13 @@ async function start(): Promise<void> {
       render();
     },
     change: () => turns.soon(),
-  });
+  }, { path: eventsPath });
   // A window opened before the stream answers would show the waiting page for a moment.
   await Promise.race([firstAnswer, sleep(2000)]);
   if (!connected) void ensure();
   started = true;
-  if (openWhenStarted || !app.getLoginItemSettings().wasOpenedAtLogin) openWindow();
+  if (linkWhenStarted !== null && appLinkPath(linkWhenStarted, base) !== null) openLink(linkWhenStarted);
+  else if (openWhenStarted || !app.getLoginItemSettings().wasOpenedAtLogin) openWindow();
   // The Dock icon, clicked. Not before: at launch, macOS activates the app too.
   app.on('activate', () => {
     if (!BrowserWindow.getAllWindows().some((w) => !headerless.has(w))) openWindow();
@@ -273,9 +296,30 @@ function waitingPage(): string {
 function appMenu(): MenuItemConstructorOptions[] {
   const mac = process.platform === 'darwin';
   const history = () => BrowserWindow.getFocusedWindow()?.webContents.navigationHistory;
+  // Electron checks or unchecks it before the click.
+  const links: MenuItemConstructorOptions = { label: 'Open galley links in the app', type: 'checkbox', checked: settings.openLinks, click: (item) => setOpenLinks(item.checked) };
   return [
-    ...(mac ? [{ role: 'appMenu' } as const] : []),
-    { label: 'File', submenu: [{ label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => newWindow('/') }, { role: 'close' }, ...(mac ? [] : [{ role: 'quit' } as const])] },
+    ...(mac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              links,
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ] satisfies MenuItemConstructorOptions[],
+          },
+        ]
+      : []),
+    { label: 'File', submenu: [{ label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => newWindow('/') }, { role: 'close' }, ...(mac ? [] : [{ type: 'separator' } as const, links, { type: 'separator' } as const, { role: 'quit' } as const])] },
     { role: 'editMenu' },
     { role: 'viewMenu' },
     {
@@ -288,6 +332,61 @@ function appMenu(): MenuItemConstructorOptions[] {
     },
     { role: 'windowMenu' },
   ];
+}
+
+// ------------------------------------------------------------------ galley links
+
+/** The galley:// link among command-line arguments, as Linux and Windows pass one. */
+function linkIn(argv: string[]): string | null {
+  return argv.find((a) => a.toLowerCase().startsWith(`${APP_SCHEME}:`)) ?? null;
+}
+
+/** Show a galley:// link's page in the page window last used: only galley's (appLinkPath). */
+function openLink(link: string): void {
+  if (!started) return void (linkWhenStarted = link);
+  const path = appLinkPath(link, base);
+  if (path === null) return;
+  // An uploaded image or a raw file, which has no header, in a window of its own, as from a page.
+  if (headerIsTitleBar && notAPage(base + path)) newWindow(path, true);
+  else openWindow(path);
+}
+
+/**
+ * The app's stream says it is the app's, and whether it opens galley links: its menu says so, and
+ * galley:// links come to it (not to Electron's app when it runs from the checkout). Pages opened
+ * in the browser then hand off to it (src/server/server.ts).
+ */
+function eventsPath(): string {
+  return `/events?desktop=1${settings.openLinks && app.isDefaultProtocolClient(APP_SCHEME) ? '&open_links=1' : ''}`;
+}
+
+/** The app's own settings, in its data directory. */
+interface Settings {
+  /** Open galley links in the app: pages opened in the browser hand off to it. */
+  openLinks: boolean;
+}
+
+function settingsFile(): string {
+  return join(app.getPath('userData'), 'settings.json');
+}
+
+function readSettings(): Settings {
+  let saved: Partial<Settings> = {};
+  try {
+    saved = JSON.parse(readFileSync(settingsFile(), 'utf8'));
+  } catch {}
+  return { openLinks: saved.openLinks !== false };
+}
+
+function setOpenLinks(on: boolean): void {
+  settings = { ...settings, openLinks: on };
+  try {
+    writeFileSync(settingsFile(), JSON.stringify(settings, null, 2) + '\n');
+  } catch (e) {
+    console.error(e);
+  }
+  // The server hears it from the stream.
+  live.reopen();
 }
 
 // ------------------------------------------------------------------ status and notifications

@@ -5,6 +5,7 @@ import { avatarUrl, commentUrl } from '../github.ts';
 import { avatar, html, icon, plural, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 import type { ReferenceContext } from './references.ts';
+import { askingComputer } from '../computer.ts';
 
 export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
@@ -12,6 +13,11 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
   // The server was asked to stop, and lets the running reviews post first. Live updates swap it along with #main.
   const running = s.stopping ? s.reviewsRunning() : 0;
   const waiting = `Waiting for ${plural(running, 'running review')} to finish before the server stops.`;
+  // Whether the desktop app on the browser's computer follows the server and opens galley links,
+  // for a page opened in the browser to hand off to it (public/app.js). Only on load: live updates
+  // leave it as it was.
+  const desktop = s.desktopApp(askingComputer());
+  const desktopApp = desktop.openLinks ? 'open-links' : desktop.connected ? 'connected' : '';
   return (
     '<!doctype html>' +
     html`<html lang="en">
@@ -23,7 +29,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
-<body data-live="${opts.live ?? ''}" data-viewer="${viewer.login}">
+<body data-live="${opts.live ?? ''}" data-viewer="${viewer.login}" data-desktop-app="${desktopApp}">
 <header class="app-header-wrap">
 <div class="app-header">
   <a class="app-header-logo" href="/" title="All staged pull requests">${icon('git-pull-request', { size: 24 })}</a>

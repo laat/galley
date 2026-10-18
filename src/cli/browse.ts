@@ -1,12 +1,13 @@
 import { parseArgs } from 'node:util';
-import { spawn } from 'node:child_process';
 import { isAbsolute, posix, relative } from 'node:path';
 import { ApiError, CliError, git, repoPath, type Client, type RepoRef } from './client.ts';
 import { isTTY, out, stagedRef, stagedNumber } from './output.ts';
+import { openPage } from './open.ts';
 import { rendersByDefault } from '../rendered.ts';
 
 export const BROWSE_USAGE = `Print the web UI's URL for a staged pull request, a file or a directory, and open it
-in the browser when run at a terminal. Like \`gh browse\`, but the URLs name a commit, so
+in the browser when run at a terminal, or in the desktop app while it runs and opens
+galley links. Like \`gh browse\`, but the URLs name a commit, so
 they keep pointing at the code you mean. s4 (or 4, as in gh) is staged pull request s#4;
 when there is none, 4 can be a commit SHA.
 
@@ -60,10 +61,7 @@ export async function browse(client: Client, cwd: string, args: string[]): Promi
   if (positionals.length > 1) throw new CliError(`accepts at most 1 arg, received ${positionals.length}`);
   const url = await client.url(await target(client, cwd, positionals[0], v));
   out(url);
-  if (isTTY && !v['no-browser']) {
-    const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    spawn(cmd, [url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
-  }
+  if (isTTY && !v['no-browser']) await openPage(client, url);
   return 0;
 }
 

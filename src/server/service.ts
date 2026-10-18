@@ -544,6 +544,12 @@ export class Service {
   custom: CustomReviewers | null = null;
   /** The server is stopping, once the reviews running now have posted (see startServer's close). */
   stopping = false;
+  /**
+   * The desktop apps following /events now (desktop/live.ts), each with the computer it runs on
+   * (computer.ts) and whether it opens galley links: its menu's "Open galley links in the app" is
+   * on, and galley:// links go to it.
+   */
+  desktopApps = new Set<{ computer: string; openLinks: boolean }>();
   /** Number of `pr wait` calls currently blocked, per pull id (authorWaiting, waitingPulls). */
   private waiters = new Map<number, number>();
   /** When an author that keeps the reviewer agents waiting has stalled (AUTHOR_STALL_MS; tests shorten it). */
@@ -574,6 +580,12 @@ export class Service {
     this.githubUrl = opts.githubUrl ?? ((slug) => `https://github.com/${slug}.git`);
     this.viewerLogin = opts.viewerLogin ?? this.db.getMeta('viewer_login') ?? process.env.USER ?? 'you';
     this.bus.setMaxListeners(0);
+  }
+
+  /** Whether a desktop app on `computer` follows the server, and whether one there opens galley links (desktopApps). */
+  desktopApp(computer: string): { connected: boolean; openLinks: boolean } {
+    const there = [...this.desktopApps].filter((a) => a.computer === computer);
+    return { connected: there.length > 0, openLinks: there.some((a) => a.openLinks) };
   }
 
   // ---------------------------------------------------------------- actors

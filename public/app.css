@@ -419,6 +419,19 @@ kbd {
 }
 .toast .btn { height: 26px; }
 
+/* Under the header of a page that went to the desktop app (handOff in app.js). */
+.handoff-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px;
+  background: var(--accent-subtle);
+  border-bottom: 1px solid var(--accent-muted);
+  font-size: 14px;
+}
+.handoff-notice-text { margin-right: auto; }
+
 /* ----------------------------------------------------------- list page */
 
 .list-header-row { display: flex; align-items: center; margin: 24px 0 16px; }

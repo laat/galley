@@ -1,11 +1,11 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
 import { ApiError, CliError, Client, GATEWAY_DOWN, Help, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, stagedNumber } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews } from './reviewers.ts';
+import { openPage } from './open.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
@@ -75,12 +75,10 @@ function readBody(v: { body?: string; 'body-file'?: string }): string | undefine
   return v.body;
 }
 
-function openBrowser(url: string): void {
-  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-  try {
-    spawn(cmd, [url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
-  } catch {}
-  err(`Opening ${url} in your browser.`);
+/** --web: in the browser, or in the desktop app while it runs and opens galley links. */
+async function openWeb(client: Client, url: string): Promise<void> {
+  const where = await openPage(client, url);
+  err(`Opening ${url} in ${where === 'app' ? 'the galley app' : 'your browser'}.`);
 }
 
 interface Target {
@@ -228,7 +226,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
   out(pr.html_url);
   err(whoReviews(pr.reviewer_agents));
-  if (v.web) openBrowser(pr.html_url);
+  if (v.web) await openWeb(client, pr.html_url);
   err(c.gray(`Review happens in the browser. Run \`galley pr wait s${pr.number}\` to block until the reviewer agents or the user respond.`));
   return 0;
 }
@@ -270,7 +268,7 @@ async function list(client: Client, cwd: string, args: string[]): Promise<number
   });
   const repo = await client.repoFor(cwd, v.repo as string | undefined);
   if (v.web) {
-    openBrowser(await client.url(`/${repo.owner}/${repo.name}`));
+    await openWeb(client, await client.url(`/${repo.owner}/${repo.name}`));
     return 0;
   }
   const state = String(v.state);
@@ -330,7 +328,7 @@ async function view(client: Client, cwd: string, args: string[]): Promise<number
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.web) {
-    openBrowser(await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}`));
+    await openWeb(client, await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}`));
     return 0;
   }
   if (v.json !== undefined) {
@@ -369,7 +367,7 @@ async function diff(client: Client, cwd: string, args: string[]): Promise<number
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   if (v.web) {
-    openBrowser(await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}/files`));
+    await openWeb(client, await client.url(`/${t.repo.owner}/${t.repo.name}/pull/${t.number}/files`));
     return 0;
   }
   if (v['name-only']) {

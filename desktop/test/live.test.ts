@@ -20,16 +20,16 @@ test('reads the messages the server sends, and skips pings and comments', () => 
  * with a page of its own.
  */
 async function eventServer() {
-  const streams: { res: ServerResponse; closed: boolean }[] = [];
+  const streams: { res: ServerResponse; closed: boolean; url: string }[] = [];
   let as: 'galley' | 'starting' | 'other' = 'galley';
   const server = createServer((req, res) => {
-    if (as === 'other') return void res.writeHead(req.url === '/events' ? 200 : 404, { 'content-type': 'text/html' }).end('<!doctype html>');
+    if (as === 'other') return void res.writeHead(/^\/events(\?|$)/.test(req.url!) ? 200 : 404, { 'content-type': 'text/html' }).end('<!doctype html>');
     const status = as === 'starting' ? 503 : 200;
     if (req.url === '/api/meta') return void res.writeHead(status, { 'content-type': 'application/json' }).end('{"name":"galley","version":"0.1.0"}');
-    if (req.url !== '/events' || status !== 200) return void res.writeHead(status).end('starting');
+    if (!/^\/events(\?|$)/.test(req.url!) || status !== 200) return void res.writeHead(status).end('starting');
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(': hello\n\n');
-    const stream = { res, closed: false };
+    const stream = { res, closed: false, url: req.url! };
     res.on('close', () => (stream.closed = true));
     streams.push(stream);
   });
@@ -114,6 +114,32 @@ test('stopped, it hears nothing more and opens no stream', async () => {
     assert.deepEqual(heard, ['up']);
     assert.equal(events.streams.length, 1);
   } finally {
+    events.drop();
+    await events.close();
+  }
+});
+
+test('the stream opens at the path it is given then, and opens again at once when told, without going down', async () => {
+  const events = await eventServer();
+  let path = '/events?desktop=1&open_links=1';
+  const heard: string[] = [];
+  const live = follow(events.base, { up: () => heard.push('up'), down: () => heard.push('down'), change() {} }, { retryMs: 20, path: () => path });
+  try {
+    await until(() => heard.includes('up'), 'the stream is open');
+    path = '/events?desktop=1';
+    live.reopen();
+    await until(() => heard.length === 2, 'the stream is open again');
+    assert.deepEqual(heard, ['up', 'up']);
+    assert.deepEqual(events.streams.map((st) => st.url), ['/events?desktop=1&open_links=1', '/events?desktop=1']);
+    await until(() => events.streams[0].closed, 'the first stream is closed');
+    // Down, it opens at the path it is given then, as before.
+    path = '/events?desktop=1&open_links=1';
+    events.drop();
+    await until(() => heard.filter((h) => h === 'up').length === 3, 'the stream is open after the drop');
+    assert.deepEqual(heard, ['up', 'up', 'down', 'up']);
+    assert.equal(events.streams.at(-1)!.url, '/events?desktop=1&open_links=1');
+  } finally {
+    live.stop();
     events.drop();
     await events.close();
   }

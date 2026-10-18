@@ -21,6 +21,7 @@ import { renderMarkdown } from './web/markdown.ts';
 import { pullReferences } from './web/references.ts';
 import { ENGINE_IDS, nextSettings, readSettings, saveSettings, type EngineId, type MergeMethod } from './settings.ts';
 import { META } from '../config.ts';
+import { askingComputer } from './computer.ts';
 
 /**
  * A GitHub-compatible subset of the REST API, plus a few galley extensions
@@ -152,8 +153,12 @@ export function api(s: Service): Hono {
   });
 
   app.get('/health', (c) => c.json({ ok: true, pid: process.pid, viewer: s.viewer().login }));
-  // Extension: where the server's links point (its public URL), for the links the CLI makes.
-  app.get('/meta', (c) => c.json({ ...META, url: s.baseUrl }));
+  // Extension: where the server's links point (its public URL), for the links the CLI makes, and
+  // whether the desktop app on the caller's computer follows it and opens them (src/cli/open.ts).
+  app.get('/meta', (c) => {
+    const desktop = s.desktopApp(askingComputer());
+    return c.json({ ...META, url: s.baseUrl, desktop_app: { connected: desktop.connected, open_links: desktop.openLinks } });
+  });
   app.get('/user', (c) => c.json(userJson(s, actor(c))));
 
   app.post('/markdown', async (c) => {
