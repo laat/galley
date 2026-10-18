@@ -5,7 +5,7 @@ import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startServer } from '../../src/server/server.ts';
 import { Repo } from '../../src/server/git.ts';
@@ -460,8 +460,9 @@ test('publishing fetches its own base alone, and a repository with nothing to fe
   assert.equal((await human('POST', `${api}/${published.n}/publish`, { sign: false })).staging_state, 'published');
   assert.equal(tracking('main'), mainNow);
   assert.equal(tracking('release'), before);
-  // With no other pull request open, the published one's page has nothing to fetch, and fetches nothing.
+  // With no pull request open, a page has nothing to fetch, and fetches nothing.
   await human('PATCH', `${api}/${intoRelease.n}`, { state: 'closed' });
+  await human('PATCH', `${api}/${published.n}`, { state: 'closed' });
   await published.page();
   // So a pull request staged next is fetched when its page opens, not a minute later.
   const next = await stage('next', 'main', 'n.js');
@@ -626,4 +627,109 @@ test('the server fetches base branches on its timer, and a waiting author hears 
   } finally {
     await timed.close();
   }
+});
+
+test('a published pull request that comes to conflict with its base: the author is told, rebases, and its next wait force-pushes the rebase', async (t) => {
+  const { fullName, api, path, g } = await scratchRepo('republished');
+  const bare = join(dir, 'republished.git');
+  // Fetches reach the bare repository, as pushes do (see the tests above).
+  g('config', `url.${bare}.insteadOf`, 'https://github.com/acme/republished.git');
+  const merge = otherClone(bare, 'republished-other');
+  g('checkout', '-q', '-b', 'mine');
+  writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+  g('commit', '-qam', 'Set a to 1');
+  const res = await fetch(server.url + api, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
+    body: JSON.stringify({ title: 'Set a to 1', head: 'mine', base: 'main', automatic_reviews: false }),
+  });
+  assert.equal(res.status, 201);
+  const { id, number } = await res.json();
+  const url = `${server.url}/${fullName}/pull/${number}`;
+  // By its URL, as the CLI would register the repository again from its path, with the bare repository's for a URL.
+  const wait = () => cli(['pr', 'wait', url, '--timeout', '20s'], { cwd: path });
+  const json = () => human('GET', `${api}/${number}`);
+  const page = async () => (await fetch(url)).text();
+  const onGithub = () => execFileSync('git', ['--git-dir', bare, 'rev-parse', 'mine'], { encoding: 'utf8' }).trim();
+  const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
+  /** What GitHub says of the pull request: its branch's commit, and whether it merges; and galley asking it. */
+  const githubSays = async (head: string, mergeable: 'MERGEABLE' | 'CONFLICTING') => {
+    const node = { state: 'OPEN', mergedAt: null, closedAt: null, mergedBy: null, mergeCommit: null, timelineItems: { nodes: [] }, headRefOid: head, mergeable, mergeStateStatus: mergeable === 'CONFLICTING' ? 'DIRTY' : 'BLOCKED', commits: { nodes: [] } };
+    writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${id}`]: node } } }));
+    try {
+      await server.service.followGithub();
+    } finally {
+      rmSync(join(dir, 'gh-pulls.json'), { force: true });
+    }
+  };
+  await human('POST', `${api}/${number}/publish`, { sign: false });
+  assert.match((await wait()).stdout, /^Published to GitHub: /m);
+  const published = g('rev-parse', 'mine');
+  assert.equal(onGithub(), published);
+
+  await t.test('another pull request is merged into main: the waiting author is told to rebase', async () => {
+    const waiting = wait();
+    await until(async () => (await json()).author_waiting, 'the author waits');
+    const merged = merge('a.js', 'export const a = 2;\n');
+    // Opening the page fetches the base of the published pull request too.
+    await page();
+    await until(() => g('rev-parse', 'refs/remotes/origin/main') === merged, 'origin/main is fetched');
+    const told = await waiting;
+    assert.equal(told.code, 0, told.stderr);
+    assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
+    assert.ok(told.stdout.includes(`Rebase onto origin/main, resolve the conflicts and run the tests, then run \`galley pr wait ${url}\` again: it force-pushes the rebase to GitHub.\nIt is published: commit and wait, and galley pushes each commit you wait with to GitHub. Never push to GitHub yourself.\n`), told.stdout);
+    // galley's check is for the author; mergeability stays GitHub's to say, which it has not yet.
+    const view = await human('GET', `/api/repos/${fullName}/gh/pulls/${number}?fields=mergeable,mergeStateStatus,baseConflicts`);
+    assert.deepEqual(view, { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: merged, conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
+  });
+
+  await t.test('it is the author\'s turn, and GitHub\'s word on the conflict gives way to galley\'s', async () => {
+    await githubSays(published, 'CONFLICTING');
+    const { turn } = await json();
+    assert.equal(turn.whose, 'author');
+    assert.equal(turn.reasons[0].text, 'agent is working on the feedback');
+    assert.deepEqual(turn.reasons.filter((r: any) => r.kind === 'conflicts' || r.kind === 'github').map((r: any) => r.text), ['conflicts with origin/main in a.js']);
+    const box = await page();
+    assert.match(box, /<strong>This branch has conflicts with <span class="branch-name branch-name-sm">origin\/main<\/span><\/strong>/);
+    assert.match(box, /conflicts in 1 file\. agent was told to rebase it\. GitHub can not merge it until the conflicts are resolved; agent&#39;s next wait pushes the rebase\./);
+    assert.doesNotMatch(box, /on GitHub<\/strong>/);
+    // Publishing by hand (a new title, say) does not ask about it: GitHub has the head already.
+    assert.deepEqual(server.service.publishAsks(row()), []);
+  });
+
+  await t.test('the author rebases, and its next wait force-pushes the rebase', async () => {
+    g('reset', '-q', '--hard', 'origin/main');
+    writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+    g('commit', '-qam', 'Set a to 1');
+    const rebased = g('rev-parse', 'mine');
+    const pushed = await wait();
+    assert.equal(pushed.code, 0, pushed.stderr);
+    assert.match(pushed.stdout, new RegExp(`^Force-pushed ${rebased.slice(0, 7)} to GitHub: https://github\\.com/acme/widgets/pull/7$`, 'm'));
+    assert.doesNotMatch(pushed.stdout, /This branch conflicts/);
+    assert.equal(onGithub(), rebased);
+    const timeline = await human('GET', `/api/repos/${fullName}/issues/${number}/timeline`);
+    const push = timeline.filter((e: any) => e.event === 'github_push').at(-1);
+    assert.deepEqual([push.result, push.source, push.before, push.force], ['pushed', rebased, published, true]);
+    assert.equal((await json()).turn.reasons.find((r: any) => r.kind === 'conflicts'), undefined);
+  });
+
+  await t.test('once the branch moves on GitHub, a conflict resolved there say, galley\'s check of the head gives way to GitHub\'s', async () => {
+    const rebased = row().published_head_sha;
+    // A commit made on GitHub: a merge of main that resolves the conflict below there.
+    await githubSays('f'.repeat(40), 'MERGEABLE');
+    const merged = merge('a.js', 'export const a = 3;\n');
+    await server.service.fetchBases(server.service.repoById(row().repo_id), { base: 'main' });
+    assert.equal(g('rev-parse', 'refs/remotes/origin/main'), merged);
+    await server.service.sync(row());
+    await server.service.conflictChecks;
+    const agent = { 'x-galley-actor': 'agent' };
+    const quiet = await fetch(`${server.url}${api}/${number}/wait?timeout=1`, { headers: agent });
+    assert.equal((await quiet.json()).status, 'timeout');
+    assert.equal((await json()).turn.reasons.find((r: any) => r.kind === 'conflicts'), undefined);
+    // GitHub's branch is the commit galley pushed after all: the conflict is the author's again.
+    await githubSays(rebased, 'CONFLICTING');
+    const told = await fetch(`${server.url}${api}/${number}/wait?timeout=5`, { headers: agent });
+    assert.equal((await told.json()).status, 'conflicts');
+    assert.deepEqual((await json()).turn.reasons.filter((r: any) => r.kind === 'conflicts' || r.kind === 'github').map((r: any) => r.text), ['conflicts with origin/main in a.js']);
+  });
 });

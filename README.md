@@ -73,7 +73,8 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
    was on. A push GitHub refuses is not tried again, and you and the agent hear why; when
    someone added commits to the branch on GitHub, galley fetches them for the agent to rebase
    onto. One that fails otherwise (GitHub out of reach, a signing prompt nobody answered) is
-   tried again when the agent next waits.
+   tried again when the agent next waits. When the branch conflicts with its base, galley tells
+   the agent to rebase it, as before publishing, and pushes the rebase.
 
 The conversation stays in galley; GitHub gets the branch, title and description.
 

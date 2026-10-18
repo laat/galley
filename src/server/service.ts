@@ -280,14 +280,15 @@ export interface TurnReason {
 
 /**
  * Whose move a pull request waits for (#6). The author agent's from being handed feedback that
- * asks something of it until its next action (a push, an edit, a reply, a wait). While a reviewer
- * agent still has the head to review, the reviewer agents', or the author's when they start only
- * once it waits (#94). Published, a commit GitHub does not have is the author's too: its wait
- * pushes it. Then the reviewer's: the reviewer agents are done with the head (or none reviews it),
- * feedback the author is not waiting for is the reviewer's to pass on, a push failed, or the
- * author stalled. Nobody's once it is closed (here, or merged or closed on GitHub), or published
- * with nothing new (or a commit being pushed) and no feedback the author has yet to be handed;
- * then the reasons say what GitHub waits for, if anything.
+ * asks something of it, or a conflict with the base, until its next action (a push, an edit, a
+ * reply, a wait). While a reviewer agent still has the head to review, the reviewer agents', or
+ * the author's when they start only once it waits (#94). Published, a commit GitHub does not have
+ * is the author's too: its wait pushes it. Then the reviewer's: the reviewer agents are done with
+ * the head (or none reviews it), feedback the author is not waiting for is the reviewer's to pass
+ * on, a push failed, the head conflicts with the base, or the author stalled. Nobody's once it is closed (here, or merged or
+ * closed on GitHub), or published with nothing new (or a commit being pushed), no feedback the
+ * author has yet to be handed and no conflict with the base; then the reasons say what GitHub
+ * waits for, if anything.
  */
 export interface Turn {
   whose: Whose;
@@ -1177,8 +1178,8 @@ export class Service {
   private fetchAbort = new AbortController();
 
   /**
-   * Fetch the base branches of the repository's pull requests whose head GitHub does not have
-   * (headUnpublished), so the check for conflicts sees what was merged there since. Each comes from
+   * Fetch the base branches of the repository's open pull requests, published or not, so the
+   * check for conflicts sees what was merged there since. Each comes from
    * GitHub over https with gh's credentials, whatever the remote's URL: an ssh remote's agent may
    * ask for approval in a window, and this runs in the background. A repository not on GitHub is
    * not fetched. Each goes into its remote-tracking branch, and only one that is there already:
@@ -1193,7 +1194,7 @@ export class Service {
     if (this.fetchAbort.signal.aborted || !repo.github_slug) return Promise.resolve();
     const last = this.fetchRounds.get(repo.id);
     const open = () => this.db.all<PullRow>("SELECT * FROM pulls WHERE repo_id = ? AND state != 'closed' AND COALESCE(github_state, 'open') = 'open'", repo.id);
-    const bases = new Set(opts.base !== undefined ? [opts.base] : open().filter((p) => this.headUnpublished(p)).map((p) => p.base_ref));
+    const bases = new Set(opts.base !== undefined ? [opts.base] : open().map((p) => p.base_ref));
     if (last?.running) {
       // A fetch that set out before a pull request was staged, say, may not fetch its base: this one comes after it.
       if ([...bases].every((b) => last.bases.has(b))) return last.running;
@@ -1221,7 +1222,7 @@ export class Service {
   /** Fetch the base branches of every repository due (fetchBases). The server does so on a timer. */
   async fetchAllBases(): Promise<void> {
     const open = this.db.all<PullRow>("SELECT * FROM pulls WHERE state != 'closed' AND COALESCE(github_state, 'open') = 'open'");
-    for (const id of new Set(open.filter((p) => this.headUnpublished(p)).map((p) => p.repo_id))) await this.fetchBases(this.repoById(id));
+    for (const id of new Set(open.map((p) => p.repo_id))) await this.fetchBases(this.repoById(id));
   }
 
   /** Stop fetching: fetches under way are stopped, and no other starts. The server waits for this before it closes the database. */
@@ -1274,13 +1275,17 @@ export class Service {
   conflictChecks: Promise<void> = Promise.resolve();
 
   /**
-   * Whether the head merges cleanly into the tip of its base branch, for a head GitHub does not
-   * have (GitHub's own answer covers the one it has: githubStatus); null otherwise. Never waits on
-   * git: it answers from what was found (or with null) and works it out in the background, as it
-   * does when the base moves (observeBase). Until then, the answer is for the base as it was.
+   * Whether the head merges cleanly into the tip of its base branch, while the pull request is
+   * open; null otherwise. Also for a head GitHub has, whose conflicts the author hears of from
+   * galley as before publishing: GitHub's own answer (githubStatus) is for the reviewer. Not once
+   * the branch on GitHub moved on from it (movedOnGithub): the head says nothing then of the
+   * branch GitHub would merge. Never waits on git: it answers from what was found (or with null)
+   * and works it out in the background, as it does when the base moves (observeBase). Until then,
+   * the answer is for the base as it was.
    */
   baseConflicts(pull: PullRow): BaseConflicts | null {
-    if (!this.headUnpublished(pull)) return null;
+    if (stagingState(pull) === 'done') return null;
+    if (!this.headUnpublished(pull) && this.movedOnGithub(pull)) return null;
     const found = this.conflictsFound.get(pull.id);
     if (found?.head === pull.head_sha && found.branch === pull.base_ref) return found;
     this.checkConflicts(pull.id);
@@ -1298,7 +1303,17 @@ export class Service {
     return found && (tip === undefined || found.base === tip) ? found : null;
   }
 
-  /** The head is one GitHub does not have, of a pull request that is not done: whether it merges cleanly is for galley to work out. */
+  /**
+   * The branch on GitHub has another commit than the one galley pushed last, as following saw it
+   * after that push: one made there (a conflict resolved there, Update branch), or pushed by
+   * someone else.
+   */
+  private movedOnGithub(pull: PullRow): boolean {
+    const github = githubStatus(pull);
+    return !!github?.head && github.head !== pull.published_head_sha && github.checkedAt >= (pull.published_at ?? '');
+  }
+
+  /** The head is one GitHub does not have, of a pull request that is not done: GitHub has no answer for whether it merges cleanly, so galley's stands in for it. */
   headUnpublished(pull: PullRow): boolean {
     return stagingState(pull) !== 'done' && pull.head_sha !== (pull.published_source_sha ?? pull.published_head_sha);
   }
@@ -1959,8 +1974,8 @@ export class Service {
     const unseen = fb.reviews.length > 0 || fb.comments.length > 0;
     // Reviews from reviewer agents still at work are held, to come together (agentsStillReviewing).
     const held = unseen && this.agentsStillReviewing(pull, fb);
-    // A head that conflicts with its base is the author's to rebase: said once per commit, with any
-    // other news, but not ahead of held reviews, which a wait that returned would mark as seen.
+    // A head that conflicts with its base is the author's to rebase, published or not: said once per
+    // commit, with any other news, but not ahead of held reviews, which a wait that returned would mark as seen.
     const conflicts = this.baseConflicts(pull)?.clean === false ? pull.head_sha : undefined;
     const fresh = conflicts !== undefined && conflicts !== pull.conflicts_told_sha;
     const pushed = push && (push.result === 'pushed' ? 'pushed' : push.retry ? null : 'push_failed');
@@ -2199,6 +2214,10 @@ export class Service {
     const atWork = r.reviewers.some((x) => busy(x.status.state));
     // A waiting author starts the reviewer agents that have not reviewed its head.
     const next = state === 'waiting' && r.reviewers.some((x) => x.status.state === 'unreviewed');
+    // A head that conflicts with its base as galley worked it out, published or not: the author's to
+    // rebase once `pr wait` tells it (markSeen), and until then, or if it does not, the reviewer's.
+    const found = this.baseConflicts(pull);
+    const conflicting = found?.clean === false ? found : null;
     const unpublished = this.unpublishedChanges(pull);
     // A review that failed after publishing (asked for by hand) needs the reviewer all the same.
     const failed = r.reviewers.some((x) => x.status.state === 'failed' && !!x.status.failedAt && x.status.failedAt > (pull.published_at ?? ''));
@@ -2209,7 +2228,9 @@ export class Service {
     // GitHub does not, or galley pushed one since following last asked. Asked since, another commit
     // is GitHub's latest all the same: one made there (Update branch, a suggestion), or a force-push back.
     const pushedOver = !!onGithub && onGithub.head !== pull.published_head_sha && onGithub.checkedAt < (pull.published_at ?? '');
-    const github = githubAsks(onGithub, pull.base_ref, unpushed || pushedOver);
+    // GitHub's conflict is said only while galley's own check has not found it (yet): once it has,
+    // its reason says it, with the files.
+    const github = githubAsks(onGithub && conflicting ? { ...onGithub, conflicting: false } : onGithub, pull.base_ref, unpushed || pushedOver);
     // Published, what GitHub does not have is the reviewer's to publish, except commits about to be
     // pushed: the author waits with them, and pushing them has not failed.
     const toPublish = unpublished.filter((c) => c !== 'commits' || !waiting || !!pushFailed);
@@ -2223,7 +2244,7 @@ export class Service {
           ? 'reviewer_agents'
           : toStart && !unseen && !stalled
             ? 'author'
-            : pull.state === 'published' && !toPublish.length && !failed && !unseen && !github.length
+            : pull.state === 'published' && !toPublish.length && !failed && !unseen && !conflicting && !github.length
               ? 'none'
               : 'reviewer';
     // Waiting on GitHub: for whom, when it says.
@@ -2255,11 +2276,10 @@ export class Service {
       const failure = pushFailed ? `; pushing ${pull.head_sha.slice(0, 7)} failed` : '';
       reasons.push({ kind: 'unpublished', text: `update not published: ${unpublished.join(', ')}${failure}` });
     }
-    const conflicts = this.baseConflicts(pull);
-    if (conflicts?.clean === false) {
-      const { files } = conflicts;
+    if (conflicting) {
+      const { files, ref } = conflicting;
       const where = files.length === 1 ? ` in ${files[0]}` : files.length ? ` in ${files.length} files` : '';
-      reasons.push({ kind: 'conflicts', text: `conflicts with ${conflicts.ref}${where}` });
+      reasons.push({ kind: 'conflicts', text: `conflicts with ${ref}${where}` });
     }
     for (const text of github) reasons.push({ kind: 'github', text });
     return { whose, reasons };
@@ -2853,8 +2873,9 @@ export class Service {
   /**
    * What publishing the pull request now asks the user to acknowledge, with a second click on the
    * page: a reviewer agent at work, whose review may ask for changes and which publishing cancels,
-   * and a head that conflicts with its base. `conflicts`: what was found for the base as it was
-   * last seen, unless given; publishing works it out for the base as it is now first (conflictsNow).
+   * and a head GitHub does not have that conflicts with its base (one GitHub has conflicts there
+   * whether it is published again or not). `conflicts`: what was found for the base as it was last
+   * seen, unless given; publishing works it out for the base as it is now first (conflictsNow).
    */
   publishAsks(pull: PullRow, conflicts = this.currentConflicts(pull)): PublishAsk[] {
     const asks: PublishAsk[] = [];
@@ -2864,7 +2885,7 @@ export class Service {
       const doing = busy.map(({ reviewer, work }) => `${reviewer.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what(work.head_sha)}`);
       asks.push({ field: 'during_review', text: `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes. Publishing now cancels ${busy.length > 1 ? 'them' : 'it'}.` });
     }
-    if (conflicts?.clean === false) {
+    if (conflicts?.clean === false && this.headUnpublished(pull)) {
       const where = conflicts.files.length ? ` in ${conflicts.files.join(', ')}` : '';
       asks.push({ field: 'during_conflict', text: `This branch conflicts with ${conflicts.ref}${where}: GitHub can not merge it until the conflicts are resolved.` });
     }

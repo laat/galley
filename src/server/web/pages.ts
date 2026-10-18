@@ -727,8 +727,11 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     </div>`;
   }
 
-  rows.push(...githubRows(p));
-  const conflicts = s.baseConflicts(pull);
+  // galley's own check for conflicts; for a head GitHub has, only a conflict it found, which the
+  // author is told of: GitHub's rows say the rest, and its row for a conflict gives way to this one.
+  const found = s.baseConflicts(pull);
+  const conflicts = found && (s.headUnpublished(pull) || found.clean === false) ? found : null;
+  rows.push(...githubRows(p, conflicts?.clean === false));
   if (conflicts) rows.push(conflictsRow(p, conflicts, !s.currentConflicts(pull)));
   if (pull.github_state === 'closed') {
     rows.push(html`<div class="merge-row">${icon('git-pull-request-closed', { cls: 'color-fg-closed' })}<div><strong>Closed on GitHub</strong><div class="color-fg-muted">${githubUser(pull.github_closed_by)} closed it on GitHub without merging ${relTime(pull.github_closed_at)}. Publishing again updates it there, and galley follows it again in case it was reopened.</div></div></div>`);
@@ -949,8 +952,11 @@ const CHECK_ICON: Record<GithubCheck['result'], [string, string]> = {
   skipped: ['skip', 'color-fg-muted'],
 };
 
-/** How the published pull request stands on GitHub, as merge box rows: review, checks, threads, conflicts. */
-function githubRows(p: PullPage): Safe[] {
+/**
+ * How the published pull request stands on GitHub, as merge box rows: review, checks, threads,
+ * conflicts. `conflicting`: galley found the head conflicting (conflictsRow), which says it instead.
+ */
+function githubRows(p: PullPage, conflicting: boolean): Safe[] {
   const g = githubStatus(p.pull);
   if (!g) return [];
   const base = p.pull.base_ref;
@@ -991,6 +997,8 @@ function githubRows(p: PullPage): Safe[] {
     });
     rows.push(row('comment-discussion', 'color-fg-attention', `${plural(g.threads.length, 'unresolved conversation')} on GitHub`, '', html`<ul class="merge-checks">${items}</ul>`));
   }
+  // galley's own row says a conflict it found (conflictsRow).
+  if (conflicting) return rows;
   if (g.conflicting) rows.push(row('alert', 'color-fg-danger', html`This branch has conflicts with <span class="branch-name branch-name-sm">${base}</span> on GitHub`, `The agent rebases it; publishing that update force-pushes.`));
   else if (g.mergeStateStatus === 'BEHIND') rows.push(row('alert', 'color-fg-attention', html`This branch is behind <span class="branch-name branch-name-sm">${base}</span> on GitHub`));
   return rows;
@@ -1021,6 +1029,10 @@ function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
   }
   const { pull, author } = p;
   const told = pull.conflicts_told_sha === pull.head_sha ? `${author.login} was told to rebase it.` : html`${author.login} is told to rebase it in <code>pr wait</code>.`;
+  // A head GitHub has is not published again: the author's wait pushes the rebase.
+  const then = p.s.headUnpublished(pull)
+    ? 'Published as it is, GitHub can not merge it until the conflicts are resolved, so publishing takes a second click.'
+    : `GitHub can not merge it until the conflicts are resolved; ${author.login}'s next wait pushes the rebase.`;
   const items = [
     ...c.files.map((f) => {
       const name = p.files.some((d) => d.path === f) ? html`<a href="${p.htmlBase}/files#${fileAnchor(f)}"><code>${f}</code></a>` : html`<code>${f}</code>`;
@@ -1030,7 +1042,7 @@ function conflictsRow(p: PullPage, c: BaseConflicts, again: boolean): Safe {
   ];
   const where = c.files.length ? html` in ${plural(c.files.length, 'file')}` : '';
   return html`<div class="merge-row">${icon('alert', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>This branch has conflicts with ${ref}</strong>
-    <div class="color-fg-muted">Merging it into ${tip}, its tip in this repository, conflicts${where}. ${told} Published as it is, GitHub can not merge it until the conflicts are resolved, so publishing takes a second click.${moved}${fetched}</div>
+    <div class="color-fg-muted">Merging it into ${tip}, its tip in this repository, conflicts${where}. ${told} ${then}${moved}${fetched}</div>
     <ul class="merge-checks">${items}</ul></div></div>`;
 }
 

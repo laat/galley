@@ -898,11 +898,15 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       if (rest) out(c.gray(rest.trim()));
       return 0;
     }
-    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`galley pr wait ${all}\` again.` : null;
+    // Published, the wait after the rebase pushes it, force-pushed over the commits it replaces;
+    // after a push GitHub refused, what is pushed next is said with the refusal.
+    const pushes = pr.state === 'PUBLISHED' && r.status !== 'push_failed' ? ': it force-pushes the rebase to GitHub.' : '.';
+    const rebase = conflicts ? `Rebase onto ${pr.baseConflicts.ref}, resolve the conflicts and run the tests, then run \`galley pr wait ${all}\` again${pushes}` : null;
     if (r.status === 'published') {
       if (atWork.length) out(`Published while ${stillReviewing(pr)}; ${getIt}`);
       else out(text ? 'Published, but read the feedback above: the user may still want changes.' : 'The user is done with this pull request.');
-      out(c.gray(`Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      // Published with a conflict (a second click): the rebase is left.
+      out(c.gray(rebase ?? `Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       out(c.gray(PUSHES));
       return 0;
     }
@@ -922,6 +926,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if ((r.status === 'pushed' || r.status === 'push_failed') && !text) {
       // A conflict told with it (it is marked as told above) is the author's to rebase.
       out(c.gray(rebase ?? `Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      if (rebase && r.status === 'pushed') out(c.gray(PUSHES));
       return 0;
     }
     if (r.status === 'closed') {
@@ -934,6 +939,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       // Gone again before it could be shown (the base moved once more): nothing to say, so keep waiting.
       if (!rebase) continue;
       out(c.gray(rebase));
+      if (pr.state === 'PUBLISHED') out(c.gray(PUSHES));
       return 0;
     }
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
