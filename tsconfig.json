@@ -13,5 +13,5 @@
     "noUncheckedIndexedAccess": false,
     "types": ["node"]
   },
-  "include": ["bin", "src", "test"]
+  "include": ["bin", "src", "test", "desktop/test"]
 }

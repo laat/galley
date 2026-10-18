@@ -1,0 +1,18 @@
+{
+  "name": "galley-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "galley's desktop app: a window onto the galley server, with notifications and a menu-bar status.",
+  "type": "module",
+  "license": "MIT",
+  "main": "main.ts",
+  "scripts": {
+    "start": "electron .",
+    "build": "node build.ts",
+    "typecheck": "../node_modules/.bin/tsc -p ."
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^44.5.1"
+  }
+}

@@ -54,6 +54,23 @@ The server publishes with your `git push`, `gh` and signing key, so they must wo
 runs. If an agent's sandbox blocks them, start the server yourself. Stopping the server lets
 running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
 
+## Desktop app
+
+On macOS, `desktop/` has an app: galley in a window of its own with a Dock icon, a notification
+when a pull request becomes your turn (clicking it opens the pull request), and the number waiting
+for you in the menu bar, with a menu listing them and a Start at login switch. It is a window onto
+the server the CLI uses: it starts one when none is running, and quitting it leaves the server
+running.
+
+```sh
+pnpm --dir desktop install
+pnpm --dir desktop start     # run it from the checkout
+pnpm --dir desktop build     # or build galley.app, unsigned, in desktop/out
+```
+
+The built app runs the checkout's code, so it follows `git pull`; keep the checkout where it is.
+Its windows leave notifications to the app and have no **Notify me**.
+
 ## The review loop
 
 1. **The agent stages its branch** with `galley pr create` and waits with `galley pr wait`.
