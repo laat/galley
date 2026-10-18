@@ -175,7 +175,8 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         const { whose, reasons } = await turn();
         assert.equal(whose, 'reviewer');
         assert.ok(reasons.includes('approved'));
-        assert.match(rowOf(await page('/'))!, /<span class="Label Label--success">.*?Approved<\/span>/);
+        // Approved here: the label opens it here.
+        assert.match(rowOf(await page('/'))!, new RegExp(`<a class="Label Label--success" href="/acme/widgets/pull/${number}">.*?Approved</a>`));
       });
 
       await t.test("published: nobody's, until a commit is not pushed: the author's, whose wait pushes it", async () => {
@@ -225,7 +226,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         // Staged, in the badge and the merge box, until GitHub has the update.
         const pullPage = await page(`/acme/widgets/pull/${number}`);
         assert.match(pullPage, /<span class="State State--staged">.*?Update not published<\/span>/);
-        assert.match(pullPage, /<div class="merge-box">/);
+        assert.match(pullPage, /<div class="merge-box" id="publish">/);
         assert.match(pullPage, /Staged changes not on GitHub yet: commits, title\.[^]*? The commits are also pushed when agent waits\./);
         assert.match(rowOf(await page('/acme/widgets?state=published'))!, /<span class="turn-reason" title="agent has not waited since its last commit">agent not waiting<span class="turn-since">[^]*?<span class="turn-reason">update not published: commits, title<\/span>/);
         assert.equal(await group(), 'published: With agents');

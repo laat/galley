@@ -83,14 +83,22 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
+  /**
+   * A label of a row, which links to where what it says is: what GitHub did opens the pull request
+   * there, with GitHub's mark, and what was done here opens it here, at `anchor`.
+   */
+  const label = (p: PullRow, cls: string, text: Safe | string, onGithub = false, anchor = '') =>
+    onGithub && p.published_url
+      ? html`<a class="Label${cls}" href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${text}</a>`
+      : html`<a class="Label${cls}" href="${href(p)}${anchor}">${text}</a>`;
   /** How a pull request that is done ended: merged or closed on GitHub, or closed here. */
   const ended = (p: PullRow) =>
     p.github_state === 'merged'
-      ? html`<span class="Label Label--merged">Merged</span>`
+      ? label(p, ' Label--merged', 'Merged', true)
       : p.state === 'closed'
-        ? html`<span class="Label Label--closed">Closed</span>`
+        ? label(p, ' Label--closed', 'Closed')
         : p.github_state === 'closed'
-          ? html`<span class="Label Label--closed">Closed on GitHub</span>`
+          ? label(p, ' Label--closed', 'Closed on GitHub', true)
           : '';
 
   /** Who is at work on a pull request, as small avatars at the end of its row. */
@@ -110,13 +118,13 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
   <span class="pr-row-icon">${pullIcon(p, !!unpublished)}</span>
   <div class="pr-row-main">
     ${heading(p)}
-    ${p.draft && p.state === 'staged' ? html`<span class="Label">Draft</span>` : ''}
-    ${t.reasons.some((r) => r.kind === 'approved') ? html`<span class="Label Label--success">${icon('check')} Approved</span>` : ''}
-    ${t.reasons.some((r) => r.kind === 'changes_requested') ? html`<span class="Label Label--danger">${icon('file-diff')} Changes requested</span>` : ''}
-    ${unpublished ? html`<span class="Label Label--attention">${icon('mark-github')} ${capitalize(unpublished.text)}</span>` : ''}
+    ${p.draft && p.state === 'staged' ? label(p, '', 'Draft') : ''}
+    ${t.reasons.some((r) => r.kind === 'approved') ? label(p, ' Label--success', html`${icon('check')} Approved`) : ''}
+    ${t.reasons.some((r) => r.kind === 'changes_requested') ? label(p, ' Label--danger', html`${icon('file-diff')} Changes requested`) : ''}
+    ${unpublished ? label(p, ' Label--attention', html`${icon('rocket')} ${capitalize(unpublished.text)}`, false, '#publish') : ''}
     ${ended(p)}
     ${line}
-    <div class="pr-row-meta"><a href="${href(p)}">s#${p.number}</a> staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
+    <div class="pr-row-meta"><a class="pr-row-number" href="${href(p)}">s#${p.number}</a> staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
   <div class="pr-row-side">${atWorkAvatars(atWork)}${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
 </div>`;
@@ -878,7 +886,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   const closedOnGithub = pull.github_state === 'closed';
   // An update GitHub does not have yet is staged, as in stateBadge.
   const published = pull.state === 'published' && changed.length === 0;
-  return html`<div class="merge-box${closedOnGithub ? ' merge-box--closed' : published ? ' merge-box--published' : ''}">
+  // The lists' "Update not published" links here.
+  return html`<div class="merge-box${closedOnGithub ? ' merge-box--closed' : published ? ' merge-box--published' : ''}" id="publish">
     <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : published ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
