@@ -305,10 +305,11 @@ export type AuthorState = 'waiting' | 'unseen' | 'working' | 'stopped' | 'stalle
 export interface TurnReason {
   /**
    * The author agent, a reviewer agent, what changed since the reviewer's last review, the decision,
-   * unresolved threads, an update not on GitHub yet, conflicts with the base, or what GitHub has for
-   * the reviewer (on nobody's turn, what it waits for).
+   * unresolved threads, an update not on GitHub yet, conflicts with the base, what GitHub has for
+   * the reviewer (on nobody's turn, what it waits for), or auto-publish (on nobody's turn, what it
+   * waits for before it publishes; on the reviewer's, what holds it up that no other reason says).
    */
-  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'conflicts' | 'github';
+  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'conflicts' | 'github' | 'auto_publish';
   /** A few words. The reviewer is named by login, so it reads the same to the reviewer and to agents. */
   text: string;
   /** Since when it has been so: waiting, reviewing, working on feedback, or stopped. */
@@ -335,7 +336,11 @@ export interface TurnReason {
  * on, a push failed, the head conflicts with the base, or the author stalled. Nobody's once it is closed (here, or merged or
  * closed on GitHub), or published with nothing new (or a commit being pushed), no feedback the
  * author has yet to be handed and no conflict with the base; then the reasons say what GitHub
- * waits for, if anything.
+ * waits for, if anything. With auto-merge on, GitHub merging it is not the reviewer's to do. Nor
+ * is publishing what auto-publish publishes on its own: staged with auto-publish on, it is nobody's
+ * turn where it would be the reviewer's, unless auto-publish waits for something of theirs
+ * (waitsForUser); the reason says what it waits for. When it waits for the author to wait, that
+ * is the author's turn, as when the reviewer agents start only once it waits, until it stalls.
  */
 export interface Turn {
   whose: Whose;
@@ -796,10 +801,11 @@ export class Service {
       const status = readGithub(node, previous, sentAt, complete);
       this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status) });
       // Pages show the status; tell them when it changed, not each time galley asked. The first
-      // answer since galley's latest push or publish is news even when GitHub says the same: what it
-      // said before may have been taken for news of a commit that push replaced (turn).
-      const same =
-        previous && previous.checkedAt >= (pull.published_at ?? '') && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
+      // answer since galley's latest push or publish, or since it turned on auto-merge, is news even
+      // when GitHub says the same: what it said before may have been taken for news of a commit that
+      // push replaced, or for auto-merge being on when it says it is off (turn).
+      const since = [pull.published_at ?? '', this.autoMerge(pull)?.at ?? ''].reduce((a, b) => (a > b ? a : b));
+      const same = previous && previous.checkedAt >= since && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
       return pull.github_state === 'open' && same ? null : 'github_status';
     });
     // From GitHub, like what merging allows: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
@@ -2270,10 +2276,21 @@ export class Service {
     // pushing it failed: then the reviewer decides.
     const unpushed = stagingState(pull) === 'published' && this.headUnpublished(pull);
     const pushFailed = unpushed ? this.pushFailed(pull) : null;
-    // A reviewer agent still has the head to review and starts when the author waits, or, published,
-    // the head is pushed when it waits: until then the author has to wait. Not for a head GitHub has,
-    // which is the reviewer's to follow.
-    const toStart = !waiting && (unpushed ? !pushFailed : this.headUnpublished(pull) && r.reviewers.some((x) => x.status.state === 'unreviewed'));
+    // A head that conflicts with its base as galley worked it out, published or not: the author's to
+    // rebase once `pr wait` tells it (markSeen), and until then, or if it does not, the reviewer's.
+    const found = this.baseConflicts(pull);
+    const conflicting = found?.clean === false ? found : null;
+    // Auto-publish, while it is on: what it waits for, and what of that is the reviewer's to see to.
+    // So is a conflict galley found, also while it is checked again for a base that moved since.
+    const checklist = pull.state === 'staged' && pull.auto_publish ? this.autoPublishChecklist(pull, r) : null;
+    const forUser = checklist?.filter(waitsForUser) ?? [];
+    const userHolds = forUser.length > 0 || !!conflicting;
+    // Nothing of the reviewer's: it publishes once the author waits with all feedback seen.
+    const awaitsAuthor = !!checklist && !userHolds && checklist.some((i) => i.key === 'author' && !i.ok);
+    // A reviewer agent still has the head to review and starts when the author waits, auto-publish
+    // publishes it when the author waits, or, published, the head is pushed when it waits: until
+    // then the author has to wait. Not for a head GitHub has, which is the reviewer's to follow.
+    const toStart = !waiting && (unpushed ? !pushFailed : (this.headUnpublished(pull) && r.reviewers.some((x) => x.status.state === 'unreviewed')) || awaitsAuthor);
     // Away from `pr wait` for that long since its last action, its session has probably ended.
     const stalled = toStart && !working && Date.now() - Date.parse(acted) >= this.stallMs;
     const state: AuthorState = working ? 'working' : unseen ? 'unseen' : waiting ? 'waiting' : stalled ? 'stalled' : 'stopped';
@@ -2298,10 +2315,6 @@ export class Service {
     const atWork = r.reviewers.some((x) => busy(x.status.state));
     // A waiting author starts the reviewer agents that have not reviewed its head.
     const next = state === 'waiting' && r.reviewers.some((x) => x.status.state === 'unreviewed');
-    // A head that conflicts with its base as galley worked it out, published or not: the author's to
-    // rebase once `pr wait` tells it (markSeen), and until then, or if it does not, the reviewer's.
-    const found = this.baseConflicts(pull);
-    const conflicting = found?.clean === false ? found : null;
     const unpublished = this.unpublishedChanges(pull);
     // A review that failed after publishing (asked for by hand) needs the reviewer all the same.
     const failed = r.reviewers.some((x) => x.status.state === 'failed' && !!x.status.failedAt && x.status.failedAt > (pull.published_at ?? ''));
@@ -2312,9 +2325,14 @@ export class Service {
     // GitHub does not, or galley pushed one since following last asked. Asked since, another commit
     // is GitHub's latest all the same: one made there (Update branch, a suggestion), or a force-push back.
     const pushedOver = !!onGithub && onGithub.head !== pull.published_head_sha && onGithub.checkedAt < (pull.published_at ?? '');
+    // Auto-merge galley turned on after following last asked is on, whatever GitHub said then: asked
+    // while publishing turned it on, GitHub has it off and the pull request ready to merge. Once
+    // GitHub says it is off after that, it is (turned off there, or by a push).
+    const merge = onGithub?.autoMerge === false ? this.autoMerge(pull) : null;
+    const merging = !!merge && merge.state !== 'failed' && merge.at > onGithub!.checkedAt;
     // GitHub's conflict is said only while galley's own check has not found it (yet): once it has,
     // its reason says it, with the files.
-    const github = githubAsks(onGithub && conflicting ? { ...onGithub, conflicting: false } : onGithub, pull.base_ref, unpushed || pushedOver);
+    const github = githubAsks(onGithub && { ...onGithub, ...(conflicting ? { conflicting: false } : {}), ...(merging ? { autoMerge: true } : {}) }, pull.base_ref, unpushed || pushedOver);
     // Published, what GitHub does not have is the reviewer's to publish, except commits about to be
     // pushed: the author waits with them, and pushing them has not failed.
     const toPublish = unpublished.filter((c) => c !== 'commits' || !waiting || !!pushFailed);
@@ -2333,6 +2351,9 @@ export class Service {
               : 'reviewer';
     // Waiting on GitHub: for whom, when it says.
     if (whose === 'none') return { whose, reasons: githubWaits(onGithub).map((text) => ({ kind: 'github', text })) };
+    // Waiting on auto-publish, which publishes it with nothing more from the reviewer, though the
+    // reviewer agents are done with it. Not when the author has feedback it is not waiting for, or stalled.
+    if (whose === 'reviewer' && checklist && !userHolds && !unseen && !stalled) return { whose: 'none', reasons: [autoPublishNext(checklist, pull, author)] };
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
     // Automatic reviews end at the first publish: once published, there are none to stop.
@@ -2366,6 +2387,11 @@ export class Service {
       reasons.push({ kind: 'conflicts', text: `conflicts with ${ref}${where}` });
     }
     for (const text of github) reasons.push({ kind: 'github', text });
+    // What holds auto-publish up for the reviewer that no reason above says.
+    for (const i of forUser) {
+      if (i.key === 'conflicts' && !conflicting) reasons.push({ kind: 'auto_publish', text: `auto-publish could not check for conflicts with ${pull.base_ref}` });
+      if (i.key === 'merge_method' && 'text' in i) reasons.push({ kind: 'auto_publish', text: i.text });
+    }
     return { whose, reasons };
   }
 
@@ -2469,10 +2495,10 @@ export class Service {
    * the threads the reviewer started open, and the head known not to conflict with its base as it
    * is now. Then what it does not wait for: GitHub no longer allows the auto-merge it was turned on
    * with, so publishing will fail. The signing, threads and the merge method are listed only when
-   * there is something to say.
+   * there is something to say. Whose action each waits for: waitsForUser. `r`: the pull request's
+   * readiness, when the caller has it already.
    */
-  autoPublishChecklist(pull: PullRow): AutoPublishItem[] {
-    const r = this.readiness(pull);
+  autoPublishChecklist(pull: PullRow, r = this.readiness(pull)): AutoPublishItem[] {
     const author = this.db.actorById(pull.author_id).login;
     const retry = this.autoPublishRetry(pull);
     const items: AutoPublishItem[] = [];
@@ -3537,6 +3563,38 @@ export const CANCELLED: Record<CancelReason, string> = {
   edited: 'title or description edited',
   base_moved: 'the base moved',
 };
+
+/**
+ * Whether an item of auto-publish's checklist that is not ok waits for the reviewer (Service.turn).
+ * It does when someone has to act (failed): a review that failed, to ask for again; a conflict with
+ * the base, for the author to rebase once told, and until then the reviewer's to pass on; a check
+ * for conflicts that could not run; a merge method GitHub no longer allows. So do findings the
+ * author left unanswered, which the author is not working on once it acted on them, and the
+ * threads the reviewer started, to resolve. It gets past the rest with no help from the reviewer:
+ * a reviewer agent with the head to review (at it, or starting when the author waits), the author
+ * waiting with all feedback seen (a turn of its own), the time to try signing again, the check for
+ * conflicts under way.
+ */
+function waitsForUser(i: AutoPublishItem): boolean {
+  if (i.ok) return false;
+  if (i.failed) return true;
+  if ('reviewer' in i) return !toReview(i.reviewer.status.state);
+  return i.key !== 'signing' && i.key !== 'author' && i.key !== 'conflicts';
+}
+
+/**
+ * What auto-publish waits for once nothing it waits for is the reviewer's, as nobody's turn reason
+ * (Service.turn): the time to try signing again, the check for conflicts, the author coming back to
+ * wait; or nothing, and it publishes now.
+ */
+function autoPublishNext(checklist: AutoPublishItem[], pull: PullRow, author: string): TurnReason {
+  const left = checklist.filter((i) => !i.ok && i.blocking);
+  const signing = left.flatMap((i) => ('signing' in i ? [i.signing] : []))[0];
+  if (signing) return { kind: 'auto_publish', text: 'auto-publish waits to try signing again', since: signing.at };
+  if (left.some((i) => i.key === 'conflicts')) return { kind: 'auto_publish', text: `auto-publish is checking for conflicts with ${pull.base_ref}` };
+  if (left.some((i) => i.key === 'author')) return { kind: 'auto_publish', text: `auto-publish publishes it once ${author} waits with all feedback seen` };
+  return { kind: 'auto_publish', text: 'auto-publish is publishing it' };
+}
 
 /**
  * A reviewer agent's progress with the head, as a reason in Turn; null when it has nothing to do

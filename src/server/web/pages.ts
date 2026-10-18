@@ -122,13 +122,16 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
 </div>`;
   };
 
-  /** The title, and under it what the agents are doing, or on GitHub, what it waits for there. */
+  /** The title, and under it what the agents are doing, or on nobody's turn, what GitHub or auto-publish waits for. */
   const compactRow = (p: PullRow) => {
     const t = turn(p);
     const unpublished = t.reasons.some((r) => r.kind === 'unpublished');
     const { line, atWork } =
       t.whose === 'none'
-        ? { line: html`<div class="pr-row-turn"><span class="turn-reason">${published(p)}</span>${t.reasons.map((r) => html`<span class="turn-reason">${r.text}</span>`)}</div>`, atWork: [] }
+        ? {
+            line: html`<div class="pr-row-turn">${p.published_url ? html`<span class="turn-reason">${published(p)}</span>` : ''}${t.reasons.map((r) => html`<span class="turn-reason">${r.text}</span>`)}</div>`,
+            atWork: [],
+          }
         : turnLine(s, p, t, ready.get(p.id), apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts']);
     return html`<div class="Box-row pr-row pr-row--compact">
   <span class="pr-row-icon">${pullIcon(p, unpublished)}</span>
@@ -149,12 +152,15 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     const pinnedMine = pinned.some((p) => staging.get(p.id) === state && turn(p).whose === 'reviewer');
     const agents = shown.filter((p) => turn(p).whose === 'author' || turn(p).whose === 'reviewer_agents');
     // Published with nothing new here: the next move is on GitHub (its review, checks, the merge).
-    const github = shown.filter((p) => turn(p).whose === 'none');
+    // Staged: auto-publish's, which publishes it on its own.
+    const nobody = shown.filter((p) => turn(p).whose === 'none');
+    const waitingOn =
+      state === 'staged' ? group('clock', 'Auto-publish', nobody.length, 'publishes on its own') : group('mark-github', 'Waiting on GitHub', nobody.length, 'nothing new since publishing');
     rows = [
       group('inbox', 'Your turn', mine.length, mine.length > 1 ? 'oldest first' : ''),
       ...(mine.length ? mine.map(row) : [html`<div class="Box-row turn-empty">Nothing ${pinnedMine ? 'else ' : ''}is waiting for you.</div>`]),
       ...(agents.length ? [group('hubot', 'With agents', agents.length), ...agents.map(compactRow)] : []),
-      ...(github.length ? [group('mark-github', 'Waiting on GitHub', github.length, 'nothing new since publishing'), ...github.map(compactRow)] : []),
+      ...(nobody.length ? [waitingOn, ...nobody.map(compactRow)] : []),
     ];
   }
   const nothing: Record<string, string> = { staged: 'No staged pull requests', published: 'No published pull requests open on GitHub', done: 'No merged or closed pull requests', all: 'No pull requests' };
@@ -283,7 +289,7 @@ function turnLine(
   t: Turn,
   ready: Readiness | undefined,
   apiBase: string,
-  kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github'],
+  kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github', 'auto_publish'],
 ): TurnLine {
   const shown = t.reasons.filter((r) => kinds.includes(r.kind));
   const author = s.db.actorById(pull.author_id);
@@ -292,8 +298,8 @@ function turnLine(
   const agents = new Map(ready?.reviewers.map((x) => [x.reviewer, x]));
   const rank = (r: TurnReason): number => {
     if (t.whose === 'reviewer') {
-      // Your turn: a stalled author to get going, feedback to pass on, a review to retry, GitHub; then what changed since your review.
-      if (r.state === 'stalled' || r.state === 'unseen' || r.state === 'failed' || r.kind === 'github') return 0;
+      // Your turn: a stalled author to get going, feedback to pass on, a review to retry, GitHub, what holds auto-publish up; then what changed since your review.
+      if (r.state === 'stalled' || r.state === 'unseen' || r.state === 'failed' || r.kind === 'github' || r.kind === 'auto_publish') return 0;
       if (r.kind === 'changes') return 1;
       return r.kind === 'author' || r.kind === 'reviewer_agent' ? 3 : 2;
     }

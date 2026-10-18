@@ -117,6 +117,9 @@ test('a signing that fails for now is tried again later, up to the limit', async
       // The agent stopped waiting, and nothing tries again before it is time.
       await server.autoPublisher.settle(pr.id);
       assert.deepEqual([signer.tries(), pr.created()], [1, false]);
+      // Nothing for the user to do meanwhile.
+      const { turn } = await human('GET', pr.base);
+      assert.deepEqual([turn.whose, turn.reasons.map((r: any) => r.text)], ['none', ['auto-publish waits to try signing again']]);
 
       // Its time comes: it fails once more, and the retry after that publishes, with the agent away.
       server.service.signingRetryMs = 50;
@@ -151,6 +154,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
       assert.match(page, /<strong>Auto-publish failed [^]*?Signing failed \(1Password prompt not answered\) after 1 retry, and it turned itself off\./);
       assert.match(page, /Auto-publish failed and turned itself off <relative-time [^]*?<\/relative-time>: signing failed \(1Password prompt not answered\) after 1 retry/);
       assert.equal(pr.created(), false);
+      assert.equal((await human('GET', pr.base)).turn.whose, 'reviewer');
     } finally {
       await restore();
     }

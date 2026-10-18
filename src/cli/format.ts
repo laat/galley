@@ -167,7 +167,8 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   }
   const unresolved = pr.reviewThreads.filter((t: any) => !t.isResolved).length;
   if (unresolved) out.push(c.yellow(`${unresolved} unresolved review thread${unresolved === 1 ? '' : 's'}`));
-  if (pr.turn && pr.turn.whose !== 'NONE') out.push(`${c.bold('Turn:')} ${turnLine(pr.turn)}`);
+  // Nobody's turn only with what it waits for: auto-publish, or a review GitHub requires.
+  if (pr.turn && (pr.turn.whose !== 'NONE' || pr.turn.reasons.length)) out.push(`${c.bold('Turn:')} ${turnLine(pr.turn)}`);
   const conflicts = conflictsText(pr);
   if (conflicts) out.push(c.red(`This branch conflicts ${conflicts}`));
   out.push('', pr.body.trim() ? indent(withImages(pr.body.trim(), images), '  ') : c.gray('  No description provided.'), '');

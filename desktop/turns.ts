@@ -35,22 +35,36 @@ export async function yourTurns(base: string): Promise<YourTurn[]> {
 }
 
 /**
+ * How long a pull request has to stay the user's turn before it is told, so a turn that is the
+ * user's for a moment (on its way from the agents to auto-publish, say) tells nothing. The front
+ * page's Notify me waits as long (NOTIFY_AFTER_MS in public/app.js).
+ */
+export const NOTIFY_AFTER_MS = 10_000;
+
+/**
  * The user's turns as last fetched, fetched again on each change. What became the user's turn
- * since the fetch before is `turned`, once per change; the first fetch only says what is, as the
- * front page's Notify me does. A fetch that fails (the server stopping) changes nothing, so what
- * changed while the server was away is told once it is back.
+ * since the fetch before is `turned` once it has stayed so for `delayMs`, as a fetch then says
+ * too, once per change; the first fetch only says what is, as the front page's Notify me does. A
+ * fetch that fails (the server stopping) changes nothing, so what changed while the server was
+ * away is told once it is back.
  */
 export class Turns {
   list: YourTurn[] = [];
   private known: Set<number> | null = null;
   private running: Promise<void> | null = null;
   private again = false;
+  /** Fetches that worked, so a look again can tell whether it saw anything new. */
+  private loads = 0;
+  /** What became the user's turn, until it has been for delayMs or is not any more. */
+  private held = new Map<number, ReturnType<typeof setTimeout>>();
   private load: () => Promise<YourTurn[]>;
   private on: { list(turns: YourTurn[]): void; turned(t: YourTurn): void };
+  private delayMs: number;
 
-  constructor(load: () => Promise<YourTurn[]>, on: { list(turns: YourTurn[]): void; turned(t: YourTurn): void }) {
+  constructor(load: () => Promise<YourTurn[]>, on: { list(turns: YourTurn[]): void; turned(t: YourTurn): void }, delayMs = NOTIFY_AFTER_MS) {
     this.load = load;
     this.on = on;
+    this.delayMs = delayMs;
   }
 
   /** Fetch again: one fetch at a time, and one more after it for changes during it. */
@@ -78,7 +92,33 @@ export class Turns {
     const before = this.known;
     this.known = new Set(list.map((t) => t.id));
     this.list = list;
+    this.loads++;
     this.on.list(list);
-    if (before) for (const t of list) if (!before.has(t.id)) this.on.turned(t);
+    // No longer the user's turn: nothing to tell, and becoming it again starts the wait again.
+    for (const [id, timer] of this.held) {
+      if (this.known.has(id)) continue;
+      clearTimeout(timer);
+      this.held.delete(id);
+    }
+    if (before) for (const t of list) if (!before.has(t.id)) this.hold(t.id);
+  }
+
+  private hold(id: number): void {
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => void this.confirm(id, timer), this.delayMs);
+    this.held.set(id, timer);
+  }
+
+  /**
+   * Look again, and tell of it if it has been the user's turn all along. When the look fails, wait
+   * again. Not when it stopped being the user's turn meanwhile, even if it is again (a wait of its own).
+   */
+  private async confirm(id: number, timer: ReturnType<typeof setTimeout>): Promise<void> {
+    const loads = this.loads;
+    await this.refresh();
+    if (this.held.get(id) !== timer) return;
+    if (this.loads === loads) return this.hold(id);
+    this.held.delete(id);
+    const t = this.list.find((x) => x.id === id);
+    if (t) this.on.turned(t);
   }
 }

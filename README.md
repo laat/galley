@@ -74,12 +74,12 @@ they open on your other devices too. Agents still stage from the server's machin
 ## Desktop app
 
 On macOS, `desktop/` has an app: galley in a window of its own with a Dock icon, a notification
-when a pull request becomes your turn (clicking it opens the pull request), and the number waiting
-for you in the menu bar, with a menu listing them and a Start at login switch. It is a window onto
-the server the CLI uses: it starts one when none is running, and quitting it leaves the server
-running. Its window has no title bar of its own: galley's header holds the window's buttons, drags
-the window, and stays at the top as you scroll. Uploaded images and raw files open in windows of
-their own, with a title bar.
+when a pull request has been your turn for 10 seconds (clicking it opens the pull request), and
+the number waiting for you in the menu bar, with a menu listing them and a Start at login switch.
+It is a window onto the server the CLI uses: it starts one when none is running, and quitting it
+leaves the server running. Its window has no title bar of its own: galley's header holds the
+window's buttons, drags the window, and stays at the top as you scroll. Uploaded images and raw
+files open in windows of their own, with a title bar.
 
 ```sh
 pnpm --dir desktop install
@@ -125,8 +125,9 @@ thread. Opening it unfolds the thread or file the comment is in and scrolls to i
 
 The front page lists the pull requests waiting for you first, each with the reason, then those
 the agents are working on. A published pull request is your turn once GitHub can merge it and
-auto-merge is off, and its title opens it on GitHub. **Notify me** shows a desktop notification when one becomes your
-turn.
+auto-merge is off, and its title opens it on GitHub. One that auto-publish publishes on its own is
+not your turn, unless it waits for something of yours. **Notify me** shows a desktop notification
+when one has been your turn for 10 seconds.
 
 ## Reviewer agents
 

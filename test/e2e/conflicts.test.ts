@@ -153,6 +153,28 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     const told = await waiting!;
     assert.match(told.stdout, /^This branch conflicts with origin\/main in a\.js; rebase onto origin\/main\.$/m);
     assert.deepEqual(await moving.published(), []);
+    // The agent waits again without rebasing: the user's turn, and still while the conflict is
+    // checked again for a base that moved since.
+    const again = await fetch(`${server.url}${api}/${moving.n}/wait?timeout=1`, { headers: agent });
+    assert.equal((await again.json()).status, 'timeout');
+    assert.equal((await moving.json()).turn.whose, 'reviewer');
+    const tip = g('rev-parse', 'main');
+    const releaseAgain = hold();
+    try {
+      g('checkout', '-q', 'main');
+      writeFileSync(join(path, 'moved.js'), 'export const moved = 1;\n');
+      g('add', 'moved.js');
+      g('commit', '-qm', 'Add moved.js');
+      g('update-ref', 'refs/remotes/origin/main', 'main');
+      await server.service.sync(moving.row());
+      assert.deepEqual(server.service.autoPublishChecklist(moving.row()).find((i) => i.key === 'conflicts'), { key: 'conflicts', blocking: true, ok: false, failed: false, text: 'Checking for conflicts with main' });
+      assert.equal((await moving.json()).turn.whose, 'reviewer');
+    } finally {
+      releaseAgain();
+      // main as the tests below expect it.
+      g('reset', '-q', '--hard', tip);
+      g('update-ref', 'refs/remotes/origin/main', 'main');
+    }
     await human('PATCH', `${api}/${moving.n}`, { state: 'closed' });
   });
 
