@@ -7,7 +7,7 @@ import { mkdirSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs
 import { join } from 'node:path';
 import type { Actor, PullRow, RepoRow } from '../db.ts';
 import { HttpError, type ReviewColumns, type Service } from '../service.ts';
-import { readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
+import { ENGINE_IDS, readSettings, type EngineId, type ReviewerSettings } from '../settings.ts';
 import { checkDefinition, readDefinitions, removeDefinition, reviewsRepo, writeDefinition, type Definition, type DefinitionFile, type Reviews, type Verdict } from './definition.ts';
 import { customActorKey, moveOff, Reviewer, type Engine, type OwnSettings } from './reviewer.ts';
 
@@ -38,15 +38,15 @@ function settable(fields: Record<string, unknown>): Record<string, unknown> {
 export class CustomReviewer extends Reviewer {
   definition: Definition;
 
-  constructor(s: Service, tool: Engine, definition: Definition) {
-    super(s, tool);
+  constructor(s: Service, engine: Engine, definition: Definition) {
+    super(s, engine);
     this.definition = definition;
   }
 
   /** Take a changed definition. A review running now goes on as it began. */
-  redefine(definition: Definition, tool: Engine): void {
+  redefine(definition: Definition, engine: Engine): void {
     this.definition = definition;
-    this.tool = tool;
+    this.engine = engine;
   }
 
   get key(): string {
@@ -80,7 +80,7 @@ export class CustomReviewer extends Reviewer {
   /** What it is, in a few words, under its name. */
   describe(): string {
     const reads = this.reviews === 'description' ? 'the title, description and commit messages' : 'the code';
-    return `${this.tool.label} · reviews ${reads}${this.verdict === 'approve' ? ', and approves when it finds nothing' : ''}`;
+    return `${this.engine.label} · reviews ${reads}${this.verdict === 'approve' ? ', and approves when it finds nothing' : ''}`;
   }
 
   appliesTo(repo: RepoRow): boolean {
@@ -129,7 +129,7 @@ export class CustomReviewer extends Reviewer {
 export class CustomReviewers {
   readonly dir: string;
   private s: Service;
-  private engines: Record<ReviewerKind, Engine>;
+  private engines: Record<EngineId, Engine>;
   /** The reviewers that run: those whose definitions are valid. */
   private running = new Map<string, CustomReviewer>();
   /** Every definition file, with why it does not run when it does not. */
@@ -144,7 +144,7 @@ export class CustomReviewers {
   private timer: NodeJS.Timeout | undefined;
   private following: NodeJS.Timeout | undefined;
 
-  constructor(s: Service, dir: string, engines: Record<ReviewerKind, Engine>) {
+  constructor(s: Service, dir: string, engines: Record<EngineId, Engine>) {
     this.s = s;
     this.dir = dir;
     this.engines = engines;
@@ -235,10 +235,10 @@ export class CustomReviewers {
   /** Why a custom reviewer can not have a name Codex's or Claude's reviewer answers to (see Reviewer.answersTo), or yours; null when it can. */
   private builtInName(name: string): string | null {
     const l = name.toLowerCase();
-    for (const kind of REVIEWER_KINDS) {
-      const id = Number(this.s.db.getMeta(`${kind}_actor_id`));
-      const login = (id && this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || readSettings(this.s.db)[kind].name;
-      if (l === kind || l === login.toLowerCase()) return `"${name}" would ask for the ${this.engines[kind].label} reviewer (--reviewer ${name}); choose another`;
+    for (const engine of ENGINE_IDS) {
+      const id = Number(this.s.db.getMeta(`${engine}_actor_id`));
+      const login = (id && this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || readSettings(this.s.db)[engine].name;
+      if (l === engine || l === login.toLowerCase()) return `"${name}" would ask for the ${this.engines[engine].label} reviewer (--reviewer ${name}); choose another`;
     }
     if (l === this.s.viewer().login.toLowerCase()) return `"${name}" is your name; choose another`;
     return null;

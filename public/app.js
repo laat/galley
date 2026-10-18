@@ -1387,9 +1387,9 @@
       el.disabled = true;
       await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       refresh();
-    } else if ((el = on('.js-codex-step'))) {
-      stepCodexLimit(el);
-    } else if ((el = on('.js-codex-reset'))) {
+    } else if ((el = on('.js-reviewer-step'))) {
+      stepReviewerLimit(el);
+    } else if ((el = on('.js-reviewer-reset'))) {
       el.disabled = true;
       await api('PATCH', el.dataset.api, { [el.dataset.field]: null }).catch((err) => toast(err.message));
       refresh();
@@ -1405,7 +1405,7 @@
       el.disabled = true;
       await api('DELETE', el.dataset.api).catch((err) => toast(err.message));
       refresh();
-    } else if ((el = on('.js-run-codex'))) {
+    } else if ((el = on('.js-run-reviewer'))) {
       el.disabled = true;
       // Asked from its menu, the menu closes; the row shows the review starting.
       const menu = el.closest('details.dropdown');
@@ -1478,13 +1478,13 @@
   // A reviewer agent's review limit on a pull request: each click moves the number at once, and the
   // last value is saved shortly after the clicks stop. Each reviewer's limit waits on its own.
   const limitSaves = new Map();
-  function stepCodexLimit(button) {
-    const box = button.closest('.codex-limit');
+  function stepReviewerLimit(button) {
+    const box = button.closest('.reviewer-limit');
     const max = Number(box.dataset.max);
     const value = Math.min(max, Math.max(0, Number(box.dataset.limit) + Number(button.dataset.step)));
     box.dataset.limit = String(value);
-    $('.js-codex-limit', box).textContent = String(value);
-    for (const b of $$('.js-codex-step', box)) b.disabled = Number(b.dataset.step) < 0 ? value <= 0 : value >= max;
+    $('.js-reviewer-limit', box).textContent = String(value);
+    for (const b of $$('.js-reviewer-step', box)) b.disabled = Number(b.dataset.step) < 0 ? value <= 0 : value >= max;
     clearTimeout(limitSaves.get(box.dataset.api));
     limitSaves.set(
       box.dataset.api,
@@ -1500,12 +1500,12 @@
   document.addEventListener('change', (e) => {
     const t = e.target;
     if (t.matches && t.matches('.js-reviewer-engine')) {
-      const model = $('.js-codex-model', t.form);
+      const model = $('.js-reviewer-model', t.form);
       for (const o of model.options) o.hidden = o.disabled = o.dataset.engine !== t.value;
       const tool = [...model.options].find((o) => o.dataset.engine === t.value && !o.value);
       model.value = '';
       tool.selected = true;
-      $('.js-codex-effort', t.form).dataset.defaultLabel = tool.dataset.defaultLabel;
+      $('.js-reviewer-effort', t.form).dataset.defaultLabel = tool.dataset.defaultLabel;
       model.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (t.matches && t.matches('.js-reviewer-reviews')) {
       $('.js-code-only', t.form).hidden = t.value !== 'code';
@@ -1515,10 +1515,10 @@
   // Settings: the effort levels on offer depend on the model.
   document.addEventListener('change', (e) => {
     const model = e.target;
-    if (!model.matches || !model.matches('.js-codex-model')) return;
+    if (!model.matches || !model.matches('.js-reviewer-model')) return;
     const option = model.selectedOptions[0];
     const efforts = (option.dataset.efforts || '').split(',').filter(Boolean);
-    const effort = $('.js-codex-effort', model.form);
+    const effort = $('.js-reviewer-effort', model.form);
     const current = effort.value;
     const fallback = option.dataset.defaultEffort;
     effort.innerHTML =

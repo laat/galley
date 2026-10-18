@@ -273,7 +273,7 @@ export function reviewJson(s: Service, repo: RepoRow, pull: PullRow, r: ReviewRo
  * times. Never its instructions.
  */
 export function reviewerAgentJson(r: Reviewer, enabled: boolean, maxIterations: number) {
-  return { login: r.actor().login, reviewer: r.key, engine: r.engine, reviews: r.reviews, automatic: enabled && maxIterations > 0, max_iterations: maxIterations };
+  return { login: r.actor().login, reviewer: r.key, engine: r.engineId, reviews: r.reviews, automatic: enabled && maxIterations > 0, max_iterations: maxIterations };
 }
 
 // ------------------------------------------------------------------ gh --json

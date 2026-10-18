@@ -16,7 +16,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HttpError } from '../service.ts';
-import { checkReviewerName, MAX_ITERATIONS_LIMIT, REVIEWER_KINDS, SLUG, type ReviewerKind } from '../settings.ts';
+import { checkReviewerName, ENGINE_IDS, MAX_ITERATIONS_LIMIT, SLUG, type EngineId } from '../settings.ts';
 
 export const REVIEWS = ['code', 'description'] as const;
 /** What a reviewer reads: the code (a checkout of the head), or the title, description and commit messages. */
@@ -30,7 +30,7 @@ export interface Definition {
   /** The file's name, and the login its reviews are from. */
   name: string;
   /** The tool that reviews. */
-  engine: ReviewerKind;
+  engine: EngineId;
   /** A model the tool takes; empty for the tool's own default. */
   model: string;
   /** A reasoning effort the model takes; empty for its default. */
@@ -95,7 +95,7 @@ export function checkDefinition(name: string, fields: Record<string, unknown>, b
         if (text(key, v) !== login) throw new HttpError(422, `the name "${text(key, v)}" is not the file's name, "${login}"`);
         break;
       case 'engine':
-        next.engine = oneOf(key, v, REVIEWER_KINDS);
+        next.engine = oneOf(key, v, ENGINE_IDS);
         break;
       case 'model':
       case 'effort': {
@@ -136,7 +136,7 @@ export function checkDefinition(name: string, fields: Record<string, unknown>, b
         throw new HttpError(422, `unknown setting "${key}"`);
     }
   }
-  if (!next.engine) throw new HttpError(422, `engine is required: ${REVIEWER_KINDS.join(' or ')}`);
+  if (!next.engine) throw new HttpError(422, `engine is required: ${ENGINE_IDS.join(' or ')}`);
   // Without a checkout, there is nothing else to go on.
   if (next.reviews === 'description' && !next.instructions) throw new HttpError(422, 'a reviewer of the description needs instructions: what to check it against');
   return next as Definition;

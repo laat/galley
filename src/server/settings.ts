@@ -1,9 +1,9 @@
 import type { Db } from './db.ts';
 import { HttpError } from './service.ts';
 
-/** The tools that review pull requests, as review_runs.reviewer and the settings name them. */
-export const REVIEWER_KINDS = ['codex', 'claude'] as const;
-export type ReviewerKind = (typeof REVIEWER_KINDS)[number];
+/** The engines, the tools that review pull requests, as review_runs.reviewer and the settings name them. */
+export const ENGINE_IDS = ['codex', 'claude'] as const;
+export type EngineId = (typeof ENGINE_IDS)[number];
 
 /** A reviewer agent's settings. */
 export interface ReviewerSettings {
@@ -82,14 +82,14 @@ export function checkReviewerName(name: string): string {
 /** Validate a partial update and return the settings it would give, without storing them. */
 export function nextSettings(
   db: Db,
-  patch: { [K in ReviewerKind]?: Record<string, unknown> } & { publish?: Record<string, unknown> },
-  efforts?: (kind: ReviewerKind, model: string) => string[] | null,
+  patch: { [K in EngineId]?: Record<string, unknown> } & { publish?: Record<string, unknown> },
+  efforts?: (engine: EngineId, model: string) => string[] | null,
 ): Settings {
   const current = readSettings(db);
   const next: Settings = { codex: { ...current.codex }, claude: { ...current.claude }, publish: { ...current.publish } };
-  for (const kind of REVIEWER_KINDS) {
-    const changes = patch[kind];
-    if (changes) nextReviewer(next[kind], changes, efforts && ((model) => efforts(kind, model)));
+  for (const engine of ENGINE_IDS) {
+    const changes = patch[engine];
+    if (changes) nextReviewer(next[engine], changes, efforts && ((model) => efforts(engine, model)));
   }
   const p = patch.publish ?? {};
   if (p.mergeMethod !== undefined) {

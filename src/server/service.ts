@@ -2037,9 +2037,14 @@ export class Service {
     if (working) this.emit(pull.id, 'waiting', author);
   }
 
+  /** Codex and Claude as reviewer agents, those of them the server runs. */
+  builtInReviewers(): Reviewer[] {
+    return [this.codex, this.claude].filter((r) => r !== null);
+  }
+
   /** The reviewer agents this server runs, Codex, Claude and the custom ones: each one actor that reviews on its own. */
   reviewerAgents(): Reviewer[] {
-    return [this.codex, this.claude, ...(this.custom?.list() ?? [])].filter((r) => r !== null);
+    return [...this.builtInReviewers(), ...(this.custom?.list() ?? [])];
   }
 
   /** The reviewer agents that review the pull request: custom reviewers review the repositories they name. */
@@ -2112,7 +2117,7 @@ export class Service {
    * open. Auto-publish waits for all of it (autoPublishChecklist).
    */
   readiness(pull: PullRow): Readiness {
-    const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engine, reviewer: r.key, status: r.headStatus(pull) }));
+    const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engineId, reviewer: r.key, status: r.headStatus(pull) }));
     const authorWaiting = this.authorWaiting(pull.id);
     const fb = unseenFeedback(this.db, pull);
     const unseen = fb.reviews.length + fb.comments.length;

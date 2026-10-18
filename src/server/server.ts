@@ -155,7 +155,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   service.codex = new CodexReviewer(service, opts.codexBin ?? fromEnv('CODEX') ?? 'codex');
   service.claude = new ClaudeReviewer(service, opts.claudeBin ?? fromEnv('CLAUDE') ?? 'claude', opts.sandboxExec);
   // Custom reviewers run with Codex's and Claude's tools.
-  service.custom = new CustomReviewers(service, opts.reviewersDir ?? join(configDir(), 'reviewers'), { codex: service.codex.tool, claude: service.claude.tool });
+  service.custom = new CustomReviewers(service, opts.reviewersDir ?? join(configDir(), 'reviewers'), { codex: service.codex.engine, claude: service.claude.engine });
   service.custom.load();
   for (const reviewer of service.reviewerAgents()) reviewer.start();
   service.custom.start();
