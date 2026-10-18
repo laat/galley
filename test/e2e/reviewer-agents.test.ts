@@ -293,18 +293,13 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     assert.equal(call.session, null, 'not taken for part of a Claude Code session the server was started from');
     // The dependencies were installed first, in galley's own sandbox: network, and writes only to the checkout and the review's TMPDIR.
     const install = JSON.parse(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').at(-1)!);
-    assert.match(install.args[1], /^\(version 1\)\n\(deny default\)/);
-    assert.deepEqual(install.args.slice(2), [
-      `-DWRITABLE_0=${checkout}`,
-      `-DWRITABLE_1=${tmp}`,
-      `-DREAD_ONLY_0=${join(checkout, '.git')}`,
-      'pnpm',
-      'install',
-      '--frozen-lockfile',
-      '--ignore-scripts',
-      '--ignore-pnpmfile',
-      '--config.manage-package-manager-versions=false',
-    ]);
+    const pnpmInstall = ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile', '--config.manage-package-manager-versions=false'];
+    if (process.platform === 'linux') {
+      assert.deepEqual(install.args.slice(install.args.indexOf('--bind')), ['--bind', checkout, checkout, '--bind', tmp, tmp, '--ro-bind', join(checkout, '.git'), join(checkout, '.git'), '--', ...pnpmInstall]);
+    } else {
+      assert.match(install.args[1], /^\(version 1\)\n\(deny default\)/);
+      assert.deepEqual(install.args.slice(2), [`-DWRITABLE_0=${checkout}`, `-DWRITABLE_1=${tmp}`, `-DREAD_ONLY_0=${join(checkout, '.git')}`, ...pnpmInstall]);
+    }
     assert.equal(install.cwd, checkout);
     assert.equal(install.store, join(tmp, 'pnpm-store'));
     assert.match(call.prompt, /galley installed the dependencies with `pnpm install [^`]*`[^]*\n    Packages: \+1\n/);

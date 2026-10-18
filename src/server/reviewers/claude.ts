@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
 import { EngineError, lastLines, makeWritable, removeDir, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
-import { sandboxed } from './sandbox.ts';
+import { noSandbox, sandboxed } from './sandbox.ts';
 import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCall } from './transcript.ts';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -74,16 +74,20 @@ export class ClaudeEngine implements Engine {
   private bin: string;
   private sandboxExec: string | undefined;
 
-  /** `sandboxExec` stands in for macOS's sandbox-exec (in tests). */
+  /** `sandboxExec` stands in for macOS's sandbox-exec or Linux's bwrap (in tests). */
   constructor(bin = 'claude', sandboxExec?: string) {
     this.bin = bin;
     this.sandboxExec = sandboxExec;
   }
 
-  /** Claude Code can not run a command in its sandbox without the model, so the install gets galley's own (sandbox.ts). */
-  install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {
-    const wrapped = sandboxed(command, { writable: [o.checkout, o.tmp], readOnly: [join(o.checkout, '.git')] }, this.sandboxExec);
-    if (!wrapped) return Promise.reject(new Error(`galley has no sandbox to install in on ${process.platform}`));
+  /**
+   * Claude Code can not run a command in its sandbox without the model, so the install gets
+   * galley's own (sandbox.ts). Without one, it installs nothing and says what is missing.
+   */
+  async install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {
+    const missing = await noSandbox(this.sandboxExec);
+    if (missing) throw new Error(missing);
+    const wrapped = sandboxed(command, { writable: [o.checkout, o.tmp], readOnly: [join(o.checkout, '.git')] }, this.sandboxExec)!;
     return run(wrapped.bin, wrapped.args, { cwd: o.checkout, env: o.env, allowFail: true, timeoutMs: o.timeoutMs, signal: o.signal });
   }
 

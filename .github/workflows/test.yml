@@ -36,6 +36,14 @@ jobs:
           version: 10.34.5
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      # The install sandbox's tests run bubblewrap, which needs unprivileged user namespaces;
+      # Ubuntu restricts them with AppArmor. The last command fails the job when bwrap still can
+      # not make a sandbox, rather than let those tests skip.
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-all --share-net --ro-bind / / --dev /dev --proc /proc true
       # The tests run git, ssh-keygen and jq, which the runner image has. They bring their
       # own git config, gh, codex and claude.
       - run: pnpm test

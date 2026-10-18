@@ -13,6 +13,9 @@ title, description and commits are right, you publish it to GitHub.
 - [gh](https://cli.github.com), logged in, for publishing
 - jq, for `--jq`
 - For reviewer agents: Codex or Claude Code, installed and logged in
+- On Linux, for reviewer agents: unprivileged user namespaces, which Ubuntu 23.10 and later
+  restrict with AppArmor (`kernel.apparmor_restrict_unprivileged_userns`); for Claude,
+  bubblewrap and socat too
 
 ## Install
 
@@ -179,7 +182,9 @@ times to try signing again.
 - Secrets in a push are left to GitHub's push protection.
 - Reviewer agents run code from the pull request in a sandbox with no network, except while the
   dependencies install. Code that gets past the install's precautions could reach the API.
-  Turn off installing and running tests for repositories you do not trust.
+  Turn off installing and running tests for repositories you do not trust. Claude installs in
+  galley's own sandbox: sandbox-exec on macOS, bubblewrap on Linux. Where galley can not start
+  one, it installs nothing.
 - **Let Claude's tests listen on localhost** lets code in the pull request reach anything on
   localhost, the API included, and other machines on your network reach a server it starts
   that does not listen on 127.0.0.1 only. Turn it on only for code you trust.
