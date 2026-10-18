@@ -20,6 +20,7 @@ under `/api/repos/{owner}/{repo}`.
 ## Pull requests
 
 - `GET …/pulls?state=`: also `staged`, `published`, `done`, `merged` and `all`. `state` is `closed` once the pull request is done, merged on GitHub included.
+- `GET /api/pulls?state=`: every repository's pull requests in one list, as `…/pulls` lists them (latest update first), each with its `repository` as `GET /api/repos` has it.
 - `POST …/pulls`: `reviewers` (logins, or `{"login": "codex", "max_iterations": 3}`) turns those reviewer agents on: an engine (`codex`, `claude`), a name in settings, or a custom reviewer of the repository. `automatic_reviews: false` turns all of them off. Unknown logins come back in `ignored_reviewers`.
 - `DELETE …/pulls/{n}`: delete a staged pull request.
 - `POST …/pulls/{n}/publish`: push and open or update the pull request on GitHub. Body `{sign, draft, force, expected, during_review, during_conflict, auto_merge, merge_method, bring_back}`. 428 lists what the body must acknowledge in `acknowledge`; 412 when the pull request (`expected`, the page's fingerprint) or the merge method changed. A head that would bring back commits a rewrite on GitHub removed gets 409 with them in `bring_back`; with each of them (full SHAs) in the body's `bring_back`, it is pushed all the same, and the `published` event lists them in `brought_back`. Auto-publish never brings any back. The response adds `auto_merge_result`.
