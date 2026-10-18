@@ -121,7 +121,7 @@ test('the author agent publishes its own pull request', async (t) => {
 
   await t.test('and hears what to do when signing fails', async () => {
     const pr = await stage('feature/agent-signing');
-    // Signing fails as 1Password's op-ssh-sign does: a prompt nobody answered, then one the user denied.
+    // Signing fails as 1Password's op-ssh-sign does: a prompt nobody answered, then a key it does not have.
     const program = join(dir, 'failing-ssh-keygen');
     /** Make signing fail with `message`, or sign without one. */
     const fail = (message?: string) => {
@@ -139,10 +139,10 @@ test('the author agent publishes its own pull request', async (t) => {
         unanswered.stderr.includes(`Nothing was published. Turn on auto-publish with \`galley pr publish s${pr.n} -R acme/widgets --auto --auto-merge rebase\` and wait: it publishes once it can, and tries signing again over the next hour. Or tell the user.`),
         unanswered.stderr,
       );
-      fail('1Password: agent returned an error');
-      const denied = await cli(['pr', 'publish', pr.n]);
-      assert.equal(denied.code, 1);
-      assert.match(denied.stderr, /Nothing was published\. Trying again fails the same way: tell the user\.$/m);
+      fail('1Password: No SSH private key found for the specified public key');
+      const noKey = await cli(['pr', 'publish', pr.n]);
+      assert.equal(noKey.code, 1);
+      assert.match(noKey.stderr, /Nothing was published\. Trying again fails the same way: tell the user\.$/m);
       assert.equal(pr.created(), false);
 
       // Published, auto-publish is no more, and the next wait would push as the last publish did: the user's to decide.

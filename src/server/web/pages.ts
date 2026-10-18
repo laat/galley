@@ -1007,9 +1007,9 @@ function onRewritten(rewritten: GithubPush['rewritten']): Safe | '' {
 
 /**
  * After "signing failed": why, " (1Password prompt not answered)", and once it is not tried again,
- * how that ended: " after 3 retries", or ", in a way trying again can not get past". One that was
- * final at once for what galley could tell, such as a denied prompt, is only why: " (1Password
- * prompt denied)".
+ * how that ended: " after 3 retries", or ", in a way trying again can not get past". An older one
+ * final at once with a why, from when galley took a declined prompt for final, is only why:
+ * " (1Password prompt denied)".
  */
 function signingWhy(f: SigningFailure): Safe {
   if (!f.why) return html`, in a way trying again can not get past`;

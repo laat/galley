@@ -1,6 +1,5 @@
 // Signing that fails for now, as when nobody answers a 1Password prompt: auto-publish and the pushes
-// after publishing try again later, whether the agent still waits or not, up to the setting. A
-// prompt the user denied is final at once.
+// after publishing try again later, whether the agent still waits or not, up to the setting.
 import '../helpers/env.ts';
 import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
@@ -176,25 +175,34 @@ test('a signing that fails for now is tried again later, up to the limit', async
     }
   });
 
+  // A signing program says the same for a prompt the user declined as for one nobody answered.
   for (const [what, branch, message, why] of [
-    ['a denied 1Password prompt', 'feature/sign-denied', '1Password: agent returned an error', '1Password prompt denied'],
+    ["1Password's agent returning an error", 'feature/sign-1password-error', '1Password: agent returned an error', '1Password prompt not answered or declined'],
+    ["ssh-agent's refusal", 'feature/sign-agent-refused', "Couldn't sign message (agent): agent refused operation", 'SSH agent refused to sign: locked, or a prompt not answered'],
     ['a cancelled pinentry', 'feature/sign-cancelled', 'gpg: signing failed: Operation cancelled', 'passphrase prompt dismissed'],
   ]) {
-    await t.test(`${what} turns it off at once, and says what happened`, async () => {
+    await t.test(`${what} is tried again too, and turns it off after the limit`, async () => {
       const pr = await stage(branch);
       const signer = failSigning(1000, message);
+      server.service.signingRetryMs = 60_000;
       try {
+        await human('PUT', '/api/settings/publish', { signingRetries: 1 });
         await human('PUT', `${pr.base}/auto-publish`, {});
-        const r = await cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
-        assert.match(r.stdout, /ask the user to review it/);
+        await pr.waitUntil(async () => (await pr.events('auto_publish_retry')).length === 1, 'the first try fails');
+        const [retry] = await pr.events('auto_publish_retry');
+        assert.deepEqual({ ...retry.signing, next_at: undefined }, { why, failures: 1, retries: 1, next_at: undefined });
+        assert.ok((await human('GET', pr.base)).auto_publish);
+        assert.match(await pr.page(), new RegExp(`Signing failed <relative-time [^>]*>[^<]*</relative-time> \\(${why}\\); trying again at <time [^>]*>[^<]*</time>, retry 1 of 1`));
+        // Its time comes, and it fails again: the retries ran out.
+        due(pr.id, 'auto_publish_retry');
+        await until(async () => (await pr.events('auto_publish_failed')).length === 1, 'the retry fails');
+        await server.autoPublisher.settle(pr.id);
+        assert.equal(signer.tries(), 2);
         assert.equal((await human('GET', pr.base)).auto_publish, null);
-        assert.deepEqual(await pr.events('auto_publish_retry'), []);
-        assert.equal(signer.tries(), 1);
         const [failed] = await pr.events('auto_publish_failed');
-        assert.deepEqual(failed.signing, { why, final: true, failures: 1, retries: 3, next_at: null });
-        const page = await pr.page();
-        assert.match(page, new RegExp(`Signing failed \\(${why}\\), and it turned itself off\\. Publish by hand, or turn it on again\\.`));
-        assert.match(page, new RegExp(`Auto-publish failed and turned itself off <relative-time [^]*?</relative-time>: signing failed \\(${why}\\)\\s*<details`));
+        assert.deepEqual(failed.signing, { why, failures: 2, retries: 1, next_at: null });
+        assert.match(await pr.page(), new RegExp(`Signing failed \\(${why}\\) after 1 retry, and it turned itself off\\.`));
+        assert.equal(pr.created(), false);
       } finally {
         await restore();
       }
@@ -330,13 +338,20 @@ test('a signing that fails for now is tried again later, up to the limit', async
       const row = server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pr.id)!;
       assert.equal(server.service.pushReady(row), false);
 
-      // So is a prompt the user denied, and the page says so.
-      failSigning(1000, '1Password: agent returned an error');
+      // 1Password's agent returning an error, as for a prompt declined or nobody answered, is tried
+      // again, and final after the limit.
+      signer = failSigning(1000, '1Password: agent returned an error');
       pr.commit('export const pushed = 4;\n');
       assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /^Could not push [0-9a-f]{7} to GitHub: signing commit/m);
-      const denied = (await failedPushes()).at(-1);
-      assert.deepEqual([denied.retry, denied.signing], [false, { why: '1Password prompt denied', final: true, failures: 1, retries: 1, next_at: null }]);
-      assert.match(await pr.page(), /Signing failed \(1Password prompt denied\)\. agent was told, and it is not tried again/);
+      assert.deepEqual(
+        (await failedPushes()).slice(-2).map((p) => [p.retry, p.signing.why, p.signing.failures, p.signing.next_at === null]),
+        [
+          [true, '1Password prompt not answered or declined', 1, false],
+          [false, '1Password prompt not answered or declined', 2, true],
+        ],
+      );
+      assert.equal(signer.tries(), 2);
+      assert.match(await pr.page(), /Signing failed \(1Password prompt not answered or declined\) after 1 retry\. agent was told, and it is not tried again/);
     } finally {
       server.service.waitGraceMs = WAIT_GRACE_MS;
       await restore();
