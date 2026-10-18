@@ -129,3 +129,27 @@ test('links start with the public URL, and avatars on pages load from wherever t
   assert.match(page, / src="\/avatars\/agent\.svg"/);
   assert.doesNotMatch(page, /src="https?:\/\/[^"]*\/avatars\//);
 });
+
+test("the publish box's page-only check takes a page at the public URL, by its https Origin", async () => {
+  const json = { 'content-type': 'application/json' };
+  const registered = await (await fetch(`${server.url}/api/repos`, { method: 'POST', headers: json, body: JSON.stringify({ github: 'acme/repo' }) })).json();
+  git('checkout', '-qb', 'feature/sub', 'main');
+  writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+  git('commit', '-qam', 'Add sub');
+  git('push', '-q', registered.git_dir, 'feature/sub');
+  const api = `/api/repos/${registered.full_name}`;
+  const created = await (await fetch(`${server.url}${api}/pulls`, { method: 'POST', headers: { ...json, 'x-galley-actor': 'agent' }, body: JSON.stringify({ title: 'Add sub', head: 'feature/sub', base: 'main' }) })).json();
+  // Bringing back what a rewrite on GitHub removed, which only the user may do, from the page.
+  const publish = { sign: false, bring_back: [git('rev-parse', 'HEAD')], expected: 'a page loaded before the last change' };
+  const path = `${api}/pulls/${created.number}/publish`;
+  const host = 'galley.tailnet-1234.ts.net';
+  const plain = await send('POST', path, { host }, publish);
+  assert.equal(plain.status, 403, plain.text);
+  assert.match(JSON.parse(plain.text).message, /^only the user can bring back commits a rewrite on GitHub removed, from the publish box/);
+  // From the page there, it gets past that check, to the next one this request fails.
+  for (const h of [host, `127.0.0.1:${new URL(server.url).port}`]) {
+    const page = await send('POST', path, { host: h, origin: PUBLIC }, publish);
+    assert.equal(page.status, 412, page.text);
+    assert.match(JSON.parse(page.text).message, /^The pull request changed after this page was loaded/);
+  }
+});

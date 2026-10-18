@@ -49,6 +49,10 @@ FLAGS
       --open                 Open the web UI in the browser
       --now                  Stop at the first Ctrl-C or SIGTERM, interrupting running reviews,
                              instead of letting them finish for up to ${STOP_GRACE_MS / 60000} minutes
+      --check                Say whether this machine has what the server needs, and start nothing:
+                             git, and gh logged in with the workflow scope; and, marked ! when
+                             missing, what galley runs without: signing, codex and claude logged
+                             in, and on Linux bwrap and socat. Exits 1 when git or gh falls short
 `;
 
 /** The public URL as given (galley serve --public-url), as its origin: http(s)://host[:port], with no path. */
@@ -78,6 +82,7 @@ async function serve(args: string[]): Promise<number> {
         open: { type: 'boolean' },
         // Stop at the first signal, interrupting running reviews.
         now: { type: 'boolean' },
+        check: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -89,6 +94,12 @@ async function serve(args: string[]): Promise<number> {
   if (v.help) {
     out(SERVE_USAGE);
     return 0;
+  }
+  if (v.check) {
+    const { check } = await import('../server/check.ts');
+    const checks = await check();
+    for (const c of checks) out(`${c.ok ? '✓' : c.optional ? '!' : '✗'} ${c.text}`);
+    return checks.every((c) => c.ok || c.optional) ? 0 : 1;
   }
   const { startServer } = await import('../server/server.ts');
   const port = Number(v.port ?? fromEnv('PORT') ?? DEFAULT_PORT);

@@ -7,7 +7,7 @@ import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { dataDir } from '../../src/config.ts';
-import { attach, findNode, loginShellEnv, noAutostart, startServer, type Found } from '../server.ts';
+import { attach, awayText, findNode, loginShellEnv, noAutostart, startServer, type Found } from '../server.ts';
 
 const root = join(import.meta.dirname, '..', '..');
 
@@ -55,15 +55,49 @@ test('says why it started none, and what answers instead of galley', async () =>
   assert.deepEqual(await attach('http://localhost:1', { identify: () => Promise.reject(new Error('EPERM')), start: () => 'no' }), { found: 'none', why: 'no' });
 });
 
-test('starts no server where the CLI starts none', () => {
-  const was = process.env.GALLEY_NO_AUTOSTART;
+test('starts no server where the CLI starts none: on another computer, or on one where no galley server has run', () => {
+  const was = { home: process.env.GALLEY_HOME, noAutostart: process.env.GALLEY_NO_AUTOSTART };
+  const home = mkdtempSync(join(tmpdir(), 'galley-home-'));
   try {
+    process.env.GALLEY_HOME = home;
     process.env.GALLEY_NO_AUTOSTART = '1';
     assert.equal(noAutostart('http://localhost:24823'), 'GALLEY_NO_AUTOSTART is set');
     delete process.env.GALLEY_NO_AUTOSTART;
+    // A new computer, where GALLEY_URL was likely forgotten.
+    const never = "no galley server has run on this computer: run galley serve once, or set GALLEY_URL to your server's URL";
+    assert.equal(noAutostart('http://localhost:24823'), never);
+    assert.equal(awayText('http://localhost:24823', 'none', never, ''), `galley is not running at http://localhost:24823 (${never})`);
+    // One that has run a server: its database is in the data directory.
+    writeFileSync(join(home, 'galley.db'), '');
     assert.equal(noAutostart('http://localhost:24823'), null);
     assert.equal(noAutostart('http://127.0.0.1:4000'), null);
-    assert.equal(noAutostart('http://galley.example.com'), 'http://galley.example.com is not on this computer');
+    for (const base of ['http://galley.example.com', 'https://galley.tailnet-1234.ts.net']) assert.equal(noAutostart(base), `${base} is not on this computer`);
+  } finally {
+    Object.assign(process.env, { GALLEY_HOME: was.home, GALLEY_NO_AUTOSTART: was.noAutostart });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('attaches to a galley on another computer, and starts nothing there: it says when that galley does not answer', async () => {
+  const base = 'https://galley.tailnet-1234.ts.net';
+  const was = process.env.GALLEY_NO_AUTOSTART;
+  delete process.env.GALLEY_NO_AUTOSTART;
+  try {
+    let tried = 0;
+    // As the app starts one (main.ts ensure): only where noAutostart lets it.
+    const start = () => noAutostart(base) ?? (tried++, null);
+    assert.deepEqual(await attach(base, { identify: answering('galley').identify, start }), { found: 'galley' });
+    const starting = answering('starting', 'galley');
+    assert.deepEqual(await attach(base, { identify: starting.identify, start, everyMs: 1 }), { found: 'galley' });
+    assert.equal(starting.asked(), 2);
+    // Nothing answers (or tailscale serve answers for a galley that is down): it does not wait for a server nobody starts.
+    const none = answering('none');
+    const away = await attach(base, { identify: none.identify, start, everyMs: 1 });
+    assert.deepEqual(away, { found: 'none', why: `${base} is not on this computer` });
+    assert.equal(none.asked(), 1);
+    assert.equal(tried, 0);
+    assert.equal(awayText(base, away.found, away.why, ''), `galley does not answer at ${base}. Is the server running there, and can this computer reach it (is it on the tailnet)?`);
+    assert.equal(awayText(base, 'other', undefined, ''), `Another program answers at ${base}`);
   } finally {
     process.env.GALLEY_NO_AUTOSTART = was;
   }
