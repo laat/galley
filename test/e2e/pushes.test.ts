@@ -1,6 +1,6 @@
 // After publishing, the author waiting pushes each commit to GitHub.
 import '../helpers/env.ts';
-import { dir, git, human, remote, server, startHarness } from '../helpers/harness.ts';
+import { dir, git, human, inClone, remote, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { published } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
@@ -92,6 +92,8 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
       env: { ...process.env, GIT_AUTHOR_NAME: 'Someone', GIT_AUTHOR_EMAIL: 'someone@example.com', GIT_COMMITTER_NAME: 'Someone', GIT_COMMITTER_EMAIL: 'someone@example.com' },
     }).trim();
     execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/push-kept', theirs]);
+    // galley has fetched it, as after a push GitHub refused.
+    inClone('fetch', '-q', remote, '+refs/heads/feature/push-kept:refs/remotes/origin/feature/push-kept');
     // The agent brings it in and commits on top: signing copies the agent's commit, not theirs.
     git('fetch', '-q', remote, '+refs/heads/feature/push-kept:refs/remotes/origin/feature/push-kept');
     git('reset', '-q', '--hard', 'origin/feature/push-kept');

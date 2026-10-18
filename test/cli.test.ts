@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'node:http';
 import { connect, createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -233,10 +233,10 @@ test('the CLI goes through the proxy the environment names, to a galley on anoth
   assert.match(gateway.stderr, /^galley does not answer at http:\/\/down\.example:443\. Is the server running there/);
 });
 
-test('a pull request named by its URL in a checkout of its repository registers the checkout by its GitHub name alone, and goes on when galley registers by path', async (t) => {
+test('a checkout is registered by the GitHub repository its remote names, once per command, also for a pull request named by its URL; one not on GitHub is refused', async (t) => {
   const posted: unknown[] = [];
-  // What galley answers a registration by GitHub name alone: a galley that registers by path refuses it.
-  let byName: [number, unknown] = [422, { message: 'this galley registers repositories by path: path is required' }];
+  // What galley answers a registration: at first without a clone, so that nothing is sent.
+  let answer: [number, unknown] = [200, { owner: { login: 'acme' }, name: 'widgets' }];
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (d) => (body += d));
@@ -244,9 +244,8 @@ test('a pull request named by its URL in a checkout of its repository registers 
       if (req.url === '/api/meta') return res.end(JSON.stringify(META));
       const json = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
       if (req.url === '/api/repos') {
-        const asked = JSON.parse(body);
-        posted.push(asked);
-        return asked.path ? json(200, { owner: { login: 'acme' }, name: 'widgets' }) : json(...byName);
+        posted.push(JSON.parse(body));
+        return json(...answer);
       }
       json(200, { number: 3 });
     });
@@ -263,17 +262,29 @@ test('a pull request named by its URL in a checkout of its repository registers 
     env: { ...process.env, GALLEY_URL: url, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '1' },
   });
   assert.deepEqual(JSON.parse(stdout), { number: 3 });
-  assert.deepEqual(posted, [{ github: 'acme/widgets' }]);
-  // A registration by path at the same time, for a pull request named by number in the same wait, goes through.
+  // With the path, for a server older than the CLI, which registers by path.
+  assert.deepEqual(posted, [{ github: 'acme/widgets', path: realpathSync(checkout) }]);
   const saved = { ...process.env };
   process.env.GALLEY_ACTOR = 'agent';
   try {
+    // For a pull request named by its URL and one by its number in the same wait: one registration, with the clone's git URL where the CLI reaches galley.
+    answer = [200, { owner: { login: 'acme' }, name: 'widgets', git_url: 'http://galley.example/git/acme/widgets.git' }];
     const client = new Client(url);
     const [, repo] = await Promise.all([client.checkoutOf(checkout, { owner: 'acme', name: 'widgets' }), client.repoFor(checkout)]);
     assert.deepEqual([repo.owner, repo.name], ['acme', 'widgets']);
-    // Any other answer is an error.
-    byName = [503, { message: 'galley is stopping' }];
+    assert.equal(posted.length, 2);
+    assert.equal((await client.registered(checkout))?.gitUrl, `${url}/git/acme/widgets.git`);
+    // A failed one is an error.
+    answer = [503, { message: 'galley is stopping' }];
     await assert.rejects(new Client(url).checkoutOf(checkout, { owner: 'acme', name: 'widgets' }), /galley is stopping/);
+    // A checkout whose remote is not on GitHub, or that has none, is not registered: galley stages GitHub repositories only.
+    await promisify(execFile)('git', ['-C', checkout, 'remote', 'set-url', 'origin', 'https://gitlab.example/acme/widgets.git']);
+    await assert.rejects(new Client(url).repoFor(checkout), /^Error: galley stages pull requests of GitHub repositories only, and the remote origin of this checkout is not on github\.com: https:\/\/gitlab\.example\/acme\/widgets\.git$/);
+    await promisify(execFile)('git', ['-C', checkout, 'remote', 'remove', 'origin']);
+    await assert.rejects(new Client(url).repoFor(checkout), /this checkout has no remote$/);
+    // For a pull request named by its URL, such a checkout is no checkout of its repository: the command goes on without it.
+    await new Client(url).checkoutOf(checkout, { owner: 'acme', name: 'widgets' });
+    assert.equal(posted.length, 3);
   } finally {
     process.env = saved;
   }

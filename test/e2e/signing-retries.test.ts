@@ -1,7 +1,7 @@
 // Signing that fails for now, as when nobody answers a 1Password prompt: auto-publish and the pushes
 // after publishing try again later, whether the agent still waits or not, up to the setting.
 import '../helpers/env.ts';
-import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -39,8 +39,9 @@ test('a signing that fails for now is tried again later, up to the limit', async
         git('commit', '-qam', `Change ${file}`);
         return git('rev-parse', '--short=7', 'HEAD');
       },
-      /** Wait as the agent until `done`, then stop, as an agent whose session ended. */
+      /** Wait as the agent until `done`, then stop, as an agent whose session ended; its branch sent first, as the CLI sends it. */
       waitUntil: async (done: () => Promise<unknown>, what: string) => {
+        await send(branch);
         const ctx = await server.service.ctx('acme', 'widgets', number);
         const stop = new AbortController();
         const waiting = server.service.wait(ctx, server.service.db.actorById(ctx.pull.author_id), 20_000, stop.signal);
@@ -73,7 +74,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
       `#!/bin/sh\nif [ "$1 $2" = "-Y sign" ]; then\n  n=$(( $(cat "${count}" 2>/dev/null || echo 0) + 1 ))\n  echo $n > "${count}"\n  if [ $n -le ${times} ]; then echo "${message}" >&2; exit 1; fi\n${wait}fi\nexec ssh-keygen "$@"\n`,
     );
     chmodSync(program, 0o755);
-    git('config', 'gpg.ssh.program', program);
+    inClone('config', 'gpg.ssh.program', program);
     return {
       tries: () => (existsSync(count) ? Number(readFileSync(count, 'utf8')) : 0),
       started: () => existsSync(`${gate}.started`),
@@ -89,7 +90,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
   const restore = async () => {
     // A gated signer still waiting goes on, and fails or signs a commit nobody waits for.
     writeFileSync(join(dir, 'sign-gate'), '');
-    git('config', '--unset', 'gpg.ssh.program');
+    inClone('config', '--unset', 'gpg.ssh.program');
     server.service.signingRetryMs = SIGNING_RETRY_MS;
     await human('PUT', '/api/settings/publish', { signingRetries: 3 });
   };

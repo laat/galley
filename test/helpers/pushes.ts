@@ -43,20 +43,6 @@ export const published = async (branch: string, opts: { sign?: boolean } = {}) =
   };
 };
 
-/** Runs `fn` with galley's fetches from GitHub, over https, going to the bare repository. */
-export const fetchingFromBare = async (fn: () => Promise<void>) => {
-  // The remote's URL is the ssh one meanwhile, so `git remote get-url` still gives GitHub's; pushes go to the bare repository too.
-  git('remote', 'set-url', 'origin', 'git@github.com:acme/widgets.git');
-  git('config', 'remote.origin.pushurl', remote);
-  git('config', `url.${remote}.insteadOf`, 'https://github.com/acme/widgets.git');
-  try {
-    await fn();
-  } finally {
-    git('config', '--unset', `url.${remote}.insteadOf`);
-    git('config', '--unset', 'remote.origin.pushurl');
-    git('remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git');
-  }
-};
 /** A commit with `at`'s tree on top of `parent` on GitHub, made there (a suggestion committed, a rebase); its SHA. */
 export const madeOnGithub = (at: string, parent: string, message: string) => {
   const tree = execFileSync('git', ['--git-dir', remote, 'rev-parse', `${at}^{tree}`], { encoding: 'utf8' }).trim();

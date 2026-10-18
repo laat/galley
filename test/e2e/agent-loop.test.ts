@@ -2,7 +2,7 @@
 // through the API (as the web UI does), the agent rewrites history, and the reviewer publishes.
 // And what pages show beside it: Markdown, pasted images, the repository at a commit, the file tree.
 import '../helpers/env.ts';
-import { BIN, cli, digitCommit, dir, exec, git, handedOver, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
+import { BIN, cli, digitCommit, dir, exec, git, handedOver, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -124,8 +124,8 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(reviewThreads[0].line, 9);
     assert.equal(reviewThreads[0].originalLine, 6);
     assert.equal(reviewThreads[0].isOutdated, false);
-    // The old head is kept reachable for the revision history.
-    const pins = git('for-each-ref', '--format=%(refname)', `refs/galley/${server.service.db.instance}/pull/1/`);
+    // The old head is kept reachable for the revision history, in galley's clone.
+    const pins = inClone('for-each-ref', '--format=%(refname)', `refs/galley/${server.service.db.instance}/pull/1/`);
     assert.deepEqual(pins.split('\n'), [1, 2].map((seq) => `refs/galley/${server.service.db.instance}/pull/1/${seq}`));
     const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
     assert.ok(timeline.some((e: any) => e.event === 'pushed' && e.forced === true));
@@ -259,11 +259,12 @@ test('the agent loop, from staging to publishing', async (t) => {
     writeFileSync(join(repo, 'README.md'), '# widgets\n');
     git('add', 'README.md');
     git('commit', '-qm', 'Add a readme');
+    await send('feature/mul');
     await human('POST', '/api/repos/acme/widgets/pulls/1/publish', {});
     const after = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
     assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', `${after}^`], { encoding: 'utf8' }).trim(), before);
     // The signed copies are kept from garbage collection: the ref moves from the earlier ones.
-    assert.equal(git('rev-parse', `refs/galley/${server.service.db.instance}/pull/1/published`), after);
+    assert.equal(inClone('rev-parse', `refs/galley/${server.service.db.instance}/pull/1/published`), after);
     const timeline = await human('GET', '/api/repos/acme/widgets/issues/1/timeline');
     assert.equal(timeline.filter((e: any) => e.event === 'published').at(-1).signed, 1);
     // The signed copies count as the staged commits: nothing is left to publish.
@@ -273,11 +274,12 @@ test('the agent loop, from staging to publishing', async (t) => {
 
   await t.test('a rewritten branch needs force to publish again', async () => {
     git('commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Reworded.');
+    await send('feature/mul');
     await assert.rejects(human('POST', '/api/repos/acme/widgets/pulls/1/publish', {}), /409|rejected|git push failed/);
     // A published ref at a commit galley did not sign is not its to move.
     const published = `refs/galley/${server.service.db.instance}/pull/1/published`;
     const unsigned = git('rev-parse', 'main');
-    git('update-ref', published, unsigned);
+    inClone('update-ref', published, unsigned);
     const errors = mock.method(console, 'error', () => {});
     try {
       await human('POST', '/api/repos/acme/widgets/pulls/1/publish', { force: true });
@@ -285,10 +287,10 @@ test('the agent loop, from staging to publishing', async (t) => {
       errors.mock.restore();
     }
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^pr edit https:\/\/github\.com\/acme\/widgets\/pull\/7 --title/m);
-    assert.equal(git('rev-parse', published), unsigned);
+    assert.equal(inClone('rev-parse', published), unsigned);
     const logged = errors.mock.calls.map((c) => c.arguments.join(' '));
     assert.ok(logged.some((line) => line.startsWith(`left ${published} alone in `) && line.endsWith(`it points at ${unsigned}, which galley did not sign`)), logged.join('\n'));
-    git('update-ref', published, execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim());
+    inClone('update-ref', published, execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim());
   });
 
   await t.test('force-publishing never overwrites commits added on GitHub', async () => {
@@ -302,6 +304,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/feature/mul', theirs]);
     // ... while the agent rewrites history locally.
     git('commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Reworded again.');
+    await send('feature/mul');
     await assert.rejects(human('POST', '/api/repos/acme/widgets/pulls/1/publish', { force: true }), /changed since it was last published/);
     assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim(), theirs);
   });
@@ -336,16 +339,11 @@ test('the agent loop, from staging to publishing', async (t) => {
       assert.doesNotMatch(page, /UnderlineNav|github\.com\/acme\/widgets\/(pulls|issues)/, path);
       assert.match(page, /<nav class="app-header-context">[^]*?<a href="\/acme\/widgets"><strong>acme\/widgets<\/strong><\/a>/, path);
     }
-    // Without a GitHub remote, no link; with one added later, it names the repository there, and
-    // the repository takes its name.
-    const elsewhere = join(dir, 'elsewhere');
-    execFileSync('git', ['init', '-q', '-b', 'main', elsewhere]);
-    execFileSync('git', ['-C', elsewhere, 'remote', 'add', 'origin', 'https://gitlab.com/acme/elsewhere.git']);
-    const local = await human('POST', '/api/repos', { path: elsewhere });
-    assert.doesNotMatch(await (await fetch(`${server.url}/${local.full_name}`)).text(), /page-title-github/);
-    execFileSync('git', ['-C', elsewhere, 'remote', 'set-url', 'origin', 'https://github.com/acme/moved.git']);
-    assert.equal((await human('POST', '/api/repos', { path: elsewhere })).full_name, 'acme/moved');
-    assert.match(await (await fetch(`${server.url}/${local.full_name}`)).text(), link('acme/moved'));
+    // One registered by path before galley kept clones, without a GitHub remote: no link.
+    server.service.db.insert('repos', { git_dir: join(dir, 'elsewhere', '.git'), work_dir: join(dir, 'elsewhere'), owner: 'local', name: 'elsewhere', remote: 'origin', github_slug: null, created_at: new Date().toISOString() });
+    const local = await (await fetch(`${server.url}/local/elsewhere`)).text();
+    assert.match(local, /<h1 class="page-title">/);
+    assert.doesNotMatch(local, /page-title-github/);
   });
 
   await t.test('web pages render', async () => {
@@ -373,6 +371,8 @@ test('Markdown links issues, mentions and commits the way GitHub does', async ()
   git('add', 'links.js');
   git('commit', '-qm', 'First try');
   const replaced = git('rev-parse', 'HEAD');
+  // Sent before the amend, so galley has it.
+  await send('feature/links');
   git('commit', '-q', '--amend', '-m', 'Add links.js');
   const own = git('rev-parse', 'HEAD');
   const pushed = git('rev-parse', 'origin/main');
@@ -800,14 +800,15 @@ test('browsing the repository at a commit of a pull request', async (t) => {
         (r) => r.stdout.trim(),
         (e) => `exit ${e.code}: ${e.stderr.trim()}`,
       );
-    // Without --commit, HEAD of that repository's checkout.
-    const now = git('rev-parse', 'HEAD');
+    // Without --commit, the default branch, as on GitHub.
+    const main = inClone('rev-parse', 'refs/remotes/origin/main');
     for (const cwd of [other, dir]) {
-      assert.equal(await browseFrom(cwd, '-R', 'acme/widgets', 'dir with space/notes.md:2'), `${server.url}/acme/widgets/blob/${now}/dir%20with%20space/notes.md?plain=1#L2`, cwd);
+      assert.equal(await browseFrom(cwd, '-R', 'acme/widgets', 'math.js:2'), `${server.url}/acme/widgets/blob/${main}/math.js#L2`, cwd);
     }
+    const now = git('rev-parse', 'HEAD');
     assert.equal(await browseFrom(other, '-R', 'acme/widgets', 'long.js:3', '--commit', head.slice(0, 7)), `${server.url}/acme/widgets/blob/${head}/long.js#L3`);
     assert.equal(await browseFrom(other, '--repo=acme/widgets', '-b', 'browse-base', 'doomed.txt'), `${server.url}/acme/widgets/blob/${base}/doomed.txt`);
-    assert.equal(await browseFrom(other, '-R', 'acme/widgets', '/dir with space/'), `${server.url}/acme/widgets/tree/${now}/dir%20with%20space`);
+    assert.equal(await browseFrom(other, '-R', 'acme/widgets', '/dir with space/', '-c', now), `${server.url}/acme/widgets/tree/${now}/dir%20with%20space`);
     assert.match(await browseFrom(other, '-R', 'acme/widgets', 'nope.js'), /^exit 1: nope\.js does not exist at [0-9a-f]{7}$/);
     assert.match(await browseFrom(other, '-R', 'acme/widgets', '-c', 'nope', 'long.js'), /^exit 1: no commit "nope" in acme\/widgets$/);
 
@@ -879,6 +880,7 @@ test('the file tree counts the unresolved conversations on each file in the diff
   await human('DELETE', `${api}/threads/${resolved.id}/resolved`);
   writeFileSync(join(repo, 'two.js'), five('two', (i) => (i === 1 ? 'export const two1 = -1;' : i === 5 ? 'export const two5 = -5;' : null)));
   git('commit', '-qam', 'Negate two5');
+  await send('feature/tree');
   assert.deepEqual(await tree(), { 'one.js': [resolved.id, lower.id, about.id], 'two.js': [] });
   assert.deepEqual(await tree('?diff=split'), { 'one.js': [resolved.id, lower.id, about.id], 'two.js': [] });
 });

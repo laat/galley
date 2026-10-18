@@ -174,13 +174,13 @@ export function api(s: Service): Hono {
 
   // ------------------------------------------------------------------ repos
 
-  // `github` (an extension): the repository's GitHub owner/name, which a server that keeps clones
-  // of its own (GALLEY_CLONES) registers it by. Otherwise `path`, on the server's machine.
+  // `github` (an extension): the repository's GitHub owner/name, which galley keeps a clone of. The
+  // CLI sends `path` too, for a server older than it, which registers by path; a CLI from before
+  // galley kept clones sends only that.
   app.post('/repos', async (c) => {
     const { path, github } = await body(c);
-    if (github && s.clones) return c.json(repoJson(s, await s.registerGithub(String(github))));
-    if (!path) throw new HttpError(422, github ? 'this galley registers repositories by path: path is required' : 'path is required');
-    return c.json(repoJson(s, await s.registerRepo(String(path))));
+    if (!github) throw new HttpError(422, path ? 'galley registers a repository by its GitHub owner/name (github), not by path: update the CLI' : 'github is required: the GitHub owner/name of the repository');
+    return c.json(repoJson(s, await s.registerGithub(String(github))));
   });
   app.get('/repos', (c) => c.json(s.repos().map((r) => repoJson(s, r))));
   app.get('/repos/:owner/:repo', (c) => c.json(repoJson(s, s.repo(c.req.param('owner'), c.req.param('repo')))));

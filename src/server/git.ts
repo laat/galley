@@ -592,13 +592,4 @@ export class Repo {
     if (r.code === 0 || (await this.resolve(ref)) === to) return null;
     return r.stderr.trim();
   }
-
-  async remoteUrl(remote: string): Promise<string | null> {
-    const r = await this.run(['remote', 'get-url', remote], { allowFail: true });
-    return r.code === 0 ? r.stdout.trim() : null;
-  }
-
-  async remotes(): Promise<string[]> {
-    return (await this.out(['remote'])).split('\n').filter(Boolean);
-  }
 }

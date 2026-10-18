@@ -13,8 +13,9 @@ export interface Actor {
 
 export interface RepoRow {
   id: number;
-  /** The user's repository's (common) git directory, or for galley's own clone of a GitHub repository, its path in the data directory, repos/<id>.git (Service.registerGithub). */
+  /** galley's own clone of the GitHub repository: its path in the data directory, repos/<id>.git (Service.registerGithub). For one registered by path before galley kept clones, and left where it was (Service.migrateRepos), the user's repository's (common) git directory. */
   git_dir: string;
+  /** The working tree of one registered by path; null for a clone. */
   work_dir: string | null;
   owner: string;
   name: string;
@@ -174,7 +175,8 @@ CREATE TABLE IF NOT EXISTS repos (
   created_at TEXT NOT NULL,
   UNIQUE (owner, name)
 );
--- The keys repositories had in URLs before their GitHub slug changed (Service.followSlug).
+-- The keys repositories had in URLs before their GitHub slug changed, as galley followed it in the
+-- remotes of repositories registered by path.
 CREATE TABLE IF NOT EXISTS repo_aliases (
   owner TEXT NOT NULL,
   name TEXT NOT NULL,

@@ -1,7 +1,7 @@
 // After publishing, a commit the author waits with is not pushed, or not yet: GitHub declines it,
 // can not be asked or says it was merged, or the author has feedback to read first.
 import '../helpers/env.ts';
-import { dir, git, human, remote, server, startHarness } from '../helpers/harness.ts';
+import { dir, git, human, remote, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { published } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
@@ -72,6 +72,7 @@ test('after publishing, a commit is not pushed, or not yet, when GitHub declines
     const pr = await published('feature/push-held');
     const before = pr.tip().sha;
     const sha = pr.commit('export const held = 1;\n');
+    await send('feature/push-held');
     // The reviewer asks Codex and Claude to look at the new commit. Codex comments; Claude is still at it.
     const gate = join(dir, 'push-held-gate');
     await withFakes({

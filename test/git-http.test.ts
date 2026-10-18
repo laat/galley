@@ -1,7 +1,7 @@
 // galley's git endpoint for its clones (src/server/git-http.ts): git's smart HTTP at
 // /git/<owner>/<name>.git, and what its pre-receive hook takes (src/server/receive-hook.ts).
 import './helpers/env.ts';
-import { dir, git, gitToGalley, human, repo, scratchRepo, server, startHarness } from './helpers/harness.ts';
+import { dir, git, gitToGalley, human, repo, server, startHarness } from './helpers/harness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { Db } from '../src/server/db.ts';
 import { Service } from '../src/server/service.ts';
 
-startHarness({ clones: true });
+startHarness();
 
 /** galley's clone of acme/widgets, registered by its GitHub name, and git in it. */
 async function widgets() {
@@ -82,7 +82,9 @@ test('galley serves its clone of a repository over git smart HTTP, and only bran
 
 test('the git endpoint answers only for galley’s clones, and only to requests addressed to galley', async () => {
   const { url } = await widgets();
-  const { fullName } = await scratchRepo('by-path');
+  // One registered by path before galley kept clones, and left where it was: gone.
+  const fullName = 'acme/by-path';
+  server.service.db.insert('repos', { git_dir: join(dir, 'by-path', '.git'), work_dir: join(dir, 'by-path'), owner: 'acme', name: 'by-path', remote: 'origin', github_slug: null, created_at: new Date().toISOString() });
   const smart = '/info/refs?service=git-upload-pack';
   const git404 = { status: 404, type: 'text/plain; charset=UTF-8', text: 'Not Found' };
   const host = `127.0.0.1:${new URL(server.url).port}`;

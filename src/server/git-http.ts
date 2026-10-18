@@ -2,8 +2,8 @@
 // CLI pushes the author's branches there, and fetches what galley fetched from GitHub. `git
 // http-backend` serves it as a CGI program, streamed both ways, except the answer to a push, which
 // comes once the repository's pull requests are synced with it (Service.received). Pushes go
-// through galley's pre-receive hook (receive-hook.ts). Repositories registered by path have no git
-// endpoint: galley reads them where they are.
+// through galley's pre-receive hook (receive-hook.ts). A repository registered by path before
+// galley kept clones, and left where it was (Service.migrateRepos), has no git endpoint.
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';

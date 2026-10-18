@@ -1,10 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FETCH_ENV, ghCredentials, Repo, run, type Commit, type RawCommit, type RunResult } from './git.ts';
-import { githubSlug } from '../config.ts';
 import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withContext, type FileDiff } from './diff.ts';
 import type { CodexReviewer } from './reviewers/codex.ts';
 import type { ClaudeReviewer } from './reviewers/claude.ts';
@@ -551,16 +550,12 @@ interface GraphqlAnswer {
 }
 
 /**
- * Where galley keeps refs in the repositories it stages from. Each server has a namespace of its
- * own under it (Db.instance), so servers staging from one repository never touch each other's.
- * A database pins its revisions in its namespace when it gets its id (Service.pinRevisions).
+ * Where galley keeps refs in its clones. Each database has a namespace of its own under it
+ * (Db.instance), from when servers staged from the user's repositories, where several could. A
+ * database pins its revisions in its namespace when it gets its id (Service.pinRevisions): a copy
+ * of the data directory does so in its copies of the clones.
  */
 export const REFS = 'refs/galley';
-
-/** The key a repository gets in URLs: the GitHub owner/name of its remote, or local/<dir> without one. */
-function repoKey(slug: string | null, gitDir: string, workDir: string | null): [string, string] {
-  return slug ? (slug.split('/') as [string, string]) : ['local', basename(workDir ?? gitDir.replace(/\.git$/, ''))];
-}
 
 export interface ServiceOptions {
   db: Db;
@@ -571,8 +566,6 @@ export interface ServiceOptions {
   fetchEveryMs?: number;
   /** The server's data directory, where galley keeps its own clones of GitHub repositories, in repos/ (registerGithub). */
   dataDir?: string;
-  /** Whether a repository registered by its GitHub owner/name gets a clone of galley's own (GALLEY_CLONES); without, repositories are registered by path. */
-  clones?: boolean;
   /** Where galley fetches a GitHub repository from and pushes it to, for its clones: GitHub's https URL unless given (tests give a local repository). */
   githubUrl?: (slug: string) => string;
 }
@@ -609,8 +602,6 @@ export class Service {
   fetchEveryMs: number;
   /** The data directory, which galley's clones are in (registerGithub); null for a service that keeps none. */
   dataDir: string | null;
-  /** Whether repositories registered by their GitHub owner/name get a clone of galley's own (registerGithub). */
-  clones: boolean;
   /** Where galley fetches a GitHub repository from, by its owner/name, and where its clones push to. */
   githubUrl: (slug: string) => string;
 
@@ -621,7 +612,6 @@ export class Service {
     this.fetchEveryMs = opts.fetchEveryMs ?? FETCH_EVERY_MS;
     // Absolute, since git runs elsewhere: with another cwd, and hooks in the clone (git-http.ts).
     this.dataDir = opts.dataDir ? resolve(opts.dataDir) : null;
-    this.clones = opts.clones ?? false;
     this.githubUrl = opts.githubUrl ?? ((slug) => `https://github.com/${slug}.git`);
     this.viewerLogin = opts.viewerLogin ?? this.db.getMeta('viewer_login') ?? process.env.USER ?? 'you';
     this.bus.setMaxListeners(0);
@@ -947,90 +937,43 @@ export class Service {
   // ----------------------------------------------------------------- repos
 
   /**
-   * Register the repository at `path`, keyed by its common git dir so its worktrees share one
-   * entry. Its name in URLs is the GitHub owner/name of its remote, or local/<dir> without one.
+   * Move each repository registered by path, from before galley kept clones of its own, into a
+   * clone of galley's own (createClone), with what galley has in it: at start, before the pins
+   * and the first page. Its pull requests keep their numbers and pages. galley keeps one clone of
+   * each GitHub repository, which the CLI registers by its name: of several checkouts of one
+   * (owner/name, owner/name-2), the first registered whose path is there moves. One whose path is
+   * gone, whose remote names no GitHub repository, or whose GitHub repository has its clone
+   * already, stays where it was and is logged, at every start: its pages show what the database
+   * and the repository still have, and galley writes nothing there (ownClone). A move that failed
+   * is tried again at the next start, or when the CLI registers the GitHub repository
+   * (registerGithub), which also clones one whose path is gone.
    */
-  async registerRepo(path: string): Promise<RepoRow> {
-    const r = await run('git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { allowFail: true });
-    if (r.code !== 0) throw new HttpError(422, `not a git repository: ${path}`);
-    const gitDir = r.stdout.trim();
-    const workDir = basename(gitDir) === '.git' ? dirname(gitDir) : null;
-    const { remote, slug } = await this.remoteOf(new Repo(gitDir));
-
-    const existing = this.db.get<RepoRow>('SELECT * FROM repos WHERE git_dir = ?', gitDir);
-    if (existing) {
-      if (existing.remote !== remote || existing.work_dir !== workDir) this.db.update('repos', existing.id, { remote, work_dir: workDir });
-      this.followSlug(existing, slug);
-      return this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', existing.id)!;
+  async migrateRepos(): Promise<void> {
+    if (!this.dataDir) return;
+    for (const repo of this.db.all<RepoRow>('SELECT * FROM repos ORDER BY id')) {
+      if (this.isClone(repo)) continue;
+      const which = `${repo.owner}/${repo.name} at ${repo.git_dir}`;
+      const cloned = repo.github_slug ? this.clonedAs(repo.github_slug) : undefined;
+      if (!repo.github_slug) console.error(`left ${which} where it is: its remote names no GitHub repository, and galley keeps clones of GitHub repositories only`);
+      else if (!existsSync(repo.git_dir)) console.error(`left ${which} where it was: it is gone`);
+      else if (cloned) console.error(`left ${which} where it is: galley keeps one clone of ${repo.github_slug}, ${cloned.owner}/${cloned.name}`);
+      else await this.createClone(repo.github_slug, repo).catch((e: Error) => console.error(`could not move ${which} into a clone of galley's own: ${e.message}`));
     }
-
-    const [owner, name] = this.freeKey(repoKey(slug, gitDir, workDir), null);
-    const id = this.db.transaction(() => {
-      // A repository's own key wins over another's old one.
-      this.db.run('DELETE FROM repo_aliases WHERE owner = ? AND name = ?', owner, name);
-      return this.db.insert('repos', { git_dir: gitDir, work_dir: workDir, owner, name, remote, github_slug: slug, created_at: now() });
-    });
-    return this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', id)!;
   }
 
-  /** The remote a repository follows, origin or else its first, and the GitHub repository it names. */
-  private async remoteOf(git: Repo): Promise<{ remote: string; slug: string | null }> {
-    const remotes = await git.remotes();
-    const remote = remotes.includes('origin') ? 'origin' : (remotes[0] ?? 'origin');
-    return { remote, slug: githubSlug(await git.remoteUrl(remote)) };
-  }
-
-  /**
-   * Record the GitHub repository that a registered one's remote names now. When it is another
-   * one than the key names (renamed or transferred there, or added to a local repository), the
-   * key follows, as registering the repository now would give it, and the old one stays an
-   * alias: its pages redirect, and its API paths still work.
-   */
-  private followSlug(repo: RepoRow, slug: string | null): void {
-    if (slug !== repo.github_slug) this.db.update('repos', repo.id, { github_slug: slug });
-    // Without a GitHub repository to follow, the key stays.
-    if (!slug) return;
-    const [owner, base] = repoKey(slug, repo.git_dir, repo.work_dir);
-    // A number it got because another repository had the name stays while the remote names the
-    // same repository and the name is the other's, or its old one. A name ending in digits, or
-    // one kept from before keys followed the remote, is no such number.
-    const numbered =
-      slug === repo.github_slug &&
-      repo.name.startsWith(base) &&
-      /^-\d+$/.test(repo.name.slice(base.length)) &&
-      !!this.db.get('SELECT 1 FROM repos WHERE owner = ? AND name = ? AND id != ? UNION ALL SELECT 1 FROM repo_aliases WHERE owner = ? AND name = ? AND repo_id != ?', owner, base, repo.id, owner, base, repo.id);
-    if (repo.owner === owner && (repo.name === base || numbered)) return;
-    const [, name] = this.freeKey([owner, base], repo.id);
-    this.db.transaction(() => {
-      this.db.run('DELETE FROM repo_aliases WHERE owner = ? AND name = ?', owner, name);
-      this.db.run('INSERT OR REPLACE INTO repo_aliases (owner, name, repo_id) VALUES (?, ?, ?)', repo.owner, repo.name, repo.id);
-      this.db.update('repos', repo.id, { owner, name });
-    });
-    this.emitSystem(null, 'repo_renamed', 'git');
-  }
-
-  /** Follow each repository's remote to the GitHub repository it names now (followSlug), as registering it again would. galley's clones follow none. */
-  async followRemotes(): Promise<void> {
-    for (const repo of this.repos()) {
-      if (this.isClone(repo) || !existsSync(repo.git_dir)) continue;
-      try {
-        const { remote, slug } = await this.remoteOf(this.git(repo));
-        if (remote !== repo.remote) this.db.update('repos', repo.id, { remote });
-        this.followSlug(repo, slug);
-      } catch (e) {
-        console.error(`could not read the remotes of ${repo.git_dir}:`, e);
-      }
-    }
+  /** The repository galley keeps its clone of `slug` (owner/name, in any case) in, if any. */
+  private clonedAs(slug: string): RepoRow | undefined {
+    return this.db.all<RepoRow>('SELECT * FROM repos WHERE github_slug = ? COLLATE NOCASE ORDER BY id', slug).find((r) => this.isClone(r));
   }
 
   /** Registrations by GitHub owner/name under way, by the name in lowercase, so registering one twice at once clones it once. */
   private registering = new Map<string, Promise<RepoRow>>();
 
   /**
-   * Register the repository GitHub has as `slug` (owner/name), by that name, as the CLI does from
-   * another machine: the one registered already with it as its GitHub repository (one registered by
-   * path stays so), or under a name it had before (followSlug), or else a new one in a clone of
-   * galley's own (createClone). Registering it twice at once clones it once.
+   * Register the repository GitHub has as `slug` (owner/name), by that name, as the CLI does: the
+   * one registered already with it as its GitHub repository, or under a name it had before, or
+   * else a new one in a clone of galley's own (createClone). Registering it twice at once clones it
+   * once.
    */
   async registerGithub(slug: string): Promise<RepoRow> {
     const m = slug.match(/^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?$/);
@@ -1048,24 +991,31 @@ export class Service {
   private async registerSlug(slug: string): Promise<RepoRow> {
     const [owner, name] = slug.split('/');
     // GitHub's names are the same in any case, its former ones too (movedRepo).
-    const known =
+    const named =
       this.db.get<RepoRow>('SELECT * FROM repos WHERE github_slug = ? COLLATE NOCASE ORDER BY id LIMIT 1', slug) ??
       this.db.get<RepoRow>('SELECT repos.* FROM repo_aliases JOIN repos ON repos.id = repo_aliases.repo_id WHERE repo_aliases.owner = ? COLLATE NOCASE AND repo_aliases.name = ? COLLATE NOCASE', owner, name);
-    if (known) return known;
+    // Its clone, also by a name it had before; of several checkouts of it registered by path before
+    // (migrateRepos), the first.
+    const known = this.clonedAs(slug) ?? (named?.github_slug ? this.clonedAs(named.github_slug) : undefined) ?? named;
+    if (known && this.isClone(known)) return known;
     if (!this.dataDir) throw new HttpError(501, 'this server keeps no clones of its own');
-    return this.createClone(slug);
+    // One registered by path that the start did not move (migrateRepos): moved now, or cloned from GitHub when its path is gone.
+    return this.createClone(known?.github_slug ?? slug, known ?? null);
   }
 
   /**
-   * Make galley's own clone of a GitHub repository and register it: bare, in the data directory as
-   * repos/<id>.git, with git_dir relative to it, so the data directory can move to another machine
-   * as it is. Branches come from the CLI, over git's smart HTTP (git-http.ts). Base branches, and
-   * the branch of a published pull request when GitHub refused a push, are fetched from GitHub into
+   * Make galley's own clone of a GitHub repository: bare, in the data directory as repos/<id>.git,
+   * with git_dir relative to it, so the data directory can move to another machine as it is.
+   * Branches come from the CLI, over git's smart HTTP (git-http.ts). Base branches, and the branch
+   * of a published pull request when GitHub refused a push, are fetched from GitHub into
    * refs/remotes/origin/ (fetchBases, fetchHead), and publishing pushes to GitHub by URL, with
-   * gh's credentials (preparePush); no fetch refspec, since galley names what it fetches. It starts
-   * with GitHub's default branch, which origin/HEAD and HEAD name.
+   * gh's credentials (preparePush); no fetch refspec, since galley names what it fetches. A new
+   * one starts with GitHub's default branch, which origin/HEAD and HEAD name. `moving`, a
+   * repository registered by path before galley kept clones (migrateRepos), keeps its row, and its
+   * clone starts with what galley has in that repository (copyFrom), or as a new one when its path
+   * is gone.
    */
-  private async createClone(slug: string): Promise<RepoRow> {
+  private async createClone(slug: string, moving: RepoRow | null): Promise<RepoRow> {
     const dataDir = this.dataDir!;
     const repos = join(dataDir, 'repos');
     mkdirSync(repos, { recursive: true });
@@ -1076,37 +1026,124 @@ export class Service {
       const git = new Repo(made);
       const url = this.githubUrl(slug);
       await git.run(['config', 'remote.origin.url', url]);
-      const signal = this.fetchAbort.signal;
-      const opts = { gh: this.ghBin, cwd: tmpdir(), timeoutMs: CLONE_TIMEOUT_MS, signal };
-      const stopping = new HttpError(503, 'galley is stopping');
-      const branch = await git.defaultBranchAt(url, opts).catch((e: Error) => {
-        throw signal.aborted ? stopping : new HttpError(502, `could not ask GitHub for the default branch of ${slug}: ${e.message}`);
-      });
-      const error = await git.fetchBranch(url, branch, `refs/remotes/origin/${branch}`, opts);
-      if (signal.aborted) throw stopping;
-      if (error) throw new HttpError(502, `could not fetch ${branch} of ${slug} from GitHub: ${error}`);
-      await git.run(['symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${branch}`]);
-      // So a ref of HEAD (contents) means the default branch, as on GitHub.
-      await git.run(['symbolic-ref', 'HEAD', `refs/remotes/origin/${branch}`]);
-      const [owner, name] = this.freeKey(slug.split('/') as [string, string], null);
+      let branch: string | null;
+      let copied: number | null = null;
+      if (moving && existsSync(moving.git_dir)) ({ branch, copied } = await this.copyFrom(git, moving));
+      else {
+        const signal = this.fetchAbort.signal;
+        const opts = { gh: this.ghBin, cwd: tmpdir(), timeoutMs: CLONE_TIMEOUT_MS, signal };
+        const stopping = new HttpError(503, 'galley is stopping');
+        branch = await git.defaultBranchAt(url, opts).catch((e: Error) => {
+          throw signal.aborted ? stopping : new HttpError(502, `could not ask GitHub for the default branch of ${slug}: ${e.message}`);
+        });
+        const error = await git.fetchBranch(url, branch, `refs/remotes/origin/${branch}`, opts);
+        if (signal.aborted) throw stopping;
+        if (error) throw new HttpError(502, `could not fetch ${branch} of ${slug} from GitHub: ${error}`);
+      }
+      if (branch) {
+        await git.run(['symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${branch}`]);
+        // So a ref of HEAD (contents) means the default branch, as on GitHub.
+        await git.run(['symbolic-ref', 'HEAD', `refs/remotes/origin/${branch}`]);
+      }
       const id = this.db.transaction(() => {
-        this.db.run('DELETE FROM repo_aliases WHERE owner = ? AND name = ?', owner, name);
-        const id = this.db.insert('repos', { git_dir: relative(dataDir, made), work_dir: null, owner, name, remote: 'origin', github_slug: slug, created_at: now() });
+        let id = moving?.id;
+        if (id === undefined) {
+          const [owner, name] = this.freeKey(slug.split('/') as [string, string], null);
+          this.db.run('DELETE FROM repo_aliases WHERE owner = ? AND name = ?', owner, name);
+          id = this.db.insert('repos', { git_dir: relative(dataDir, made), work_dir: null, owner, name, remote: 'origin', github_slug: slug, created_at: now() });
+        }
         const gitDir = join('repos', `${id}.git`);
+        // Left by a move that stopped after it renamed its clone: nothing else has this repository's id.
+        if (moving) rmSync(join(dataDir, gitDir), { recursive: true, force: true });
+        this.db.update('repos', id, { git_dir: gitDir, work_dir: null, remote: 'origin' });
         renameSync(made, join(dataDir, gitDir));
-        this.db.update('repos', id, { git_dir: gitDir });
         return id;
       });
-      return this.repoById(id);
+      const repo = this.repoById(id);
+      if (moving) console.log(`moved ${repo.owner}/${repo.name} from ${moving.git_dir} into galley's own clone, ${join(dataDir, repo.git_dir)}${copied === null ? ', from GitHub, as it was gone' : `, with ${copied} of its refs`}`);
+      return repo;
     } catch (e) {
       rmSync(made, { recursive: true, force: true });
       throw e;
     }
   }
 
-  /** Whether the repository is galley's own clone (createClone), not the user's repository, registered by path. */
+  /**
+   * Copy into `git`, galley's new clone, what galley has in the repository `repo` was registered by
+   * path at, only reading it: the commits it pins (each revision's head, and the signed copies each
+   * pull request was last published as), by SHA, pinned in this database's namespace as
+   * pinRevisions pins them; the branches of the pull requests not done with, and the
+   * remote-tracking branches galley compared them with or fetched (their bases, and the branch on
+   * GitHub after a refused push), as origin's; and the default branch. What that repository no
+   * longer has is left out, as pinRevisions leaves it. Returns the default branch, when its remote
+   * names one, and how many refs it copied.
+   */
+  private async copyFrom(git: Repo, repo: RepoRow): Promise<{ branch: string | null; copied: number }> {
+    const from = new Repo(repo.git_dir);
+    const refs = await from.refs();
+    // Refspecs, by the ref each makes in the clone.
+    const specs = new Map<string, string>();
+    const branch = (name: string) => {
+      const ref = `refs/heads/${name}`;
+      if (refs.has(ref)) specs.set(ref, `+${ref}:${ref}`);
+    };
+    const tracking = (name: string): boolean => {
+      const ref = `refs/remotes/${repo.remote}/${name}`;
+      if (refs.has(ref)) specs.set(`refs/remotes/origin/${name}`, `+${ref}:refs/remotes/origin/${name}`);
+      return refs.has(ref);
+    };
+    const pulls = this.db.all<PullRow>('SELECT * FROM pulls WHERE repo_id = ?', repo.id);
+    for (const pull of pulls) {
+      if (pull.state === 'closed' || pull.github_state === 'merged') continue;
+      branch(pull.head_ref);
+      tracking(pull.head_ref);
+      // The base as baseTip read it there: its remote-tracking branch, else the local one.
+      if (!tracking(pull.base_ref)) branch(pull.base_ref);
+    }
+    const head = (await from.run(['symbolic-ref', '--quiet', `refs/remotes/${repo.remote}/HEAD`], { allowFail: true })).stdout.trim();
+    const named = head.startsWith(`refs/remotes/${repo.remote}/`) ? head.slice(`refs/remotes/${repo.remote}/`.length) : null;
+    const main = [named, 'main', 'master', 'trunk', 'develop'].find((b) => b && tracking(b)) ?? null;
+    const pins = new Map<string, string>();
+    for (const pull of pulls) {
+      for (const rev of this.revisions(pull)) pins.set(this.ref(pull, rev.seq), rev.head_sha);
+      if (pull.published_head_sha && pull.published_source_sha && pull.published_head_sha !== pull.published_source_sha) pins.set(this.ref(pull, 'published'), pull.published_head_sha);
+    }
+    const shas = [...new Set(pins.values())];
+    const there = shas.length ? await from.out(['cat-file', '--batch-check=%(objectname) %(objecttype)'], { input: shas.join('\n') + '\n' }) : '';
+    const commits = new Set(there.split('\n').flatMap((line) => (line.endsWith(' commit') ? [line.split(' ')[0]] : [])));
+    for (const [ref, sha] of pins) if (commits.has(sha)) specs.set(ref, `${sha}:${ref}`);
+    if (specs.size) {
+      // Protocol v2 fetches a commit by its SHA, also one no ref there points at any more. From a
+      // shallow repository, the clone is as shallow: without --update-shallow, git leaves out every
+      // ref and says nothing of it but a warning.
+      const r = await git.run(['-c', 'protocol.version=2', 'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-auto-maintenance', '--update-shallow', '--stdin', '--', repo.git_dir], {
+        cwd: tmpdir(),
+        env: FETCH_ENV,
+        input: [...specs.values()].join('\n') + '\n',
+        timeoutMs: CLONE_TIMEOUT_MS,
+        allowFail: true,
+      });
+      if (r.code !== 0) throw new Error(r.timedOut ? `git fetch timed out after ${CLONE_TIMEOUT_MS / 1000} seconds` : r.stderr.trim() || `git fetch exited with ${r.code}`);
+      // Each, or the move fails, and the repository stays where it is.
+      const made = new Set((await git.out(['for-each-ref', '--format=%(refname)'])).split('\n'));
+      const missing = [...specs.keys()].filter((ref) => !made.has(ref));
+      if (missing.length) throw new Error(`git fetch left out ${missing.join(', ')}: ${r.stderr.trim()}`);
+    }
+    return { branch: main, copied: specs.size };
+  }
+
+  /** Whether the repository is galley's own clone (createClone), not one registered by path before galley kept clones (migrateRepos). */
   isClone(repo: RepoRow): boolean {
     return !isAbsolute(repo.git_dir);
+  }
+
+  /**
+   * Refuse, with 422, to change a repository registered by path that galley could not move into a
+   * clone (migrateRepos): galley no longer writes to the user's repositories.
+   */
+  private ownClone(repo: RepoRow): void {
+    if (this.isClone(repo)) return;
+    throw new HttpError(422, `galley keeps no clone of ${repo.owner}/${repo.name}: it is the repository at ${repo.git_dir}, from before galley kept clones of its own, which galley shows but no longer changes`);
   }
 
   /** Where the CLI sends branches to galley's clone of the repository and fetches them back (git-http.ts); null for a repository registered by path. */
@@ -1127,7 +1164,7 @@ export class Service {
     return repo;
   }
 
-  /** The repository that had the key `owner/name` before its GitHub slug changed (followSlug). */
+  /** The repository that had the key `owner/name` before its GitHub slug changed, as galley followed it in the remote of a repository registered by path. */
   movedRepo(owner: string, name: string): RepoRow | undefined {
     return this.db.get<RepoRow>('SELECT repos.* FROM repo_aliases JOIN repos ON repos.id = repo_aliases.repo_id WHERE repo_aliases.owner = ? AND repo_aliases.name = ?', owner, name);
   }
@@ -1246,13 +1283,14 @@ export class Service {
     input: { title?: string; body?: string; head?: string; base?: string; draft?: boolean; fill?: 'default' | 'first' | 'verbose'; reviews?: ReviewColumns; client?: string | null },
     actor: Actor,
   ): Promise<PullRow> {
+    this.ownClone(repo);
     const git = this.git(repo);
     const head = input.head?.replace(/^[^:]+:/, '');
     if (!head) throw new HttpError(422, 'head branch is required');
     const base = input.base || (await this.defaultBranch(repo));
     if (head === base) throw new HttpError(422, `head branch "${head}" is the same as base branch "${base}"`);
     const headSha = await git.resolve(`refs/heads/${head}`);
-    if (!headSha) throw new HttpError(422, this.isClone(repo) ? `galley does not have branch "${head}": push it to ${this.gitUrl(repo)} first` : `head branch "${head}" does not exist in ${repo.git_dir}`);
+    if (!headSha) throw new HttpError(422, `galley does not have branch "${head}": push it to ${this.gitUrl(repo)} first`);
     const baseTip = await this.newBaseTip(repo, base);
     if (!baseTip) throw new HttpError(422, `base branch "${base}" does not exist`);
     // One merged on GitHub is done with (sync no longer follows its branch): the branch can be
@@ -1313,7 +1351,7 @@ export class Service {
    * GitHub's default branch alone: it fetches another from GitHub first, when GitHub has it.
    */
   private async newBaseTip(repo: RepoRow, branch: string): Promise<string | null> {
-    if (this.isClone(repo) && !(await this.baseTip(repo, branch)).sha) await this.fetchBases(repo, { base: branch });
+    if (!(await this.baseTip(repo, branch)).sha) await this.fetchBases(repo, { base: branch });
     return (await this.baseTip(repo, branch)).sha;
   }
 
@@ -1333,8 +1371,10 @@ export class Service {
     if (this.db.getMeta('pinned_namespace') === namespace) return;
     let done = true;
     for (const repo of this.repos()) {
+      // One registered by path, left where it was (migrateRepos), is not galley's to write to.
+      if (!this.isClone(repo)) continue;
       const git = this.git(repo);
-      if (!existsSync(git.gitDir)) continue; // Repository moved or deleted: nothing to pin.
+      if (!existsSync(git.gitDir)) continue; // Clone deleted: nothing to pin.
       // A pin that failed is tried again while the ref is missing and the commit is there (a stale
       // lock, say). A ref pointing elsewhere stays as it is, and a commit that is gone needs no pin.
       const pin = async (ref: string, sha: string) => {
@@ -1383,6 +1423,8 @@ export class Service {
     const git = this.git(repo);
     // Callers that joined this sync get the row as it is when it ends, not as it was when it began.
     const current = () => this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
+    // In a repository registered by path, left where it was (migrateRepos), nothing moves any more.
+    if (!this.isClone(repo)) return current();
     const head = await git.resolve(`refs/heads/${pull.head_ref}`);
     if (!head) return current(); // Branch deleted locally; keep showing the last known state.
     const baseTip = (await this.baseTip(repo, pull.base_ref)).sha;
@@ -1424,11 +1466,12 @@ export class Service {
     const byRepo = Map.groupBy(open, (p) => p.repo_id);
     for (const [repoId, pulls] of byRepo) {
       const repo = this.repoById(repoId);
+      if (!this.isClone(repo)) continue;
       let refs: Map<string, string>;
       try {
         refs = await this.git(repo).refs();
       } catch {
-        continue; // Repository moved or deleted.
+        continue; // Clone deleted.
       }
       for (const pull of pulls) {
         const head = refs.get(`refs/heads/${pull.head_ref}`);
@@ -1480,15 +1523,13 @@ export class Service {
 
   /**
    * Fetch the base branches of the repository's open pull requests, published or not, so the
-   * check for conflicts sees what was merged there since. Each comes from
-   * GitHub over https with gh's credentials, whatever the remote's URL: an ssh remote's agent may
-   * ask for approval in a window, and this runs in the background. A repository not on GitHub is
-   * not fetched. Each goes into its remote-tracking branch, and only one that is there already:
-   * without one, the base is the local branch (baseTip). galley's clone fetches each base, and one
-   * GitHub does not have is a branch staged here (stacked pull requests). The poll then sees the
-   * base move, as when the user fetches. At most once every fetchEveryMs per repository, however
-   * many pages and pull requests ask; a round that fetched nothing (each base a local branch, say)
-   * does not count.
+   * check for conflicts sees what was merged there since. Each comes from GitHub over https with
+   * gh's credentials, into its remote-tracking branch in galley's clone; one GitHub does not have
+   * is a branch staged here (stacked pull requests), which baseTip then reads. The poll then sees
+   * the base move. At most once every fetchEveryMs per repository, however many pages and pull
+   * requests ask, but for a base the last round did not have (a pull request staged since); a
+   * round that fetched nothing (a repository registered by path, left where it was) does not
+   * count.
    * `base` (publishing) fetches that base alone, now, and leaves the throttle as it was. Each joins
    * the fetch under way if that fetches the same bases, and comes after it otherwise. Never throws:
    * a failure is kept for the page (fetchError) and logged once.
@@ -1505,7 +1546,7 @@ export class Service {
     }
     if (opts.base === undefined) {
       // A second of slack, so a timer ticking every 20 seconds does not skip a round.
-      if (last && Date.now() - last.at < this.fetchEveryMs - 1000) return Promise.resolve();
+      if (last && Date.now() - last.at < this.fetchEveryMs - 1000 && [...bases].every((b) => last.bases.has(b))) return Promise.resolve();
       // Nothing to fetch yet: a pull request staged next is fetched as soon as something asks.
       if (!bases.size) return Promise.resolve();
     }
@@ -1514,7 +1555,7 @@ export class Service {
     const throttled = last?.at ?? 0;
     round.running = this.fetchRepo(repo, round.bases)
       .then((fetched) => {
-        // Nothing fetched (each base is a local branch, say): what is staged next is fetched as soon as something asks.
+        // Nothing fetched (a repository registered by path): what is staged next is fetched as soon as something asks.
         if (!fetched) round.at = throttled;
       })
       .catch((e) => console.error(`fetching the base branches into ${repo.git_dir} failed:`, e))
@@ -1542,18 +1583,18 @@ export class Service {
   /** Fetch `bases` (fetchBases); whether it fetched any. */
   private async fetchRepo(repo: RepoRow, bases: Set<string>): Promise<boolean> {
     const git = this.git(repo);
-    if (!existsSync(git.gitDir)) return false; // Repository moved or deleted.
-    const clone = this.isClone(repo);
+    // One registered by path, left where it was (migrateRepos), is not galley's to write to.
+    if (!this.isClone(repo) || !existsSync(git.gitDir)) return false;
     const signal = this.fetchAbort.signal;
     let changed = false;
     let fetched = false;
     for (const branch of bases) {
       const tracking = `refs/remotes/${repo.remote}/${branch}`;
       const known = await git.resolve(tracking);
-      if (signal.aborted || (!known && !clone)) continue;
+      if (signal.aborted) continue;
       fetched = true;
       const url = this.githubUrl(repo.github_slug!);
-      let error = await git.fetchBranch(url, branch, tracking, { gh: this.ghBin, cwd: repo.work_dir ?? tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
+      let error = await git.fetchBranch(url, branch, tracking, { gh: this.ghBin, cwd: tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
       if (signal.aborted) continue;
       // Never on GitHub: a branch staged here as the base (a stacked pull request), sent by the CLI.
       if (error && !known && /couldn't find remote ref/i.test(error)) error = null;
@@ -1688,6 +1729,8 @@ export class Service {
           error: null,
         };
         if (!base) found.error = `there is no ${repo.remote}/${pull.base_ref} or ${pull.base_ref} branch in this repository`;
+        // git merge-tree writes the merge's objects: not to a repository registered by path (ownClone).
+        else if (!this.isClone(repo)) found.error = `galley keeps no clone of ${repo.owner}/${repo.name} to check it in`;
         else {
           try {
             Object.assign(found, await git.mergeTree(base, pull.head_sha));
@@ -1775,7 +1818,8 @@ export class Service {
   async deletePull(ctx: Ctx, actor: Actor): Promise<void> {
     const { pull, git } = ctx;
     this.requireHuman(actor, 'only the user can delete a staged pull request; close it instead');
-    for (const rev of this.revisions(pull)) await this.moveRef(git, this.ref(pull, rev.seq), rev.head_sha, null);
+    // Its pins, in galley's clone; a repository registered by path keeps them (ownClone).
+    if (this.isClone(ctx.repo)) for (const rev of this.revisions(pull)) await this.moveRef(git, this.ref(pull, rev.seq), rev.head_sha, null);
     this.db.run('DELETE FROM pulls WHERE id = ?', pull.id);
     this.emit(null, 'deleted', actor);
   }
@@ -3289,6 +3333,8 @@ export class Service {
    */
   private async preparePush(ctx: Ctx, pull: PullRow, opts: { sign: boolean; force: boolean; lease?: boolean; auto?: boolean; timeoutMs?: number; bringBack?: string[] }): Promise<PushPlan> {
     const { repo, git } = ctx;
+    // Signing and the pins write to the repository.
+    this.ownClone(repo);
     const published = await this.onGitHub(ctx);
     // The branch on GitHub as last fetched, when it moved on from what galley pushed and the head
     // has it in it (the author rebased onto it): the push goes on top of it, with its commits as
@@ -3345,13 +3391,12 @@ export class Service {
       );
     }
     const branch = `refs/heads/${pull.head_ref}`;
-    // The user's repository pushes to its remote as the user does; galley's clone to GitHub, with gh's credentials.
-    const clone = this.isClone(repo);
-    const args = clone ? [...ghCredentials(this.ghBin), 'push'] : ['push'];
+    // To GitHub by URL, with gh's credentials.
+    const args = [...ghCredentials(this.ghBin), 'push'];
     // Overwrite only the commit seen on GitHub, never commits added there since. (Without one, a
     // lease asks that there be no branch.)
     if (force || opts.lease) args.push(`--force-with-lease=${branch}:${before ?? ''}`);
-    args.push(clone ? this.githubUrl(repo.github_slug!) : repo.remote, `${pushed}:${branch}`);
+    args.push(this.githubUrl(repo.github_slug!), `${pushed}:${branch}`);
     // Said when it replaced what galley pushed last: not when the branch is back at it.
     const over = rewritten && before === onTop && rewritten.to !== rewritten.from;
     return { pushed, signed, force, before, ...(over ? { rewritten: { from: rewritten.from, to: rewritten.to } } : {}), ...(broughtBack.size ? { broughtBack: [...broughtBack] } : {}), args };
@@ -3363,7 +3408,7 @@ export class Service {
    * pushed to a pull request merged on GitHub.
    */
   private async pushPrepared(ctx: Ctx, pull: PullRow, plan: PushPlan, opts: { timeoutMs?: number; ready?: () => Promise<void> }): Promise<void> {
-    const { repo, git } = ctx;
+    const { git } = ctx;
     await opts.ready?.();
     // Merged on GitHub while this push signed or looked things up (following found it meanwhile):
     // pushing now would add to a merged pull request, or bring back a branch GitHub deleted.
@@ -3371,7 +3416,7 @@ export class Service {
       throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
     }
     // No await may come between the checks above and this call, which starts the push at once.
-    const push = await git.run(plan.args, { cwd: repo.work_dir ?? tmpdir(), env: this.isClone(repo) ? { ...UNPROMPTED, ...FETCH_ENV } : UNPROMPTED, allowFail: true, timeoutMs: opts.timeoutMs });
+    const push = await git.run(plan.args, { cwd: tmpdir(), env: { ...UNPROMPTED, ...FETCH_ENV }, allowFail: true, timeoutMs: opts.timeoutMs });
     if (push.code !== 0) {
       const stale = /stale info/.test(push.stderr);
       const declined = /\[remote rejected\]/.test(push.stderr);
@@ -3419,6 +3464,7 @@ export class Service {
   ): Promise<PullRow> {
     const { repo } = ctx;
     this.requireUserOrAuthor(actor, ctx.pull, 'publish it');
+    this.ownClone(repo);
     // Refused before any work: bringing back what a rewrite on GitHub removed is the user's call,
     // made at the publish box. A CLI caller can claim to be the user (GALLEY_ACTOR), so the API
     // says whether the request came from the page, as far as its headers tell.
@@ -3428,6 +3474,7 @@ export class Service {
     }
     // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
     await this.fetchBases(repo, { base: ctx.pull.base_ref });
+    if (!ctx.pull.published_head_sha && repo.github_slug) await this.fetchUnpublished(ctx);
     await this.sync(ctx.pull);
     // What it publishes, with the edits its title and description include (authorEdits).
     const { pull, upto } = this.snapshot(ctx.pull.id);
@@ -3448,7 +3495,7 @@ export class Service {
     if (asks.length) throw new HttpError(428, asks.map((a) => a.text).join(' '), { acknowledge: asks.map((a) => a.field) });
     // Refused before anything is pushed, rather than published without the auto-merge asked for.
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
-    const cwd = repo.work_dir ?? tmpdir();
+    const cwd = tmpdir();
     // An agent publishing is unattended too: a signing prompt nobody answers fails, as one
     // auto-publish tries again (SigningError.transient), rather than holding the agent up.
     const timeoutMs = auto || actor.type === 'Bot' ? UNATTENDED_TIMEOUT_MS : undefined;
@@ -3548,7 +3595,7 @@ export class Service {
    */
   private async enableAutoMerge(ctx: Ctx, url: string, head: string, method: MergeMethod, actor: Actor, timeoutMs?: number): Promise<void> {
     const { repo, pull } = ctx;
-    const opts = { cwd: repo.work_dir ?? tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs };
+    const opts = { cwd: tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs };
     const merge = () => run(this.ghBin, ['pr', 'merge', url, '--auto', `--${method}`, '--match-head-commit', head], opts);
     // Unknown until GitHub says.
     let merged: boolean | null = null;
@@ -3808,7 +3855,7 @@ export class Service {
     // GitHub out of reach, or busy, rather than refusing the edit: tried again.
     let retry = true;
     try {
-      const r = await run(this.ghBin, args, { cwd: ctx.repo.work_dir ?? tmpdir(), env: UNPROMPTED, input: send.includes('description') ? pull.body : undefined, allowFail: true, timeoutMs: UNATTENDED_TIMEOUT_MS });
+      const r = await run(this.ghBin, args, { cwd: tmpdir(), env: UNPROMPTED, input: send.includes('description') ? pull.body : undefined, allowFail: true, timeoutMs: UNATTENDED_TIMEOUT_MS });
       if (r.code !== 0) {
         error = `gh pr edit failed:\n${failure(r)}`;
         retry = r.timedOut || /error connecting to|dial tcp|no such host|TLS handshake|connection (reset|refused)|i\/o timeout|context deadline exceeded|HTTP 5\d\d/i.test(r.stderr);
@@ -3910,6 +3957,19 @@ export class Service {
   }
 
   /**
+   * Before the first publish: the pull request's branch as GitHub has it, should it be there
+   * already (pushed there by hand, or by an earlier pull request of the same branch), into its
+   * remote-tracking branch, which a push replaces only with force, and with a lease on (onGitHub).
+   * One GitHub does not have leaves none, whatever an earlier fetch left.
+   */
+  private async fetchUnpublished(ctx: Ctx): Promise<void> {
+    const { repo, pull, git } = ctx;
+    const tracking = `refs/remotes/${repo.remote}/${pull.head_ref}`;
+    const error = await git.fetchBranch(this.githubUrl(repo.github_slug!), pull.head_ref, tracking, { gh: this.ghBin, cwd: tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal: this.fetchAbort.signal });
+    if (error && /couldn't find remote ref/i.test(error)) await git.run(['update-ref', '-d', tracking], { allowFail: true });
+  }
+
+  /**
    * Fetch the pull request's branch from GitHub into its remote-tracking branch, as fetchRepo
    * fetches base branches, and nothing else: the ref preparePush pushes on top of, once the head
    * has it in it. Stopped when the server stops (stopFetching).
@@ -3919,7 +3979,7 @@ export class Service {
     const signal = this.fetchAbort.signal;
     const ref = `${repo.remote}/${pull.head_ref}`;
     const url = this.githubUrl(repo.github_slug!);
-    const error = await git.fetchBranch(url, pull.head_ref, `refs/remotes/${ref}`, { gh: this.ghBin, cwd: repo.work_dir ?? tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
+    const error = await git.fetchBranch(url, pull.head_ref, `refs/remotes/${ref}`, { gh: this.ghBin, cwd: tmpdir(), timeoutMs: FETCH_TIMEOUT_MS, signal });
     if (signal.aborted) return { ref, error: 'galley stopped before the fetch was done' };
     const sha = error ? null : await git.resolve(`refs/remotes/${ref}`);
     if (!sha) return { ref, error: error ?? `git fetch left no ${ref}` };
@@ -3945,7 +4005,7 @@ export class Service {
     let view: (GithubPull & { title?: string; body?: string }) | undefined;
     let why = 'gh answered with something other than a pull request';
     try {
-      const r = await run(this.ghBin, ['pr', 'view', url, '--json', ['state,mergedAt,mergedBy,mergeCommit,closedAt', ...fields].join(',')], { cwd: ctx.repo.work_dir ?? tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs: UNATTENDED_TIMEOUT_MS });
+      const r = await run(this.ghBin, ['pr', 'view', url, '--json', ['state,mergedAt,mergedBy,mergeCommit,closedAt', ...fields].join(',')], { cwd: tmpdir(), env: UNPROMPTED, allowFail: true, timeoutMs: UNATTENDED_TIMEOUT_MS });
       if (r.code !== 0) why = failure(r);
       else {
         view = JSON.parse(r.stdout) as GithubPull;

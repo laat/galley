@@ -15,7 +15,7 @@ export function web(s: Service): Hono {
     return c.html(notFoundPage(s, `Something went wrong: ${(err as Error).message}`), 500);
   });
 
-  // A repository whose key followed its GitHub slug (Service.followSlug): its old URLs lead to the
+  // A repository whose key followed its GitHub slug (Service.movedRepo): its old URLs lead to the
   // new ones. Browsers do not keep the redirect, since the key may change back.
   app.use('/:owner/:repo/*', async (c, next) => {
     const moved = s.movedRepo(c.req.param('owner'), c.req.param('repo'));

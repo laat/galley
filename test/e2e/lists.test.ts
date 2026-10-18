@@ -4,7 +4,6 @@ import '../helpers/env.ts';
 import { cli, dir, human, scratchRepo, server, startHarness } from '../helpers/harness.ts';
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -12,35 +11,7 @@ startHarness();
 
 test('the list has a tab for each state: staged, published and open on GitHub, and done', async () => {
   // A repository of its own, so the tabs count only these pull requests.
-  const tabs = join(dir, 'tabs');
-  const tabsRemote = join(dir, 'tabs.git');
-  execFileSync('git', ['init', '-q', '--bare', tabsRemote]);
-  execFileSync('git', ['init', '-q', '-b', 'main', tabs]);
-  const g = (...args: string[]) => execFileSync('git', ['-C', tabs, '-c', 'commit.gpgsign=false', '-c', 'user.name=Dev', '-c', 'user.email=dev@example.com', ...args]);
-  g('remote', 'add', 'origin', 'https://github.com/acme/tabs.git');
-  g('config', `url.${tabsRemote}.pushInsteadOf`, 'https://github.com/acme/tabs.git');
-  writeFileSync(join(tabs, 'a.js'), 'export {};\n');
-  g('add', '.');
-  g('commit', '-qm', 'Initial commit');
-  g('push', '-q', 'origin', 'main');
-  g('update-ref', 'refs/remotes/origin/main', 'main');
-  await human('POST', '/api/repos', { path: tabs });
-  const api = '/api/repos/acme/tabs/pulls';
-  /** A pull request with a commit on a branch of its own, staged by the agent. */
-  const stage = async (name: string): Promise<{ id: number; number: number }> => {
-    g('checkout', '-q', 'main');
-    g('checkout', '-qb', name);
-    writeFileSync(join(tabs, `${name}.js`), 'export {};\n');
-    g('add', '.');
-    g('commit', '-qm', `Add ${name}`);
-    const res = await fetch(server.url + api, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
-      body: JSON.stringify({ title: `Add ${name}`, head: name, base: 'main', automatic_reviews: false }),
-    });
-    assert.equal(res.status, 201);
-    return res.json();
-  };
+  const { api, stage } = await scratchRepo('tabs');
   const staged = await stage('staged');
   const published = await stage('published');
   const merged = await stage('merged');
@@ -152,96 +123,29 @@ test("a published pull request's row opens it here by its s#N and at the publish
   assert.match(await page(here), /<div class="merge-box" id="publish">[^]*?<button type="submit" class="btn btn-primary btn-publish"[^>]*><svg [^]*?<\/svg> Publish update<\/button>/);
 });
 
-test('a repository renamed on GitHub takes its new name, and its old URLs lead there', async () => {
-  const { fullName, api, stage, path, g } = await scratchRepo('old-name');
-  assert.equal(fullName, 'acme/old-name');
+test('a repository whose key followed a rename on GitHub keeps its old URLs, which lead to the new ones', async () => {
+  const { api, stage } = await scratchRepo('new-name');
   const pr = await stage('renamed');
-  const events: string[] = [];
-  const listen = (e: { type: string }) => events.push(e.type);
-  server.service.bus.on('change', listen);
-  try {
-    // The remote follows the rename on GitHub; the next CLI call registers the repository again.
-    g('remote', 'set-url', 'origin', 'https://github.com/acme/new-name.git');
-    assert.equal((await human('POST', '/api/repos', { path })).full_name, 'acme/new-name');
-    // Open pages hear of it, and their next refresh follows the redirect.
-    assert.ok(events.includes('repo_renamed'), events.join());
-    // The old pages redirect, with the rest of the URL. Browsers do not keep the redirect: the name may change back.
-    for (const [from, to] of [
-      [`/acme/old-name/pull/${pr.number}/files?diff=split`, `/acme/new-name/pull/${pr.number}/files?diff=split`],
-      ['/acme/old-name', '/acme/new-name'],
-    ]) {
-      const res = await fetch(server.url + from, { redirect: 'manual' });
-      assert.equal(res.status, 301, from);
-      assert.equal(res.headers.get('location'), to);
-      assert.equal(res.headers.get('cache-control'), 'no-store');
-    }
-    assert.match(await (await fetch(`${server.url}/acme/old-name/pull/${pr.number}`)).text(), new RegExp(`<title>Add renamed by agent · Pull Request s#${pr.number} · acme/new-name</title>`));
-    // The API answers at the old paths, for pages opened before and for scripts, in the new name.
-    assert.equal((await human('GET', `${api}/${pr.number}`)).html_url, `${server.url}/acme/new-name/pull/${pr.number}`);
-    await human('POST', `/api/repos/acme/old-name/issues/${pr.number}/comments`, { body: 'Still reachable' });
-    assert.equal((await human('GET', `/api/repos/acme/new-name/issues/${pr.number}/comments`)).at(-1).body, 'Still reachable');
-
-    // Renamed again while nothing registers it: the server follows the remote when it starts.
-    g('remote', 'set-url', 'origin', 'https://github.com/acme/third-name.git');
-    await server.service.followRemotes();
-    const keys = () => server.service.repos().map((r) => `${r.owner}/${r.name}`);
-    assert.ok(keys().includes('acme/third-name'), keys().join());
-    for (const old of ['acme/old-name', 'acme/new-name']) assert.equal((await human('GET', `/api/repos/${old}`)).full_name, 'acme/third-name');
-
-    // Back to the first name: it is the repository's own again, and the others lead to it.
-    g('remote', 'set-url', 'origin', 'https://github.com/acme/old-name.git');
-    assert.equal((await human('POST', '/api/repos', { path })).full_name, 'acme/old-name');
-    assert.equal((await fetch(`${server.url}/acme/old-name/pull/${pr.number}`, { redirect: 'manual' })).status, 200);
-    assert.equal((await fetch(`${server.url}/acme/third-name`, { redirect: 'manual' })).headers.get('location'), '/acme/old-name');
-
-    // A repository that has a name another had before takes it; the other keeps its own.
-    const other = await scratchRepo('third-name');
-    assert.equal(other.fullName, 'acme/third-name');
-    assert.equal((await fetch(`${server.url}/acme/third-name`, { redirect: 'manual' })).status, 200);
-    // Renamed to one another repository has, it is numbered as when it was registered.
-    g('remote', 'set-url', 'origin', 'https://github.com/acme/third-name.git');
-    assert.equal((await human('POST', '/api/repos', { path })).full_name, 'acme/third-name-2');
-    assert.equal((await human('GET', '/api/repos/acme/third-name')).full_name, 'acme/third-name');
-
-    // Registered before names followed GitHub, with the new one recorded but not taken: it takes it when the server starts.
-    const id = server.service.repos().find((r) => r.name === 'third-name-2')!.id;
-    server.service.db.update('repos', id, { name: 'from-before' });
-    await server.service.followRemotes();
-    assert.equal((await human('GET', '/api/repos/acme/from-before')).full_name, 'acme/third-name-2');
-
-    // A number stays when the repository it made way for moves on, whose old name leads to it still.
-    const twin = await scratchRepo('twin');
-    const clone = await scratchRepo('twin-clone', { github: false });
-    clone.g('remote', 'add', 'origin', 'https://github.com/acme/twin.git');
-    assert.equal((await human('POST', '/api/repos', { path: clone.path })).full_name, 'acme/twin-2');
-    twin.g('remote', 'set-url', 'origin', 'https://github.com/acme/twin-renamed.git');
-    assert.equal((await human('POST', '/api/repos', { path: twin.path })).full_name, 'acme/twin-renamed');
-    assert.equal((await human('POST', '/api/repos', { path: clone.path })).full_name, 'acme/twin-2');
-    await server.service.followRemotes();
-    assert.equal((await human('GET', '/api/repos/acme/twin-2')).full_name, 'acme/twin-2');
-    assert.equal((await fetch(`${server.url}/acme/twin`, { redirect: 'manual' })).headers.get('location'), '/acme/twin-renamed');
-
-    // A name that ends in digits is not numbered: renamed to the name without them, it follows.
-    const dated = await scratchRepo('project-2');
-    dated.g('remote', 'set-url', 'origin', 'https://github.com/acme/project.git');
-    assert.equal((await human('POST', '/api/repos', { path: dated.path })).full_name, 'acme/project');
-
-    // Renamed so before names followed GitHub, with the new name recorded but not taken: it takes it when the server starts.
-    const legacy = await scratchRepo('legacy-2025');
-    legacy.g('remote', 'set-url', 'origin', 'https://github.com/acme/legacy.git');
-    server.service.db.run("UPDATE repos SET github_slug = 'acme/legacy' WHERE owner = 'acme' AND name = 'legacy-2025'");
-    await server.service.followRemotes();
-    assert.equal((await human('GET', '/api/repos/acme/legacy-2025')).full_name, 'acme/legacy');
-
-    // At start, the server picks the remote as registering does: here a GitHub one added to a local repository, not called origin.
-    const upstream = await scratchRepo('upstream-only', { github: false });
-    assert.equal(upstream.fullName, 'local/upstream-only');
-    upstream.g('remote', 'add', 'upstream', 'https://github.com/acme/upstream-only.git');
-    await server.service.followRemotes();
-    assert.equal((await human('GET', '/api/repos/local/upstream-only')).full_name, 'acme/upstream-only');
-  } finally {
-    server.service.bus.off('change', listen);
+  // As galley left it when the remote of a repository registered by path named the new name.
+  const id = server.service.repos().find((r) => r.name === 'new-name')!.id;
+  server.service.db.run('INSERT INTO repo_aliases (owner, name, repo_id) VALUES (?, ?, ?)', 'acme', 'old-name', id);
+  // The old pages redirect, with the rest of the URL. Browsers do not keep the redirect: the name may change back.
+  for (const [from, to] of [
+    [`/acme/old-name/pull/${pr.number}/files?diff=split`, `/acme/new-name/pull/${pr.number}/files?diff=split`],
+    ['/acme/old-name', '/acme/new-name'],
+  ]) {
+    const res = await fetch(server.url + from, { redirect: 'manual' });
+    assert.equal(res.status, 301, from);
+    assert.equal(res.headers.get('location'), to);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
   }
+  assert.match(await (await fetch(`${server.url}/acme/old-name/pull/${pr.number}`)).text(), new RegExp(`<title>Add renamed by agent · Pull Request s#${pr.number} · acme/new-name</title>`));
+  // The API answers at the old paths, for pages opened before and for scripts, in the new name.
+  assert.equal((await human('GET', `/api/repos/acme/old-name/pulls/${pr.number}`)).html_url, `${server.url}/acme/new-name/pull/${pr.number}`);
+  await human('POST', `/api/repos/acme/old-name/issues/${pr.number}/comments`, { body: 'Still reachable' });
+  assert.equal((await human('GET', `${api.replace('/pulls', '/issues')}/${pr.number}/comments`)).at(-1).body, 'Still reachable');
+  // A checkout whose remote still has the old name registers the same repository.
+  assert.equal((await human('POST', '/api/repos', { github: 'acme/old-name' })).full_name, 'acme/new-name');
 });
 
 test('the reviewer pins pull requests to the top of the front page, until they unpin them', async () => {
@@ -357,25 +261,25 @@ test('the front page and a repository\'s list the repositories with pull request
   };
   const north = await scratchRepo('north');
   const south = await scratchRepo('south');
-  const local = await scratchRepo('sidebar-local', { github: false });
+  const west = await scratchRepo('west');
   const n1 = await north.stage('n1');
   await south.stage('s1');
   await south.stage('s2');
   const s3 = await south.stage('s3');
   // Closed: not your turn, but activity.
   await human('PATCH', `${south.api}/${s3.number}`, { state: 'closed' });
-  await local.stage('l1');
+  await west.stage('w1');
 
   let { repos } = await sidebar();
   const mine = (names: string[]) => repos.filter((r) => names.includes(r.name));
   // Latest activity first, each with how many are your turn; a link to the repository, and the owner's avatar.
-  assert.deepEqual(mine([local.fullName, south.fullName, north.fullName]), [
-    { name: local.fullName, shown: true, avatar: '/avatars/local.svg', href: `/${local.fullName}`, turn: 1, title: '1 pull request waiting for you' },
+  assert.deepEqual(mine([west.fullName, south.fullName, north.fullName]), [
+    { name: 'acme/west', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/west', turn: 1, title: '1 pull request waiting for you' },
     { name: 'acme/south', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/south', turn: 2, title: '2 pull requests waiting for you' },
     { name: 'acme/north', shown: true, avatar: 'https://github.com/acme.png?size=40', href: '/acme/north', turn: 1, title: '1 pull request waiting for you' },
   ]);
-  assert.equal(repos[0].name, local.fullName);
-  // A GitHub owner's avatar falls back to the generated one; a generated one needs none.
+  assert.equal(repos[0].name, west.fullName);
+  // A GitHub owner's avatar falls back to the generated one.
   assert.match((await sidebar()).aside, /src="https:\/\/github\.com\/acme\.png\?size=40" data-fallback="\/avatars\/acme\.svg"/);
   // A comment is activity; a repository with nothing for you has no count.
   await human('POST', `/api/repos/acme/north/issues/${n1.number}/comments`, { body: 'Moving.' });

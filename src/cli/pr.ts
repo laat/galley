@@ -6,7 +6,7 @@ import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, s
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews } from './reviewers.ts';
 import { openPage } from './open.ts';
-import { fetchBack, fetchHead, hasBranch, sendHead, sendPull } from './send.ts';
+import { fetchBack, fetchHead, hasBranch, sendBase, sendHead, sendPull } from './send.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
 
@@ -218,6 +218,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
   } catch {}
   err(`Staging pull request for ${head} into ${(v.base as string) ?? 'the default branch'} in ${repo.owner}/${repo.name}\n`);
   if (v['dry-run']) return 0;
+  if (v.base) await sendBase(client, cwd, repo, v.base as string);
   await sendHead(client, cwd, repo, head.replace(/^[^:]+:/, ''));
   const pr = await client.json('POST', `${repoPath(repo)}/pulls`, {
     title: v.title,
@@ -717,6 +718,8 @@ async function publish(client: Client, cwd: string, args: string[]): Promise<num
     err(`✓ Auto-publish disabled for pull request ${name}`);
     return 0;
   }
+  // The author publishes what it has, as auto-publish publishes what it waits with.
+  await sendPull(client, cwd, t.repo, t.number, { strict: true });
   const autoMerge = method !== undefined;
   // Force-push when it has to, as the publish box offers: with a lease, over only what it replaces.
   const force = !v['no-force'];
@@ -881,9 +884,10 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     const pr = r.pr;
     // What galley fetched from GitHub for the author to rebase onto, fetched into the checkout too
     // (from galley's clone), and named as it is there: the base the head conflicts with, and the
-    // branch on GitHub after a push GitHub refused.
-    if (pr.baseConflicts?.conflicting && pr.baseConflicts.ref === `origin/${pr.baseRefName}`) {
-      pr.baseConflicts.ref = (await fetchBack(client, cwd, t.repo, pr.baseRefName, pr.baseConflicts.oid)) ?? pr.baseConflicts.ref;
+    // branch on GitHub after a push GitHub refused. A base staged in galley (stacked) comes as galley/<base>.
+    if (pr.baseConflicts?.conflicting && [`origin/${pr.baseRefName}`, pr.baseRefName].includes(pr.baseConflicts.ref)) {
+      const staged = pr.baseConflicts.ref === pr.baseRefName;
+      pr.baseConflicts.ref = (await fetchBack(client, cwd, t.repo, pr.baseRefName, pr.baseConflicts.oid, { staged })) ?? pr.baseConflicts.ref;
     }
     const onGithub = r.status === 'push_failed' && r.push.fetched?.sha && r.push.fetched.ref === `origin/${pr.headRefName}` ? r.push.fetched : null;
     if (onGithub) onGithub.ref = (await fetchBack(client, cwd, t.repo, pr.headRefName, onGithub.sha)) ?? onGithub.ref;

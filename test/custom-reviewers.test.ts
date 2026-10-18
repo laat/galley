@@ -9,6 +9,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { startServer } from '../src/server/server.ts';
 import { checkDefinition, formatDefinition, parseDefinition, reviewsRepo } from '../src/server/reviewers/definition.ts';
 import type { PullRow, ReviewRow } from '../src/server/db.ts';
@@ -102,7 +103,10 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
 }
 
-/** A repository with a commit on main and a branch with one more, fetched from `remote` (none: no remote). */
+/**
+ * A repository with a commit on main and a branch with one more, fetched from `remote` (none: no
+ * remote). GitHub's repository is the bare one beside it (githubUrl), which has main.
+ */
 function makeRepo(name: string, remote: string | null): string {
   const repo = join(dir, name);
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
@@ -110,12 +114,19 @@ function makeRepo(name: string, remote: string | null): string {
   writeFileSync(join(repo, 'math.js'), 'export function add(a, b) {\n  return a + b;\n}\n');
   git(repo, 'add', '.');
   git(repo, 'commit', '-qm', 'Initial commit');
-  if (remote) git(repo, 'update-ref', 'refs/remotes/origin/main', 'main');
+  if (remote) {
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', join(dir, `${name}.git`)]);
+    git(repo, 'push', '-q', join(dir, `${name}.git`), 'main');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'main');
+  }
   git(repo, 'checkout', '-qb', 'feature/mul');
   writeFileSync(join(repo, 'math.js'), 'export function add(a, b) {\n  return a + b;\n}\n\nexport const mul = (a, b) => a * b;\n');
   git(repo, 'commit', '-qam', 'Add mul', '-m', 'Multiplication, for the widgets.');
   return repo;
 }
+
+/** Send a branch to galley's clone of acme/widgets, as the CLI sends the author's; not in this process's event loop, which the server runs in. */
+const send = (cwd: string, branch: string) => promisify(execFile)('git', ['-c', 'http.proxy=', 'push', '-q', `${server.url}/git/acme/widgets.git`, branch], { cwd });
 
 async function cli(cwd: string, args: string[], opts: { actor?: string } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   const child = execFile(process.execPath, [BIN, ...args], { cwd, env: { ...process.env, GALLEY_URL: server.url, GALLEY_ACTOR: opts.actor ?? 'agent', NO_COLOR: '1' } });
@@ -141,7 +152,7 @@ const page = async (path: string) => (await fetch(server.url + path)).text();
 const calls = (log: string) => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
 const reviewer = (name: string) => server.service.custom!.list().find((r) => r.key === name)!;
 const row = (owner: string, number: number) => {
-  const repo = server.service.repo(owner, owner === 'acme' ? 'widgets' : owner === 'other' ? 'thing' : 'solo');
+  const repo = server.service.repo(owner, owner === 'acme' ? 'widgets' : 'thing');
   return server.service.db.get<PullRow>('SELECT * FROM pulls WHERE repo_id = ? AND number = ?', repo.id, number)!;
 };
 
@@ -202,7 +213,8 @@ if (gate) { const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t)
   );
   writeFileSync(join(reviewersDir, 'codex-review.md'), '---\nengine: claude\n---\n');
   writeFileSync(join(reviewersDir, 'broken.md'), '---\nengine: claude\nrepos: [acme/*\n---\n');
-  options = { port: 0, dataDir: join(dir, 'data'), ghBin: 'false', codexBin: codex, claudeBin: claude, viewerLogin: 'reviewer', pollMs: 50, reviewersDir };
+  const githubUrl = (slug: string) => join(dir, `${slug.split('/')[1]}.git`);
+  options = { port: 0, dataDir: join(dir, 'data'), ghBin: 'false', codexBin: codex, claudeBin: claude, viewerLogin: 'reviewer', pollMs: 50, reviewersDir, githubUrl };
   server = await startServer(options);
   startingFakes = fakes();
 });
@@ -433,10 +445,10 @@ test('it reviews only the repositories it names', async () => {
   await human('POST', `/api/repos/other/thing/pulls/${number}/reviewers/house-rules`, undefined, 404);
   await human('PATCH', `/api/repos/other/thing/pulls/${number}/reviewers/house-rules`, { enabled: true }, 404);
   await human('GET', `/api/repos/other/thing/pulls/${number}/reviewers/house-rules`, undefined, 404);
-  // Without a GitHub remote, a repository has no slug to match.
-  const solo1 = await stage(solo);
-  const { message } = await human('POST', `/api/repos/local/solo/pulls/${solo1.number}/reviewers/house-rules`, undefined, 404);
-  assert.equal(message, 'house-rules does not review repositories without a GitHub remote');
+  // Without a GitHub remote, a repository is not staged at all.
+  const r = await cli(solo, ['pr', 'create', '--title', 'Add mul', '--body', 'x']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /galley stages pull requests of GitHub repositories only, and this checkout has no remote/);
 });
 
 test('galley reviewers lists the reviewer agents of the repository, without their instructions', async () => {
@@ -548,6 +560,7 @@ test('a review of the description is cancelled when the base moves and changes t
     try {
       const { run_id } = await human('POST', `${base}/reviewers/house-rules`);
       // Onto a base that has the first commit: the review read a message that is no longer there.
+      await send(acme, 'with-two');
       await human('PATCH', base, { base: 'with-two' });
       const run = (await human('GET', `${base}/reviewers/house-rules`)).runs.find((r: any) => r.id === run_id);
       assert.deepEqual([run.status, run.reason], ['cancelled', 'base_moved']);

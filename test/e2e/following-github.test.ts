@@ -1,6 +1,6 @@
 // Published pull requests: what galley reads about them on GitHub, until they are merged or closed.
 import '../helpers/env.ts';
-import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -149,6 +149,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       git('add', 'base-moved.js');
       git('commit', '-qm', 'Move the base');
       git('push', '-q', 'origin', 'main');
+      await server.service.fetchBases(server.service.repo('acme', 'widgets'), { base: 'main' });
       git('checkout', '-q', branch);
       git('rebase', '-q', 'main');
       const copy = git('rev-parse', 'HEAD');
@@ -157,6 +158,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       writeFileSync(join(repo, 'left-out.js'), 'export const synced = 1;\n');
       git('commit', '-qam', 'Synced before the merge');
       const synced = git('rev-parse', 'HEAD');
+      await send(branch);
       await until(async () => (await human('GET', pr.base)).head.sha === synced, 'the server has the synced commit');
       assert.deepEqual((await human('GET', pr.base)).unpublished_changes, ['commits']);
       await githubSays({ [pr.id]: merged });
@@ -193,12 +195,13 @@ test('published pull requests are followed until they are merged or closed on Gi
       assert.match(withMerge, new RegExp(`^Next: keep the branch ${branch}, tell the user, and ask how to stage them as a new pull request: a rebase would not carry them over as they are \\(a merge, say\\)\\.`, 'm'));
       assert.doesNotMatch(withMerge, /git rebase/);
 
-      // Deleted here: what galley last saw, and how to bring the branch back.
+      // Deleted here: galley has the branch as it was sent last, and says how to bring it back.
+      const merge = git('rev-parse', 'HEAD');
       git('checkout', '-q', 'main');
       git('branch', '-qD', branch, 'feature/follow-left-out-side');
       const gone = await wait();
-      assert.match(gone, new RegExp(`^GitHub merged it without these 2 commits of ${branch}, which it never got:\n  ${short(copy)} Add left-out\\.js\n  ${short(synced)} Synced before the merge\n`, 'm'));
-      assert.match(gone, new RegExp(`^The branch ${branch} is gone here; bring it back with \`git branch ${branch} ${synced}\`\\. Next: keep the branch`, 'm'));
+      assert.match(gone, /^GitHub merged it without these 5 commits of feature\/follow-left-out, which it never got:$/m);
+      assert.match(gone, new RegExp(`^The branch ${branch} is gone here; bring it back with \`git branch ${branch} ${merge}\`\\. Next: keep the branch`, 'm'));
     });
 
     await t.test('a merge found while a publish signs stops the push', async () => {
@@ -213,7 +216,7 @@ test('published pull requests are followed until they are merged or closed on Gi
       const program = join(dir, 'race-ssh-keygen');
       writeFileSync(program, `#!/bin/sh\ntouch "${signing}"\nwhile [ ! -f "${gate}" ]; do sleep 0.02; done\nexec ssh-keygen "$@"\n`);
       chmodSync(program, 0o755);
-      git('config', 'gpg.ssh.program', program);
+      inClone('config', 'gpg.ssh.program', program);
       try {
         const publishing = fetch(`${server.url}${pr.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: true, force: true }) });
         await until(() => existsSync(signing), 'signing starts');
@@ -224,7 +227,7 @@ test('published pull requests are followed until they are merged or closed on Gi
         assert.match((await res.json()).message, /merged on GitHub/);
         assert.equal(remoteHead(), before);
       } finally {
-        git('config', '--unset', 'gpg.ssh.program');
+        inClone('config', '--unset', 'gpg.ssh.program');
         for (const f of [signing, gate, program]) rmSync(f, { force: true });
       }
     });

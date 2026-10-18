@@ -1,16 +1,16 @@
 // What each end-to-end test file in test/e2e starts from: a repository whose origin is GitHub's
 // acme/widgets, pushing to a bare repository beside it; stand-ins for gh, codex, claude and
 // sandbox-exec or bwrap; and a galley server for them. Each file calls startHarness() and gets its
-// own: node runs test files in parallel, and the tests within a file one after another. With
-// `clones`, the server keeps clones of its own, which fetch from and push to the bare repositories
-// in place of GitHub.
+// own: node runs test files in parallel, and the tests within a file one after another. The
+// server's clones fetch from and push to the bare repositories in place of GitHub, and the agent's
+// branches reach them as the CLI sends them, or with send().
 import './env.ts';
 import { assertLeftAsFound, fakes } from './fakes.ts';
 import { after, afterEach, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -62,14 +62,28 @@ export function git(...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
 }
 
+/** galley's clone of acme/widgets, once registered. */
+function widgetsClone(): string | null {
+  const widgets = server.service.db.get<{ id: number }>("SELECT id FROM repos WHERE owner = 'acme' AND name = 'widgets'");
+  return widgets ? server.service.gitDir(server.service.repoById(widgets.id)) : null;
+}
+
+/** git in galley's clone of acme/widgets. */
+export function inClone(...args: string[]): string {
+  return execFileSync('git', ['--git-dir', widgetsClone()!, ...args], { encoding: 'utf8' }).trim();
+}
+
 /**
- * The worktrees of the repository that are review checkouts of the test's server: galley-review-*
- * in the temporary directory. A reviewer agent that runs this suite runs it in a galley-review-*
- * of its own, with the temporary directory in it, so the repository's own path may have the name.
+ * The worktrees of galley's clone of acme/widgets (or of the clone at `gitDir`) that are review
+ * checkouts: galley-review-* in the temporary directory. A reviewer agent that runs this suite runs
+ * it in a galley-review-* of its own, with the temporary directory in it, so the clone's own path
+ * may have the name.
  */
-export function reviewCheckouts(): string[] {
+export function reviewCheckouts(gitDir = widgetsClone()): string[] {
   const made = join(realpathSync(tmpdir()), 'galley-review-');
-  return git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith(`worktree ${made}`));
+  if (!gitDir) return [];
+  const list = execFileSync('git', ['--git-dir', gitDir, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
+  return list.split('\n').filter((l) => l.startsWith(`worktree ${made}`));
 }
 
 /** A commit on top of `parent` whose short SHA is all digits, as about one commit in 27 has by chance. */
@@ -137,13 +151,31 @@ export async function gitToGalley(args: string[], opts: { cwd?: string } = {}): 
   }
 }
 
-/** Where a clone of the server fetches a GitHub repository from: the bare repository beside the file's repository, or a scratch repository's. */
+/**
+ * Send `branch` of the agent's repository (or of `cwd`, a checkout of GitHub's `github`) to galley's
+ * clone, as the CLI does before the author's commands: galley syncs the pull requests that have it
+ * before the push returns. A rewrite goes with a lease on what galley has.
+ */
+export async function send(branch: string, opts: { cwd?: string; github?: string } = {}): Promise<void> {
+  const url = `${server.url}/git/${opts.github ?? 'acme/widgets'}.git`;
+  const there = (await gitToGalley(['ls-remote', url, `refs/heads/${branch}`], opts)).stdout.split('\t')[0];
+  const lease = [`--force-with-lease=refs/heads/${branch}:${there}`, '--push-option', `lease=${branch}:${there}`];
+  const pushed = await gitToGalley(['push', '-q', ...lease, url, `refs/heads/${branch}:refs/heads/${branch}`], opts);
+  assert.equal(pushed.code, 0, pushed.stderr);
+}
+
+/**
+ * Where a clone of the server fetches a GitHub repository from: the bare repository beside the
+ * file's repository, or a scratch repository's; without one, GitHub's URL, which the proxy keeps out.
+ */
 function githubUrl(slug: string): string {
-  return slug === 'acme/widgets' ? remote : join(dir, `${slug.split('/')[1]}.git`);
+  if (slug === 'acme/widgets') return remote;
+  const bare = join(dir, `${slug.split('/')[1]}.git`);
+  return existsSync(bare) ? bare : `https://github.com/${slug}.git`;
 }
 
 /** The file's repository with its remote, the fakes, and the server. */
-async function setUp({ clones = false }: { clones?: boolean }): Promise<void> {
+async function setUp(): Promise<void> {
   dir = mkdtempSync(join(tmpdir(), 'galley-test-'));
   remote = join(dir, 'remote.git');
   repo = join(dir, 'repo');
@@ -151,7 +183,7 @@ async function setUp({ clones = false }: { clones?: boolean }): Promise<void> {
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
   git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git');
-  // Pushes go to the local bare repository; the fetch URL still says GitHub.
+  // The tests' own pushes to GitHub go to the local bare repository; the fetch URL still says GitHub.
   git('config', `url.${remote}.pushInsteadOf`, 'https://github.com/acme/widgets.git');
   writeFileSync(join(repo, 'math.js'), 'export function add(a, b) {\n  return a + b;\n}\n');
   git('add', '.');
@@ -326,7 +358,7 @@ console.log('Packages: +1\\nDone in 1s');
     viewerLogin: 'reviewer',
     pollMs: 50,
     followMs: 60 * 60_000,
-    ...(clones ? { clones, githubUrl } : {}),
+    githubUrl,
   });
   startingFakes = fakes();
 }
@@ -335,8 +367,8 @@ console.log('Packages: +1\\nDone in 1s');
  * Sets up the file's repository, fakes and server before its tests, and removes them after. After
  * each test, checks that it left no review running and the fakes as it found them.
  */
-export function startHarness(opts: { clones?: boolean } = {}): void {
-  before(() => setUp(opts));
+export function startHarness(): void {
+  before(() => setUp());
 
   // A test leaves no review running or about to start on the file's server, where it would answer
   // with the fakes of the tests after it, and leaves the fakes as it found them. Checked after each
@@ -353,11 +385,11 @@ export function startHarness(opts: { clones?: boolean } = {}): void {
 }
 
 /**
- * A repository of its own, acme/<name> on GitHub (pushing to a bare repository), or with `github`
- * false local/<name> with no remote, registered by path, where `stage` stages a branch with a
- * commit of its own as the agent.
+ * A repository of its own, acme/<name> on GitHub (pushing to a bare repository), registered with
+ * galley, which clones it, where `stage` stages a branch with a commit of its own as the agent, and
+ * `send` sends a branch to galley.
  */
-export async function scratchRepo(name: string, { github = true } = {}) {
+export async function scratchRepo(name: string) {
   const path = join(dir, name);
   const bare = join(dir, `${name}.git`);
   execFileSync('git', ['init', '-q', '-b', 'main', path]);
@@ -365,21 +397,21 @@ export async function scratchRepo(name: string, { github = true } = {}) {
   writeFileSync(join(path, 'a.js'), 'export {};\n');
   g('add', '.');
   g('commit', '-qm', 'Initial commit');
-  if (github) {
-    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
-    g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
-    g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
-    g('push', '-q', 'origin', 'main');
-    g('update-ref', 'refs/remotes/origin/main', 'main');
-  }
-  const { full_name } = await human('POST', '/api/repos', { path });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+  g('remote', 'add', 'origin', `https://github.com/acme/${name}.git`);
+  g('config', `url.${bare}.pushInsteadOf`, `https://github.com/acme/${name}.git`);
+  g('push', '-q', 'origin', 'main');
+  g('update-ref', 'refs/remotes/origin/main', 'main');
+  const { full_name } = await human('POST', '/api/repos', { github: `acme/${name}` });
   const api = `/api/repos/${full_name}/pulls`;
+  const sendBranch = (branch: string) => send(branch, { cwd: path, github: full_name });
   const stage = async (branch: string): Promise<{ id: number; number: number }> => {
     g('checkout', '-q', 'main');
     g('checkout', '-qb', branch);
     writeFileSync(join(path, `${branch}.js`), 'export {};\n');
     g('add', '.');
     g('commit', '-qm', `Add ${branch}`);
+    await sendBranch(branch);
     const res = await fetch(server.url + api, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
@@ -388,5 +420,5 @@ export async function scratchRepo(name: string, { github = true } = {}) {
     assert.equal(res.status, 201);
     return res.json();
   };
-  return { fullName: full_name as string, api, stage, path, g };
+  return { fullName: full_name as string, api, stage, send: sendBranch, path, g };
 }

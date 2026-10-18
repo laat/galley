@@ -1,7 +1,7 @@
 // Codex and Claude as reviewer agents: their settings, sandboxes, progress and names, two at once,
 // and stopping their iterations.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, reviewCheckouts, server, slashTmpWritable, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, handedOver, human, repo, reviewCheckouts, send, server, slashTmpWritable, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -682,6 +682,7 @@ test('pr wait says when the reviewer agents leave nothing to address, and which 
   const commit = async (n: number) => {
     writeFileSync(join(repo, 'nothing.js'), `export const nothing = ${n};\n`);
     git('commit', '-qam', `Count to ${n}`);
+    await send('feature/nothing-to-address');
     await until(() => row().head_sha === git('rev-parse', 'HEAD'), 'the server has the new commit');
   };
   try {

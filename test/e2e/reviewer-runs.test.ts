@@ -1,7 +1,7 @@
 // When reviewer agents review and what they are told: --reviewer and --no-review, reviews still
 // running or cancelled, findings the author answers, and their earlier reviews.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, handedOver, human, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -251,7 +251,8 @@ test('a running review is cancelled when the pull request is published, closed, 
         writeFileSync(join(repo, 'cancel-push.js'), 'export const pushed = true;\n');
         git('commit', '-qam', 'Change cancel-push.js');
         const second = git('rev-parse', 'HEAD');
-        // The poll finds the push, which cancels the review of the first commit and starts one of the second.
+        // The push to galley cancels the review of the first commit and starts one of the second.
+        await send('feature/cancel-push');
         const reviewing = () => reviewer('codex').atWork(row(pr));
         await until(() => reviewing()?.head_sha === second, 'Codex reviews the second commit');
         writeFileSync(gates.codex, '');
@@ -278,6 +279,7 @@ test('a running review is cancelled when the pull request is published, closed, 
         writeFileSync(join(repo, 'cancel-both.js'), 'export const both = true;\n');
         git('commit', '-qam', 'Change cancel-both.js');
         const second = git('rev-parse', 'HEAD');
+        await send('feature/cancel-both');
         await until(() => at('claude')?.head_sha === second, 'Claude reviews the second commit');
         const returned = await Promise.race([waiting.then(() => true), new Promise((r) => setTimeout(() => r(false), 300))]);
         assert.equal(returned, false, 'the wait goes on for Claude');
@@ -303,6 +305,7 @@ test('a running review is cancelled when the pull request is published, closed, 
             writeFileSync(join(repo, 'cancel-newer.js'), 'export const newer = true;\n');
             git('commit', '-qam', 'Change cancel-newer.js');
             const newer = git('rev-parse', 'HEAD');
+            await send('feature/cancel-newer');
             await until(() => row(pr).head_sha === newer, 'the server has the second commit');
             await ask(pr, 'codex');
             writeFileSync(ghGate, '');
@@ -675,6 +678,7 @@ test('a reviewer agent is told what its earlier reviews found, resolved or not, 
   writeFileSync(join(repo, 'history-base.js'), 'export {};\n');
   git('add', 'history-base.js');
   git('commit', '-qm', 'Add history-base.js');
+  await send('history-base');
   git('checkout', '-q', 'feature/history');
   git('rebase', '-q', 'history-base');
   const third = await reviewed(oneMore);

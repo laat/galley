@@ -1,9 +1,9 @@
-// galley's own clones of GitHub repositories (GALLEY_CLONES): staged from branches pushed to its
+// galley's own clones of GitHub repositories: staged from branches pushed to its
 // git endpoint, reviewed, published, and fetched from GitHub, all in the clone, with nothing
 // written to the agent's repository. The bare repositories beside it stand in for GitHub. The
 // CLI sends the author's branch there, and fetches back what galley fetched from GitHub.
 import '../helpers/env.ts';
-import { cli, dir, git, gitToGalley, human, remote, repo, reviewCheckouts, scratchRepo, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, gitToGalley, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -16,7 +16,7 @@ import type { PullRow, RepoRow } from '../../src/server/db.ts';
 import { Client } from '../../src/cli/client.ts';
 import { sendPull } from '../../src/cli/send.ts';
 
-startHarness({ clones: true });
+startHarness();
 
 const API = '/api/repos/acme/widgets';
 
@@ -116,7 +116,7 @@ test('a reviewer agent reviews in a worktree of galley’s clone', async () => {
     assert.equal(call.sawFile, true, 'Codex runs in a checkout of the head');
     assert.ok(readFileSync(join(checkout, '.git'), 'utf8').startsWith(`gitdir: ${realpathSync(gitDir)}/worktrees/`));
     assert.match(clone('worktree', 'list', '--porcelain'), new RegExp(`^worktree ${checkout}$`, 'm'));
-    assert.deepEqual(reviewCheckouts(), []);
+    assert.doesNotMatch(git('worktree', 'list', '--porcelain'), /galley-review-/);
     writeFileSync(gate, '');
     await server.service.codex!.settle(pr.id);
   });
@@ -152,6 +152,29 @@ test('publishing pushes from galley’s clone to GitHub, signed, and so do the p
   const next = onGithub();
   assert.equal(execFileSync('git', ['-C', remote, 'rev-parse', `${next}^`], { encoding: 'utf8' }).trim(), signed);
   assert.match(commit(next), /^gpgsig /m);
+});
+
+test('before the first publish, galley asks GitHub for the branch: one there is replaced only with force, and one gone leaves no lease behind', async () => {
+  const { clone } = await widgets();
+  const onGithub = (branch: string) => execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { encoding: 'utf8' }).trim();
+  // Pushed to GitHub by hand before it was staged, then amended: publishing needs force, and leases against GitHub's.
+  const there = await stage('feature/there', 'there.js');
+  git('push', '-q', remote, 'feature/there');
+  const theirs = git('rev-parse', 'HEAD');
+  git('commit', '-q', '--amend', '-m', 'Add there.js, reworded');
+  assert.equal((await gitToGalley(['push', '--force-with-lease=refs/heads/feature/there:' + theirs, '-o', `lease=feature/there:${theirs}`, `${server.url}/git/acme/widgets.git`, 'feature/there'])).code, 0);
+  const refused = await fetch(`${server.url}${there.base}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: false, force: false }) });
+  assert.equal(refused.status, 409);
+  assert.equal(clone('rev-parse', 'refs/remotes/origin/feature/there'), theirs);
+  assert.equal(onGithub('feature/there'), theirs);
+  assert.equal((await human('POST', `${there.base}/publish`, { sign: false, force: true })).staging_state, 'published');
+  assert.equal(onGithub('feature/there'), git('rev-parse', 'HEAD'));
+  // A remote-tracking branch an earlier fetch left, of a branch GitHub no longer has: no lease against it.
+  const gone = await stage('feature/gone-there', 'gone-there.js');
+  clone('update-ref', 'refs/remotes/origin/feature/gone-there', theirs);
+  assert.equal((await human('POST', `${gone.base}/publish`, { sign: false })).staging_state, 'published');
+  assert.equal(onGithub('feature/gone-there'), git('rev-parse', 'HEAD'));
+  assert.equal(clone('for-each-ref', 'refs/remotes/origin/feature/gone-there'), '');
 });
 
 test('galley fetches base branches from GitHub into its clone, and checks the head against them', async () => {
@@ -221,7 +244,7 @@ test('commits GitHub did not merge are found in galley’s clone', async () => {
   );
 });
 
-test('a GitHub repository registered twice at once is cloned once; one registered by path stays so', async () => {
+test('a GitHub repository registered twice at once is cloned once, and under a name it had before is the same', async () => {
   // GitHub's acme/twice, with a main branch.
   const twice = join(dir, 'twice.git');
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', twice]);
@@ -242,18 +265,13 @@ test('a GitHub repository registered twice at once is cloned once; one registere
   assert.deepEqual(readdirSync(repos).sort(), clones.sort());
   assert.equal(server.service.db.get('SELECT 1 FROM repos WHERE github_slug = ?', 'acme/missing'), undefined);
 
-  // Registered by path, as the CLI does while it sends no branches, it stays so when registered by name.
-  const { fullName, g } = await scratchRepo('by-path');
-  const byPath = await human('GET', `/api/repos/${fullName}`);
-  const byName = await human('POST', '/api/repos', { github: 'acme/by-path' });
-  assert.equal(byName.id, byPath.id);
-  assert.equal(byName.git_url, undefined);
-  assert.equal(byName.work_dir, realpathSync(join(dir, 'by-path')));
-  // Renamed on GitHub, it is the one registered by its former name too, in any case.
-  g('remote', 'set-url', 'origin', 'https://github.com/acme/renamed.git');
-  await server.service.followRemotes();
-  assert.equal((await human('GET', '/api/repos/acme/renamed')).id, byPath.id);
-  assert.equal((await human('POST', '/api/repos', { github: 'Acme/By-Path' })).id, byPath.id);
+  // Under a name it had before (as galley followed a rename on GitHub in the remote of a repository registered by path), in any case.
+  server.service.db.run('INSERT INTO repo_aliases (owner, name, repo_id) VALUES (?, ?, ?)', 'acme', 'once', answers[0].id);
+  assert.equal((await human('POST', '/api/repos', { github: 'Acme/Once' })).id, answers[0].id);
+  // A CLI from before galley kept clones registers by path, which galley no longer does.
+  const byPath = await fetch(`${server.url}/api/repos`, { method: 'POST', body: JSON.stringify({ path: repo }) });
+  assert.equal(byPath.status, 422);
+  assert.equal((await byPath.json()).message, 'galley registers a repository by its GitHub owner/name (github), not by path: update the CLI');
 });
 
 /** A branch off main in the agent's repository with a commit adding `file`, staged with the CLI as the agent: its number and API path. */
@@ -302,7 +320,7 @@ test('pr create and pr wait send the author’s branch to galley’s clone first
     assert.deepEqual(revisions(pr.id).map((r) => [r.seq, r.head_sha]), [[1, first], [2, second]]);
     assert.equal(execFileSync('git', ['-C', call.args[call.args.indexOf('-C') + 1], 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), second);
     // No worktree in the checkout, nor galley's refs.
-    assert.deepEqual(reviewCheckouts(), []);
+    assert.doesNotMatch(git('worktree', 'list', '--porcelain'), /galley-review-/);
     assert.equal(git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
     assert.equal(git('for-each-ref', 'refs/galley'), '');
     writeFileSync(gate, '');
@@ -379,6 +397,49 @@ test('when the head conflicts with the base galley fetched, pr wait fetches that
   r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(git('rev-parse', 'refs/remotes/origin/main'), moved);
+});
+
+test('pr create sends a base galley does not have, of a pull request stacked on a branch not staged yet, and pr wait fetches it into galley/<base> when the head conflicts with it', async () => {
+  const { clone } = await widgets();
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/stack-base');
+  writeFileSync(join(repo, 'stack.js'), 'export const stack = 1;\n');
+  git('add', 'stack.js');
+  git('commit', '-qm', 'Add stack.js');
+  git('checkout', '-qb', 'feature/stack-top');
+  writeFileSync(join(repo, 'stack.js'), 'export const stack = 2;\n');
+  git('commit', '-qam', 'Change stack.js');
+  // Neither is on galley or GitHub: both are sent.
+  const created = await cli(['pr', 'create', '--title', 'Change stack.js', '--body', 'x', '--base', 'feature/stack-base']);
+  assert.equal(created.code, 0, created.stderr);
+  assert.match(created.stderr, new RegExp(`^Sent feature/stack-base at ${git('rev-parse', '--short=7', 'feature/stack-base')} to galley\\.$`, 'm'));
+  assert.match(created.stderr, new RegExp(`^Sent feature/stack-top at ${git('rev-parse', '--short=7', 'HEAD')} to galley\\.$`, 'm'));
+  const number = Number(created.stdout.trim().split('/').pop());
+  assert.equal((await asAgent('GET', `${API}/gh/pulls/${number}?fields=baseRefName`)).json.baseRefName, 'feature/stack-base');
+  // A base the checkout has a remote-tracking branch of is GitHub's to give: main is not sent.
+  git('checkout', '-qb', 'feature/on-main', 'main');
+  writeFileSync(join(repo, 'on-main.js'), 'export {};\n');
+  git('add', 'on-main.js');
+  git('commit', '-qm', 'Add on-main.js');
+  const onMain = await cli(['pr', 'create', '--title', 'Add on-main.js', '--body', 'x', '--base', 'main']);
+  assert.equal(onMain.code, 0, onMain.stderr);
+  assert.doesNotMatch(onMain.stderr, /Sent main/);
+  assert.equal(clone('for-each-ref', 'refs/heads/main'), '');
+
+  // The base moves on galley, in the same lines: the wait says to rebase onto galley's, fetched into galley/<base>.
+  git('checkout', '-q', 'feature/stack-base');
+  writeFileSync(join(repo, 'stack.js'), 'export const stack = 3;\n');
+  git('commit', '-qam', 'Set stack to 3');
+  const moved = git('rev-parse', 'HEAD');
+  assert.equal((await gitToGalley(['push', `${server.url}/git/acme/widgets.git`, 'feature/stack-base'])).code, 0);
+  git('checkout', '-q', 'feature/stack-top');
+  await until(async () => (await asAgent('GET', `${API}/gh/pulls/${number}?fields=baseConflicts`)).json.baseConflicts?.oid === moved, 'galley finds the conflict');
+  const r = await cli(['pr', 'wait', String(number), '--timeout', '20s']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^This branch conflicts with galley\/feature\/stack-base in stack\.js; rebase onto galley\/feature\/stack-base\./m);
+  assert.equal(git('rev-parse', 'refs/remotes/galley/feature/stack-base'), moved);
+  // No local branch was written.
+  assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/heads/galley'), '');
 });
 
 test('after GitHub refused a push for the branch rewritten there, pr wait fetches it into the checkout, and the rebase onto it is sent and pushed', async () => {

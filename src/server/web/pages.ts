@@ -1299,7 +1299,7 @@ function sidebar(p: PullPage): Safe {
     })}</ol>
   </div>
   <div class="sidebar-item"><h3 class="sidebar-heading">Repository</h3>
-    <p class="sidebar-text"><code class="wrap">${repo.work_dir ?? s.gitDir(repo)}</code></p>
+    <p class="sidebar-text"><code class="wrap">${s.gitDir(repo)}</code></p>
     <p class="sidebar-text color-fg-muted">${repo.github_slug ? html`Publishes to <a href="https://github.com/${repo.github_slug}" target="_blank" rel="noopener">${repo.github_slug}</a>` : 'No GitHub remote'} · compared with <code>${repo.remote}/${pull.base_ref}</code></p>
   </div>
   <div class="sidebar-item">
