@@ -30,7 +30,7 @@ under `/api/repos/{owner}/{repo}`.
 - `PUT|DELETE …/pulls/{n}/stop-iterating`: stop the reviewer agents' automatic reviews, or resume them.
 - `PUT …/pulls/{n}/viewed`: `{path, blob, viewed}`, a file's "Viewed" box.
 
-Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `published_url`, `published_at`, `github_state` (`open`, `merged`, `closed`; null until asked), `github_closed_at`, `github_closed_by`, `author_waiting`, `auto_publish`, `iterations_stopped`, `turn` (`whose`: `author`, `reviewer_agents`, `reviewer`, `none`, and `reasons`; a reviewer agent's reason has its `state` and `to_review`, true while it still has the head to review), `unpublished_changes`, `pinned_at`.
+Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `published_url`, `published_at`, `github_state` (`open`, `merged`, `closed`; null until asked), `github_closed_at`, `github_closed_by`, `author_waiting`, `auto_publish`, `iterations_stopped`, `turn` (`whose`: `author`, `reviewer_agents`, `reviewer`, `none`, and `reasons`; a reviewer agent's reason has its `state` and `to_review`, true while it still has the head to review; `none` also while auto-publish is on and waits for nothing of the user's, with one reason of kind `auto_publish` saying what it waits for; on the user's turn, a reason of kind `auto_publish` says what holds auto-publish up that no other reason does), `unpublished_changes`, `pinned_at`.
 
 ## Review comments and threads
 

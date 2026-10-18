@@ -6,9 +6,10 @@ import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Service } from '../../src/server/service.ts';
+import type { PullRow } from '../../src/server/db.ts';
+import { Service, type ChangeEvent } from '../../src/server/service.ts';
 
 startHarness();
 
@@ -150,6 +151,38 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     } finally {
       await human('DELETE', `${pr.base}/auto-publish`);
       await human('PUT', '/api/settings/publish', { mergeMethod: 'squash' });
+    }
+  });
+
+  await t.test("GitHub's answer from before galley turned auto-merge on does not make it the user's turn to merge", async () => {
+    const pr = await stage('feature/merge-turn', 'turn-merge.js');
+    const pull = await human('POST', `${pr.base}/publish`, { auto_merge: true, merge_method: 'squash' });
+    assert.deepEqual(pull.auto_merge_result, { state: 'enabled', merge_method: 'squash', error: null });
+    const row = () => server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
+    // Ready to merge, with auto-merge off, as GitHub says when asked while publishing turns auto-merge on.
+    const node = { state: 'OPEN', mergedAt: null, closedAt: null, mergedBy: null, mergeCommit: null, timelineItems: { nodes: [] }, headRefOid: pr.pushed(), mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', autoMergeRequest: null };
+    writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${pull.id}`]: node } } }));
+    try {
+      await server.service.followGithub();
+      const asked = new Date(Date.parse(server.service.autoMerge(row())!.at) - 1).toISOString();
+      server.service.db.run("UPDATE pulls SET github_status = json_set(github_status, '$.checkedAt', ?) WHERE id = ?", asked, pull.id);
+      assert.deepEqual(server.service.turn(row()), { whose: 'none', reasons: [] });
+      // Said after galley turned it on, auto-merge is off on GitHub: the user's turn to merge it
+      // there. Pages hear of it, though GitHub says what it said before.
+      const events: string[] = [];
+      const listen = (e: ChangeEvent) => e.pullId === pull.id && events.push(e.type);
+      server.service.bus.on('change', listen);
+      try {
+        await server.service.followGithub();
+      } finally {
+        server.service.bus.off('change', listen);
+      }
+      assert.deepEqual(events, ['github_status']);
+      const turn = server.service.turn(row());
+      assert.equal(turn.whose, 'reviewer');
+      assert.ok(turn.reasons.some((r) => r.text === 'ready to merge on GitHub'), JSON.stringify(turn.reasons));
+    } finally {
+      rmSync(join(dir, 'gh-pulls.json'), { force: true });
     }
   });
 

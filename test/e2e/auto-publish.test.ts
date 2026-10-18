@@ -10,6 +10,7 @@ import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import type { PullRow } from '../../src/server/db.ts';
 import { Repo } from '../../src/server/git.ts';
+import { AUTHOR_STALL_MS, type ChangeEvent } from '../../src/server/service.ts';
 
 startHarness();
 
@@ -220,6 +221,82 @@ test('auto-publish publishes once the agents are done', async (t) => {
     });
   });
 
+  await t.test("never the user's turn on its way from the reviewer agents to published", async () => {
+    const pr = await stage('feature/auto-turn', 'auto-turn.js');
+    const { id } = await human('GET', pr.base);
+    const row = () => server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!;
+    // Whose turn it is after each change and each wait, as pages and the desktop app hear of them:
+    // once whoever made the change is done with it.
+    const turns: string[] = [];
+    const look = (pullId: number | null) => {
+      if (pullId !== id) return;
+      setImmediate(() => {
+        const { whose, reasons } = server.service.turn(row());
+        const now = whose === 'none' ? `none: ${reasons.map((r) => r.text).join('; ')}` : whose;
+        if (turns.at(-1) !== now) turns.push(now);
+      });
+    };
+    const onChange = (e: ChangeEvent) => look(e.pullId);
+    server.service.bus.on('change', onChange);
+    server.service.bus.on('author-waiting', look);
+    const gate = join(dir, 'auto-turn-gate');
+    const signing = gateSigning();
+    try {
+      await withFakes({ FAKE_CODEX_GATE: gate, FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Looks right.', comments: [] }) }, async () => {
+        await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
+        await human('PUT', `${pr.base}/auto-publish`, {});
+        const reviewed = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+        await until(() => server.service.codex!.atWork(row())?.status === 'IN_PROGRESS', 'Codex reviews');
+        writeFileSync(gate, '');
+        assert.match((await reviewed).stdout, /Looks right\./);
+        // Codex found nothing, and the agent waits again: auto-publish publishes it, while signing waits for a prompt.
+        const published = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+        await until(signing.started, 'signing started');
+        const { turn } = await human('GET', pr.base);
+        assert.deepEqual([turn.whose, turn.reasons.map((r: any) => r.text)], ['none', ['auto-publish is publishing it']]);
+        assert.match((await cli(['pr', 'view', String(pr.number)])).stdout, /^turn:\tnone\tauto-publish is publishing it$/m);
+        // The front page lists it under auto-publish, not as yours, and does not notify about it.
+        const front = await (await fetch(`${server.url}/`)).text();
+        const group = front.split('<div class="Box-row turn-group">').find((g) => g.includes(`href="/acme/widgets/pull/${pr.number}"`))!;
+        assert.match(group, /<h2 class="turn-group-title">Auto-publish<\/h2> <span class="Counter">1<\/span> <span class="turn-group-note">publishes on its own<\/span>/);
+        assert.match(group, /<div class="pr-row-turn"><span class="turn-reason">auto-publish is publishing it<\/span><\/div>/);
+        assert.doesNotMatch(front.match(/data-your-turn="([^"]*)"/)![1], new RegExp(`/acme/widgets/pull/${pr.number}&quot;`));
+        signing.open();
+        assert.match((await published).stdout, /Published to GitHub/);
+        await new Promise((resolve) => setImmediate(resolve));
+      });
+    } finally {
+      server.service.bus.off('change', onChange);
+      server.service.bus.off('author-waiting', look);
+      signing.restore();
+      rmSync(gate, { force: true });
+      await human('PUT', '/api/settings/codex', defaults);
+    }
+    assert.ok(!turns.includes('reviewer'), turns.join(' → '));
+    assert.deepEqual(turns.slice(0, 2), ['author', 'reviewer_agents'], turns.join(' → '));
+    assert.ok(turns.includes('none: auto-publish is publishing it'), turns.join(' → '));
+    // Published, with nothing from GitHub yet.
+    assert.equal(turns.at(-1), 'none: ', turns.join(' → '));
+  });
+
+  await t.test("the author's turn when auto-publish waits for it to wait, and the user's once it stalls", async () => {
+    const pr = await stage('feature/auto-stall', 'stall.js', '--no-review');
+    await human('PUT', `${pr.base}/auto-publish`, {});
+    const turn = async () => {
+      const { turn } = await human('GET', pr.base);
+      return { whose: turn.whose, reasons: turn.reasons.map((r: any) => r.text) };
+    };
+    assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not asked for review yet (pr wait)'] });
+    // As if the agent's last action were longer ago than that.
+    server.service.stallMs = 0;
+    try {
+      assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent stopped without asking for review', 'no review from reviewer yet'] });
+    } finally {
+      server.service.stallMs = AUTHOR_STALL_MS;
+    }
+    assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Published to GitHub/);
+  });
+
   await t.test('without waiting for Codex when the pull request was staged with --no-review', async () => {
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
     try {
@@ -249,6 +326,8 @@ test('auto-publish publishes once the agents are done', async (t) => {
         assert.equal((await waiting).code, 124);
         assert.equal(pr.created(), false);
         assert.match(await pr.page(), new RegExp(`codex-review's review of <code>${git('rev-parse', '--short=7', 'HEAD')}</code> failed\\. Ask it to review again, or publish by hand\\.`));
+        // Someone has to ask for another review, or publish by hand: the user's turn.
+        assert.equal((await human('GET', pr.base)).turn.whose, 'reviewer');
         const agent = await cli(['pr', 'publish', String(pr.number), '--disable-auto']);
         assert.equal(agent.code, 1);
         const off = await cli(['pr', 'publish', String(pr.number), '--disable-auto'], { actor: 'reviewer' });
@@ -504,6 +583,10 @@ test('auto-publish publishes once the agents are done', async (t) => {
     await pr.settle();
     assert.equal(pr.created(), false);
     assert.match(await pr.page(), /1 conversation you started is unresolved/);
+    // Only the user resolves it: their turn.
+    const held = (await human('GET', pr.base)).turn;
+    assert.equal(held.whose, 'reviewer');
+    assert.ok(held.reasons.some((r: any) => r.text === '1 unresolved thread'), JSON.stringify(held.reasons));
 
     await withFakes({ FAKE_GH_FAIL: 'HTTP 502: gh is down' }, async () => {
       await human('PUT', `${pr.base}/threads/${thread.id}/resolved`);
@@ -520,6 +603,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     const told = await waiting;
     assert.match(told.stdout, /^No reviewer agent reviews .*; ask the user to review it: /);
     assert.doesNotMatch(told.stdout, /Published to GitHub/);
+    assert.equal((await human('GET', pr.base)).turn.whose, 'reviewer');
     await human('POST', `/api/repos/acme/widgets/issues/${pr.number}/comments`, { body: 'I will publish this by hand.' });
     assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /I will publish this by hand\./);
   });

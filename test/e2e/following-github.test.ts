@@ -323,10 +323,18 @@ test('published pull requests are followed until they are merged or closed on Gi
       // Its title opens it on GitHub, where the reviewer merges it; its number opens it here.
       assert.match(mine.row, /<a class="pr-row-title" href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">Add checks\.js<\/a>/);
       assert.match(mine.row, new RegExp(`<a href="/acme/widgets/pull/${n}">s#${n}</a> staged`));
-      // With auto-merge on, GitHub merges it by itself.
-      await githubSays({ [pr.id]: github(passed, { autoMergeRequest: { enabledAt: '2026-10-17T12:00:00Z' } }) });
+      // With auto-merge on, GitHub merges it by itself, also once checks that run now pass.
+      const autoMerge = { autoMergeRequest: { enabledAt: '2026-10-17T12:00:00Z' } };
+      await githubSays({ [pr.id]: github(passed, autoMerge) });
       assert.deepEqual(await turn(), { whose: 'NONE', reasons: [] });
       assert.equal((await listed()).group, 'Waiting on GitHub');
+      await githubSays({ [pr.id]: github([run('test', 11, 'IN_PROGRESS'), run('lint', 12, 'COMPLETED', 'SUCCESS')], { ...autoMerge, mergeStateStatus: 'BLOCKED' }) });
+      assert.deepEqual(await turn(), { whose: 'NONE', reasons: [] });
+      // Not once a check fails: the reviewer's turn.
+      await githubSays({ [pr.id]: github([run('test', 11, 'COMPLETED', 'FAILURE'), run('lint', 12, 'COMPLETED', 'SUCCESS')], { ...autoMerge, mergeStateStatus: 'UNSTABLE' }) });
+      const failing = await turn();
+      assert.equal(failing.whose, 'REVIEWER');
+      assert.deepEqual(failing.reasons.filter((r: string) => /GitHub/.test(r)), ['1 check failed on GitHub']);
       // Blocked by a required review: it waits on GitHub, for those asked to review.
       const requested = { totalCount: 3, nodes: [{ requestedReviewer: { login: 'eskilgh' } }, { requestedReviewer: { login: 'cbjerkan' } }, { requestedReviewer: { combinedSlug: 'acme/platform' } }] };
       await githubSays({ [pr.id]: github(passed, { autoMergeRequest: null, mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', reviewRequests: requested }) });

@@ -177,7 +177,9 @@
     return refreshing;
   }
 
+  let rendered = 0; // pages rendered, so confirmTurn can tell whether its refresh got anything new
   function afterRender() {
+    rendered++;
     for (const file of $$('.file')) {
       const user = userState.collapsed.get(file.dataset.path);
       const body = $('.file-body', file);
@@ -1642,9 +1644,14 @@
 
   // -------------------------------------------------------- notifications
   // Opt in on a list page: a desktop notification when a pull request becomes your turn. The
-  // page knows after each live refresh, so it works while a list page is open in some tab.
+  // page knows after each live refresh, so it works while a list page is open in some tab. It
+  // tells once the pull request has been your turn for NOTIFY_AFTER_MS, and still is when the page
+  // is refreshed then, so a turn that is yours for a moment (on its way from the agents to
+  // auto-publish, say) tells nothing. The desktop app waits as long (desktop/turns.ts).
 
+  const NOTIFY_AFTER_MS = 10000;
   let yourTurn = null; // the pull ids whose turn was yours when the page last rendered
+  const held = new Map(); // pull id → the timer for those that became yours, until told or no longer yours
 
   function notifying() {
     try {
@@ -1660,20 +1667,43 @@
     button.hidden = !window.Notification || Notification.permission === 'denied';
     $('.js-notify-label', button).textContent = notifying() ? 'Notifying' : 'Notify me';
     button.classList.toggle('selected', notifying());
-    // The server lists them whatever the tab shows: { id, title, url, reasons }.
-    const list = $('[data-your-turn]');
-    const turns = list ? JSON.parse(list.dataset.yourTurn) : [];
-    if (yourTurn && notifying()) {
-      for (const t of turns.filter((t) => !yourTurn.has(t.id))) {
-        // The tag keeps other tabs showing a list from notifying twice.
-        const n = new Notification(`Your turn: ${t.title}`, { body: t.reasons, tag: `galley-turn-${t.id}`, icon: '/static/favicon.svg' });
-        n.onclick = () => {
-          window.focus();
-          location.href = t.url;
-        };
-      }
+    const turns = listedTurns();
+    // No longer yours: nothing to tell, and becoming yours again starts the wait again.
+    for (const [id, timer] of held) {
+      if (turns.some((t) => t.id === id)) continue;
+      clearTimeout(timer);
+      held.delete(id);
     }
+    if (yourTurn && notifying()) for (const t of turns.filter((t) => !yourTurn.has(t.id))) holdTurn(t.id);
     yourTurn = new Set(turns.map((t) => t.id));
+  }
+
+  // The server lists them whatever the tab shows: { id, title, url, reasons }.
+  function listedTurns() {
+    const list = $('[data-your-turn]');
+    return list ? JSON.parse(list.dataset.yourTurn) : [];
+  }
+
+  function holdTurn(id) {
+    const timer = setTimeout(() => confirmTurn(id, timer), NOTIFY_AFTER_MS);
+    held.set(id, timer);
+  }
+
+  // Refresh, and tell of it if it has been your turn all along. When the refresh fails, wait again.
+  async function confirmTurn(id, timer) {
+    const before = rendered;
+    await refresh().catch(() => {});
+    if (held.get(id) !== timer) return;
+    if (rendered === before) return holdTurn(id);
+    held.delete(id);
+    const t = listedTurns().find((t) => t.id === id);
+    if (!t || !notifying()) return;
+    // The tag keeps other tabs showing a list from notifying twice.
+    const n = new Notification(`Your turn: ${t.title}`, { body: t.reasons, tag: `galley-turn-${t.id}`, icon: '/static/favicon.svg' });
+    n.onclick = () => {
+      window.focus();
+      location.href = t.url;
+    };
   }
 
   document.addEventListener('click', async (e) => {
