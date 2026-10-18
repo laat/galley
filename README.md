@@ -89,7 +89,8 @@ each with what it waits for, and has a Start at login switch. It is a window ont
 CLI uses: it starts one when none is running, and quitting it leaves the server running. Its window
 has no title bar of its own: galley's header holds the window's buttons, drags the window, and
 stays at the top as you scroll. Uploaded images and raw files open in windows of their own, with a
-title bar.
+title bar. As in Chrome, a two-finger swipe sideways goes back or forward, and so do the mouse's
+side buttons, ⌘[ and ⌘], and ⌘← and ⌘→ outside a text field.
 
 ```sh
 pnpm --dir desktop install

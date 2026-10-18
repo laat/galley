@@ -1,5 +1,6 @@
 // galley links in the desktop app: what page a galley:// link opens, and when a page opened in the
-// browser hands off to the app (public/app.js, run in a VM against stand-ins for the DOM).
+// browser hands off to the app (public/app.js, run in a VM against stand-ins for the DOM), which
+// in its own windows loads what a browser tab does not need.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -76,6 +77,7 @@ function load(o: { desktopApp?: string; navigation?: string; referrer?: string; 
   const session = { getItem: () => null, setItem() {}, removeItem() {}, key: () => null, length: 0 };
   const listeners = new Map<string, ((e: unknown) => void)[]>();
   const before: { innerHTML: string; removed: boolean }[] = [];
+  const scripts: string[] = [];
   const main = { dataset: {}, before: (el: { innerHTML: string; removed: boolean }) => before.push(el) };
   const toast = { hidden: true, innerHTML: '', buttons: [] as { textContent?: string; onclick?: () => void }[], append(b: { textContent?: string }) { this.buttons.push(b); } };
   const document = {
@@ -84,6 +86,7 @@ function load(o: { desktopApp?: string; navigation?: string; referrer?: string; 
     activeElement: null,
     addEventListener: (type: string, fn: (e: unknown) => void) => listeners.set(type, [...(listeners.get(type) ?? []), fn]),
     createElement: () => ({ setAttribute() {}, removed: false, remove() { this.removed = true; } }),
+    head: { append: (el: { src: string }) => scripts.push(el.src) },
     getElementById: (id: string) => (id === 'main' ? main : id === 'toast' ? toast : null),
     querySelector: (sel: string) => (sel === '.handoff-notice' ? before.find((n) => !n.removed) ?? null : null),
     querySelectorAll: () => [],
@@ -107,6 +110,8 @@ function load(o: { desktopApp?: string; navigation?: string; referrer?: string; 
     /** Where the page sent the tab: the galley:// link, or its own URL when it stayed. */
     went: () => location.href,
     notice: () => before.find((n) => !n.removed)?.innerHTML ?? null,
+    /** The scripts it added to the page. */
+    scripts,
     stays: () => stored.get('galley:stay-in-browser') === '1',
     toast,
     /** A click on what `selector` finds, a link to `href` for one. */
@@ -151,6 +156,11 @@ test("a page stays where it is in the app's own windows, after Stay in the brows
     assert.equal(p.went(), page, what);
     assert.equal(p.notice(), null, what);
   }
+});
+
+test("the app's windows go back and forward with a swipe and with ⌘← and ⌘→ (gestures.js), which a browser tab has of its own", () => {
+  assert.deepEqual(load({ userAgent: APP }).scripts, ['/static/gestures.js']);
+  assert.deepEqual(load().scripts, []);
 });
 
 test('a page a galley page opened in a tab of its own, which has no referrer, stays in the browser', () => {
