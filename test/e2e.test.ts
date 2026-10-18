@@ -1529,7 +1529,7 @@ test('a review that fails after iterations stop holds nothing up, and the next c
       assert.equal(codexStatus().state, 'capped');
       const again = cli(['pr', 'wait', String(number), '--timeout', '2s']);
       await until(() => server.service.waiters.get(id), 'the author waits');
-      assert.equal(server.service.readiness(row()).agentsDone, true);
+      assert.deepEqual(server.service.autoPublishChecklist(row()).filter((i) => !i.ok && i.key !== 'conflicts').map((i) => i.key), []);
       assert.equal((await again).code, 124);
       const html = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
       assert.match(html, /title="Review of [0-9a-f]{7} failed"/);
@@ -6126,7 +6126,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
       waiting = moving.wait();
       await until(async () => (await moving.json()).author_waiting, 'the author waits');
       // All else is ready, but the answer for the old base does not count.
-      assert.equal(server.service.readiness(moving.row()).agentsDone, true);
+      assert.deepEqual(server.service.autoPublishChecklist(moving.row()).filter((i) => !i.ok).map((i) => i.key), ['conflicts']);
       assert.equal(server.service.autoPublishReady(moving.row()), false);
       const box = await moving.page();
       assert.match(box, /This branch has no conflicts with .*origin\/main has moved since; checking again\./);
@@ -6153,7 +6153,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
       const publishing = retried.wait();
       await until(async () => /Could not check for conflicts with/.test(await retried.page()), 'the failed check is shown');
       await until(async () => (await retried.json()).author_waiting, 'the author waits');
-      assert.equal(server.service.readiness(retried.row()).agentsDone, true);
+      assert.deepEqual(server.service.autoPublishChecklist(retried.row()).filter((i) => !i.ok).map((i) => i.key), ['conflicts']);
       assert.equal(server.service.autoPublishReady(retried.row()), false);
       const box = await retried.page();
       assert.match(box, /<pre class="merge-error">git merge-tree failed: error: unknown style /);

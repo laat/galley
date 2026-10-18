@@ -11,6 +11,7 @@ import type { CustomReviewers } from './reviewers/custom.ts';
 import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { busy, doneForAutoPublish, doneForHandover, toReview, type HeadState, type HeadStatus } from './reviewers/head-status.ts';
 import { agentReviews, askedAt, unansweredThreads, unseenFeedback, type Feedback } from './feedback.ts';
+import { addEvent, lastEvent, type EventData, type EventType } from './events.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
 import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
@@ -203,7 +204,7 @@ export interface AgentsDone {
   reviewers: string[];
 }
 
-/** Whether the agents are done with a pull request, so the reviewer can take it from here. */
+/** Where the agents are with a pull request: what auto-publish waits for from them (Service.autoPublishChecklist). */
 export interface Readiness {
   /** `reviewer`: what the API calls it (Reviewer.key). */
   reviewers: { login: string; engine: string; reviewer: string; status: HeadStatus }[];
@@ -213,8 +214,6 @@ export interface Readiness {
   unseen: number;
   /** Unresolved threads a person started (agents' threads do not count). */
   openThreads: number;
-  /** Every reviewer agent is done with the head for auto-publish (doneForAutoPublish), and the author is waiting with all feedback seen. */
-  agentsDone: boolean;
 }
 
 /** Whose move a pull request waits for: the author agent's, the reviewer agents', the reviewer's, or nobody's. */
@@ -277,6 +276,20 @@ export interface AutoPublish {
   force: boolean;
   /** Turn on auto-merge on GitHub after publishing, with this merge method; null for no auto-merge. */
   autoMerge: MergeMethod | null;
+}
+
+/**
+ * One thing auto-publish waits for (`blocking`), or warns of, as the pull request's page lists it
+ * (Service.autoPublishChecklist). `key`: `reviewer:<key>` (Reviewer.key), `author`, `threads`,
+ * `conflicts` or `merge_method`. `failed`: not ok until someone acts, rather than once the agents
+ * are done. A reviewer agent's item has its status in place of text, which the page words.
+ */
+export type AutoPublishItem = { key: string; ok: boolean; blocking: boolean; failed: boolean } & ({ text: string } | { reviewer: { login: string; status: HeadStatus } });
+
+/** What publishing now asks the user to acknowledge (Service.publishAsks): the request's field for it, and why. */
+export interface PublishAsk {
+  field: 'during_review' | 'during_conflict';
+  text: string;
 }
 
 /** Automatic reviews, once the reviewer stopped them: who did, when, and after which round (see Service.automaticRound). */
@@ -1323,8 +1336,8 @@ export class Service {
       .catch((e) => console.error('checking for conflicts with the base failed:', e));
   }
 
-  addEvent(pull: PullRow, actor: Actor, type: string, data: object = {}, ts = now()): void {
-    this.db.insert('events', { pull_id: pull.id, actor_id: actor.id, type, data: JSON.stringify(data), created_at: ts });
+  addEvent<T extends EventType>(pull: PullRow, actor: Actor, type: T, data: EventData[T], ts = now()): void {
+    addEvent(this.db, pull, actor, type, data, ts);
   }
 
   events(pull: PullRow): EventRow[] {
@@ -1872,7 +1885,7 @@ export class Service {
     if (!pull) return { status: 'closed', reviews: [], comments: [] };
     // Feedback always comes back, also when it arrives together with a close, a publish or a merge.
     const fb = unseenFeedback(this.db, pull);
-    const published = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' AND created_at > ?", id, pull.author_seen_at);
+    const published = lastEvent(this.db, pull, 'published', pull.author_seen_at);
     // What came of pushing the head it waited with, the latest push it has not been told of. A
     // failure that is tried again is the reviewer's to see; the author waits on.
     const push = this.lastPush(pull, pull.author_seen_at);
@@ -2039,10 +2052,9 @@ export class Service {
   }
 
   /**
-   * Whether the agents are done with the pull request: every reviewer agent is done with the
-   * head, and the author is waiting with all feedback seen. Auto-publish also needs none of
-   * the threads the reviewer started to be open. Unlike agentsDone, a failed review holds it up
-   * (doneForAutoPublish).
+   * Where the agents are with the pull request: what each reviewer agent made of the head, whether
+   * the author is waiting with all feedback seen, and the threads the reviewer started that are
+   * open. Auto-publish waits for all of it (autoPublishChecklist).
    */
   readiness(pull: PullRow): Readiness {
     const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, engine: r.engine, reviewer: r.key, status: r.headStatus(pull) }));
@@ -2055,8 +2067,7 @@ export class Service {
          AND (c.review_id IS NULL OR c.review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`,
       pull.id,
     )!.n;
-    const agentsDone = reviewers.every((r) => doneForAutoPublish(r.status.state)) && authorWaiting && unseen === 0;
-    return { reviewers, authorWaiting, unseen, openThreads, agentsDone };
+    return { reviewers, authorWaiting, unseen, openThreads };
   }
 
   /**
@@ -2267,17 +2278,56 @@ export class Service {
   // ------------------------------------------------------------ auto-publish
 
   /**
-   * Auto-publish is on and may publish now: the agents are done, none of the reviewer's threads is
-   * open, and the head is known not to conflict with its base as it is now. It approves the first
-   * publish only, which turns it off: after that, each commit the author waits with is pushed
-   * (pushUpdate).
+   * Auto-publish is on and may publish now: everything it waits for is ok (autoPublishChecklist).
+   * It approves the first publish only, which turns it off: after that, each commit the author
+   * waits with is pushed (pushUpdate).
    */
   autoPublishReady(pull: PullRow): boolean {
     if (!pull.auto_publish || pull.state !== 'staged') return false;
-    // Known to merge cleanly into the base as it is now: not while that is worked out, nor when git could not tell.
-    if (this.currentConflicts(pull)?.clean !== true) return false;
+    return this.autoPublishChecklist(pull).every((i) => i.ok || !i.blocking);
+  }
+
+  /**
+   * What auto-publish waits for, in the order the page lists it: each reviewer agent done with the
+   * head (doneForAutoPublish: a failed review holds it up, unlike for agentsDone), the author
+   * waiting with all feedback seen, none of the threads the reviewer started open, and the head
+   * known not to conflict with its base as it is now. Then what it does not wait for: GitHub no
+   * longer allows the auto-merge it was turned on with, so publishing will fail. Threads and the
+   * merge method are listed only when they are not ok.
+   */
+  autoPublishChecklist(pull: PullRow): AutoPublishItem[] {
     const r = this.readiness(pull);
-    return r.agentsDone && r.openThreads === 0;
+    const author = this.db.actorById(pull.author_id).login;
+    const items: AutoPublishItem[] = r.reviewers.map(({ login, reviewer, status }) => ({
+      key: `reviewer:${reviewer}`,
+      ok: doneForAutoPublish(status.state),
+      blocking: true,
+      failed: status.state === 'failed',
+      reviewer: { login, status },
+    }));
+    const seen = r.authorWaiting && r.unseen === 0;
+    const text = seen ? `${author} is waiting for review, with all feedback seen` : r.authorWaiting ? `${author} has feedback it has not seen yet` : `${author} is working (not waiting for review)`;
+    items.push({ key: 'author', ok: seen, blocking: true, failed: false, text });
+    if (r.openThreads) {
+      const threads = r.openThreads === 1 ? '1 conversation you started is' : `${r.openThreads} conversations you started are`;
+      items.push({ key: 'threads', ok: false, blocking: true, failed: false, text: `${threads} unresolved` });
+    }
+    // Known to merge cleanly into the base as it is now: not while that is worked out, nor when git
+    // could not tell. Auto-publish is for the first publish, so GitHub does not have the head to answer for.
+    const conflicts = this.currentConflicts(pull);
+    const conflict = { key: 'conflicts', blocking: true };
+    if (!conflicts) items.push({ ...conflict, ok: false, failed: false, text: `Checking for conflicts with ${pull.base_ref}` });
+    else if (conflicts.clean === null) items.push({ ...conflict, ok: false, failed: true, text: `Could not check for conflicts with ${conflicts.ref}: ${conflicts.error}` });
+    else if (!conflicts.clean) items.push({ ...conflict, ok: false, failed: true, text: `Conflicts with ${conflicts.ref}: nothing is published until ${author} rebases it` });
+    else items.push({ ...conflict, ok: true, failed: false, text: `No conflicts with ${conflicts.ref}` });
+    // GitHub's settings may have changed since it was turned on; publishing refuses then (autoMergeMethod).
+    // As GitHub last said, without asking again as githubRepo would: this runs on every change.
+    const method = this.autoPublish(pull)?.autoMerge;
+    const slug = this.repoById(pull.repo_id).github_slug;
+    const merging = method && slug ? this.githubRepoCache.get(slug)?.value?.merging : null;
+    const refused = method && merging && (!merging.autoMerge ? 'auto-merge' : !merging.methods.includes(method) ? `${method} merges` : null);
+    if (refused) items.push({ key: 'merge_method', ok: false, blocking: false, failed: true, text: `${slug} does not allow ${refused}, so publishing will fail` });
+    return items;
   }
 
   /** Auto-publish's options while it is on, or null. */
@@ -2388,7 +2438,7 @@ export class Service {
     // Decided in the database, like stopIterating: ctx may be from before the stop.
     const resumed = this.db.transaction(() => {
       if (this.db.run('UPDATE pulls SET iterations_stopped = NULL WHERE id = ? AND iterations_stopped IS NOT NULL', pull.id).changes === 0) return false;
-      this.addEvent(pull, actor, 'iterations_resumed');
+      this.addEvent(pull, actor, 'iterations_resumed', {});
       return true;
     });
     if (!resumed) return false;
@@ -2659,19 +2709,9 @@ export class Service {
     if (!repo.github_slug) throw new HttpError(422, `remote "${repo.remote}" is not a GitHub repository`);
     // Decided here, not by the page: a page loaded before the review started, or before the base
     // moved, does not know of it. The 428 lists what the body must acknowledge (an extension).
-    const asks: { field: string; text: string }[] = [];
-    const busy = this.reviewersAtWork(pull);
-    if (busy.length && !opts.duringReview) {
-      const what = (sha: string) => (sha === pull.head_sha ? 'this commit' : `an earlier commit (${sha.slice(0, 7)})`);
-      const doing = busy.map(({ reviewer, work }) => `${reviewer.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what(work.head_sha)}`);
-      asks.push({ field: 'during_review', text: `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes. Publishing now cancels ${busy.length > 1 ? 'them' : 'it'}.` });
-    }
     // Auto-publish publishes only a head known to merge cleanly into the base as it is now (stillApproved).
     const conflicts = auto || opts.duringConflict ? null : await this.conflictsNow(pull);
-    if (conflicts?.clean === false) {
-      const where = conflicts.files.length ? ` in ${conflicts.files.join(', ')}` : '';
-      asks.push({ field: 'during_conflict', text: `This branch conflicts with ${conflicts.ref}${where}: GitHub can not merge it until the conflicts are resolved.` });
-    }
+    const asks = this.publishAsks(pull, conflicts).filter((a) => !(a.field === 'during_review' && opts.duringReview));
     if (asks.length) throw new HttpError(428, asks.map((a) => a.text).join(' '), { acknowledge: asks.map((a) => a.field) });
     // Refused before anything is pushed, rather than published without the auto-merge asked for.
     const mergeMethod = opts.autoMerge ? await this.autoMergeMethod(repo, opts.autoMerge) : null;
@@ -2737,6 +2777,27 @@ export class Service {
     this.emit(pull.id, auto ? 'auto_published' : 'published', actor);
     if (mergeMethod) await this.enableAutoMerge(ctx, url!, pushed, mergeMethod, actor, timeoutMs);
     return this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
+  }
+
+  /**
+   * What publishing the pull request now asks the user to acknowledge, with a second click on the
+   * page: a reviewer agent at work, whose review may ask for changes and which publishing cancels,
+   * and a head that conflicts with its base. `conflicts`: what was found for the base as it was
+   * last seen, unless given; publishing works it out for the base as it is now first (conflictsNow).
+   */
+  publishAsks(pull: PullRow, conflicts = this.currentConflicts(pull)): PublishAsk[] {
+    const asks: PublishAsk[] = [];
+    const busy = this.reviewersAtWork(pull);
+    if (busy.length) {
+      const what = (sha: string) => (sha === pull.head_sha ? 'this commit' : `an earlier commit (${sha.slice(0, 7)})`);
+      const doing = busy.map(({ reviewer, work }) => `${reviewer.actor().login} is ${work.status === 'QUEUED' ? 'about to review' : 'still reviewing'} ${what(work.head_sha)}`);
+      asks.push({ field: 'during_review', text: `${doing.join(', and ')}, and ${busy.length > 1 ? 'their reviews' : 'its review'} may ask for changes. Publishing now cancels ${busy.length > 1 ? 'them' : 'it'}.` });
+    }
+    if (conflicts?.clean === false) {
+      const where = conflicts.files.length ? ` in ${conflicts.files.join(', ')}` : '';
+      asks.push({ field: 'during_conflict', text: `This branch conflicts with ${conflicts.ref}${where}: GitHub can not merge it until the conflicts are resolved.` });
+    }
+    return asks;
   }
 
   /**
@@ -2836,8 +2897,8 @@ export class Service {
 
   /** The latest push of the pull request made when its author waited (pushUpdate), or the latest after `since`. */
   lastPush(pull: PullRow, since = ''): GithubPush | null {
-    const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'github_push' AND created_at > ? ORDER BY id DESC LIMIT 1", pull.id, since);
-    return e ? { ...(JSON.parse(e.data) as Omit<GithubPush, 'at'>), at: e.created_at } : null;
+    const e = lastEvent(this.db, pull, 'github_push', since);
+    return e ? { ...e.data, at: e.created_at } : null;
   }
 
   /** The push of the head that failed, when the latest try to push it failed. */
@@ -2852,8 +2913,7 @@ export class Service {
    */
   private async signsUpdates(ctx: Ctx): Promise<boolean> {
     const { pull, git } = ctx;
-    const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'published' ORDER BY id DESC LIMIT 1", pull.id);
-    const sign = e && (JSON.parse(e.data) as { sign?: boolean }).sign;
+    const sign = lastEvent(this.db, pull, 'published')?.data.sign;
     if (typeof sign === 'boolean') return sign;
     if (!pull.published_head_sha) return false;
     if (pull.published_head_sha !== pull.published_source_sha) return true;
@@ -2933,10 +2993,10 @@ export class Service {
     this.emit(pull.id, 'github_pushed', viewer);
     // Turned on by galley (also when asking for it again failed since), and not turned off on
     // GitHub since, as far as following saw: asked for again, for the commit pushed.
-    const merge = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type = 'auto_merge_enabled' ORDER BY id DESC LIMIT 1", pull.id);
+    const merge = lastEvent(this.db, pull, 'auto_merge_enabled');
     const github = githubStatus(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!);
     const off = github?.autoMerge === false && !!merge && github.checkedAt > merge.created_at;
-    if (merge && !off) await this.enableAutoMerge(ctx, url, plan.pushed, (JSON.parse(merge.data) as { method: MergeMethod }).method, viewer, timeoutMs);
+    if (merge && !off) await this.enableAutoMerge(ctx, url, plan.pushed, merge.data.method, viewer, timeoutMs);
   }
 
   /**
@@ -2997,11 +3057,12 @@ export class Service {
 
   /** What came of the last time galley turned on auto-merge for this pull request on GitHub; null if it never did. */
   autoMerge(pull: PullRow): AutoMerge | null {
-    const e = this.db.get<EventRow>("SELECT * FROM events WHERE pull_id = ? AND type IN ('auto_merge_enabled', 'auto_merge_failed') ORDER BY id DESC LIMIT 1", pull.id);
+    const e = lastEvent(this.db, pull, ['auto_merge_enabled', 'auto_merge_failed']);
     if (!e) return null;
-    const data = JSON.parse(e.data);
-    const state = e.type === 'auto_merge_failed' ? 'failed' : data.merged === true ? 'merged' : data.merged === false ? 'enabled' : 'requested';
-    return { state, by: e.actor_id, at: e.created_at, url: data.url, method: data.method, error: data.error };
+    const { url, method } = e.data;
+    if (e.type === 'auto_merge_failed') return { state: 'failed', by: e.actor_id, at: e.created_at, url, method, error: e.data.error };
+    const state = e.data.merged === true ? 'merged' : e.data.merged === false ? 'enabled' : 'requested';
+    return { state, by: e.actor_id, at: e.created_at, url, method };
   }
 }
 
