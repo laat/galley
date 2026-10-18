@@ -125,6 +125,8 @@ description: Stage a pull request in galley, the user's local review server, ins
    - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
      user says otherwise.
    - New feedback: address it as in step 4, commit, and wait again.
+   - `This branch conflicts with origin/main …`: rebase as in step 3 and wait again. The wait
+     force-pushes the rebase; do not push it yourself.
    - `Pushed 3f2a1c9 to GitHub: <url>`: wait again.
    - `Could not push 3f2a1c9 to GitHub: …`: nothing was pushed. Do not push or force-push it
      yourself; the user decides. Tell the user why, and wait again.

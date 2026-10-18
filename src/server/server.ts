@@ -183,7 +183,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   timer.unref();
 
   // Published pull requests are followed on GitHub until they are merged or closed there, and the
-  // base branches of staged ones are fetched, on the same schedule.
+  // base branches of open ones are fetched, on the same schedule.
   let following: Promise<void> | null = null;
   let fetching: Promise<void> | null = null;
   const followDue = () => {

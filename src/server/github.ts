@@ -78,7 +78,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
   const author = s.db.actorById(pull.author_id);
   const merged = pull.github_state === 'merged';
   const github = githubStatus(pull);
-  const conflicts = s.baseConflicts(pull);
+  // galley's answer stands in for GitHub's only for a head GitHub does not have.
+  const conflicts = s.headUnpublished(pull) ? s.baseConflicts(pull) : null;
   const clean = conflicts?.clean ?? null;
   const local = clean === null ? null : !clean;
   const staging = stagingState(pull);
@@ -396,12 +397,13 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   // is GitHub's to say.
   const github = githubStatus(pull);
   const conflicts = s.baseConflicts(pull);
-  const local = conflicts && conflicts.clean !== null ? !conflicts.clean : null;
+  const local = conflicts && conflicts.clean !== null && s.headUnpublished(pull) ? !conflicts.clean : null;
   set('mergeable', () => (local === null ? (github?.mergeable ?? 'UNKNOWN') : local ? 'CONFLICTING' : 'MERGEABLE'));
   set('mergeStateStatus', () => (local === null ? (github?.mergeStateStatus ?? 'UNKNOWN') : local ? 'DIRTY' : conflicts!.behind ? 'BEHIND' : 'UNKNOWN'));
   // galley extension: the base branch the head was merged into here (origin/main) and its tip, whether it
   // conflicts, the files that do, git's message for each conflict in none of them, and how many commits
-  // the base has that the head does not (`behindBy`, as in GitHub's compare API).
+  // the base has that the head does not (`behindBy`, as in GitHub's compare API). Also for a head GitHub
+  // has: it is what `pr wait` tells the author.
   set('baseConflicts', () =>
     conflicts && conflicts.clean !== null
       ? { ref: conflicts.ref, oid: conflicts.base, conflicting: !conflicts.clean, files: conflicts.files, messages: conflicts.messages, behindBy: conflicts.behind }
