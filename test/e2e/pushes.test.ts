@@ -363,11 +363,11 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
       assert.ok(page.includes(`<input type="checkbox" name="bring_back" data-values="${at}"> Bring back the commit the rewrite removed</label>`), page);
       assert.match(page, /<label class="js-force-option" hidden>/);
 
-      // An agent is refused, through the CLI, also claiming to be the user, and through the API without the page's Origin, whoever it says it is.
+      // The author agent, which may publish, is refused, through the CLI, also claiming to be the user, and through the API without the page's Origin, whoever it says it is.
       const asked = ['api', '-X', 'POST', `repos/acme/widgets/pulls/${pr.n}/publish`, '-F', 'sign=false', '-f', `bring_back[]=${at}`];
       const agent = await cli(asked);
       assert.notEqual(agent.code, 0);
-      assert.match(agent.stderr, /only the user can publish/);
+      assert.match(agent.stderr, /only the user can bring back commits a rewrite on GitHub removed, from the publish box/);
       const claiming = await cli(asked, { actor: 'reviewer' });
       assert.notEqual(claiming.code, 0);
       assert.match(claiming.stderr, /only the user can bring back commits a rewrite on GitHub removed, from the publish box/);

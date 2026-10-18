@@ -1,5 +1,6 @@
 // What is the user's to do, as docs/api.md lists it: an agent is refused each, through the API and
-// in Service, so a caller inside the server can not do it for an agent either.
+// in Service, so a caller inside the server can not do it for an agent either. Publishing and
+// auto-publish are the author's too: only other agents are refused those.
 import './helpers/env.ts';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,22 +47,31 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("an agent is refused each of the user's actions that docs/api.md lists, through the API and in Service", async () => {
+test("an agent is refused each of the user's actions that docs/api.md lists, through the API and in Service, and another than the author publishing too", async () => {
   assert.equal((await call('POST', '/api/repos', { path: repo })).status, 200);
   const created = await call('POST', '/api/repos/local/repo/pulls', { title: 'Add mul', head: 'feature/mul', base: 'main' }, 'agent');
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const pull = `/api/repos/local/repo/pulls/${created.body.number}`;
   const s = server.service;
   const agent = s.db.actor('agent', 'Bot');
+  const other = s.db.actor('other', 'Bot');
   const x = await s.ctx('local', 'repo', created.body.number);
+  const before = { pull: (await call('GET', pull)).body, settings: (await call('GET', '/api/settings')).body };
+  const doc = readFileSync(join(import.meta.dirname, '..', 'docs', 'api.md'), 'utf8');
 
-  // Each item of the list, with the API calls that do it, and the Service calls behind them (settings have none).
+  // Publishing and auto-publish are the author's as well: refused for another agent.
+  assert.match(doc, /^- Publishing and turning auto-publish on or off are the user's and the pull request's author's: other callers of type `Bot`/m);
+  for (const [method, path, body] of [['POST', `${pull}/publish`, { sign: false }], ['PUT', `${pull}/auto-publish`, { sign: false }], ['DELETE', `${pull}/auto-publish`]] as const) {
+    const r = await call(method, path, body, 'other');
+    assert.equal(r.status, 403, `${method} ${path} -> ${r.status} ${JSON.stringify(r.body)}`);
+    assert.match(r.body.message, /^only the user or the author of this pull request \(agent\) can .*, not other$/);
+  }
+  for (const f of [() => s.publish(x, { sign: false }, other), () => s.enableAutoPublish(x, { sign: false }, other), async () => s.disableAutoPublish(x, other)]) {
+    await assert.rejects(f(), (e) => e instanceof HttpError && e.status === 403, String(f));
+  }
+
+  // Each item of the list, with the API calls that do it, and the Service calls behind them (settings have none), refused for the author.
   const walk: Record<string, { api: [string, string, unknown?][]; service: (() => unknown)[] }> = {
-    publishing: { api: [['POST', `${pull}/publish`, { sign: false }]], service: [() => s.publish(x, { sign: false }, agent)] },
-    'auto-publish': {
-      api: [['PUT', `${pull}/auto-publish`, { sign: false }], ['DELETE', `${pull}/auto-publish`]],
-      service: [() => s.enableAutoPublish(x, { sign: false }, agent), () => s.disableAutoPublish(x, agent)],
-    },
     deleting: { api: [['DELETE', pull]], service: [() => s.deletePull(x, agent)] },
     pinning: { api: [['PUT', `${pull}/pinned`], ['DELETE', `${pull}/pinned`]], service: [() => s.setPinned(x.pull, true, agent), () => s.setPinned(x.pull, false, agent)] },
     'stop-iterating': {
@@ -84,10 +94,9 @@ test("an agent is refused each of the user's actions that docs/api.md lists, thr
       service: [() => s.codex!.request(x, agent), () => s.codex!.configure(x, { enabled: false, max_iterations: 0 }, agent)],
     },
   };
-  const listed = readFileSync(join(import.meta.dirname, '..', 'docs', 'api.md'), 'utf8').match(/get 403 from what is the user's to do: ([^.]+)\./)![1];
+  const listed = doc.match(/get 403 from what is the user's to do: ([^.]+)\./)![1];
   assert.deepEqual(Object.keys(walk), listed.split(/, (?:and )?/));
 
-  const before = { pull: (await call('GET', pull)).body, settings: (await call('GET', '/api/settings')).body };
   for (const [what, { api, service }] of Object.entries(walk)) {
     for (const [method, path, body] of api) {
       const r = await call(method, path, body, 'agent');

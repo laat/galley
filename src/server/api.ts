@@ -19,7 +19,7 @@ import {
 } from './github.ts';
 import { renderMarkdown } from './web/markdown.ts';
 import { pullReferences } from './web/references.ts';
-import { ENGINE_IDS, nextSettings, readSettings, saveSettings, type EngineId, type MergeMethod } from './settings.ts';
+import { ENGINE_IDS, MERGE_METHODS, nextSettings, readSettings, saveSettings, type EngineId, type MergeMethod } from './settings.ts';
 import { META } from '../config.ts';
 import { askingComputer } from './computer.ts';
 
@@ -469,10 +469,15 @@ export function api(s: Service): Hono {
   /**
    * The merge method to turn on auto-merge with: the one in settings now. Extension: the page
    * sends the one it shows with the auto-merge option, which must still be that, or the one
-   * auto-publish was approved with: the page offers that one while auto-publish is on.
+   * auto-publish was approved with: the page offers that one while auto-publish is on. Any other
+   * caller, such as the CLI, may name the one it wants (`--auto-merge rebase`).
    */
-  const mergeMethod = (shown: unknown, pull: PullRow): MergeMethod => {
+  const mergeMethod = (c: Context, shown: unknown, pull: PullRow): MergeMethod => {
     const method = readSettings(s.db).publish.mergeMethod;
+    if (!fromPage(c) && shown !== undefined) {
+      if (!MERGE_METHODS.includes(shown as MergeMethod)) throw new HttpError(422, `merge_method must be one of ${MERGE_METHODS.join(', ')}`);
+      return shown as MergeMethod;
+    }
     const approved = s.autoPublish(pull)?.autoMerge;
     if (approved && shown === approved) return approved;
     if (shown !== undefined && shown !== method) {
@@ -495,7 +500,7 @@ export function api(s: Service): Hono {
     const b = await body(c);
     const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
     // Decided now: the setting may change while publishing awaits.
-    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method, x.pull) : undefined;
+    const autoMerge = b.auto_merge ? mergeMethod(c, b.merge_method, x.pull) : undefined;
     // Extension: the commits a rewrite on GitHub removed that the user confirms bringing back; unchecked, the page's box sends false.
     if (b.bring_back !== undefined && b.bring_back !== false && !(Array.isArray(b.bring_back) && b.bring_back.every((sha: unknown) => typeof sha === 'string'))) {
       throw new HttpError(422, 'bring_back: the commits to bring back, as full SHAs');
@@ -515,7 +520,7 @@ export function api(s: Service): Hono {
     const x = await ctx(c);
     const b = await body(c);
     const flag = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
-    const autoMerge = b.auto_merge ? mergeMethod(b.merge_method, x.pull) : undefined;
+    const autoMerge = b.auto_merge ? mergeMethod(c, b.merge_method, x.pull) : undefined;
     await s.enableAutoPublish(x, { sign: flag(b.sign), draft: flag(b.draft), force: !!b.force, autoMerge }, actor(c));
     return c.json(pullJson(s, x.repo, s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id)!));
   });

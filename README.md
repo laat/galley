@@ -111,9 +111,10 @@ this off.
    changes, or edit the title and description yourself.
 4. **The agent addresses your feedback** and waits again. Comments follow their lines when it
    rewrites history, and reviewer agents review its new commits before you.
-5. **You publish.** Publish pushes the commit you reviewed and opens the pull request on GitHub,
-   or updates it. It can sign the agent's commits as you and turn on auto-merge. galley then
-   shows the pull request's checks and reviews on GitHub, and tells the agent when it is merged.
+5. **You publish**, or the agent does when you asked it to ([Auto-publish](#auto-publish)).
+   Publish pushes the commit you reviewed and opens the pull request on GitHub, or updates it.
+   It can sign the agent's commits as you and turn on auto-merge. galley then shows the pull
+   request's checks and reviews on GitHub, and tells the agent when it is merged.
 6. **After that, GitHub's reviews and checks take over.** The agent commits and waits, and
    galley pushes each commit it waits with, without reviews here: signed as you published,
    force-pushed only over what galley pushed last, and with auto-merge asked for again if it
@@ -182,6 +183,12 @@ Request changes, a new base or a failed publish turns it off; a signing prompt n
 does so only after a few tries over the next hour. With **Enable auto-merge on GitHub** checked
 too, GitHub merges it once its required checks pass.
 
+When you ask the agent to publish or merge ("stage PR, publish and merge"), it turns on
+auto-publish itself as it stages, and galley publishes the pull request as the agent, without
+your review in galley; the timeline names the agent. An agent may publish, and turn auto-publish
+on or off, only for the pull requests it staged. Bringing back commits a rewrite on GitHub
+removed, deleting, pinning, settings and stopping automatic reviews stay yours.
+
 ## Settings
 
 The gear in the header. Per reviewer agent: whether it reviews automatically, its name, model,
@@ -209,8 +216,9 @@ times to try signing again.
 ## Security
 
 - The server listens on 127.0.0.1 and refuses requests from web pages on other sites. Any
-  process running as you can still call its API as you, publishing included: agents are kept
-  from publishing only by the name the CLI gives them, which `GALLEY_ACTOR` overrides
+  process running as you can still call its API as you, publishing included. An agent may
+  publish the pull requests it staged; other agents are kept from publishing only by the name
+  the CLI gives them, which `GALLEY_ACTOR` overrides
   ([#52](https://github.com/laat/galley/issues/52)).
 - With a public URL, such as `tailscale serve`'s, every device that can reach it acts as you too.
   Never put galley on the internet (`tailscale funnel`).

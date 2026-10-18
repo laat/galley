@@ -217,10 +217,10 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.doesNotMatch(header, />Resolved</);
   });
 
-  await t.test('agents cannot publish, and stale pages cannot publish', async () => {
-    const r = await cli(['pr', 'publish']);
+  await t.test('agents other than the author cannot publish, and stale pages cannot publish', async () => {
+    const r = await cli(['pr', 'publish'], { actor: 'observer' });
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /only the user can publish/);
+    assert.match(r.stderr, /only the user or the author of this pull request \(agent\) can publish it, not observer/);
     const res = await fetch(`${server.url}/api/repos/acme/widgets/pulls/1/publish`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

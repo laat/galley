@@ -122,8 +122,8 @@ test('a review still running shows in pr view and pr wait, and publishing before
       const fromTerminal = await cli(['pr', 'publish', String(number)], { actor: 'reviewer' });
       assert.equal(fromTerminal.code, 1);
       assert.match(fromTerminal.stderr, new RegExp(`Run \`galley pr publish s${number} --during-review\` to publish anyway\\.`));
-      const agent = await cli(['pr', 'publish', String(number), '--during-review']);
-      assert.match(agent.stderr, /only the user can publish/);
+      const agent = await cli(['pr', 'publish', String(number), '--during-review'], { actor: 'observer' });
+      assert.match(agent.stderr, /only the user or the author of this pull request \(agent\) can publish it/);
       const published = await human('POST', `${base}/publish`, { expected, during_review: true });
       assert.equal(published.staging_state, 'published');
       writeFileSync(gate, '');
@@ -180,7 +180,7 @@ test('a running review is cancelled when the pull request is published, closed, 
         await human('POST', `${pr.base}/publish`, { sign: false, during_review: true });
         const r = await waiting;
         assert.match(r.stdout, /^Published to GitHub: /m);
-        assert.match(r.stdout, /^The user is done with this pull request\.$/m);
+        assert.match(r.stdout, /^Its review in galley is over\.$/m);
         await reviewer('codex').settle(pr.id);
         await reviewer('claude').settle(pr.id);
         assert.deepEqual(await runs(pr, 'codex'), [['cancelled', 'published']]);
