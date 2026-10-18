@@ -1,6 +1,6 @@
 // Codex as a reviewer agent: `codex exec` in the review's checkout, in Codex's own sandbox,
 // answering in the reviewer's JSON schema. Its bot is named "codex-review" unless renamed in
-// settings; `--reviewer codex` finds it by its kind whatever its name.
+// settings; `--reviewer codex` finds it by its engine whatever its name.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';

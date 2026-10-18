@@ -37,5 +37,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       # The tests run git, ssh-keygen and jq, which the runner image has. They bring their
-      # own git config, gh and codex.
+      # own git config, gh, codex and claude.
       - run: pnpm test

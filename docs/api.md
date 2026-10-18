@@ -14,7 +14,7 @@ under `/api/repos/{owner}/{repo}`.
 ## Pull requests
 
 - `GET …/pulls?state=`: also `staged`, `published`, `done`, `merged` and `all`. `state` is `closed` once the pull request is done, merged on GitHub included.
-- `POST …/pulls`: `reviewers` (logins, or `{"login": "codex", "max_iterations": 3}`) turns those reviewer agents on: a kind (`codex`, `claude`), a name in settings, or a custom reviewer of the repository. `automatic_reviews: false` turns all of them off. Unknown logins come back in `ignored_reviewers`.
+- `POST …/pulls`: `reviewers` (logins, or `{"login": "codex", "max_iterations": 3}`) turns those reviewer agents on: an engine (`codex`, `claude`), a name in settings, or a custom reviewer of the repository. `automatic_reviews: false` turns all of them off. Unknown logins come back in `ignored_reviewers`.
 - `DELETE …/pulls/{n}`: delete a staged pull request.
 - `POST …/pulls/{n}/publish`: push and open or update the pull request on GitHub. Body `{sign, draft, force, expected, during_review, during_conflict, auto_merge, merge_method}`. 428 lists what the body must acknowledge in `acknowledge`; 412 when the pull request (`expected`, the page's fingerprint) or the merge method changed. The response adds `auto_merge_result`.
 - `PUT|DELETE …/pulls/{n}/auto-publish`: turn auto-publish on (body `{sign, draft, force, auto_merge, merge_method}`) or off. It approves the first publish only: 422 once published.

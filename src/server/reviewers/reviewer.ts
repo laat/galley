@@ -15,7 +15,7 @@ import { now, type Actor, type CancelReason, type Db, type Priority, type PullRo
 import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type Ctx, type ReviewColumns, type Service, type Thread } from '../service.ts';
 import type { HeadStatus } from './head-status.ts';
 import { unansweredThreads } from '../feedback.ts';
-import { checkReviewerName, MAX_ITERATIONS_LIMIT, readSettings, REVIEWER_KINDS, type ReviewerKind, type ReviewerSettings } from '../settings.ts';
+import { checkReviewerName, ENGINE_IDS, MAX_ITERATIONS_LIMIT, readSettings, type EngineId, type ReviewerSettings } from '../settings.ts';
 import type { Reviews, Verdict } from './definition.ts';
 import { cacheEnv, installCommand } from './install.ts';
 import { RunLog, type Progress, type ProgressEvent, type SessionUpdate } from './transcript.ts';
@@ -194,8 +194,8 @@ export interface EngineResult {
 
 /** A tool that reviews. It runs a review the reviewer has prepared and reads the answer; the reviewer does the rest. */
 export interface Engine {
-  /** The tool, as review_runs.reviewer, the settings, the pull request's columns and `…/pulls/{n}/reviewers/{engine}` name it. */
-  readonly id: ReviewerKind;
+  /** The tool, as review_runs.reviewer, the settings, the pull request's columns and `…/pulls/{n}/reviewers/{reviewer}` name it. */
+  readonly id: EngineId;
   /** Its name in prose. */
   readonly label: string;
   /** What the CLI calls an author agent running in this tool (cliActor in src/config.ts): its own kind of agent. */
@@ -247,7 +247,7 @@ export interface ReviewAtWork {
  */
 interface Plan {
   settings: ReviewerSettings;
-  tool: Engine;
+  engine: Engine;
   reads: Reviews;
   verdict: Verdict;
   instructions: string;
@@ -275,8 +275,8 @@ export const customActorKey = (name: string) => `reviewer_actor_id:${name}`;
 
 export class Reviewer {
   protected s: Service;
-  /** The tool that reviews; custom reviewers share Codex's and Claude's. */
-  tool: Engine;
+  /** The engine that reviews; custom reviewers share Codex's and Claude's. */
+  engine: Engine;
   private jobs = new Map<number, Job>();
   /** Reviews still deciding whether to start, and for which pull; shutdown waits for them too. `resume`: one a stop interrupted (see resume). */
   private deciding = new Map<Promise<void>, { pullId: number; resume: boolean }>();
@@ -285,27 +285,27 @@ export class Reviewer {
   private hurry = new AbortController();
   private onWaiting = (pullId: number) => this.consider(pullId);
 
-  constructor(s: Service, tool: Engine) {
+  constructor(s: Service, engine: Engine) {
     this.s = s;
-    this.tool = tool;
+    this.engine = engine;
   }
 
-  /** The tool that reviews. */
-  get engine(): ReviewerKind {
-    return this.tool.id;
+  /** The id of the engine that reviews. */
+  get engineId(): EngineId {
+    return this.engine.id;
   }
 
   /**
-   * What review_runs.reviewer, the API (`…/pulls/{n}/reviewers/{key}`) and pages call the
-   * reviewer: its tool for Codex and Claude, whose names are settings; a custom reviewer's name.
+   * What review_runs.reviewer, the API (`…/pulls/{n}/reviewers/{reviewer}`) and pages call the
+   * reviewer: its engine for Codex and Claude, whose names are settings; a custom reviewer's name.
    */
   get key(): string {
-    return this.engine;
+    return this.engineId;
   }
 
-  /** The reviewer in prose: its tool ("Codex"), or a custom reviewer's name. */
+  /** The reviewer in prose: its engine ("Codex"), or a custom reviewer's name. */
   get label(): string {
-    return this.tool.label;
+    return this.engine.label;
   }
 
   /** What it reads: the code, or (custom reviewers only) the title, description and commit messages. */
@@ -335,7 +335,7 @@ export class Reviewer {
 
   /** The meta key holding the reviewer's actor id. */
   protected get actorKey(): string {
-    return `${this.engine}_actor_id`;
+    return `${this.engineId}_actor_id`;
   }
 
   /**
@@ -403,19 +403,19 @@ export class Reviewer {
   }
 
   /**
-   * Refuse a name that `--reviewer` would take for another reviewer agent: its kind or its name,
+   * Refuse a name that `--reviewer` would take for another reviewer agent: its engine or its name,
    * in any case (see answersTo). Staging with it would turn on the other one.
    */
   private unambiguous(login: string): void {
     const l = login.toLowerCase();
     // A custom reviewer by that name, valid or not: its file would be in the way.
     if (this.s.custom?.names().some((name) => name.toLowerCase() === l)) throw new HttpError(422, `"${login}" is the name of a custom reviewer; choose another`);
-    for (const kind of REVIEWER_KINDS) {
-      if (kind === this.key) continue;
-      const id = Number(this.s.db.getMeta(`${kind}_actor_id`));
-      const name = (id && this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || readSettings(this.s.db)[kind].name;
-      if (l === kind || l === name.toLowerCase()) {
-        const label = this.s.reviewerAgents().find((r) => r.engine === kind)?.label ?? kind;
+    for (const engine of ENGINE_IDS) {
+      if (engine === this.key) continue;
+      const id = Number(this.s.db.getMeta(`${engine}_actor_id`));
+      const name = (id && this.s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || readSettings(this.s.db)[engine].name;
+      if (l === engine || l === name.toLowerCase()) {
+        const label = this.s.builtInReviewers().find((r) => r.engineId === engine)?.label ?? engine;
         throw new HttpError(422, `"${login}" would ask for the ${label} reviewer (--reviewer ${login}); choose another`);
       }
     }
@@ -441,7 +441,7 @@ export class Reviewer {
     if (a.id === this.s.viewer().id) return false;
     const db = this.s.db;
     const others = db.get(
-      `SELECT 1 FROM meta WHERE (key IN (${REVIEWER_KINDS.map((k) => `'${k}_actor_id'`).join(', ')}) OR key LIKE '${customActorKey('')}%') AND key != ? AND value = ?`,
+      `SELECT 1 FROM meta WHERE (key IN (${ENGINE_IDS.map((k) => `'${k}_actor_id'`).join(', ')}) OR key LIKE '${customActorKey('')}%') AND key != ? AND value = ?`,
       this.actorKey,
       String(a.id),
     );
@@ -585,7 +585,7 @@ export class Reviewer {
   }
 
   settings(): ReviewerSettings {
-    return readSettings(this.s.db)[this.engine];
+    return readSettings(this.s.db)[this.engineId];
   }
 
   isRunning(pullId: number): boolean {
@@ -679,15 +679,15 @@ export class Reviewer {
 
   /** This pull request's own values, from its columns for this reviewer; null follows the setting. */
   own(pull: PullRow): OwnSettings {
-    const enabled = pull[`${this.engine}_enabled`];
-    return { enabled: enabled === null ? null : enabled === 1, maxIterations: pull[`${this.engine}_max_iterations`] };
+    const enabled = pull[`${this.engineId}_enabled`];
+    return { enabled: enabled === null ? null : enabled === 1, maxIterations: pull[`${this.engineId}_max_iterations`] };
   }
 
   /** The columns that store this pull request's own values, changed by `change` (its fields left out stay). `pull` has those the pull request has so far. */
   protected ownColumns(change: Partial<OwnSettings>, _pull?: Partial<Pick<PullRow, 'reviewer_overrides'>>): ReviewColumns {
     const cols: ReviewColumns = {};
-    if (change.enabled !== undefined) cols[`${this.engine}_enabled`] = change.enabled === null ? null : change.enabled ? 1 : 0;
-    if (change.maxIterations !== undefined) cols[`${this.engine}_max_iterations`] = change.maxIterations;
+    if (change.enabled !== undefined) cols[`${this.engineId}_enabled`] = change.enabled === null ? null : change.enabled ? 1 : 0;
+    if (change.maxIterations !== undefined) cols[`${this.engineId}_max_iterations`] = change.maxIterations;
     return cols;
   }
 
@@ -713,25 +713,25 @@ export class Reviewer {
 
   /** Whether the settings leave the author's pull requests to the other reviewers: it is the reviewer's own kind of agent. */
   skipsAuthor(author: Actor): boolean {
-    return this.settings().skipOwnKind && author.login === this.tool.authorLogin;
+    return this.settings().skipOwnKind && author.login === this.engine.authorLogin;
   }
 
   /** The tool its own kind of agent runs in ("Claude Code"), for saying what it skips. */
   get authorTool(): string {
-    return this.tool.authorTool;
+    return this.engine.authorTool;
   }
 
   /** Whether its sandbox can let the tests listen on localhost, so the localhost setting applies to it. */
   get localServers(): boolean {
-    return this.tool.localServers;
+    return this.engine.localServers;
   }
 
   /** Where its models come from, when they are read from the tool. */
   get catalogSource(): string | undefined {
-    return this.tool.catalogSource;
+    return this.engine.catalogSource;
   }
 
-  /** Whether a reviewer asked for by login (`pr create --reviewer`) is this one: its kind ("codex"), or its name. */
+  /** Whether a reviewer asked for by login (`pr create --reviewer`) is this one: its engine ("codex"), or its name. */
   answersTo(login: string): boolean {
     const l = login.toLowerCase();
     return l === this.key.toLowerCase() || l === this.actor().login.toLowerCase();
@@ -858,7 +858,7 @@ export class Reviewer {
   }
 
   private launch(ctx: Ctx, trigger: 'auto' | 'manual'): number {
-    const plan: Plan = { settings: this.settings(), tool: this.tool, reads: this.reviews, verdict: this.verdict, instructions: this.instructions };
+    const plan: Plan = { settings: this.settings(), engine: this.engine, reads: this.reviews, verdict: this.verdict, instructions: this.instructions };
     const { settings } = plan;
     const actor = this.actor();
     const runId = this.s.db.insert('review_runs', {
@@ -922,7 +922,7 @@ export class Reviewer {
       if (settings.runTests) {
         mkdirSync(tmp);
         env = cacheEnv(tmp);
-        installed = await this.install(plan.tool, git, pull.head_sha, checkout, tmp, env, signal, log);
+        installed = await this.install(plan.engine, git, pull.head_sha, checkout, tmp, env, signal, log);
         signal.throwIfAborted();
       }
       const prompt = reads === 'description' ? await this.descriptionPrompt(ctx, trigger, plan) : await this.prompt(ctx, trigger, plan, installed);
@@ -930,7 +930,7 @@ export class Reviewer {
       const onUpdate = (u: SessionUpdate) => log.update(u);
       const schema = answerSchema(reads, plan.verdict);
       const job: EngineJob = { reads, dir, checkout, gitDir: reads === 'code' ? git.gitDir : null, tmp: settings.runTests ? tmp : null, env, prompt, schema, settings, timeoutMs, signal, onUpdate };
-      const result = await plan.tool.review(job).catch((e: Error) => {
+      const result = await plan.engine.review(job).catch((e: Error) => {
         if (e instanceof EngineError && e.usage) this.s.db.update('review_runs', runId, { usage: JSON.stringify(e.usage) });
         throw e;
       });
@@ -949,7 +949,7 @@ export class Reviewer {
    * network, from the lockfile and without running the repository's scripts. Null when there is
    * no lockfile.
    */
-  private async install(tool: Engine, git: Repo, sha: string, checkout: string, tmp: string, env: NodeJS.ProcessEnv, signal: AbortSignal, log: RunLog): Promise<Installed | null> {
+  private async install(engine: Engine, git: Repo, sha: string, checkout: string, tmp: string, env: NodeJS.ProcessEnv, signal: AbortSignal, log: RunLog): Promise<Installed | null> {
     const how = await installCommand(git, sha, tmp);
     if (!how) return null;
     const command = how.command.join(' ');
@@ -962,7 +962,7 @@ export class Reviewer {
       );
     step('in_progress');
     try {
-      const r = await tool.install(how.command, { checkout, tmp, env: { ...env, ...how.env }, timeoutMs: INSTALL_TIMEOUT_MS, signal });
+      const r = await engine.install(how.command, { checkout, tmp, env: { ...env, ...how.env }, timeoutMs: INSTALL_TIMEOUT_MS, signal });
       const failure = r.code === 0 ? null : r.timedOut ? `timed out after ${INSTALL_TIMEOUT_MS / 60000} minutes` : r.code === null ? 'was killed' : `exited with ${r.code}`;
       step(failure ? 'failed' : 'completed', `${r.stdout}\n${r.stderr}`.trim());
       return { command, failure, output: lastLines(`${r.stdout}\n${r.stderr}`, 20) };
@@ -991,7 +991,7 @@ export class Reviewer {
     const parts = [String(result.summary ?? '').trim() || fallback];
     if (found.loose.length) parts.push(found.heading, found.loose.join('\n'));
     // A custom reviewer's name is not its tool's.
-    const model = [this.label === plan.tool.label ? null : plan.tool.label, settings.model || 'default model', settings.effort ? `${settings.effort} effort` : null].filter(Boolean).join(', ');
+    const model = [this.label === plan.engine.label ? null : plan.engine.label, settings.model || 'default model', settings.effort ? `${settings.effort} effort` : null].filter(Boolean).join(', ');
     const what = plan.reads === 'description' ? `the title, description and commit messages at \`${pull.head_sha.slice(0, 7)}\`` : `\`${pull.head_sha.slice(0, 7)}\``;
     parts.push(`<sub>${this.label} (${model}) reviewed ${what}${n ? `, automatic review ${n} of ${this.limit(pull)}` : ', on request'}.</sub>`);
     await this.s.createReview(
@@ -1074,7 +1074,7 @@ export class Reviewer {
       '',
       `Run \`git diff ${pull.base_sha} HEAD\` to see the changes and read the surrounding code as needed.${settings.runTests ? '' : ' Do not modify any files.'}`,
       '',
-      ...(settings.runTests ? [...testInstructions(installed, settings.localhost && plan.tool.localServers), ''] : []),
+      ...(settings.runTests ? [...testInstructions(installed, settings.localhost && plan.engine.localServers), ''] : []),
       ...focus,
       '',
       'Give each comment a priority: high for bugs, security problems and anything that must be fixed before merging; medium for what should be fixed; low for minor improvements. Do not write the priority into the comment text.',
@@ -1161,17 +1161,17 @@ export class Reviewer {
 
   /** The tool's models, cached; empty when it is not available. */
   models(): Promise<ModelInfo[]> {
-    return this.tool.models();
+    return this.engine.models();
   }
 
   /** The efforts a model accepts, from the cached catalog (null when unknown). */
   efforts(model: string): string[] | null {
-    return this.tool.efforts(model);
+    return this.engine.efforts(model);
   }
 
   /** What the tool uses when galley does not choose. */
   defaults(): { model?: string; effort?: string } {
-    return this.tool.defaults();
+    return this.engine.defaults();
   }
 }
 

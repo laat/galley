@@ -336,7 +336,7 @@ function turnLine(
       const text = names + p.words;
       const title = p.full.join('\n');
       return html`<span class="turn-reason"${title !== text ? html` title="${title}"` : ''}>${p.mark}${text}${p.since ? html`<span class="turn-since">${since(p.since)}</span>` : ''}${
-        p.retry ? html` <button type="button" class="btn-link js-run-codex" data-api="${apiBase}/reviewers/${p.retry}">Retry</button>` : ''
+        p.retry ? html` <button type="button" class="btn-link js-run-reviewer" data-api="${apiBase}/reviewers/${p.retry}">Retry</button>` : ''
       }</span>`;
     })}</div>`,
     atWork,
@@ -603,7 +603,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
       return timelineBadge(
         'x',
         html`Could not ${data.force ? 'force-push' : 'push'} <code>${shortSha(data.source)}</code> to ${to} ${when}; nothing on GitHub was overwritten${data.retry ? `, and it is tried again when ${p.author.login} waits` : ''}
-        <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
     }
@@ -622,7 +622,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
       return timelineBadge(
         'x',
         html`Enabling auto-merge on ${githubPull(data.url)} failed ${when}
-        <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
     case 'auto_publish_disabled':
@@ -635,7 +635,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
       return timelineBadge(
         'x',
         html`Auto-publish failed and turned itself off ${when}
-        <details class="codex-error"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
+        <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
     case 'iterations_stopped':
@@ -849,7 +849,7 @@ function iterationsRows(p: PullPage): Safe[] {
   const stop = s.iterationsStopped(pull);
   if (stop) {
     return [
-      html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Iterations stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>${lastRound(p)}
+      html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Automatic reviews stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>${lastRound(p)}
         <div class="color-fg-muted">No reviewer agent starts another automatic review, so ${author.login} hands its next commit to you. Asking one to review still works, and Resume lets them go on up to their limits.</div></div>
         <button type="button" class="btn btn-sm js-iterations" data-method="DELETE" data-api="${api}">Resume</button></div>`,
     ];
@@ -1273,8 +1273,8 @@ function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; li
   const limitRow = enabled
     ? html`<div class="agent-menu-limit">
         <span class="flex-auto">Limit</span>
-        <span class="codex-limit" data-api="${api}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><button type="button" class="codex-step js-codex-step" id="${id('fewer')}" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><strong class="js-codex-limit">${limit}</strong><button type="button" class="codex-step js-codex-step" id="${id('more')}" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>
-        ${own.maxIterations !== null ? html`<button type="button" class="btn-link js-codex-reset" id="${id('limit-reset')}" data-api="${api}" data-field="max_iterations" title="Use the default from Settings (${reviewer.settings().maxIterations})">reset</button>` : ''}
+        <span class="reviewer-limit" data-api="${api}" data-limit="${limit}" data-max="${MAX_ITERATIONS_LIMIT}"><button type="button" class="reviewer-step js-reviewer-step" id="${id('fewer')}" data-step="-1" aria-label="One automatic review fewer" title="One fewer"${limit <= 0 ? raw(' disabled') : ''}>${icon('dash')}</button><strong class="js-reviewer-limit">${limit}</strong><button type="button" class="reviewer-step js-reviewer-step" id="${id('more')}" data-step="1" aria-label="One more automatic review" title="One more"${limit >= MAX_ITERATIONS_LIMIT ? raw(' disabled') : ''}>${icon('plus')}</button></span>
+        ${own.maxIterations !== null ? html`<button type="button" class="btn-link js-reviewer-reset" id="${id('limit-reset')}" data-api="${api}" data-field="max_iterations" title="Use the default from Settings (${reviewer.settings().maxIterations})">reset</button>` : ''}
       </div>`
     : '';
   // Turning automatic reviews on or off here (or when staging) holds whatever Settings say.
@@ -1284,14 +1284,14 @@ function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; li
       ? html`<div class="dropdown-header">Automatic reviews of this pull request</div>
       ${limitRow}
       <button type="button" class="dropdown-item js-reviewer-switch" id="${id('switch')}" data-api="${api}" data-enabled="${String(!enabled)}">Turn ${onOff(!enabled)}<span class="dropdown-item-desc">${own.enabled === null ? why : `Turned ${onOff(enabled)} here`}</span></button>
-      ${own.enabled !== null ? html`<button type="button" class="dropdown-item js-codex-reset" id="${id('follow')}" data-api="${api}" data-field="enabled">Follow Settings<span class="dropdown-item-desc">${why}</span></button>` : ''}
+      ${own.enabled !== null ? html`<button type="button" class="dropdown-item js-reviewer-reset" id="${id('follow')}" data-api="${api}" data-field="enabled">Follow Settings<span class="dropdown-item-desc">${why}</span></button>` : ''}
       <div class="dropdown-divider"></div>`
       : '';
   const about = reviewer.describe();
   return html`<details class="dropdown details-reset agent-menu js-keep-open" id="${id('menu')}">
     <summary class="btn-octicon" id="${id('options')}" aria-label="Options for ${reviewer.actor().login}" title="Options">${icon('gear')}</summary>
     <div class="dropdown-menu dropdown-menu-sw">
-      <button type="button" class="dropdown-item js-run-codex" id="${id('ask')}" data-api="${api}"${busy ? raw(' disabled') : ''}>Ask ${reviewer.label} to review</button>
+      <button type="button" class="dropdown-item js-run-reviewer" id="${id('ask')}" data-api="${api}"${busy ? raw(' disabled') : ''}>Ask ${reviewer.label} to review</button>
       <div class="dropdown-divider"></div>
       ${automatic}
       <a class="dropdown-item" id="${id('settings')}" href="${reviewer.settingsUrl()}">Settings${about ? html`<span class="dropdown-item-desc">${about}</span>` : ''}</a>

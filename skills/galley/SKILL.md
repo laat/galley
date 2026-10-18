@@ -154,14 +154,14 @@ of the next wait.
 
 Codex, Claude and reviewers the user defined review when you wait, until the pull request is
 published, and their reviews wake you like the user's. Some review only the title, description
-and commit messages, again whenever you change them. One loop is one review from each and your
+and commit messages, again whenever you change them. One round is one review from each and your
 answer. A reviewer agent's approval is not the user's: wait for the user all the same. The
-settings decide whether they review, unless the user says otherwise when asking you to stage.
-Add to `galley pr create`:
+settings decide whether they review, and how many automatic reviews each makes, unless the user
+says otherwise when asking you to stage. Add to `galley pr create`:
 
-- "with codex": `--reviewer codex` (as many loops as the settings allow); "codex 3 loops":
-  `--reviewer codex:3`. The same for `claude`, or a reviewer the user defined by its name
-  (`--reviewer house-rules:2`).
+- "with codex": `--reviewer codex` (as many automatic reviews as the settings allow); "codex 3
+  loops" or "3 rounds": `--reviewer codex:3`, at most 3 automatic reviews. The same for
+  `claude`, or a reviewer the user defined by its name (`--reviewer house-rules:2`).
 - "with codex and claude": `--reviewer codex --reviewer claude`.
 - "no review": `--no-review`.
 - "all of them", or a name you do not know: `galley reviewers` lists those that review this repository.

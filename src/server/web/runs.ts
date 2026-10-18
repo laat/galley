@@ -141,7 +141,7 @@ export function transcriptContent(b: RunBase, o: { run: ReviewRunRow; login: str
   const after = run.finished_at ? `, after ${took(Date.parse(run.finished_at) - Date.parse(run.started_at))}` : '';
   const state =
     run.status === 'running'
-      ? html`<span class="codex-status--running">${icon('dot-fill')} Reviewing for ${since(run.started_at)}</span>`
+      ? html`<span class="run-status--running">${icon('dot-fill')} Reviewing for ${since(run.started_at)}</span>`
       : run.status === 'done'
         ? html`${icon('check', { cls: 'color-fg-success' })} <a href="${b.htmlBase}#pullrequestreview-${run.review_id}">Posted its review</a> ${relTime(run.finished_at)}${after}`
         : run.status === 'cancelled'

@@ -19,7 +19,7 @@ import {
 } from './github.ts';
 import { renderMarkdown } from './web/markdown.ts';
 import { pullReferences } from './web/references.ts';
-import { nextSettings, readSettings, REVIEWER_KINDS, saveSettings, type MergeMethod, type ReviewerKind } from './settings.ts';
+import { ENGINE_IDS, nextSettings, readSettings, saveSettings, type EngineId, type MergeMethod } from './settings.ts';
 import { META } from '../config.ts';
 
 /**
@@ -79,35 +79,35 @@ export function api(s: Service): Hono {
   /** Settings and reviewer controls belong to the person reviewing, not to agents (Service.requireHuman): refused before any work. */
   const human = (c: Context): Actor => s.requireHuman(actor(c));
 
-  /** The reviewer agent in the path: of a kind (`codex`, `claude`), or a custom reviewer by name; given a repository, one that reviews it. */
+  /** The reviewer agent in the path (`{reviewer}`): Codex or Claude by its engine (`codex`, `claude`), or a custom reviewer by name; given a repository, one that reviews it. */
   const reviewerOf = (c: Context, repo?: RepoRow) => {
-    const kind = c.req.param('kind')!;
-    const reviewer = s.reviewerAgents().find((r) => r.key === kind);
-    if (!reviewer) throw new HttpError(REVIEWER_KINDS.includes(kind as ReviewerKind) ? 501 : 404, `this server has no ${kind} reviewer`);
-    if (repo && !reviewer.appliesTo(repo)) throw new HttpError(404, `${kind} does not review ${repo.github_slug ?? 'repositories without a GitHub remote'}`);
+    const key = c.req.param('reviewer')!;
+    const reviewer = s.reviewerAgents().find((r) => r.key === key);
+    if (!reviewer) throw new HttpError(ENGINE_IDS.includes(key as EngineId) ? 501 : 404, `this server has no ${key} reviewer`);
+    if (repo && !reviewer.appliesTo(repo)) throw new HttpError(404, `${key} does not review ${repo.github_slug ?? 'repositories without a GitHub remote'}`);
     return reviewer;
   };
 
   app.get('/settings', async (c) => {
     const catalogs: Record<string, unknown> = {};
-    for (const r of [s.codex, s.claude]) if (r) Object.assign(catalogs, { [`${r.engine}Models`]: await r.models(), [`${r.engine}Defaults`]: r.defaults() });
+    for (const r of s.builtInReviewers()) Object.assign(catalogs, { [`${r.engineId}Models`]: await r.models(), [`${r.engineId}Defaults`]: r.defaults() });
     return c.json({ ...readSettings(s.db), ...catalogs });
   });
 
-  app.put('/settings/:kind{codex|claude}', async (c) => {
+  app.put('/settings/:reviewer{codex|claude}', async (c) => {
     human(c);
     const reviewer = reviewerOf(c);
-    const kind = reviewer.engine;
+    const engine = reviewer.engineId;
     const b = await body(c);
     if ((b.localhost === true || b.localhost === 'true') && !reviewer.localServers) {
       throw new HttpError(422, `${reviewer.label}'s sandbox can not let its tests listen on localhost without letting them connect to other hosts`);
     }
     await reviewer.models(); // so efforts can be checked against the model
-    const settings = nextSettings(s.db, { [kind]: b }, (_, model) => reviewer.efforts(model));
+    const settings = nextSettings(s.db, { [engine]: b }, (_, model) => reviewer.efforts(model));
     // Renaming is the one step that can still fail (the name may be taken), so it goes before saving.
-    if (b.name !== undefined && settings[kind].name !== reviewer.actor().login) reviewer.rename(settings[kind].name);
+    if (b.name !== undefined && settings[engine].name !== reviewer.actor().login) reviewer.rename(settings[engine].name);
     // The reviewer's actual name is the truth (it may have had to take another one).
-    settings[kind].name = reviewer.actor().login;
+    settings[engine].name = reviewer.actor().login;
     saveSettings(s.db, settings);
     // Turning reviews on or raising the limit should not wait for the author's next `pr wait`
     // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
@@ -405,14 +405,14 @@ export function api(s: Service): Hono {
   });
 
   // galley extension: ask a reviewer agent (`codex`, `claude`, or a custom reviewer by name) to review now, and list its runs.
-  app.post('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
+  app.post('/repos/:owner/:repo/pulls/:n/reviewers/:reviewer', async (c) => {
     const who = human(c);
     const x = await ctx(c);
     const reviewer = reviewerOf(c, x.repo);
     return c.json({ run_id: reviewer.request(x, who) }, 202);
   });
   // galley extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
-  app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
+  app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:reviewer', async (c) => {
     const who = human(c);
     const x = await ctx(c);
     const reviewer = reviewerOf(c, x.repo);
@@ -431,9 +431,9 @@ export function api(s: Service): Hono {
     s.resumeIterating(await ctx(c, { sync: false }), who);
     return c.body(null, 204);
   });
-  app.get('/repos/:owner/:repo/pulls/:n/reviewers/:kind', async (c) => {
+  app.get('/repos/:owner/:repo/pulls/:n/reviewers/:reviewer', async (c) => {
     const x = await ctx(c, { sync: false });
-    const reviewer = s.reviewerAgents().find((r) => r.key === c.req.param('kind'));
+    const reviewer = s.reviewerAgents().find((r) => r.key === c.req.param('reviewer'));
     if (!reviewer) return c.json({ running: false, runs: [] });
     // One that does not review the repository has nothing here, as for POST and PATCH.
     reviewerOf(c, x.repo);

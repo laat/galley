@@ -26,13 +26,13 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
 
 export async function settingsPage(s: Service): Promise<string> {
   const sections: Safe[] = [];
-  for (const reviewer of [s.codex, s.claude]) if (reviewer) sections.push(await reviewerSection(reviewer));
+  for (const reviewer of s.builtInReviewers()) sections.push(await reviewerSection(reviewer));
   return settingsLayout(s, '/settings', html`${sections}`);
 }
 
 /** A reviewer agent's settings. */
 async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
-  const kind = reviewer.engine;
+  const engine = reviewer.engineId;
   const label = reviewer.label;
   const settings = reviewer.settings();
   const models = await reviewer.models();
@@ -58,7 +58,7 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
   const effortDefault = defaultEffort(selected);
   const name = reviewer.actor().login;
 
-  return html`<div class="Subhead" id="${kind}">
+  return html`<div class="Subhead" id="${engine}">
       <h2 class="Subhead-heading">${label}</h2>
       <p class="Subhead-description">Let ${label} review staged pull requests before you do. It reviews a throwaway checkout of the pull request and posts its findings as a review from <strong>${name}</strong>.</p>
     </div>
@@ -67,32 +67,32 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
         ? html`<div class="flash flash-warn">${icon('alert')} Could not read the model list from <code>${reviewer.catalogSource}</code>. Check that ${label} is installed and logged in on the machine running galley.</div>`
         : ''
     }
-    <form class="settings-form js-api-form" data-api="/api/settings/${kind}" data-method="PUT" data-toast="Settings saved">
+    <form class="settings-form js-api-form" data-api="/api/settings/${engine}" data-method="PUT" data-toast="Settings saved">
       <div class="form-checkbox">
         <label><input type="checkbox" name="enabled"${settings.enabled ? raw(' checked') : ''}> Review automatically</label>
         <p class="note">When the author agent runs <code>galley pr wait</code>, ${label} reviews the new commits first. Its review wakes the agent, which addresses the comments before you look. Each commit is reviewed once.</p>
       </div>
       <div class="form-group">
-        <label class="form-label" for="${kind}-name">Name</label>
-        <input class="form-control input-medium" type="text" id="${kind}-name" name="name" value="${name}" autocomplete="off" spellcheck="false">
+        <label class="form-label" for="${engine}-name">Name</label>
+        <input class="form-control input-medium" type="text" id="${engine}-name" name="name" value="${name}" autocomplete="off" spellcheck="false">
         <p class="note">Who the reviews are from. Renaming keeps the earlier reviews with the reviewer.</p>
       </div>
       <div class="form-group">
-        <label class="form-label" for="${kind}-model">Model</label>
-        <select class="form-select js-codex-model" id="${kind}-model" name="model">${modelOptions}</select>
+        <label class="form-label" for="${engine}-model">Model</label>
+        <select class="form-select js-reviewer-model" id="${engine}-model" name="model">${modelOptions}</select>
       </div>
       <div class="form-group">
-        <label class="form-label" for="${kind}-effort">Reasoning effort</label>
-        <select class="form-select js-codex-effort" id="${kind}-effort" name="effort" data-default-label="${byDefault}">
+        <label class="form-label" for="${engine}-effort">Reasoning effort</label>
+        <select class="form-select js-reviewer-effort" id="${engine}-effort" name="effort" data-default-label="${byDefault}">
           <option value=""${settings.effort ? '' : raw(' selected')}>${byDefault}${effortDefault ? ` (${effortDefault})` : ''}</option>
           ${efforts.map((e) => html`<option value="${e}"${settings.effort === e ? raw(' selected') : ''}>${e}</option>`)}
         </select>
         <p class="note">Higher effort finds more and takes longer. The levels depend on the model.</p>
       </div>
       <div class="form-group">
-        <label class="form-label" for="${kind}-iterations">Max iterations</label>
-        <input class="form-control input-narrow" type="number" id="${kind}-iterations" name="maxIterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${settings.maxIterations}">
-        <p class="note">Automatic reviews per pull request, so ${label} and the author agent do not go back and forth forever. "Ask ${label} to review" on a pull request is not limited.</p>
+        <label class="form-label" for="${engine}-iterations">Automatic reviews</label>
+        <input class="form-control input-narrow" type="number" id="${engine}-iterations" name="maxIterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${settings.maxIterations}">
+        <p class="note">At most this many per pull request, so ${label} and the author agent do not go back and forth forever. "Ask ${label} to review" on a pull request is not limited.</p>
       </div>
       <div class="form-checkbox">
         <label><input type="checkbox" name="runTests"${settings.runTests ? raw(' checked') : ''}> Let ${label} install dependencies and run tests</label>
@@ -108,7 +108,7 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
       }
       <div class="form-checkbox">
         <label><input type="checkbox" name="skipOwnKind"${settings.skipOwnKind ? raw(' checked') : ''}> Skip pull requests by agents in ${reviewer.authorTool}</label>
-        <p class="note">Leave pull requests that an agent running in ${reviewer.authorTool} wrote to the other reviewers, so authors get a second opinion. Staging with <code>--reviewer ${kind}</code>, or turning it on in a pull request's sidebar, still has ${label} review it.</p>
+        <p class="note">Leave pull requests that an agent running in ${reviewer.authorTool} wrote to the other reviewers, so authors get a second opinion. Staging with <code>--reviewer ${engine}</code>, or turning it on in a pull request's sidebar, still has ${label} review it.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
@@ -203,21 +203,21 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
       <div class="form-group">
         <label class="form-label" for="reviewer-engine">Tool</label>
         <select class="form-select js-reviewer-engine" id="reviewer-engine" name="engine">
-          ${[s.codex, s.claude].map((r) => (r ? html`<option value="${r.engine}"${d.engine === r.engine ? raw(' selected') : ''}>${r.label}</option>` : ''))}
+          ${s.builtInReviewers().map((r) => html`<option value="${r.engineId}"${d.engine === r.engineId ? raw(' selected') : ''}>${r.label}</option>`)}
         </select>
       </div>
       <div class="form-group">
         <label class="form-label" for="reviewer-model">Model</label>
-        <select class="form-select js-codex-model" id="reviewer-model" name="model">${models}</select>
+        <select class="form-select js-reviewer-model" id="reviewer-model" name="model">${models}</select>
       </div>
       <div class="form-group">
         <label class="form-label" for="reviewer-effort">Reasoning effort</label>
         ${efforts}
       </div>
       <div class="form-group">
-        <label class="form-label" for="reviewer-iterations">Max iterations</label>
+        <label class="form-label" for="reviewer-iterations">Automatic reviews</label>
         <input class="form-control input-narrow" type="number" id="reviewer-iterations" name="max_iterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${d.max_iterations}">
-        <p class="note">Automatic reviews per pull request. Asking it to review from a pull request is not limited.</p>
+        <p class="note">At most this many per pull request. Asking it to review from a pull request is not limited.</p>
       </div>
       <div class="form-checkbox js-code-only"${d.reviews === 'code' ? '' : raw(' hidden')}>
         <label><input type="checkbox" name="run_tests"${checked(d.run_tests)}> Let it install dependencies and run tests</label>
@@ -233,15 +233,14 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
 async function modelChoices(s: Service, d: Omit<Definition, 'name'>): Promise<{ models: Safe[]; efforts: Safe }> {
   const models: Safe[] = [];
   let efforts = html``;
-  for (const reviewer of [s.codex, s.claude]) {
-    if (!reviewer) continue;
-    const mine = reviewer.engine === d.engine;
+  for (const reviewer of s.builtInReviewers()) {
+    const mine = reviewer.engineId === d.engine;
     const list = await reviewer.models();
     const defaults = reviewer.defaults();
     const byDefault = `${reviewer.label} default`;
     const defaultEffort = (m: { defaultEffort: string } | undefined) => defaults.effort ?? m?.defaultEffort ?? '';
     const defaultModel = list.find((m) => m.slug === defaults.model);
-    const attrs = (selected: boolean) => raw(`data-engine="${reviewer.engine}"${mine ? '' : ' hidden disabled'}${mine && selected ? ' selected' : ''}`);
+    const attrs = (selected: boolean) => raw(`data-engine="${reviewer.engineId}"${mine ? '' : ' hidden disabled'}${mine && selected ? ' selected' : ''}`);
     models.push(
       html`<option value="" data-efforts="${(defaultModel?.efforts ?? reviewer.efforts('') ?? []).join(',')}" data-default-effort="${defaultEffort(defaultModel)}" data-default-label="${byDefault}" ${attrs(!d.model)}>${byDefault}${defaults.model ? ` (${defaults.model})` : ''}</option>`,
       ...list.map((m) => html`<option value="${m.slug}" data-efforts="${m.efforts.join(',')}" data-default-effort="${defaultEffort(m)}" ${attrs(d.model === m.slug)}>${m.name}${m.description ? ` – ${m.description}` : ''}</option>`),
@@ -252,7 +251,7 @@ async function modelChoices(s: Service, d: Omit<Definition, 'name'>): Promise<{ 
     const selected = list.find((m) => m.slug === (d.model || defaults.model));
     const levels = selected?.efforts ?? reviewer.efforts(d.model) ?? (d.effort ? [d.effort] : []);
     const fallback = defaultEffort(selected);
-    efforts = html`<select class="form-select js-codex-effort" id="reviewer-effort" name="effort" data-default-label="${byDefault}">
+    efforts = html`<select class="form-select js-reviewer-effort" id="reviewer-effort" name="effort" data-default-label="${byDefault}">
           <option value=""${d.effort ? '' : raw(' selected')}>${byDefault}${fallback ? ` (${fallback})` : ''}</option>
           ${levels.map((e) => html`<option value="${e}"${d.effort === e ? raw(' selected') : ''}>${e}</option>`)}
         </select>`;

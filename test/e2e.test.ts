@@ -811,7 +811,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
     assert.match(capped.stdout, new RegExp(`^The reviewer agents are done with ${git('rev-parse', '--short=7', 'HEAD')} \\(codex-review used 1 of 1 automatic reviews\\); ask the user to review it: `));
 
     // Raising this pull request's limit lets Codex go on, at once when the author is waiting.
-    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /data-limit="1"[^]*js-codex-step[^]*js-codex-step/);
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /data-limit="1"[^]*js-reviewer-step[^]*js-reviewer-step/);
     // This time the install fails; Codex reviews anyway and is told why.
     const second = await withFakes({ FAKE_INSTALL_FAIL: '1' }, async () => {
       const resumed = cli(['pr', 'wait', String(number), '--timeout', '20s']);
@@ -854,8 +854,8 @@ test('codex-review reviews when the author waits, within the limits in settings'
     const page = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
     assert.match(page, /failed/);
     assert.match(page, /<span class="agent-chunk">Automatic: 2 of 2<\/span>/);
-    assert.match(page, /class="codex-limit" data-api="[^"]*\/reviewers\/codex" data-limit="2"/);
-    assert.match(page, /js-codex-reset"[^>]* data-field="max_iterations"/);
+    assert.match(page, /class="reviewer-limit" data-api="[^"]*\/reviewers\/codex" data-limit="2"/);
+    assert.match(page, /js-reviewer-reset"[^>]* data-field="max_iterations"/);
     assert.doesNotMatch(page, /for this pull request/, 'following the setting, as without --reviewer');
     assert.deepEqual(await human('PATCH', `${base}/reviewers/codex`, { max_iterations: null }), { enabled: true, max_iterations: 1, overrides: { enabled: null, max_iterations: null } });
 
@@ -1460,7 +1460,7 @@ test('stop iterating: a running review finishes, no new one starts, the author h
       assert.match(both.stdout, /claude-review reviewed: commented/);
       await server.service.claude!.settle(id);
       const box = await page();
-      assert.match(box, /<strong>Iterations stopped by reviewer after round 1<\/strong>[^]*>Resume<\/button>/);
+      assert.match(box, /<strong>Automatic reviews stopped by reviewer after round 1<\/strong>[^]*>Resume<\/button>/);
       assert.match(box, /stopped automatic reviews after round 1/);
       assert.doesNotMatch(box, />Stop iterating<\/button>/);
 
@@ -1642,7 +1642,7 @@ test('Stop iterating shows the round it records, also when a reviewer ahead of t
   try {
     assert.match(await page(), /<strong>2 automatic review rounds so far<\/strong>[^]*>Stop iterating<\/button>/);
     assert.equal((await human('PUT', `${base}/stop-iterating`)).iterations_stopped.round, 2);
-    assert.match(await page(), /<strong>Iterations stopped by reviewer after round 2<\/strong>/);
+    assert.match(await page(), /<strong>Automatic reviews stopped by reviewer after round 2<\/strong>/);
   } finally {
     await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3 });
     await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3 });
@@ -1708,7 +1708,7 @@ test('beside Stop iterating and Resume, what each reviewer agent last found, by 
 
       // After a stop, the Resume row says the same.
       await human('PUT', `${base}/stop-iterating`);
-      assert.match(await page(), /<strong>Iterations stopped by reviewer after round 1<\/strong><div class="iterations-found">[^]*>Resume<\/button>/);
+      assert.match(await page(), /<strong>Automatic reviews stopped by reviewer after round 1<\/strong><div class="iterations-found">[^]*>Resume<\/button>/);
       assert.deepEqual(await found(), done);
     } finally {
       rmSync(gate, { force: true });
@@ -2087,7 +2087,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
       const html = await page(n);
       assert.match(html, /data-field="enabled">Follow Settings<span class="dropdown-item-desc">Off in Settings<\/span>/);
       assert.match(html, /<span class="agent-chunk">Automatic: 0 of 2<\/span>/);
-      assert.match(html, /class="codex-limit"[^>]*data-limit="2"/);
+      assert.match(html, /class="reviewer-limit"[^>]*data-limit="2"/);
       // Queued as soon as Codex considers it, although automatic reviews are off in settings.
       assert.equal((await considered(n))?.status, 'QUEUED');
       for (const i of [1, 2]) {
@@ -2143,7 +2143,7 @@ test('pr create --reviewer and --no-review decide Codex reviews for that pull re
       const html = await page(n);
       assert.match(html, /<span class="agent-state" title="Off for this pull request"><span>Off<\/span><\/span>/);
       assert.match(html, /data-field="enabled">Follow Settings<span class="dropdown-item-desc">On in Settings<\/span>/);
-      assert.match(html, /js-codex-reset"[^>]* data-field="enabled"/);
+      assert.match(html, /js-reviewer-reset"[^>]* data-field="enabled"/);
       // Back to the setting (the page's reset) while the author waits: Codex starts at once.
       const resumed = cli(['pr', 'wait', String(n), '--timeout', '20s']);
       await authorWaiting(n);
@@ -4320,7 +4320,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         });
         const failed = (await human('GET', base)).turn.reasons.find((x: any) => x.kind === 'reviewer_agent');
         assert.deepEqual(failed, { kind: 'reviewer_agent', state: 'failed', to_review: false, text: `codex-review's review of ${sha()} failed`, engine: 'codex', reviewer: 'codex' });
-        assert.match(await page('/'), new RegExp(`codex-review&#39;s review failed <button type="button" class="btn-link js-run-codex" data-api="${base}/reviewers/codex">Retry</button>`));
+        assert.match(await page('/'), new RegExp(`codex-review&#39;s review failed <button type="button" class="btn-link js-run-reviewer" data-api="${base}/reviewers/codex">Retry</button>`));
         // Also while the author waits: nothing more is coming from Codex for this commit. The author
         // was told so when Codex found nothing in it, and is not told again.
         const waited = cli(['pr', 'wait', String(number), '--timeout', '2s']);
@@ -5321,9 +5321,9 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
       const menus = [...page.matchAll(/<details class="dropdown details-reset agent-menu[^]*?<\/details>/g)].map((m) => m[0]);
       assert.ok(menus.length);
       for (const menu of menus) {
-        assert.match(menu, /class="dropdown-item js-run-codex"[^>]*>Ask .+ to review</);
+        assert.match(menu, /class="dropdown-item js-run-reviewer"[^>]*>Ask .+ to review</);
         assert.match(menu, />Settings</);
-        assert.doesNotMatch(menu, /Automatic reviews of this pull request|codex-limit|js-reviewer-switch|Follow Settings/);
+        assert.doesNotMatch(menu, /Automatic reviews of this pull request|reviewer-limit|js-reviewer-switch|Follow Settings/);
       }
     } finally {
       await human('PUT', '/api/settings/codex', { enabled: false, model: '', effort: '', maxIterations: 3 });
