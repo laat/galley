@@ -433,8 +433,23 @@ interface PushPlan {
   before: string | null;
   /** It goes on top of the branch as rewritten on GitHub (`before`), which no longer has `from`, the commit galley pushed last. */
   rewritten?: { from: string; to: string };
+  /** The commits that rewrite removed which it brings back, as the user confirmed when publishing by hand. */
+  broughtBack?: string[];
   /** The `git push` arguments. */
   args: string[];
+}
+
+/**
+ * What publishing the head would bring back of the commits a rewrite on GitHub removed
+ * (Service.bringsBack): publishing refuses it unless the user confirms each of them.
+ */
+export interface BringsBack {
+  /** The rewrite: the branch no longer has `from`, and galley fetched it into `ref` at `to`. */
+  from: string;
+  to: string;
+  ref: string;
+  /** The removed commits it would bring back, newest first. */
+  commits: string[];
 }
 
 /** How often galley asks GitHub about published pull requests: while something runs there, and otherwise. */
@@ -2699,7 +2714,9 @@ export class Service {
     const { pull, git } = ctx;
     const published = await this.onGitHub(ctx);
     if (!published) return false;
-    // On top of the branch as last fetched, when the head has it in it, as preparePush pushes.
+    // On top of the branch as last fetched, when the head has it in it, as preparePush pushes. So
+    // is a head that brings back commits a rewrite there removed, once the user confirms them
+    // (bringsBack): that needs no force either.
     const { onTop } = await this.fetchedBranch(ctx, pull, published);
     const theirs = onTop ?? published;
     if (!sign) return !(await git.isAncestor(theirs, pull.head_sha));
@@ -2734,7 +2751,7 @@ export class Service {
    * those of what galley knew the branch to have, and the staged ones it pushed signed copies of,
    * that the fetched branch does not have.
    */
-  private async fetchedBranch(ctx: Ctx, pull: PullRow, published: string | null): Promise<{ onTop: string | null; rewritten?: { from: string; to: string; removed: Set<string> } }> {
+  private async fetchedBranch(ctx: Ctx, pull: PullRow, published: string | null): Promise<{ onTop: string | null; rewritten?: { from: string; to: string; gone: string[]; removed: Set<string> } }> {
     const { repo, git } = ctx;
     const fetched = published ? await git.resolve(`refs/remotes/${repo.remote}/${pull.head_ref}`) : null;
     if (!published || !fetched || !(await git.isAncestor(fetched, pull.head_sha))) return { onTop: null };
@@ -2747,7 +2764,34 @@ export class Service {
     if (!this.fetchedRewritten(pull, fetched)) return { onTop: null };
     const tips = gone.includes(published) ? [...gone, pull.published_source_sha ?? published] : gone;
     const removed = (await git.out(['rev-list', ...tips, '--not', fetched])).split('\n').filter(Boolean);
-    return { onTop: fetched, rewritten: { from: published, to: fetched, removed: new Set(removed) } };
+    return { onTop: fetched, rewritten: { from: published, to: fetched, gone, removed: new Set(removed) } };
+  }
+
+  /** Of the commits a rewrite on GitHub removed (fetchedBranch), those `tips` have, which a push of them would bring back; newest first. */
+  private async removedIn(ctx: Ctx, tips: string[], rewritten: { to: string; removed: Set<string> }): Promise<string[]> {
+    return (await ctx.git.out(['rev-list', ...tips, '--not', rewritten.to])).split('\n').filter((sha) => rewritten.removed.has(sha));
+  }
+
+  /**
+   * What publishing the head now would bring back of the commits a rewrite on GitHub removed, as
+   * preparePush finds them, for the publish box to say before the click and to ask the user to
+   * confirm. Signed or not: signing pushes the head's copies, reusing those made before
+   * (signedVersions), so the commits under those count too, and the list covers both.
+   */
+  async bringsBack(ctx: Ctx): Promise<BringsBack | null> {
+    const { repo, pull } = ctx;
+    const { onTop, rewritten } = await this.fetchedBranch(ctx, pull, await this.onGitHub(ctx));
+    if (!rewritten) return null;
+    const { shas, versions } = await this.signedVersions(ctx, pull, async () => null, onTop);
+    const copies = shas.flatMap((sha) => {
+      const copy = versions.get(sha);
+      return copy && copy !== sha ? [copy] : [];
+    });
+    const commits = await this.removedIn(ctx, [pull.head_sha, ...copies], rewritten);
+    if (!commits.length) return null;
+    // Back at what galley pushed (reset there after a rewrite), it is the tip galley fetched since that it no longer has.
+    const from = rewritten.from !== rewritten.to ? rewritten.from : rewritten.gone.at(-1)!;
+    return { from, to: rewritten.to, ref: `${repo.remote}/${pull.head_ref}`, commits };
   }
 
   /** The tips galley fetched of the branch on GitHub after refused pushes since it last pushed there (fetchHead), oldest first. */
@@ -2814,7 +2858,10 @@ export class Service {
     const signer = await this.signer(ctx);
     if (!signer) throw new SigningError('set user.name and user.email in git to sign commits', null, 422);
     let signed = 0;
-    const { versions } = await this.signedVersions(ctx, pull, async (sha, c, parents) => {
+    // Copies made again in place of others (signedVersions), whose rows go back when signing fails:
+    // the published ref may point at one, and stays galley's to move only while its row is there (preparePush).
+    const replaced: { sha: string; before: string; copy: string }[] = [];
+    const signing = this.signedVersions(ctx, pull, async (sha, c, parents) => {
       const r = await git.run(['commit-tree', '-S', c.tree, ...parents.flatMap((p) => ['-p', p]), '-F', '-'], {
         input: c.message,
         env: {
@@ -2829,6 +2876,8 @@ export class Service {
       });
       if (r.code !== 0) throw new SigningError(`signing commit ${sha.slice(0, 7)} failed:\n${failure(r, 'a passphrase or a 1Password prompt nobody answered?')}`, signingCause(r));
       const copy = r.stdout.trim();
+      const before = this.db.get<{ signed_sha: string }>('SELECT signed_sha FROM signed_commits WHERE repo_id = ? AND source_sha = ?', repo.id, sha)?.signed_sha;
+      if (before && before !== copy) replaced.push({ sha, before, copy });
       this.db.run(
         'INSERT INTO signed_commits (repo_id, source_sha, signed_sha) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET signed_sha = excluded.signed_sha',
         repo.id,
@@ -2838,6 +2887,15 @@ export class Service {
       signed++;
       return copy;
     }, keep);
+    let versions: Map<string, string | null>;
+    try {
+      ({ versions } = await signing);
+    } catch (e) {
+      for (const { sha, before, copy } of replaced) {
+        this.db.run('UPDATE signed_commits SET signed_sha = ? WHERE repo_id = ? AND source_sha = ? AND signed_sha = ?', before, repo.id, sha, copy);
+      }
+      throw e;
+    }
     return { head: versions.get(pull.head_sha) ?? pull.head_sha, signed };
   }
 
@@ -2846,8 +2904,9 @@ export class Service {
    * commit itself when it is signed and its parents stay, or a new copy from `copy`; `keep` and
    * the commits under it (on GitHub already) as they are. Copies are
    * remembered per source commit, so publishing again after the agent added commits reuses them
-   * and GitHub sees a fast-forward. To predict without signing, `copy` returns null: a copy
-   * still to be made (and so is every copy on top of it).
+   * and GitHub sees a fast-forward. Not a copy of a commit that has `keep` in it, made when the
+   * commits under `keep` were copied too: its push would not add to `keep`. To predict without
+   * signing, `copy` returns null: a copy still to be made (and so is every copy on top of it).
    */
   private async signedVersions(
     ctx: Ctx,
@@ -2869,7 +2928,9 @@ export class Service {
         continue;
       }
       const known = versions.get(sha);
-      if (known && (await git.exists(known))) continue;
+      // Made again when it has a copy of `keep` in place of `keep`: the head brought in a branch
+      // rewritten on GitHub before galley fetched it, and signing copied that branch's commits too.
+      if (known && (await git.exists(known)) && !(keep && (await git.isAncestor(keep, sha)) && !(await git.isAncestor(keep, known)))) continue;
       const c = await git.rawCommit(sha);
       const parents = c.parents.map((p) => (versions.has(p) ? (versions.get(p) as string | null) : p));
       if (c.signed && parents.every((p, i) => p === c.parents[i])) versions.set(sha, sha);
@@ -2888,9 +2949,10 @@ export class Service {
    * added there since are not overwritten. With `lease`, every push leases on it, so a branch that
    * moved on GitHub in any way, or that GitHub deleted after a merge, is refused rather than
    * overwritten or brought back. `auto` says in the refusal to force-push that auto-publish's
-   * options did not allow it.
+   * options did not allow it. `bringBack`: the commits a rewrite on GitHub removed that the user
+   * confirmed bringing back (publish).
    */
-  private async preparePush(ctx: Ctx, pull: PullRow, opts: { sign: boolean; force: boolean; lease?: boolean; auto?: boolean; timeoutMs?: number }): Promise<PushPlan> {
+  private async preparePush(ctx: Ctx, pull: PullRow, opts: { sign: boolean; force: boolean; lease?: boolean; auto?: boolean; timeoutMs?: number; bringBack?: string[] }): Promise<PushPlan> {
     const { repo, git } = ctx;
     const published = await this.onGitHub(ctx);
     // The branch on GitHub as last fetched, when it moved on from what galley pushed and the head
@@ -2898,32 +2960,40 @@ export class Service {
     // they are, overwriting nothing. Rewritten there, a head that still has commits the rewrite
     // removed (the author merged the branch in rather than rebasing onto it) is refused: the push
     // would bring them back. So is one whose signed copies would: signing reuses a copy made
-    // before, also one made on top of a removed commit for a push GitHub then refused.
+    // before, also one made on top of a removed commit for a push GitHub then refused. Unless the
+    // user confirmed bringing back each of them (bringsBack lists them for the publish box).
     const { onTop, rewritten } = await this.fetchedBranch(ctx, pull, published);
+    const broughtBack = new Set<string>();
     const bringsBack = async (commit: string, what: string) => {
       if (!rewritten) return;
-      const back = (await git.out(['rev-list', commit, '--not', rewritten.to])).split('\n').filter((sha) => rewritten.removed.has(sha));
+      const back = await this.removedIn(ctx, [commit], rewritten);
       if (!back.length) return;
+      if (back.every((sha) => opts.bringBack?.includes(sha))) {
+        for (const sha of back) broughtBack.add(sha);
+        return;
+      }
       const ref = `${repo.remote}/${pull.head_ref}`;
       const shas = back.slice(0, 5).map((sha) => sha.slice(0, 7)).join(', ') + (back.length > 5 ? ', …' : '');
       throw new HttpError(
         409,
         `The branch on GitHub was rewritten there (galley fetched it into ${ref} at ${rewritten.to.slice(0, 7)}), and ${what} ${back.length === 1 ? 'a commit' : `${back.length} commits`} the rewrite removed, which pushing it would bring back: ${shas}.`,
-        // For the author, what to rebase onto (pushNow).
-        { fetched: { ref, sha: rewritten.to, rewritten: true, since: await this.rebaseFrom(ctx, pull, rewritten.to) } },
+        // For the author, what to rebase onto (pushNow). Extension: what it would bring back.
+        { fetched: { ref, sha: rewritten.to, rewritten: true, since: await this.rebaseFrom(ctx, pull, rewritten.to) }, bring_back: back },
       );
     };
     await bringsBack(pull.head_sha, 'this head has');
     let pushed = pull.head_sha;
     let signed = 0;
     if (opts.sign) {
-      ({ head: pushed, signed } = await this.signCommits(ctx, pull, opts.timeoutMs, onTop));
       // The signed copies exist only here and on GitHub; keep them from being garbage collected.
+      const ref = this.ref(pull, 'published');
+      const at = await git.resolve(ref);
+      // It holds the copies an earlier publish pushed, if any: commits this server signed. Asked
+      // before signing, which can make a copy again in place of the one it points at (signedVersions).
+      const ours = !at || !!this.db.get('SELECT 1 FROM signed_commits WHERE repo_id = ? AND signed_sha = ?', repo.id, at);
+      ({ head: pushed, signed } = await this.signCommits(ctx, pull, opts.timeoutMs, onTop));
       if (pushed !== pull.head_sha) {
-        const ref = this.ref(pull, 'published');
-        const at = await git.resolve(ref);
-        // It holds the copies an earlier publish pushed, if any: commits this server signed.
-        if (!at || this.db.get('SELECT 1 FROM signed_commits WHERE repo_id = ? AND signed_sha = ?', repo.id, at)) await this.moveRef(git, ref, at, pushed);
+        if (ours) await this.moveRef(git, ref, at, pushed);
         else console.error(`left ${ref} alone in ${git.gitDir}: it points at ${at}, which galley did not sign`);
       }
     }
@@ -2947,7 +3017,7 @@ export class Service {
     args.push(repo.remote, `${pushed}:${branch}`);
     // Said when it replaced what galley pushed last: not when the branch is back at it.
     const over = rewritten && before === onTop && rewritten.to !== rewritten.from;
-    return { pushed, signed, force, before, ...(over ? { rewritten: { from: rewritten.from, to: rewritten.to } } : {}), args };
+    return { pushed, signed, force, before, ...(over ? { rewritten: { from: rewritten.from, to: rewritten.to } } : {}), ...(broughtBack.size ? { broughtBack: [...broughtBack] } : {}), args };
   }
 
   /**
@@ -2987,11 +3057,13 @@ export class Service {
    * so each step gets UNATTENDED_TIMEOUT_MS. `autoMerge` turns on auto-merge on GitHub afterwards,
    * with that merge method: auto-publish's, fixed when it was turned on, or the one in settings
    * when the request came in. Publishing while a reviewer agent is at work, or a head that conflicts
-   * with its base, needs `duringReview` or `duringConflict`.
+   * with its base, needs `duringReview` or `duringConflict`. A head that brings back commits a
+   * rewrite on GitHub removed needs each of them in `bringBack`, which only the user may give, from
+   * the publish box (`page`): never an agent, not even one that claims to be the user, nor auto-publish.
    */
   async publish(
     ctx: Ctx,
-    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod },
+    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod; bringBack?: string[]; page?: boolean },
     actor: Actor,
   ): Promise<PullRow> {
     const release = await this.pushLock(ctx.pull.id);
@@ -3004,11 +3076,18 @@ export class Service {
 
   private async publishNow(
     ctx: Ctx,
-    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod },
+    opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod; bringBack?: string[]; page?: boolean },
     actor: Actor,
   ): Promise<PullRow> {
     const { repo } = ctx;
     this.requireHuman(actor, 'only the user can publish; ask them to publish from galley');
+    // Refused before any work: bringing back what a rewrite on GitHub removed is the user's call,
+    // made at the publish box. A CLI caller can claim to be the user (GALLEY_ACTOR), so the API
+    // says whether the request came from the page, as far as its headers tell.
+    if (opts.bringBack?.length) {
+      if (opts.approval !== undefined) throw new HttpError(403, 'auto-publish never brings back commits a rewrite on GitHub removed');
+      if (!opts.page) throw new HttpError(403, "only the user can bring back commits a rewrite on GitHub removed, from the publish box on the pull request's page");
+    }
     // The base as it is on the remote now, for the checks for conflicts below and auto-publish's.
     await this.fetchBases(repo, { base: ctx.pull.base_ref });
     const pull = await this.sync(ctx.pull);
@@ -3043,9 +3122,9 @@ export class Service {
           }
         }
       : undefined;
-    const plan = await this.preparePush(ctx, pull, { sign, force: !!opts.force, auto, timeoutMs });
+    const plan = await this.preparePush(ctx, pull, { sign, force: !!opts.force, auto, timeoutMs, bringBack: opts.bringBack });
     await this.pushPrepared(ctx, pull, plan, { timeoutMs, ready });
-    const { pushed, signed, force, rewritten } = plan;
+    const { pushed, signed, force, rewritten, broughtBack } = plan;
 
     let url = pull.published_url;
     // An earlier publish, or a pull request someone opened on GitHub for the same branch, gets updated in place.
@@ -3084,7 +3163,7 @@ export class Service {
         ...(pull.github_state === 'closed' ? { github_state: null } : {}),
       });
       // `sign`, whether it signed: what the pushes after it do (signsUpdates).
-      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto, ...(rewritten ? { rewritten } : {}) }, ts);
+      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto, ...(rewritten ? { rewritten } : {}), ...(broughtBack ? { brought_back: broughtBack } : {}) }, ts);
     });
     // Published during a review (a second click): its findings would come too late.
     this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!, 'published');
@@ -3306,7 +3385,8 @@ export class Service {
       // as galley fetches base branches, for the author to rebase onto, which it may not be able to
       // fetch itself from its sandbox. Its next commit then goes on top of them (preparePush).
       const moved = e instanceof HttpError && e.status === 409 && /stale info|fetch first/.test(e.message);
-      // Refused before the push for commits a rewrite on GitHub removed: what galley fetched before (preparePush).
+      // Refused before the push for commits a rewrite on GitHub removed, which only the user may bring
+      // back, by publishing: what galley fetched before (preparePush).
       const fetched = moved ? await this.fetchHead(ctx, pull) : e instanceof HttpError ? (e.fields.fetched as GithubPush['fetched']) : undefined;
       const signing = e instanceof SigningError ? this.signingFailure(e, this.signingFailures(pull) + 1) : undefined;
       const failed: Omit<GithubPush, 'at'> = {

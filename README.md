@@ -93,11 +93,11 @@ Its windows leave notifications to the app and have no **Notify me**.
    was on. A push GitHub refuses is not tried again, and you and the agent hear why; when
    someone added commits to the branch on GitHub, or rewrote it there, galley fetches it for the
    agent to rebase onto, and pushes the agent's new commits on top of it. A commit that would
-   bring back what the rewrite removed is refused. One that fails otherwise (GitHub out of
-   reach) is tried again when the agent next waits; one whose signing prompt nobody answered is
-   tried again a few times over the next hour, whether the agent waits or not. When the branch
-   conflicts with its base, galley tells the agent to rebase it, as before publishing, and
-   pushes the rebase.
+   bring back what the rewrite removed is refused, unless you publish it yourself and choose to
+   bring those commits back. One that fails otherwise (GitHub out of reach) is tried again when
+   the agent next waits; one whose signing prompt nobody answered is tried again a few times
+   over the next hour, whether the agent waits or not. When the branch conflicts with its base,
+   galley tells the agent to rebase it, as before publishing, and pushes the rebase.
 
 The conversation stays in galley; GitHub gets the branch, title and description.
 

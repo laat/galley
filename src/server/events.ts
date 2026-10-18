@@ -22,8 +22,9 @@ export interface EventData {
   /**
    * `head`: the commit GitHub got; `source`: the staged head it is (a copy of, when signed). `sign`:
    * what the pushes after it do. `rewritten`: on top of the branch as rewritten on GitHub (GithubPush).
+   * `brought_back`: commits that rewrite removed, which the user confirmed bringing back.
    */
-  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; rewritten?: { from: string; to: string } };
+  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; rewritten?: { from: string; to: string }; brought_back?: string[] };
   /** A push when the author waited (Service.pushUpdate). */
   github_push: Omit<GithubPush, 'at'>;
   /** `at`: when GitHub merged or closed it; the event is from when galley learned of it. */

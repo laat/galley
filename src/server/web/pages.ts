@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
-import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type Ctx, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
@@ -602,7 +602,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     case 'published':
       return timelineBadge(
         'mark-github',
-        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${onRewritten(data.rewritten)}${data.auto ? ' with auto-publish' : ''} ${when}`,
+        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${onRewritten(data.rewritten)}${data.auto ? ' with auto-publish' : ''}${data.brought_back?.length ? html`, and brought back ${plural(data.brought_back.length, 'commit')} the rewrite on GitHub removed (${shortShas(data.brought_back)})` : ''} ${when}`,
         { cls: 'timeline-badge--open' },
       );
     case 'github_push': {
@@ -796,6 +796,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
       <a class="btn" href="${pull.published_url}" target="_blank" rel="noopener">View on GitHub</a></div>`;
   } else {
     publishable = true;
+    // Commits a rewrite on GitHub removed that the head would bring back: refused unless the user checks the box for it.
+    const back = pull.published_url ? await s.bringsBack(p.ctx) : null;
     const verb = pull.published_url ? 'Publish update' : 'Publish pull request';
     const what = pull.published_url
       ? html`Staged changes not on GitHub yet: ${changed.join(', ')}. Pushes <span class="branch-name branch-name-sm">${pull.head_ref}</span> (<code>${shortSha(pull.head_sha)}</code>)${forceNeeded ? html` with <strong>force</strong>` : ''} and updates <a href="${pull.published_url}" target="_blank" rel="noopener">${pull.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>.${changed.includes('commits') && !pushFailed ? ` The commits are also pushed when ${p.author.login} waits.` : ''}`
@@ -824,6 +826,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
               ? html`<label><input type="checkbox" name="sign"${signByDefault ? raw(' checked') : ''}${signer ? '' : raw(' disabled')}> Sign ${unsigned.length < p.commits.length ? `the ${plural(unsigned.length, 'unsigned commit')}` : unsigned.length === 1 ? 'the commit' : `all ${unsigned.length} commits`} as ${signer ? html`<strong>${signer.name}</strong> &lt;${signer.email}&gt;` : html`you (set <code>user.name</code> and <code>user.email</code> in git first)`}</label>`
               : ''
           }
+          ${back ? html`<label><input type="checkbox" name="bring_back" data-values="${back.commits.join(' ')}"> Bring back ${back.commits.length === 1 ? 'the commit' : `the ${back.commits.length} commits`} the rewrite removed</label>` : ''}
           <label class="js-force-option"${forceNeeded ? '' : raw(' hidden')}><input type="checkbox" name="force"${forceNeeded ? raw(' checked') : ''}> Force-push (this push replaces commits on GitHub)</label>
           ${
             !mergeOption
@@ -833,6 +836,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
                 : html`<label class="color-fg-muted"><input type="checkbox" name="auto_merge" disabled> Enable auto-merge on GitHub: ${target} does not allow ${mergeOption.method} merges. <a href="/settings/publishing">Change the merge method</a></label>`
           }
         </div>
+        ${back ? bringsBackNote(back) : ''}
         ${images ? html`<div class="flash flash-warn">${icon('alert')}<span>The description has ${plural(images, 'image')} stored in galley, which GitHub cannot show. Remove ${them}, or replace ${them} with ${images === 1 ? 'an image' : 'images'} uploaded to GitHub.</span></div>` : ''}
         <div class="flash flash-error js-form-error" hidden></div>
       </div>
@@ -940,6 +944,17 @@ function lastRound(p: PullPage): Safe {
   if (!running && !parts.length) return raw('');
   const round = running ? `Round ${s.automaticRound(pull)} running` : '';
   return html`<div class="iterations-found">${round}${round && parts.length ? ' · ' : ''}${parts.length ? html`${round ? 'last' : 'Last'} round: ${parts}` : ''}</div>`;
+}
+
+/** Commits by their short SHAs, the first five. */
+function shortShas(shas: string[]): Safe {
+  return html`${shas.slice(0, 5).map((sha, i) => html`${i ? ', ' : ''}<code>${shortSha(sha)}</code>`)}${shas.length > 5 ? ', …' : ''}`;
+}
+
+/** The head would bring back commits a rewrite on GitHub removed (Service.bringsBack), for the publish box. */
+function bringsBackNote(back: BringsBack): Safe {
+  const n = back.commits.length;
+  return html`<div class="flash flash-warn">${icon('alert')}<span>The branch on GitHub was rewritten from <code>${shortSha(back.from)}</code> to <code>${shortSha(back.to)}</code> (galley fetched it into <code>${back.ref}</code>), and pushing this head would bring back ${n === 1 ? 'a commit' : `${n} commits`} the rewrite removed: ${shortShas(back.commits)}. Publishing refuses it unless you choose to bring ${n === 1 ? 'it' : 'them'} back.</span></div>`;
 }
 
 /** " on top of the branch rewritten on GitHub from <old> to <new>", for a push that went on top of it (GithubPush.rewritten). */

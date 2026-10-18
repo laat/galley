@@ -457,6 +457,14 @@ export function api(s: Service): Hono {
     return method;
   };
 
+  /**
+   * The request came from galley's own page, as far as its headers tell: without the actor header
+   * the CLI sends, whatever actor it claims, and with the Origin header browsers send with every
+   * POST (the server refuses any other origin). That keeps out the CLI and plain API calls; the API
+   * has no authentication, so a caller that sends a browser's headers on purpose gets through.
+   */
+  const fromPage = (c: Context): boolean => !c.req.header('x-galley-actor') && !!c.req.header('origin');
+
   // galley extension: push the branch and open (or update) the pull request on GitHub.
   app.post('/repos/:owner/:repo/pulls/:n/publish', async (c) => {
     const x = await ctx(c);
@@ -464,7 +472,16 @@ export function api(s: Service): Hono {
     const sign = typeof b.sign === 'boolean' ? b.sign : undefined;
     // Decided now: the setting may change while publishing awaits.
     const autoMerge = b.auto_merge ? mergeMethod(b.merge_method, x.pull) : undefined;
-    const pull = await s.publish(x, { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review, duringConflict: !!b.during_conflict, autoMerge }, actor(c));
+    // Extension: the commits a rewrite on GitHub removed that the user confirms bringing back; unchecked, the page's box sends false.
+    if (b.bring_back !== undefined && b.bring_back !== false && !(Array.isArray(b.bring_back) && b.bring_back.every((sha: unknown) => typeof sha === 'string'))) {
+      throw new HttpError(422, 'bring_back: the commits to bring back, as full SHAs');
+    }
+    const bringBack = b.bring_back || undefined;
+    const pull = await s.publish(
+      x,
+      { draft: b.draft, force: !!b.force, expected: b.expected, sign, duringReview: !!b.during_review, duringConflict: !!b.during_conflict, autoMerge, bringBack, page: fromPage(c) },
+      actor(c),
+    );
     // Extension: what came of turning on auto-merge, which does not undo the publish when it fails.
     return c.json({ ...pullJson(s, x.repo, pull), auto_merge_result: autoMerge ? autoMergeResult(s.autoMerge(pull)) : undefined });
   });
