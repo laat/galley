@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { packager } from '@electron/packager';
+import { APP_SCHEME } from '../src/app-link.ts';
 
 const here = import.meta.dirname;
 const electron = JSON.parse(readFileSync(join(here, 'node_modules', 'electron', 'package.json'), 'utf8')).version;
@@ -34,6 +35,8 @@ try {
     name: 'galley',
     electronVersion: electron,
     appBundleId: 'io.github.laat.galley',
+    // CFBundleURLTypes in its Info.plist: macOS sends it galley:// links (src/app-link.ts).
+    protocols: [{ name: 'galley link', schemes: [APP_SCHEME] }],
     icon,
     asar: false,
     overwrite: true,

@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import { HttpError, type Service } from '../service.ts';
 import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, progressPart, pullList, transcriptPage } from './pages.ts';
-import { customReviewerPage, customReviewersPage, publishingSettingsPage, settingsPage } from './settings.ts';
+import { customReviewerPage, customReviewersPage, desktopSettingsPage, publishingSettingsPage, settingsPage } from './settings.ts';
 import { browseUrl, type DiffMode } from './diffview.ts';
 import { blobPage, excerpt, locate, rawFile, treeItemsHtml, treePage } from './browse.ts';
 
@@ -44,6 +44,7 @@ export function web(s: Service): Hono {
   // Registered before /:owner/:repo, which would otherwise match "settings".
   app.get('/settings', async (c) => c.html(await settingsPage(s)));
   app.get('/settings/publishing', (c) => c.html(publishingSettingsPage(s)));
+  app.get('/settings/desktop', (c) => c.html(desktopSettingsPage(s)));
   // The files are read again, for edits made while nothing followed the directory (made after the server started).
   app.get('/settings/reviewers', (c) => {
     s.custom?.load();

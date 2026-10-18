@@ -193,6 +193,7 @@
     restoreDrafts();
     updateTimes();
     notifyTurns();
+    showOpenInApp();
     showRepos();
     markActiveTreeItem();
     markLines(false);
@@ -1716,6 +1717,101 @@
     notifyTurns();
   });
 
+  // ------------------------------------------------------ the desktop app
+  // A page opened in the browser goes to the desktop app's window while the app runs on the
+  // browser's computer and opens galley links (the server says so in data-desktop-app), as Zoom's
+  // and Slack's pages do: through its galley:// link (src/app-link.ts), which the browser asks
+  // about first. Only a page that came from outside galley, such as a link clicked in a terminal:
+  // not one reached from another galley page, a reload, Back or Forward, or a live refresh, and
+  // never in the app's own windows. The tab then says so, and "Stay in the browser" keeps galley
+  // links in this browser from then on, until Settings > Desktop app says otherwise.
+
+  const STAY = 'galley:stay-in-browser';
+  const OPENED = 'galley:opened-from-galley';
+  const inApp = () => / Electron\//.test(navigator.userAgent);
+
+  // A link in a comment opens in a tab of its own with no referrer (markdown.ts), also one to a
+  // galley page: a page says when it opens one of galley's, and the page opened takes that.
+  function opening(e) {
+    const a = e.target.closest && e.target.closest('a[href]');
+    try {
+      if (a && new URL(a.href).origin === location.origin) localStorage.setItem(OPENED, String(Date.now()));
+    } catch {}
+  }
+  document.addEventListener('click', opening, { capture: true });
+  document.addEventListener('auxclick', opening, { capture: true });
+
+  /** Whether a galley page opened this one in the last few seconds; said once. */
+  function openedFromGalley() {
+    try {
+      const at = Number(localStorage.getItem(OPENED));
+      localStorage.removeItem(OPENED);
+      return Date.now() - at < 10_000;
+    } catch {
+      return false;
+    }
+  }
+
+  function staysInBrowser() {
+    try {
+      return localStorage.getItem(STAY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function setStaysInBrowser(stay) {
+    try {
+      if (stay) localStorage.setItem(STAY, '1');
+      else localStorage.removeItem(STAY);
+    } catch {}
+  }
+
+  function handOff() {
+    const fromGalley = openedFromGalley();
+    if (document.body.dataset.desktopApp !== 'open-links' || inApp() || staysInBrowser() || fromGalley) return;
+    const [nav] = performance.getEntriesByType('navigation');
+    if (nav && nav.type !== 'navigate') return;
+    try {
+      if (document.referrer && new URL(document.referrer).origin === location.origin) return;
+    } catch {}
+    const link = 'galley://' + (location.pathname + location.search + location.hash).replace(/^\/+/, '');
+    const notice = document.createElement('div');
+    notice.className = 'handoff-notice';
+    notice.setAttribute('role', 'status');
+    notice.innerHTML = `<span class="handoff-notice-text">Opened in the galley app.</span>
+<a class="btn btn-sm" href="${esc(link)}">Open it again</a>
+<button type="button" class="btn btn-sm js-stay-in-browser">Stay in the browser</button>`;
+    main().before(notice);
+    location.href = link;
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!(e.target.closest && e.target.closest('.js-stay-in-browser'))) return;
+    setStaysInBrowser(true);
+    const notice = $('.handoff-notice');
+    if (notice) notice.remove();
+    toast('galley links stay in this browser. Settings > Desktop app changes that.', {
+      label: 'Undo',
+      run: () => {
+        setStaysInBrowser(false);
+        toast('galley links open in the app again');
+      },
+    });
+  });
+
+  // Settings > Desktop app: this browser's choice, which has no say in the app's own windows.
+  function showOpenInApp() {
+    for (const box of $$('.js-open-in-app')) box.checked = !staysInBrowser();
+    for (const setting of $$('.js-open-in-app-setting')) setting.hidden = inApp();
+  }
+
+  document.addEventListener('change', (e) => {
+    if (!e.target.matches('.js-open-in-app')) return;
+    setStaysInBrowser(!e.target.checked);
+    toast('Settings saved');
+  });
+
   // ------------------------------------------------------------- times
 
   function ago(d) {
@@ -1771,5 +1867,6 @@
   goToLinked();
   setUpBrowseTree();
   connectLive();
+  handOff();
   setInterval(updateTimes, 30_000);
 })();

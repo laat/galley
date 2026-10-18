@@ -17,6 +17,8 @@ import { uploads } from './uploads.ts';
 import { gitHttp } from './git-http.ts';
 import { AutoPublisher } from './auto-publish.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
+import { askingComputer, computerOf, requestComputer } from './computer.ts';
+import type { IncomingMessage } from 'node:http';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
 const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -36,7 +38,9 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && origin && !origins.has(origin.toLowerCase())) {
       return c.text('galley: cross-origin request refused', 403);
     }
-    await next();
+    // Which computer it comes from, for what is done only there (computer.ts).
+    const incoming = (c.env as { incoming?: IncomingMessage } | undefined)?.incoming;
+    await requestComputer.run(computerOf(incoming?.socket.remoteAddress, c.req.header('x-forwarded-for')), next);
   });
 
   // Before the API and the web routes, whose /:owner/:repo would take /uploads/<file> and /git/<owner>/<name>.git.
@@ -64,10 +68,15 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
 
   // Live updates for open pages: every change to a pull request is pushed as an event, and so
   // is a reviewer agent's progress (throttled), for pages that show the run. Each is a message
-  // { type, event }, which the shared worker passes on to the tabs whatever its type.
+  // { type, event }, which the shared worker passes on to the tabs whatever its type. The desktop
+  // app's stream says it is the app's (?desktop=1), and whether the app opens galley links
+  // (&open_links=1): pages opened in the browser on its computer hand off to it while it is open
+  // (public/app.js).
   app.get('/events', (c) => {
     const pullId = c.req.query('pull') ? Number(c.req.query('pull')) : null;
+    const desktop = c.req.query('desktop') === '1' ? { computer: askingComputer(), openLinks: c.req.query('open_links') === '1' } : null;
     return streamSSE(c, async (stream) => {
+      if (desktop) s.desktopApps.add(desktop);
       const send = (type: 'change' | 'progress', event: ChangeEvent | ProgressEvent) => stream.writeSSE({ data: JSON.stringify({ type, event }) }).catch(() => {});
       const onChange = (e: ChangeEvent) => {
         if (pullId === null || e.pullId === pullId || e.pullId === null) send('change', e);
@@ -78,6 +87,7 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
       const off = () => {
         s.bus.off('change', onChange);
         s.bus.off('progress', onProgress);
+        if (desktop) s.desktopApps.delete(desktop);
       };
       s.bus.on('change', onChange);
       s.bus.on('progress', onProgress);
@@ -146,13 +156,14 @@ export async function startServer(opts: StartOptions): Promise<{
   let inflight = 0;
   const drained = new EventEmitter();
   const port = await new Promise<number>((resolve, reject) => {
-    const fetch = async (req: Request) => {
+    const fetch = async (req: Request, env: unknown) => {
       // Starting, it says it is galley all the same, so the CLI waits for it instead of taking it for another program.
       if (!app) return new URL(req.url).pathname === '/api/meta' ? Response.json(META, { status: 503 }) : new Response('starting', { status: 503 });
       // Count handlers that are still running, so closing can let them finish with the database.
       inflight++;
       try {
-        return await app.fetch(req);
+        // The connection, which says where the request comes from.
+        return await app.fetch(req, env);
       } finally {
         if (--inflight === 0) drained.emit('idle');
       }
