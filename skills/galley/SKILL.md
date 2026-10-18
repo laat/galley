@@ -131,7 +131,8 @@ description: Stage a pull request in galley, the user's local review server, ins
      force-pushes the rebase; do not push it yourself.
    - `Pushed 3f2a1c9 to GitHub: <url>`: wait again.
    - `Could not push 3f2a1c9 to GitHub: …`: nothing was pushed. Do not push or force-push it
-     yourself; the user decides. Tell the user why, and wait again.
+     yourself; the user decides. When it says galley fetched the branch, rebase onto it as it
+     says; do not merge it in. Tell the user why, and wait again.
 
 ## After the merge
 

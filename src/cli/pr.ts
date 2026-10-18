@@ -914,11 +914,15 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
       // Refused for commits added on GitHub, galley fetched them where the author can rebase onto them.
       const fetched = r.push.fetched?.sha ? r.push.fetched : null;
       const bringIn = fetched ? `galley fetched the branch on GitHub into ${fetched.ref}: rebase onto it` : `fetch ${pr.headRefName} from origin and rebase onto it`;
+      // Rewritten there, only the commits made since galley pushed last go on top: the ones before may be what the rewrite removed.
+      const since = fetched?.since?.slice(0, 7);
       out(
         c.gray(
           'Nothing on GitHub was overwritten, and this commit is not tried again. Do not push or force-push to GitHub yourself: the user has been told, and decides. ' +
             (fetched?.rewritten
-              ? `The branch on GitHub was rewritten there: galley fetched it into ${fetched.ref}, and it no longer has the commit galley pushed last, so the commits you wait with are refused too until the user sorts it out.`
+              ? `The branch on GitHub was rewritten there, and galley fetched it into ${fetched.ref}. Rebase the commits you made ${since ? `after ${since}` : 'since galley last pushed'} onto it, leaving out the ones before` +
+                  (since ? ` (\`git rebase --onto ${fetched.ref} ${since}\`)` : '') +
+                  `, and wait: galley pushes them on top of it. Do not merge ${fetched.ref} in: a commit that brings back what the rewrite removed is refused.`
               : `A later commit is pushed when you wait if GitHub takes it: one that has the commits added there (${bringIn}), or leaves out what GitHub declined.`),
         ),
       );

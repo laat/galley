@@ -71,10 +71,12 @@ running reviews finish for up to 10 minutes; a second Ctrl-C stops it at once.
    galley pushes each commit it waits with, without reviews here: signed as you published,
    force-pushed only over what galley pushed last, and with auto-merge asked for again if it
    was on. A push GitHub refuses is not tried again, and you and the agent hear why; when
-   someone added commits to the branch on GitHub, galley fetches them for the agent to rebase
-   onto. One that fails otherwise (GitHub out of reach, a signing prompt nobody answered) is
-   tried again when the agent next waits. When the branch conflicts with its base, galley tells
-   the agent to rebase it, as before publishing, and pushes the rebase.
+   someone added commits to the branch on GitHub, or rewrote it there, galley fetches it for the
+   agent to rebase onto, and pushes the agent's new commits on top of it. A commit that would
+   bring back what the rewrite removed is refused. One that fails otherwise (GitHub out of
+   reach, a signing prompt nobody answered) is tried again when the agent next waits. When the
+   branch conflicts with its base, galley tells the agent to rebase it, as before publishing,
+   and pushes the rebase.
 
 The conversation stays in galley; GitHub gets the branch, title and description.
 

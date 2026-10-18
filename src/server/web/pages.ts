@@ -602,7 +602,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     case 'published':
       return timelineBadge(
         'mark-github',
-        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${data.auto ? ' with auto-publish' : ''} ${when}`,
+        html`${who} ${data.first ? 'published this pull request to' : 'published an update to'} <a href="${data.url}" target="_blank" rel="noopener">${String(data.url).replace('https://github.com/', '').replace('/pull/', '#')}</a> at <code>${shortSha(data.head)}</code>${data.signed ? ` (signed ${plural(data.signed, 'commit')})` : ''}${data.force ? ' (force-pushed)' : ''}${onRewritten(data.rewritten)}${data.auto ? ' with auto-publish' : ''} ${when}`,
         { cls: 'timeline-badge--open' },
       );
     case 'github_push': {
@@ -611,7 +611,7 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
         const how = [data.signed ? `signed ${plural(data.signed, 'commit')}` : null, data.force ? 'force-pushed' : null].filter(Boolean);
         return timelineBadge(
           'repo-push',
-          html`Pushed an update to ${to} at <code>${shortSha(data.head)}</code>${how.length ? ` (${how.join(', ')})` : ''} when ${p.author.login} waited ${when}`,
+          html`Pushed an update to ${to} at <code>${shortSha(data.head)}</code>${how.length ? ` (${how.join(', ')})` : ''}${onRewritten(data.rewritten)} when ${p.author.login} waited ${when}`,
           { cls: 'timeline-badge--open' },
         );
       }
@@ -926,15 +926,23 @@ function lastRound(p: PullPage): Safe {
   return html`<div class="iterations-found">${round}${round && parts.length ? ' · ' : ''}${parts.length ? html`${round ? 'last' : 'Last'} round: ${parts}` : ''}</div>`;
 }
 
+/** " on top of the branch rewritten on GitHub from <old> to <new>", for a push that went on top of it (GithubPush.rewritten). */
+function onRewritten(rewritten: GithubPush['rewritten']): Safe | '' {
+  return rewritten ? html` on top of the branch rewritten on GitHub from <code>${shortSha(rewritten.from)}</code> to <code>${shortSha(rewritten.to)}</code>` : '';
+}
+
 /**
  * Published, the commit the author waited with could not be pushed to GitHub (Service.pushUpdate):
  * GitHub refused it, and it is not tried again, or it failed otherwise, and is tried again.
  */
 function pushFailedRow(p: PullPage, push: GithubPush): Safe {
   const { author } = p;
+  const rewritten = push.fetched && 'sha' in push.fetched && push.fetched.rewritten;
   const next = push.retry
     ? html`It is tried again each time ${author.login} waits, every few minutes while it does. Publish the update yourself to push it now, signing it if a prompt went unanswered.`
-    : html`${author.login} was told. It is not tried again: publish the update yourself once the branch on GitHub is sorted out. A later commit ${author.login} waits with is pushed if GitHub takes it: one that has the commits added there (fetched, and rebased onto), or leaves out what GitHub declined.`;
+    : rewritten
+      ? html`${author.login} was told to rebase the commits it made since galley last pushed onto the branch as rewritten on GitHub, which galley fetched, without the commits from before. This commit is not tried again; the next one ${author.login} waits with goes on top of the rewritten branch, unless it brings back commits the rewrite removed.`
+      : html`${author.login} was told. It is not tried again: publish the update yourself once the branch on GitHub is sorted out. A later commit ${author.login} waits with is pushed if GitHub takes it: one that has the commits added there (fetched, and rebased onto), or leaves out what GitHub declined.`;
   return html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div class="flex-auto"><strong>Could not ${push.force ? 'force-push' : 'push'} <code>${shortSha(push.source)}</code> to GitHub ${relTime(push.at)}</strong>
     <div class="color-fg-muted">Nothing on GitHub was overwritten. ${next}</div>
     <pre class="merge-error">${push.error ?? ''}</pre></div></div>`;
