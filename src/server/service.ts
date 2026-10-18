@@ -262,10 +262,10 @@ export interface GithubEdit {
 /**
  * A signing that failed (SigningError), as auto-publish and pushes after publishing record it
  * (Service.signingFailure). `why`: what went wrong in a few words, when galley can tell; null
- * when it can not, which is final. `final`: trying again can not get past it, such as a prompt
- * the user denied. `failures`: how many times in a row signing failed so, this time included.
- * Tried again at `next_at` while that is at most `retries`, the setting then (signingRetries);
- * null when it is not tried again.
+ * when it can not, which is final. `final`: trying again can not get past it, such as a missing
+ * key. `failures`: how many times in a row signing failed so, this time included. Tried again at
+ * `next_at` while that is at most `retries`, the setting then (signingRetries); null when it is
+ * not tried again.
  */
 export interface SigningFailure {
   why: string | null;
@@ -4114,45 +4114,37 @@ function failure(r: RunResult, waitedFor?: string): string {
 
 /**
  * Signing failures that trying again later may get past, by what git passed on from the signing
- * program, with the few words the pages say each in: a prompt nobody answered in time, and an
- * agent that could not be reached. git's exit status is the same for every signing failure; only
- * an unattended step that ran out of time (UNATTENDED_TIMEOUT_MS) has none, and that is a prompt
- * nobody answered too.
+ * program, with the few words the pages say each in: a prompt nobody answered in time, or that was
+ * closed or declined, and an agent that is locked or could not be reached. A signing program says
+ * the same for a prompt the user declined as for one nobody answered, so galley tries those again
+ * too, and each try may show the prompt again. git's exit status is the same for every signing
+ * failure; only an unattended step that ran out of time (UNATTENDED_TIMEOUT_MS) has none, and that
+ * is a prompt nobody answered too.
  */
 const TRANSIENT_SIGNING: [RegExp, string][] = [
   // 1Password's op-ssh-sign: the agent hung up before it signed, as when its prompt timed out or was closed.
   [/failed to fill whole buffer/, '1Password prompt not answered'],
+  // 1Password's agent answered with a failure: its prompt was declined, or not answered.
+  [/1Password: agent returned an error/, '1Password prompt not answered or declined'],
+  // OpenSSH's ssh-agent: locked (ssh-add -x), its confirmation (ssh-add -c) not answered or
+  // declined, a security key (sk-* keys) nobody touched, or a confirmation it could not show (no
+  // askpass). It says the same for all of them.
+  [/agent refused operation/, 'SSH agent refused to sign: locked, or a prompt not answered'],
   [/Could not connect to socket|communication with agent failed|agent not present|can't connect to the agent|No agent running/i, 'signing agent not reachable'],
   // gpg's pinentry.
   [/signing failed: Timeout/, 'passphrase prompt not answered'],
-];
-
-/**
- * Signing failures that are the user's answer to a prompt, which trying again would only ask
- * again: final, as any failure galley can not tell, but said in a few words, so the user knows
- * why auto-publish turned off and can turn it on again when they want it.
- */
-const DENIED_SIGNING: [RegExp, string][] = [
-  // 1Password's agent answered with a failure: its prompt was denied.
-  [/1Password: agent returned an error/, '1Password prompt denied'],
-  // gpg's pinentry, dismissed: as deliberate as a denial.
   [/signing failed: Operation cancelled/, 'passphrase prompt dismissed'],
-  // OpenSSH's ssh-agent: its confirmation (ssh-add -c) was denied. It says the same when it is
-  // locked (ssh-add -x), when nobody touched a security key (sk-* keys), and when it could not
-  // show the confirmation (no askpass). galley can not tell those apart, so all of them are final.
-  [/agent refused operation/, 'SSH agent refused to sign'],
 ];
 
 /**
- * What went wrong when signing failed (TRANSIENT_SIGNING, DENIED_SIGNING); null for anything
- * else, which trying again can not get past: no signing key configured, a key that can not be
- * read or is not in the agent, a signing program that is not there, git's configuration.
+ * What went wrong when signing failed in a way trying again later may get past (TRANSIENT_SIGNING);
+ * null for anything else, which trying again can not get past: no signing key configured, a key
+ * that can not be read or is not in the agent, a signing program that is not there, git's
+ * configuration.
  */
 function signingCause(r: RunResult): SigningCause | null {
   if (r.timedOut) return { why: 'prompt not answered', transient: true };
   const said = `${r.stderr}\n${r.stdout}`;
-  const denied = DENIED_SIGNING.find(([pattern]) => pattern.test(said));
-  if (denied) return { why: denied[1], transient: false };
   const transient = TRANSIENT_SIGNING.find(([pattern]) => pattern.test(said));
   return transient ? { why: transient[1], transient: true } : null;
 }
