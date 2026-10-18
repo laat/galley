@@ -93,6 +93,7 @@ function transcriptPage() {
     DOMParser,
     fetch,
     location: { href: 'http://localhost/acme/widgets/pull/1/runs/5', hash: '', pathname: '/acme/widgets/pull/1/runs/5' },
+    navigator: { userAgent: 'Mozilla/5.0' },
     localStorage: storage,
     sessionStorage: storage,
     setTimeout: (fn: () => void) => timers.push(fn),

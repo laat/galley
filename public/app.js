@@ -1814,6 +1814,15 @@
     toast('Settings saved');
   });
 
+  // The app's windows go back and forward with a swipe and with ⌘← and ⌘→, as a Chrome tab does
+  // (gestures.js).
+  function loadGestures() {
+    if (!inApp()) return;
+    const script = document.createElement('script');
+    script.src = '/static/gestures.js';
+    document.head.append(script);
+  }
+
   // ------------------------------------------------------------- times
 
   function ago(d) {
@@ -1870,5 +1879,6 @@
   setUpBrowseTree();
   connectLive();
   handOff();
+  loadGestures();
   setInterval(updateTimes, 30_000);
 })();

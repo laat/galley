@@ -432,6 +432,29 @@ kbd {
 }
 .handoff-notice-text { margin-right: auto; }
 
+/* A swipe back or forward in the desktop app (gestures.js), as Chrome draws it: an arrow comes in
+   from the side the swipe goes toward as it goes (--swipe, 0 to 1), and fills once it is far enough. */
+.swipe-arrow {
+  position: fixed;
+  top: 50%;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-top: -24px;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  box-shadow: var(--shadow-overlay);
+  pointer-events: none;
+  transition: color 0.1s, background-color 0.1s, border-color 0.1s;
+}
+.swipe-arrow[data-direction="back"] { left: 0; transform: translateX(calc(-100% + var(--swipe) * 80px)); }
+.swipe-arrow[data-direction="forward"] { right: 0; transform: translateX(calc(100% - var(--swipe) * 80px)); }
+.swipe-arrow.ready { color: var(--fg-on-emphasis); background: var(--accent-emphasis); border-color: var(--accent-emphasis); }
+
 /* ----------------------------------------------------------- list page */
 
 .list-header-row { display: flex; align-items: center; margin: 24px 0 16px; }

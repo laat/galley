@@ -91,7 +91,11 @@ if (!app.requestSingleInstanceLock()) {
       if (notAPage(url)) headerless.add(win);
       track(win);
     });
+    contents.on('did-navigate', () => updateGoMenu());
+    contents.on('did-navigate-in-page', () => updateGoMenu());
   });
+  app.on('browser-window-focus', () => updateGoMenu());
+  app.on('browser-window-blur', () => updateGoMenu());
   // Not awaited here: Electron is ready only once this module has run.
   void app.whenReady().then(start);
 }
@@ -248,6 +252,13 @@ function newWindow(path: string, noHeader = false): BrowserWindow {
 
 function track(win: BrowserWindow): void {
   win.on('focus', () => (lastFocused = win));
+  // The three-finger swipe, when System Settings > Trackpad has Swipe between pages with three
+  // fingers: "left" goes back, as in Chrome and Firefox. A two-finger swipe is the page's
+  // (public/gestures.js).
+  win.on('swipe', (_e, direction) => {
+    if (direction === 'left') go(win, -1);
+    else if (direction === 'right') go(win, 1);
+  });
   win.on('closed', () => {
     waiting.delete(win);
     failed.delete(win);
@@ -293,9 +304,31 @@ function waitingPage(): string {
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(page);
 }
 
+/**
+ * Whether a window has one of galley's pages to go back (-1) or forward (1) to: not the waiting
+ * page, as a page counts it (public/gestures.js).
+ */
+function canGo(win: BrowserWindow | null, by: -1 | 1): boolean {
+  const history = win?.webContents.navigationHistory;
+  const entry = history?.getEntryAtIndex(history.getActiveIndex() + by);
+  return !!entry && ours(entry.url);
+}
+
+function go(win: BrowserWindow | null, by: -1 | 1): void {
+  if (canGo(win, by)) win!.webContents.navigationHistory.goToOffset(by);
+}
+
+/** Go > Back and Forward, enabled when the window in front has a page to go to. */
+function updateGoMenu(): void {
+  const menu = Menu.getApplicationMenu();
+  const win = BrowserWindow.getFocusedWindow();
+  const [back, forward] = [menu?.getMenuItemById('back'), menu?.getMenuItemById('forward')];
+  if (back) back.enabled = canGo(win, -1);
+  if (forward) forward.enabled = canGo(win, 1);
+}
+
 function appMenu(): MenuItemConstructorOptions[] {
   const mac = process.platform === 'darwin';
-  const history = () => BrowserWindow.getFocusedWindow()?.webContents.navigationHistory;
   // Electron checks or unchecks it before the click.
   const links: MenuItemConstructorOptions = { label: 'Open galley links in the app', type: 'checkbox', checked: settings.openLinks, click: (item) => setOpenLinks(item.checked) };
   return [
@@ -325,8 +358,9 @@ function appMenu(): MenuItemConstructorOptions[] {
     {
       label: 'Go',
       submenu: [
-        { label: 'Back', accelerator: 'CmdOrCtrl+[', click: () => history()?.canGoBack() && history()!.goBack() },
-        { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: () => history()?.canGoForward() && history()!.goForward() },
+        // ⌘← and ⌘→ too, outside a text field, which the page takes (public/gestures.js).
+        { id: 'back', label: 'Back', accelerator: 'CmdOrCtrl+[', enabled: false, click: () => go(BrowserWindow.getFocusedWindow(), -1) },
+        { id: 'forward', label: 'Forward', accelerator: 'CmdOrCtrl+]', enabled: false, click: () => go(BrowserWindow.getFocusedWindow(), 1) },
         { label: 'Front Page', accelerator: 'CmdOrCtrl+Shift+H', click: () => openWindow('/') },
       ],
     },
