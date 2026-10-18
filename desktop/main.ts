@@ -143,7 +143,11 @@ async function start(): Promise<void> {
       connected = false;
       render();
     },
-    change: () => turns.soon(),
+    change: (e) => {
+      // Your turn again by your own Undo, in the menu or on a page: nothing to notify of.
+      if (e.type === 'undismissed' && e.pullId !== null) turns.madeYours(e.pullId);
+      turns.soon();
+    },
   }, { path: eventsPath });
   // A window opened before the stream answers would show the waiting page for a moment.
   await Promise.race([firstAnswer, sleep(2000)]);
@@ -429,6 +433,7 @@ function render(): void {
       trayMenu(state, {
         open: openWindow,
         openOutside,
+        dismiss: (p, dismissed) => void dismiss(p, dismissed),
         setOpenAtLogin: (on) => {
           app.setLoginItemSettings({ openAtLogin: on });
           render();
@@ -440,6 +445,22 @@ function render(): void {
   tray.setTitle(trayTitle(turns.pulls), { fontType: 'monospacedDigit' });
   tray.setToolTip(trayToolTip(state));
   if (!connected) for (const [win] of waiting) void win.loadURL(waitingPage()).catch(() => {});
+}
+
+/**
+ * Dismiss the user's turn on a pull request until something new happens, or undo that, as its page
+ * does. The menu follows from the stream, and a look now.
+ */
+async function dismiss(p: Pull, dismissed: boolean): Promise<void> {
+  const method = dismissed ? 'PUT' : 'DELETE';
+  try {
+    const res = await fetch(new URL(`${p.api}/dismissed`, base), { method });
+    if (!res.ok) console.error(`${method} ${p.api}/dismissed answered ${res.status}: ${await res.text()}`);
+    else if (!dismissed) turns.madeYours(p.id);
+  } catch (e) {
+    console.error(e);
+  }
+  void turns.refresh();
 }
 
 function notify(t: Pull): void {

@@ -482,6 +482,7 @@ kbd {
 .pr-row-meta { margin-top: 4px; font-size: 12px; color: var(--fg-muted); }
 .pr-row-meta a { color: inherit; }
 .pr-row-side { font-size: 12px; white-space: nowrap; padding-top: 2px; }
+.pr-row-dismiss { margin-left: 8px; }
 /* A row's s#N opens the pull request here, also when its title opens it on GitHub, so it looks like a link. */
 .pr-row-number, .pr-row-meta .pr-row-number { color: var(--accent); font-size: 12px; }
 .pr-row--compact { padding: 6px 16px; }

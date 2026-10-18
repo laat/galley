@@ -132,6 +132,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     iterations_stopped: iterationsStoppedJson(s, pull),
     // Whose move it is (author, reviewer_agents, reviewer or none), and why.
     turn: s.turn(pull),
+    // When the reviewer dismissed their turn on it, while nothing new has happened since; null otherwise.
+    dismissed_at: s.dismissal(pull)?.at ?? null,
     // What a published pull request has that GitHub does not yet: commits, title, description.
     unpublished_changes: s.unpublishedChanges(pull),
     // When the reviewer pinned it to the top of the front page; null when it is not pinned.

@@ -81,6 +81,10 @@ test("an agent is refused each of the user's actions that docs/api.md lists, thr
   const walk: Record<string, { api: [string, string, unknown?][]; service: (() => unknown)[] }> = {
     deleting: { api: [['DELETE', pull]], service: [() => s.deletePull(x, agent)] },
     pinning: { api: [['PUT', `${pull}/pinned`], ['DELETE', `${pull}/pinned`]], service: [() => s.setPinned(x.pull, true, agent), () => s.setPinned(x.pull, false, agent)] },
+    'dismissing their turn': {
+      api: [['PUT', `${pull}/dismissed`], ['DELETE', `${pull}/dismissed`]],
+      service: [() => s.dismissTurn(x, agent), () => s.undismissTurn(x, agent)],
+    },
     'stop-iterating': {
       api: [['PUT', `${pull}/stop-iterating`], ['DELETE', `${pull}/stop-iterating`]],
       service: [() => s.stopIterating(x, agent), () => s.resumeIterating(x, agent)],

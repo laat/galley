@@ -134,6 +134,7 @@
       return refreshAgain;
     }
     refreshing = (async () => {
+      const n = ++fetched;
       const res = await fetch(location.href, { headers: { accept: 'text/html' } });
       if (!res.ok) return;
       const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
@@ -158,6 +159,7 @@
         if (d) d.open = true;
       }
       document.title = doc.title;
+      shownFetch = n;
       afterRender();
       // On its button, when the control is gone or disabled.
       if (refocus) {
@@ -178,6 +180,8 @@
   }
 
   let rendered = 0; // pages rendered, so confirmTurn can tell whether its refresh got anything new
+  let fetched = 0; // page fetches begun by refresh, so an Undo can tell the renders after it (madeYours)
+  let shownFetch = 0; // the fetch the page shown came from: 0 for the one the browser loaded
   function afterRender() {
     rendered++;
     for (const file of $$('.file')) {
@@ -253,13 +257,16 @@
     closed_on_github: 'Closed on GitHub',
   };
 
-  // The viewer's own changes that its other tabs show too: a pin moves the pull request on every front page.
-  const EVERY_TAB = { pinned: true, unpinned: true };
+  // The viewer's own changes that its other tabs show too: a pin moves the pull request on every
+  // front page, and so does dismissing their turn, also from the desktop app's menu.
+  const EVERY_TAB = { pinned: true, unpinned: true, dismissed: true, undismissed: true };
 
   const dirty = () => $$('textarea').some((t) => t.value !== t.defaultValue);
 
   let pending = null;
   function onChange(ev) {
+    // Your turn again by your own Undo, here or elsewhere: nothing to notify of.
+    if (ev.type === 'undismissed' && ev.pullId != null) madeYours(ev.pullId);
     const own = ev.actor === viewer();
     // Our own actions refresh after the request. Those every tab shows refresh here as well, in
     // the tab they were made in a second time, since nothing tells which tab that was.
@@ -1440,6 +1447,16 @@
       el.disabled = true;
       await api(el.dataset.method, el.dataset.api).catch((err) => toast(err.message));
       refresh();
+    } else if ((el = on('.js-dismiss'))) {
+      el.disabled = true;
+      // What the page shows: something new since, which the server refuses to dismiss, shows once it refreshes.
+      const seen = el.dataset.seen;
+      const done = await api(el.dataset.method, el.dataset.api, seen === undefined ? undefined : { seen }).then(
+        () => true,
+        (err) => toast(err.message),
+      );
+      if (done && el.dataset.toast) toast(el.dataset.toast);
+      refresh();
     } else if ((el = on('.js-reviewer-step'))) {
       stepReviewerLimit(el);
     } else if ((el = on('.js-reviewer-reset'))) {
@@ -1655,6 +1672,17 @@
   const NOTIFY_AFTER_MS = 10000;
   let yourTurn = null; // the pull ids whose turn was yours when the page last rendered
   const held = new Map(); // pull id → the timer for those that became yours, until told or no longer yours
+  // pull id → { at, fetched } when you made it your turn again yourself, undoing its dismissal.
+  const undone = new Map();
+
+  // Nothing to tell of it becoming your turn, in the renders of fetches in flight and of the first
+  // that begins after, which shows what the Undo did; a turn after that is news again. For a
+  // minute, should no render come.
+  function madeYours(id) {
+    clearTimeout(held.get(id));
+    held.delete(id);
+    undone.set(id, { at: Date.now(), fetched });
+  }
 
   function notifying() {
     try {
@@ -1677,7 +1705,9 @@
       clearTimeout(timer);
       held.delete(id);
     }
-    if (yourTurn && notifying()) for (const t of turns.filter((t) => !yourTurn.has(t.id))) holdTurn(t.id);
+    const quiet = (id) => undone.has(id) && Date.now() - undone.get(id).at < 60000;
+    if (yourTurn && notifying()) for (const t of turns.filter((t) => !yourTurn.has(t.id) && !quiet(t.id))) holdTurn(t.id);
+    for (const [id, u] of undone) if (shownFetch > u.fetched) undone.delete(id);
     yourTurn = new Set(turns.map((t) => t.id));
   }
 

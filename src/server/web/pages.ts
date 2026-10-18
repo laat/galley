@@ -101,6 +101,16 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
           ? label(p, ' Label--closed', 'Closed on GitHub', true)
           : '';
 
+  /** Dismiss on your turn, which makes it nobody's until something new happens, and Undo once dismissed (Service.dismissTurn). */
+  const dismissButton = (p: PullRow) => {
+    const t = turn(p);
+    if (t.whose === 'reviewer') {
+      return html`<button type="button" class="btn-octicon pr-row-dismiss js-dismiss" data-api="${apiBase(p)}/dismissed" data-method="PUT" data-seen="${s.newsSeen(p)}" data-toast="Dismissed until something new happens" title="Not yours to act on? Dismiss it until something new happens" aria-label="Dismiss until something new happens">${icon('bell-slash')}</button>`;
+    }
+    if (dismissedTurn(t)) return html`<button type="button" class="btn btn-sm pr-row-dismiss js-dismiss" data-api="${apiBase(p)}/dismissed" data-method="DELETE" title="Make it your turn again">Undo</button>`;
+    return '';
+  };
+
   /** Who is at work on a pull request, as small avatars at the end of its row. */
   const atWorkAvatars = (atWork: TurnLine['atWork']) =>
     atWork.length
@@ -126,7 +136,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     ${line}
     <div class="pr-row-meta"><a class="pr-row-number" href="${href(p)}">s#${p.number}</a> staged ${relTime(p.created_at)} by ${author.login} · <span class="branch-name branch-name-sm">${p.head_ref}</span> ${icon('arrow-right')} <span class="branch-name branch-name-sm">${p.base_ref}</span>${p.published_url ? html` · ${published(p)}` : ''}</div>
   </div>
-  <div class="pr-row-side">${atWorkAvatars(atWork)}${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}</div>
+  <div class="pr-row-side">${atWorkAvatars(atWork)}${comments ? html`<a class="link-muted" href="${href(p)}">${icon('comment')} ${comments}</a>` : ''}${dismissButton(p)}</div>
 </div>`;
   };
 
@@ -137,7 +147,8 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     const { line, atWork } =
       t.whose === 'none'
         ? {
-            line: html`<div class="pr-row-turn">${p.published_url ? html`<span class="turn-reason">${published(p)}</span>` : ''}${t.reasons.map((r) => html`<span class="turn-reason">${r.text}</span>`)}</div>`,
+            // Dismissed ones are in a group that says so.
+            line: html`<div class="pr-row-turn">${p.published_url ? html`<span class="turn-reason">${published(p)}</span>` : ''}${t.reasons.filter((r) => r.kind !== 'dismissed').map((r) => html`<span class="turn-reason">${r.text}</span>`)}</div>`,
             atWork: [],
           }
         : turnLine(s, p, t, ready.get(p.id), apiBase(p), ['author', 'reviewer_agent', 'unpublished', 'conflicts']);
@@ -147,7 +158,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     <span class="pr-row-heading">${heading(p)} <a class="pr-row-number" href="${href(p)}">s#${p.number}</a></span>
     ${line}
   </div>
-  <div class="pr-row-side">${atWorkAvatars(atWork)}</div>
+  <div class="pr-row-side">${atWorkAvatars(atWork)}${dismissButton(p)}</div>
 </div>`;
   };
 
@@ -160,8 +171,9 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
     const pinnedMine = pinned.some((p) => staging.get(p.id) === state && turn(p).whose === 'reviewer');
     const agents = shown.filter((p) => turn(p).whose === 'author' || turn(p).whose === 'reviewer_agents');
     // Published with nothing new here: the next move is on GitHub (its review, checks, the merge).
-    // Staged: auto-publish's, which publishes it on its own.
-    const nobody = shown.filter((p) => turn(p).whose === 'none');
+    // Staged: auto-publish's, which publishes it on its own. Not those you dismissed, which come last.
+    const dismissed = shown.filter((p) => dismissedTurn(turn(p)));
+    const nobody = shown.filter((p) => turn(p).whose === 'none' && !dismissedTurn(turn(p)));
     const waitingOn =
       state === 'staged' ? group('clock', 'Auto-publish', nobody.length, 'publishes on its own') : group('mark-github', 'Waiting on GitHub', nobody.length, 'nothing new since publishing');
     rows = [
@@ -169,6 +181,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
       ...(mine.length ? mine.map(row) : [html`<div class="Box-row turn-empty">Nothing ${pinnedMine ? 'else ' : ''}is waiting for you.</div>`]),
       ...(agents.length ? [group('hubot', 'With agents', agents.length), ...agents.map(compactRow)] : []),
       ...(nobody.length ? [waitingOn, ...nobody.map(compactRow)] : []),
+      ...(dismissed.length ? [group('bell-slash', 'Dismissed', dismissed.length, 'until something new happens'), ...dismissed.map(compactRow)] : []),
     ];
   }
   const nothing: Record<string, string> = { staged: 'No staged pull requests', published: 'No published pull requests open on GitHub', done: 'No merged or closed pull requests', all: 'No pull requests' };
@@ -297,7 +310,7 @@ function turnLine(
   t: Turn,
   ready: Readiness | undefined,
   apiBase: string,
-  kinds: TurnReason['kind'][] = ['author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github', 'auto_publish'],
+  kinds: TurnReason['kind'][] = ['dismissed', 'author', 'changes', 'reviewer_agent', 'threads', 'conflicts', 'github', 'auto_publish'],
 ): TurnLine {
   const shown = t.reasons.filter((r) => kinds.includes(r.kind));
   const author = s.db.actorById(pull.author_id);
@@ -305,6 +318,8 @@ function turnLine(
   // The reviewer agents as the turn saw them, by the API's name for them.
   const agents = new Map(ready?.reviewers.map((x) => [x.reviewer, x]));
   const rank = (r: TurnReason): number => {
+    // Dismissed, it says so first.
+    if (r.kind === 'dismissed') return -1;
     if (t.whose === 'reviewer') {
       // Your turn: a stalled author to get going, feedback to pass on, a review to retry, GitHub, what holds auto-publish up; then what changed since your review.
       if (r.state === 'stalled' || r.state === 'unseen' || r.state === 'failed' || r.kind === 'github' || r.kind === 'auto_publish') return 0;
@@ -323,7 +338,15 @@ function turnLine(
     if (!agent) {
       if (r.state === 'working') atWork.push({ actor: author, doing: r.text });
       const mark =
-        r.state === 'working' ? pulse : r.kind === 'conflicts' ? icon('alert', { cls: 'turn-mark turn-mark--danger' }) : r.kind === 'github' ? icon('mark-github', { cls: 'turn-mark' }) : '';
+        r.state === 'working'
+          ? pulse
+          : r.kind === 'conflicts'
+            ? icon('alert', { cls: 'turn-mark turn-mark--danger' })
+            : r.kind === 'github'
+              ? icon('mark-github', { cls: 'turn-mark' })
+              : r.kind === 'dismissed'
+                ? icon('bell-slash', { cls: 'turn-mark' })
+                : '';
       phrases.set(`reason ${i}`, { logins: [], words: reasonPhrase(r, author.login), full: [r.text], since: r.since ?? null, mark, rank: rank(r) });
       return;
     }
@@ -409,6 +432,11 @@ function agentPhrase(status: HeadStatus, pull: PullRow, author: string, authorWa
       // Turned off, it has no reason (reviewerAgentText).
       return ' off';
   }
+}
+
+/** The reviewer dismissed their turn until something new happens (Service.dismissal). */
+function dismissedTurn(t: Turn): boolean {
+  return t.reasons.some((r) => r.kind === 'dismissed');
 }
 
 function capitalize(text: string): string {
@@ -709,6 +737,10 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
       return timelineBadge('circle-slash', html`${who} stopped automatic reviews ${afterRound(data.round)} ${when}`);
     case 'iterations_resumed':
       return timelineBadge('iterations', html`${who} resumed automatic reviews ${when}`);
+    case 'turn_dismissed':
+      return timelineBadge('bell-slash', html`${who} dismissed this until something new happens ${when}`);
+    case 'turn_undismissed':
+      return timelineBadge('bell', html`${who} undid dismissing this ${when}`);
     case 'merged': {
       // `at` is when GitHub merged it; the event is from when galley learned of it.
       const commit = data.commit
@@ -772,6 +804,8 @@ async function mergeBox(p: PullPage): Promise<Safe> {
   // A review still to come may ask for changes, so publishing before it takes a second click.
   const busy = pull.state === 'closed' ? [] : s.reviewersAtWork(pull);
   const rows: Safe[] = [];
+  const yours = turnRow(p);
+  if (yours) rows.push(yours);
 
   if (decision === 'CHANGES_REQUESTED') {
     rows.push(html`<div class="merge-row">${icon('x-circle-fill', { cls: 'color-fg-danger' })}<div><strong>Changes requested</strong><div class="color-fg-muted">${waiting ? `${p.author.login} is waiting for your next review.` : `${p.author.login} has the feedback.`}</div></div></div>`);
@@ -919,6 +953,27 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     <span class="merge-box-icon">${closedOnGithub ? icon('git-pull-request-closed', { size: 24 }) : published ? icon('mark-github', { size: 24 }) : icon('git-pull-request', { size: 24 })}</span>
     <div class="Box">${rows}${publishRow}</div>
   </div>`;
+}
+
+/**
+ * Your turn, and why, with Dismiss for one that is not yours to act on; once dismissed, Undo. Then
+ * it is nobody's turn until something new happens (Service.dismissTurn).
+ */
+function turnRow(p: PullPage): Safe | null {
+  const { s, pull } = p;
+  const t = s.turn(pull);
+  const api = `${p.apiBase}/dismissed`;
+  const news = 'a commit, a review or comment, or a change on GitHub';
+  if (t.whose === 'reviewer') {
+    return html`<div class="merge-row">${icon('inbox', { cls: 'color-fg-attention' })}<div class="flex-auto"><strong>Your turn</strong>
+      <div class="color-fg-muted">${t.reasons.map((r) => r.text).join(' · ')}</div></div>
+      <button type="button" class="btn btn-sm js-dismiss" data-api="${api}" data-method="PUT" data-seen="${s.newsSeen(pull)}" data-toast="Dismissed until something new happens" title="Not yours to act on? Dismiss it until something new happens: ${news}">${icon('bell-slash')} Dismiss</button></div>`;
+  }
+  const dismissed = s.dismissal(pull);
+  if (!dismissedTurn(t) || !dismissed) return null;
+  return html`<div class="merge-row">${icon('bell-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Dismissed until something new happens</strong>
+    <div class="color-fg-muted">${dismissed.by.login} dismissed it ${relTime(dismissed.at)}. It is your turn again with ${news}.</div></div>
+    <button type="button" class="btn btn-sm js-dismiss" data-api="${api}" data-method="DELETE">Undo</button></div>`;
 }
 
 /** Stop iterating, while a reviewer agent may still review on its own; Resume once stopped. Both say what the last round found. */

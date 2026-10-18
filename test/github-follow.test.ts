@@ -80,6 +80,35 @@ test('a check shows as GitHub has it now: a job run again and failed again is fa
   assert.deepEqual(readGithub(pull({}, [run('test', 'COMPLETED', 'SUCCESS', 13)]), failed, 'now').checks.map((c) => [c.result, c.job]), [['passed', 13]]);
 });
 
+test('changes counts what GitHub says changing, from the first answer: a review, a comment, a check, a thread; not asking again, nor the merge state', () => {
+  const first = readGithub(pull({ reviews: { totalCount: 0 }, comments: { totalCount: 0 } }, [run('test', 'COMPLETED', 'SUCCESS')]), null, 'one');
+  assert.deepEqual([first.reviewsTotal, first.commentsTotal, first.changes], [0, 0, 1]);
+  const again = (more: Partial<GithubPull>, checks = [run('test', 'COMPLETED', 'SUCCESS')], previous = first) => readGithub(pull({ reviews: { totalCount: 0 }, comments: { totalCount: 0 }, ...more }, checks), previous, 'two').changes;
+  assert.equal(again({}), 1, 'asked again');
+  assert.equal(again({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }), 1, 'working mergeability out after a push to the base');
+  assert.equal(again({ mergeStateStatus: 'BEHIND' }), 1);
+  assert.equal(again({ reviews: { totalCount: 1 } }), 2, 'a review');
+  assert.equal(again({ comments: { totalCount: 1 } }), 2, 'a comment');
+  assert.equal(again({}, [run('test', 'IN_PROGRESS')]), 2, 'a check run again');
+  assert.equal(again({ reviewThreads: { nodes: [thread('T1')] } }), 2, 'a thread');
+  assert.equal(again({ mergeable: 'CONFLICTING' }), 2, 'a conflict');
+  // Back as it was is a change too: a check that ran again and passed again.
+  const running = readGithub(pull({ reviews: { totalCount: 0 }, comments: { totalCount: 0 } }, [run('test', 'IN_PROGRESS')]), first, 'two');
+  assert.equal(again({}, [run('test', 'COMPLETED', 'SUCCESS')], running), 3);
+  // A job run again with the same result, between two looks; a thread's comment edited.
+  assert.equal(again({}, [run('test', 'COMPLETED', 'SUCCESS', 99)]), 2, 'a job run again');
+  const threaded = readGithub(pull({ reviews: { totalCount: 0 }, comments: { totalCount: 0 }, reviewThreads: { nodes: [thread('T1')] } }, [run('test', 'COMPLETED', 'SUCCESS')]), first, 'two');
+  const edited = thread('T1');
+  edited.comments.nodes[0].body = 'about T1, edited';
+  assert.equal(again({ reviewThreads: { nodes: [edited] } }, [run('test', 'COMPLETED', 'SUCCESS')], threaded), 3, 'a comment edited');
+  // A status stored before galley counted, or asked for reviews and comments, counts from its next answer.
+  const old = { ...first, changes: undefined, reviewsTotal: undefined, commentsTotal: undefined };
+  const upgraded = readGithub(pull({ reviews: { totalCount: 0 }, comments: { totalCount: 0 } }, [run('test', 'COMPLETED', 'SUCCESS')]), old, 'two');
+  assert.equal(upgraded.changes, 0);
+  assert.equal(again({ reviews: { totalCount: 1 } }, [run('test', 'COMPLETED', 'SUCCESS')], upgraded), 1);
+  assert.equal(again({ mergeable: 'CONFLICTING' }, [run('test', 'COMPLETED', 'SUCCESS')], old), 1, 'a conflict in its first answer');
+});
+
 test('a conflict stays known while GitHub works mergeability out again', () => {
   const conflicting = readGithub(pull({ mergeable: 'CONFLICTING' }), null, 'now');
   assert.equal(readGithub(pull({ mergeable: 'UNKNOWN' }), conflicting, 'now').conflicting, true);

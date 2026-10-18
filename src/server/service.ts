@@ -11,7 +11,7 @@ import type { CustomReviewers } from './reviewers/custom.ts';
 import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { busy, doneForAutoPublish, doneForHandover, toReview, type HeadState, type HeadStatus } from './reviewers/head-status.ts';
 import { agentReviews, askedAt, unansweredThreads, unseenFeedback, type Feedback } from './feedback.ts';
-import { addEvent, eventsAfter, eventsSince, lastEvent, type EventData, type EventType } from './events.ts';
+import { addEvent, eventsAfter, eventsSince, lastEvent, type EventData, type EventType, type TimelineEvent } from './events.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
 import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
@@ -347,10 +347,11 @@ export interface TurnReason {
    * The author agent, a reviewer agent, what changed since the reviewer's last review, the decision,
    * unresolved threads, an update not on GitHub yet (on nobody's turn, a push whose signing galley
    * tries again), conflicts with the base, what GitHub has for the reviewer (on nobody's turn, what
-   * it waits for), or auto-publish (on nobody's turn, what it waits for before it publishes; on the
-   * reviewer's, what holds it up that no other reason says).
+   * it waits for), auto-publish (on nobody's turn, what it waits for before it publishes; on the
+   * reviewer's, what holds it up that no other reason says), or the reviewer's turn dismissed until
+   * something new happens (on nobody's turn, before the reasons it was the reviewer's).
    */
-  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'conflicts' | 'github' | 'auto_publish';
+  kind: 'author' | 'reviewer_agent' | 'changes' | 'approved' | 'changes_requested' | 'threads' | 'unpublished' | 'conflicts' | 'github' | 'auto_publish' | 'dismissed';
   /** A few words. The reviewer is named by login, so it reads the same to the reviewer and to agents. */
   text: string;
   /** Since when it has been so: waiting, reviewing, working on feedback, or stopped. */
@@ -389,11 +390,34 @@ export interface TurnReason {
  * would be the reviewer's, unless auto-publish waits for something of theirs (waitsForUser); the
  * reason says what it waits for. When it waits for the author to wait, that is the author's turn,
  * as when the reviewer agents start only once it waits, until it stalls.
+ * Nor is it the reviewer's once they dismissed their turn, until something new happens (dismissal):
+ * nobody's then, with the reasons it was theirs after one saying so.
  */
 export interface Turn {
   whose: Whose;
   reasons: TurnReason[];
 }
+
+/** The user's dismissal of their turn, while it holds: who dismissed it, and when. */
+export interface Dismissal {
+  by: Actor;
+  at: string;
+}
+
+/**
+ * Events that are nothing new for a dismissed turn: the dismissal's own, and galley's bookkeeping of
+ * what happened otherwise (a review cancelled for a push, a close, a base that moved). A push that
+ * moved the merge base alone is not either (dismissal).
+ */
+const NOT_NEWS: EventType[] = ['turn_dismissed', 'turn_undismissed', 'review_cancelled'];
+
+/** SQL: pull request ?1's events after the event ?2 that are something new for a dismissed turn, with NOT_NEWS's types from ?4. */
+const NEWS_EVENTS = `FROM events WHERE pull_id = ?1 AND id > ?2 AND type NOT IN (${NOT_NEWS.map((_, i) => `?${i + 4}`).join(', ')})
+  AND NOT (type = 'pushed' AND json_extract(data, '$.before') = json_extract(data, '$.after'))`;
+
+/** SQL: when anyone said something on pull request ?1 (`at`): a review submitted, a comment posted or edited, not in a review still pending. */
+const SAID = `SELECT submitted_at AS at FROM reviews WHERE pull_id = ?1 AND state != 'PENDING'
+  UNION ALL SELECT updated_at FROM comments WHERE pull_id = ?1 AND (review_id IS NULL OR review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`;
 
 /** Auto-publish, while it is on: who turned it on, when, and the publish options fixed then. */
 export interface AutoPublish {
@@ -680,6 +704,7 @@ export class Service {
   }
 
   emit(pullId: number | null, type: string, actor: Actor): void {
+    if (pullId !== null) this.settleDismissal(pullId);
     this.bus.emit('change', { pullId, type, actor: actor.login, source: null } satisfies ChangeEvent);
   }
 
@@ -688,6 +713,7 @@ export class Service {
    * named "github" or "git" (GALLEY_ACTOR), and its `pr wait` would take the change for its own.
    */
   emitSystem(pullId: number | null, type: string, source: ChangeSource): void {
+    if (pullId !== null) this.settleDismissal(pullId);
     this.bus.emit('change', { pullId, type, actor: null, source } satisfies ChangeEvent);
   }
 
@@ -2645,7 +2671,7 @@ export class Service {
     // Waiting on the retry of signing the head, and on GitHub: for whom, when it says.
     if (whose === 'none') {
       const retry: TurnReason[] = signingAgain ? [{ kind: 'unpublished', text: `the push of ${pull.head_sha.slice(0, 7)} waits to try signing again`, since: pushFailed!.at }] : [];
-      return { whose, reasons: [...retry, ...githubWaits(onGithub).map((text): TurnReason => ({ kind: 'github', text }))] };
+      return this.withDismissal(pull, { whose, reasons: [...retry, ...githubWaits(onGithub).map((text): TurnReason => ({ kind: 'github', text }))] });
     }
     // Waiting on auto-publish, which publishes it with nothing more from the reviewer, though the
     // reviewer agents are done with it. Not when the author has feedback it is not waiting for, or stalled.
@@ -2695,7 +2721,95 @@ export class Service {
       if (i.key === 'conflicts' && !conflicting) reasons.push({ kind: 'auto_publish', text: `auto-publish could not check for conflicts with ${pull.base_ref}` });
       if (i.key === 'merge_method' && 'text' in i) reasons.push({ kind: 'auto_publish', text: i.text });
     }
-    return { whose, reasons };
+    return this.withDismissal(pull, { whose, reasons });
+  }
+
+  // ------------------------------------------------------- dismissed turns
+
+  /**
+   * The reviewer's turn, or nobody's once published, unless the reviewer dismissed it until
+   * something new happens (dismissal): then nobody's, saying so first. Also when GitHub has the next
+   * move meanwhile with nothing new (its merge state alone, say), so the pull request stays with the
+   * dismissed ones and their Undo.
+   */
+  private withDismissal(pull: PullRow, t: Turn): Turn {
+    const dismissed = t.whose === 'reviewer' || t.whose === 'none' ? this.dismissal(pull) : null;
+    if (!dismissed) return t;
+    return { whose: 'none', reasons: [{ kind: 'dismissed', text: `${dismissed.by.login} dismissed it until something new happens`, since: dismissed.at }, ...t.reasons] };
+  }
+
+  /**
+   * The user's call that their turn on a pull request is not theirs to act on (the team reviews it,
+   * say, which GitHub does not require): nobody's turn until something new happens (dismissal).
+   * Only on the user's turn, and not for agents. Not activity: updated_at stays, so it comes back
+   * in its place among the user's turns.
+   */
+  dismissTurn(ctx: Ctx, actor: Actor, seen?: string): void {
+    this.requireHuman(actor, 'only the user can dismiss their turn');
+    const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!;
+    if (this.dismissal(pull)) return;
+    // What the user saw (newsSeen): what is new since, they have not seen, so it is not theirs to dismiss.
+    if (seen !== undefined && seen !== this.newsSeen(pull)) throw new HttpError(409, `something new happened on s#${pull.number} since you looked: look again before dismissing it`);
+    if (this.turn(pull).whose !== 'reviewer') throw new HttpError(422, `it is not your turn on s#${pull.number}, so there is nothing to dismiss`);
+    this.addEvent(pull, actor, 'turn_dismissed', { github: githubStatus(pull)?.changes ?? 0 });
+    this.emit(pull.id, 'dismissed', actor);
+  }
+
+  /** Undo dismissTurn: the user's turn again, should it be. False when it was not dismissed, or something new ended that already. */
+  undismissTurn(ctx: Ctx, actor: Actor): boolean {
+    this.requireHuman(actor, 'only the user can undo dismissing their turn');
+    const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!;
+    if (!this.dismissal(pull)) return false;
+    this.addEvent(pull, actor, 'turn_undismissed', {});
+    this.emit(pull.id, 'undismissed', actor);
+    return true;
+  }
+
+  /**
+   * The user's dismissal of their turn (dismissTurn), while nothing new has happened since; null
+   * otherwise. Something new is any later event (a push, an edit, a publish, auto-publish at work,
+   * a merge or close) but those in NOT_NEWS and a push that moved the merge base alone; a comment
+   * posted or edited, or a review submitted, by anyone; or a change in what GitHub says
+   * (GithubStatus.changes): a review or comment there, checks, a conflict. It goes by what galley
+   * recorded: following GitHub asking again with nothing changed is nothing new, and a change GitHub
+   * takes back (a check run again that passes again) is new all the same. Nor is the author waiting
+   * or stalling, a reviewer agent starting or failing, or the base moving, which the author hears of
+   * when it conflicts (and GitHub says so).
+   */
+  dismissal(pull: PullRow): Dismissal | null {
+    const d = lastEvent(this.db, pull, ['turn_dismissed', 'turn_undismissed']);
+    if (d?.type !== 'turn_dismissed' || d.data.ended || this.newSince(pull, d)) return null;
+    return { by: this.db.actorById(d.actor_id), at: d.created_at };
+  }
+
+  /** Whether something new happened since the dismissal `d` (see dismissal). */
+  private newSince(pull: PullRow, d: TimelineEvent<'turn_dismissed'>): boolean {
+    if ((githubStatus(pull)?.changes ?? 0) > d.data.github) return true;
+    return !!this.db.get(`SELECT 1 ${NEWS_EVENTS} UNION ALL SELECT 1 FROM (${SAID}) WHERE at > ?3`, pull.id, d.id, d.created_at, ...NOT_NEWS);
+  }
+
+  /**
+   * Record that something new ended the user's dismissal of their turn, as galley hears of it (emit),
+   * so that it stays ended when what was new is gone again: a comment deleted, say.
+   */
+  private settleDismissal(pullId: number): void {
+    // A review the server stopped under still says it ended, after the database closed.
+    if (!this.db.sql.isOpen) return;
+    const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
+    const d = pull && lastEvent(this.db, pull, ['turn_dismissed', 'turn_undismissed']);
+    if (d?.type !== 'turn_dismissed' || d.data.ended || !this.newSince(pull!, d)) return;
+    this.db.run("UPDATE events SET data = json_set(data, '$.ended', ?) WHERE id = ?", now(), d.id);
+  }
+
+  /**
+   * What there is on the pull request that a dismissal goes by, as a page shows it to the user, who
+   * dismisses with it (dismissTurn): the latest event that is something new, how many times what
+   * GitHub says changed, and when anyone last said something.
+   */
+  newsSeen(pull: PullRow): string {
+    const event = this.db.get<{ id: number | null }>(`SELECT MAX(id) AS id ${NEWS_EVENTS}`, pull.id, 0, null, ...NOT_NEWS)!.id ?? 0;
+    const said = this.db.get<{ at: string | null }>(`SELECT MAX(at) AS at FROM (${SAID})`, pull.id)!.at ?? '';
+    return `${event} ${githubStatus(pull)?.changes ?? 0} ${said}`;
   }
 
   /** The author action each pull request was last looked at for by noticeStalls. */
