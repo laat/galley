@@ -380,6 +380,16 @@ export function api(s: Service): Hono {
     s.setPinned((await ctx(c, { sync: false })).pull, false, actor(c));
     return c.body(null, 204);
   });
+  // galley extension: dismiss the user's turn until something new happens, as the page showed it (`seen`), and undo that.
+  app.put('/repos/:owner/:repo/pulls/:n/dismissed', async (c) => {
+    const { seen } = await body(c);
+    s.dismissTurn(await ctx(c, { sync: false }), actor(c), seen === undefined ? undefined : String(seen));
+    return c.body(null, 204);
+  });
+  app.delete('/repos/:owner/:repo/pulls/:n/dismissed', async (c) => {
+    s.undismissTurn(await ctx(c, { sync: false }), actor(c));
+    return c.body(null, 204);
+  });
 
   app.get('/repos/:owner/:repo/pulls/:n/reviews', async (c) => {
     const x = await ctx(c);

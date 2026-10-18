@@ -1,7 +1,8 @@
 // What galley reads about a published pull request on GitHub while it follows it, to show the
 // reviewer how it stands there: whether it is merged or closed, its checks and the workflow runs
-// on its head, a pending Copilot review, the review decision and who is asked to review,
-// unresolved review threads, whether it conflicts with its base, and whether auto-merge is on. It
+// on its head, a pending Copilot review, the review decision and who is asked to review, how many
+// reviews and comments it has, unresolved review threads, whether it conflicts with its base, and
+// whether auto-merge is on. It
 // is information for the reviewer, not feedback for the author agent. One GraphQL query per
 // repository asks for all of the repository's followed pull requests (PULL_FIELDS, aliased by
 // staged pull id); one with more review threads than that holds gets earlier pages (earlierThreads).
@@ -15,6 +16,7 @@ const TEAM = ' ...on Team{combinedSlug}';
 /** What is asked about each followed pull request. Costs about one rate-limit point per pull request. */
 export const PULL_FIELDS = `state headRefOid mergeable mergeStateStatus reviewDecision mergedAt closedAt mergedBy{login} mergeCommit{oid} autoMergeRequest{enabledAt}
   reviewRequests(first:20){totalCount nodes{requestedReviewer{...on User{login} ...on Bot{login} ...on Mannequin{login}${TEAM}}}}
+  reviews(states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]){totalCount} comments{totalCount}
   commits(last:1){nodes{commit{
     statusCheckRollup{state contexts(first:100){totalCount nodes{__typename
       ...on CheckRun{databaseId name status conclusion detailsUrl checkSuite{workflowRun{workflow{name}}}}
@@ -65,6 +67,10 @@ export interface GithubPull {
   autoMergeRequest?: { enabledAt: string | null } | null;
   /** Users, bots and teams asked to review who have not yet. */
   reviewRequests?: Nodes<{ requestedReviewer: { login?: string; combinedSlug?: string } | null }> & { totalCount?: number };
+  /** Submitted reviews, a reply in a thread among them. */
+  reviews?: { totalCount?: number } | null;
+  /** Comments on the conversation. */
+  comments?: { totalCount?: number } | null;
   commits?: Nodes<{
     commit: {
       /** `state` sums up every check, also those past the first page of `contexts`. */
@@ -117,6 +123,15 @@ export interface GithubStatus {
   /** Who GitHub asks to review and has not yet, on the first page: logins, and teams as org/team (reviewRequestsTotal counts them all). */
   reviewRequests?: string[];
   reviewRequestsTotal?: number;
+  /** How many reviews (a reply in a thread is one) and comments on the conversation it has; missing in a status stored before galley asked. */
+  reviewsTotal?: number | null;
+  commentsTotal?: number | null;
+  /**
+   * How many times what GitHub says has changed as githubNews has it, counting galley's first
+   * answer: a turn the user dismissed ends at the next (Service.dismissal). Missing in a status
+   * stored before galley counted, whose next answer counts from there.
+   */
+  changes?: number;
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   mergeStateStatus: string;
   /** Auto-merge is on: GitHub merges it once it can. Null when GitHub did not say (missing in a status stored before galley asked). */
@@ -196,12 +211,14 @@ export function readGithub(node: GithubPull, previous: GithubStatus | null, chec
     const name = r?.login ?? r?.combinedSlug;
     return name ? [name] : [];
   });
-  return {
+  const status: GithubStatus = {
     checkedAt,
     head: node.headRefOid ?? null,
     reviewDecision: node.reviewDecision ?? null,
     reviewRequests: requested,
     reviewRequestsTotal: Math.max(node.reviewRequests?.totalCount ?? 0, requested.length),
+    reviewsTotal: node.reviews?.totalCount ?? null,
+    commentsTotal: node.comments?.totalCount ?? null,
     mergeable,
     mergeStateStatus: node.mergeStateStatus ?? 'UNKNOWN',
     autoMerge: node.autoMergeRequest === undefined ? null : node.autoMergeRequest !== null,
@@ -213,6 +230,10 @@ export function readGithub(node: GithubPull, previous: GithubStatus | null, chec
     copilotPending: copilot?.__typename === 'ReviewRequestedEvent',
     threads: [...kept, ...threads],
   };
+  // One stored before galley counted did not ask for its reviews and comments: what else it has counts.
+  const before = previous?.changes === undefined && previous ? { ...previous, reviewsTotal: status.reviewsTotal, commentsTotal: status.commentsTotal } : previous;
+  const changed = !before || githubNews(before) !== githubNews(status);
+  return { ...status, changes: (previous?.changes ?? 0) + (changed ? 1 : 0) };
 }
 
 /** The cursor for the page of review threads before the ones `node` holds, while there are more. */
@@ -282,4 +303,32 @@ export function githubWaits(status: GithubStatus | null): string[] {
   if (!names.length) return ['waiting for a required review'];
   const more = (status.reviewRequestsTotal ?? 0) - names.length;
   return [`waiting for review from ${names.join(', ')}${more > 0 ? ` and ${more} more` : ''}`];
+}
+
+/**
+ * What GitHub says that is something new when it changes (GithubStatus.changes), for a turn the
+ * user dismissed, as one string to compare: its head, the review decision, its reviews and
+ * comments, who is asked to review, the checks and how each stands (a job run again is another),
+ * the workflow runs, Copilot, the unresolved threads and their comments as they read now, a
+ * conflict and auto-merge. Not when galley asked, so asking again with nothing changed is nothing
+ * new. Nor the merge state, which follows the base and is UNKNOWN for a while after every push to
+ * it: what of it matters comes with a review, a check or a conflict.
+ */
+export function githubNews(status: GithubStatus): string {
+  return JSON.stringify([
+    status.head,
+    status.reviewDecision,
+    status.reviewsTotal ?? null,
+    status.commentsTotal ?? null,
+    status.reviewRequests ?? [],
+    status.reviewRequestsTotal ?? null,
+    status.checks.map((c) => [c.kind, checkName(c), c.result, c.job, c.url]),
+    status.checksResult ?? null,
+    status.checksTotal ?? null,
+    status.runs.map((r) => r.id),
+    status.copilotPending,
+    status.threads.map((t) => [t.id, t.comments.map((c) => [c.id, c.body])]),
+    status.conflicting,
+    status.autoMerge ?? null,
+  ]);
 }

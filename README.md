@@ -174,7 +174,8 @@ menu-bar status. Next to its icon is the number waiting for you and, after ↻, 
 or auto-publish are working on. Its menu lists the open pull requests in the front page's groups,
 each with what it waits for, and has a Start at login switch. A published pull request whose next
 move is on GitHub (checks, a review there, the merge) opens on GitHub, marked ↗ in the menu, from
-the menu and from a notification alike; the others open in galley. It is a window onto the server
+the menu and from a notification alike; the others open in galley. ⌥-click one of yours to dismiss
+it, or a dismissed one to make it your turn again. It is a window onto the server
 the CLI uses: it starts one when none is running, as the CLI does, and quitting it leaves the
 server running. Its window has no title bar of its own: galley's header holds the window's buttons,
 drags the window, and stays at the top as you scroll. Uploaded images and raw files open in
@@ -239,7 +240,9 @@ auto-merge is off, and its title opens it on GitHub; its s#N opens it here, and 
 published** opens the box to publish the update from. One that auto-publish publishes on its own
 is not your turn, unless it waits for something of yours, nor is a commit whose signing galley
 tries again. **Notify me** shows a desktop notification when one has been your turn for 10
-seconds.
+seconds. When one is not yours to act on (the team reviews it, say), dismiss it from its row or
+its page: it is not your turn, counted or notified until something new happens, such as a commit,
+a review or comment, an edit, or a change on GitHub. Until then it is under Dismissed, with Undo.
 
 ## Reviewer agents
 

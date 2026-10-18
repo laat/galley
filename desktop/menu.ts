@@ -1,6 +1,7 @@
 // The menu-bar status: next to the icon, how many pull requests wait for the user and how many are
 // in motion without them; in the menu, the open pull requests in the front page's groups, which
-// open in galley, or on GitHub when GitHub has the next move.
+// open in galley, or on GitHub when GitHub has the next move, and where ⌥-click dismisses one of
+// the user's turns until something new happens, or undoes that.
 import { yourTurns, type Pull, type Reason } from './turns.ts';
 
 /** A menu item as Electron's Menu.buildFromTemplate takes it. */
@@ -14,7 +15,8 @@ export interface MenuItem {
   checked?: boolean;
   /** Shown on hover (macOS). */
   toolTip?: string;
-  click?: () => void;
+  /** Electron passes the item, the window and the keys held (`event`); the tests pass what they need. */
+  click?: (item?: unknown, window?: unknown, event?: { altKey?: boolean }) => void;
 }
 
 export interface MenuState {
@@ -31,6 +33,8 @@ export interface MenuActions {
   open(path?: string): void;
   /** Open `url` in the default browser: a pull request on GitHub. */
   openOutside(url: string): void;
+  /** Dismiss the user's turn on the pull request until something new happens, or undo that (`dismissed` false). */
+  dismiss(p: Pull, dismissed: boolean): void;
   setOpenAtLogin(on: boolean): void;
   quit(): void;
 }
@@ -38,26 +42,29 @@ export interface MenuActions {
 /**
  * The front page's groups: the user's turn; the agents' (the reviewer agents reviewing, the author
  * working on feedback or yet to wait); staged and nobody's turn, auto-publish's, which publishes
- * it on its own; published and nobody's turn, GitHub's (its review, checks, the merge).
+ * it on its own; published and nobody's turn, GitHub's (its review, checks, the merge); and the
+ * user's turns they dismissed until something new happens.
  */
-export type Group = 'yours' | 'agents' | 'auto_publish' | 'github';
+export type Group = 'yours' | 'agents' | 'auto_publish' | 'github' | 'dismissed';
 
 const GROUPS: { group: Group; title: string }[] = [
   { group: 'yours', title: 'Your turn' },
   { group: 'agents', title: 'Agents at work' },
   { group: 'auto_publish', title: 'Auto-publish' },
   { group: 'github', title: 'Waiting on GitHub' },
+  { group: 'dismissed', title: 'Dismissed' },
 ];
 
 export function groupOf(p: Pull): Group {
   if (p.whose === 'reviewer') return 'yours';
+  if (p.reasons.some((r) => r.kind === 'dismissed')) return 'dismissed';
   if (p.whose === 'author' || p.whose === 'reviewer_agents') return 'agents';
   return p.published ? 'github' : 'auto_publish';
 }
 
 /** The pull requests of each group: the user's turn waiting longest first, the others latest update first, as the API lists them. */
 export function grouped(pulls: Pull[]): Record<Group, Pull[]> {
-  const out: Record<Group, Pull[]> = { yours: yourTurns(pulls), agents: [], auto_publish: [], github: [] };
+  const out: Record<Group, Pull[]> = { yours: yourTurns(pulls), agents: [], auto_publish: [], github: [], dismissed: [] };
   for (const p of pulls) {
     const group = groupOf(p);
     if (group !== 'yours') out[group].push(p);
@@ -73,7 +80,9 @@ const MAX_PER_GROUP = 10;
 /**
  * The menu: what it says about the server, or that nothing waits for the user, then each group
  * with pull requests in it (repository, s#N and title, ↗ when it opens on GitHub, and under it the
- * main reasons), then the app's own items.
+ * main reasons), then the app's own items. ⌥-click on one of the user's turns dismisses it, and on
+ * a dismissed one undoes that: Electron has no items that show while ⌥ is held, as macOS's own
+ * menus do, so hovering says so.
  */
 export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
   const items: MenuItem[] = [];
@@ -89,11 +98,12 @@ export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
       const name = p.title.length > MAX_TITLE ? p.title.slice(0, MAX_TITLE - 1) + '…' : p.title;
       const ranked = rankedReasons(p);
       const github = githubTarget(p);
+      const option = group === 'yours' ? '⌥-click to dismiss it until something new happens' : group === 'dismissed' ? '⌥-click to make it your turn again' : null;
       items.push({
         label: `${p.repo} s#${p.number}  ${name}${github ? ' ↗' : ''}`,
         sublabel: sublabel(p, ranked),
-        toolTip: ranked.map((r) => r.text).join(' · '),
-        click: () => (github ? a.openOutside(github) : a.open(p.path)),
+        toolTip: [ranked.map((r) => r.text).join(' · '), option].filter(Boolean).join('\n'),
+        click: (_item, _window, event) => (option && event?.altKey ? a.dismiss(p, group === 'yours') : github ? a.openOutside(github) : a.open(p.path)),
       });
     }
     // The rest, on the front page's tab that has them all: staged, published, or both.
@@ -118,11 +128,14 @@ export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
  * retry, GitHub, auto-publish held up, a conflict), then what changed since the user's review, then
  * the decision, threads and what GitHub does not have, then what the reviewer agents made of the
  * head, the author last. The reviewer agents': those with the head to review, then the author. The
- * author's: the author first.
+ * author's: the author first. A dismissed one's as on the user's turn, and the dismissal last.
  */
 export function rankedReasons(p: Pull): Reason[] {
+  // Dismissed, as on the user's turn, with the dismissal, which its group says, last.
+  const dismissed = groupOf(p) === 'dismissed';
   const rank = (r: Reason): number => {
-    if (p.whose === 'reviewer') {
+    if (r.kind === 'dismissed') return 5;
+    if (p.whose === 'reviewer' || dismissed) {
       if (r.state === 'stalled' || r.state === 'unseen' || r.state === 'failed' || ['github', 'auto_publish', 'conflicts'].includes(r.kind)) return 0;
       if (r.kind === 'changes') return 1;
       return r.kind === 'reviewer_agent' ? 3 : r.kind === 'author' ? 4 : 2;
@@ -181,6 +194,7 @@ export function trayToolTip(s: Pick<MenuState, 'status' | 'pulls'>): string {
     g.agents.length ? `${g.agents.length} with agents` : '',
     g.auto_publish.length ? `${g.auto_publish.length} with auto-publish` : '',
     g.github.length ? `${g.github.length} waiting on GitHub` : '',
+    g.dismissed.length ? `${g.dismissed.length} dismissed` : '',
   ].filter(Boolean);
   return parts.length ? `galley: ${parts.join(' · ')}` : 'galley';
 }

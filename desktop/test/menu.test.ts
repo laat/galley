@@ -10,6 +10,7 @@ const pull = (id: number, o: Partial<Pull>): Pull => ({
   number: id,
   title: `Pull ${id}`,
   path: `/acme/widgets/pull/${id}`,
+  api: `/api/repos/acme/widgets/pulls/${id}`,
   published: null,
   whose: 'reviewer',
   reasons: [],
@@ -65,6 +66,7 @@ function actions() {
   const a: MenuActions = {
     open: (path) => done.push(`open ${path ?? '(as it was)'}`),
     openOutside: (url) => done.push(`browser ${url}`),
+    dismiss: (p, dismissed) => done.push(`${dismissed ? 'dismiss' : 'undo dismissing'} ${p.api}`),
     setOpenAtLogin: (on) => done.push(`start at login ${on}`),
     quit: () => done.push('quit'),
   };
@@ -99,8 +101,9 @@ test("the menu groups the open pull requests as the front page does, each with i
     ],
   );
   for (const header of items.filter((i) => i.type === 'header')) assert.equal(header.enabled, false);
-  // On hover, all the reasons.
-  assert.equal(items[2].toolTip, 'no review from laat yet · codex-review found nothing in 1a2b3c4 · claude is waiting for review');
+  // On hover, all the reasons, and on the user's turn, what ⌥-click does.
+  assert.equal(items[2].toolTip, 'no review from laat yet · codex-review found nothing in 1a2b3c4 · claude is waiting for review\n⌥-click to dismiss it until something new happens');
+  assert.equal(items[5].toolTip, 'claude is working on the feedback · codex-review commented on 9f8e7d6');
   for (const i of items) i.click?.();
   assert.deepEqual(done, [
     'browser https://github.com/acme/app/pull/7',
@@ -117,6 +120,55 @@ test("the menu groups the open pull requests as the front page does, each with i
 
 test('which group a pull request is in: whose turn it is, and on nobody\'s, whether it is published', () => {
   assert.deepEqual([retry, merge, reviewing, working, publishing, onGithub].map(groupOf), ['yours', 'yours', 'agents', 'agents', 'auto_publish', 'github']);
+});
+
+// Your turn, dismissed until something new happens: nobody's, published or staged.
+const dismissal = { kind: 'dismissed', text: 'laat dismissed it until something new happens' };
+const dismissed = pull(9, { whose: 'none', title: 'Publish to the registry', published: 'https://github.com/acme/widgets/pull/41', reasons: [dismissal, { kind: 'changes', text: 'no review from laat yet' }, { kind: 'github', text: 'ready to merge on GitHub' }] });
+const dismissedStaged = pull(10, { whose: 'none', title: 'Rename the flag', reasons: [dismissal, { kind: 'author', state: 'stopped', text: 'claude is not waiting' }] });
+
+test('a dismissed pull request is under Dismissed, last, with why it was your turn, and is not counted', () => {
+  const { a } = actions();
+  assert.deepEqual([dismissed, dismissedStaged].map(groupOf), ['dismissed', 'dismissed']);
+  const items = trayMenu({ status: null, pulls: [dismissed, onGithub, retry, dismissedStaged], openAtLogin: null }, a);
+  assert.deepEqual(
+    items.map((i) => (i.sublabel ? `${i.label} | ${i.sublabel}` : (i.label ?? i.type))),
+    [
+      'Your turn',
+      'acme/widgets s#4  Add retry to the uploader | no review from laat yet · codex-review found nothing in 1a2b3c4',
+      'separator',
+      'Waiting on GitHub',
+      'acme/widgets s#12  Drop the old API ↗ | acme/widgets#40 · waiting for review from bob',
+      'separator',
+      'Dismissed',
+      'acme/widgets s#9  Publish to the registry ↗ | ready to merge on GitHub · no review from laat yet',
+      'acme/widgets s#10  Rename the flag | claude is not waiting · laat dismissed it until something new happens',
+      'separator',
+      'Open galley',
+      'separator',
+      'Quit galley',
+    ],
+  );
+  assert.equal(items[7].toolTip, 'ready to merge on GitHub · no review from laat yet · laat dismissed it until something new happens\n⌥-click to make it your turn again');
+  assert.deepEqual([dismissed, dismissedStaged].map(githubTarget), ['https://github.com/acme/widgets/pull/41', null]);
+  assert.equal(trayTitle([dismissed, dismissedStaged]), '');
+  assert.equal(trayTitle([retry, dismissed]), '1');
+  assert.equal(trayToolTip({ status: null, pulls: [retry, dismissed] }), 'galley: 1 pull request waits for you · 1 dismissed');
+  // Nothing waits for you when all of yours are dismissed.
+  assert.equal(trayMenu({ status: null, pulls: [dismissed], openAtLogin: null }, a)[0].label, 'Nothing waits for you');
+});
+
+test('⌥-click dismisses one of your turns, and undoes it on a dismissed one; a click opens either, and ⌥ does nothing elsewhere', () => {
+  const { a, done } = actions();
+  const items = trayMenu({ status: null, pulls: [dismissed, reviewing, retry], openAtLogin: null }, a);
+  const item = (n: number) => items.find((i) => i.label?.startsWith(`acme/widgets s#${n} `))!;
+  const option = { altKey: true };
+  item(4).click!(null, null, option);
+  item(9).click!(null, null, option);
+  item(5).click!(null, null, option);
+  item(4).click!(null, null, { altKey: false });
+  item(9).click!();
+  assert.deepEqual(done, ['dismiss /api/repos/acme/widgets/pulls/4', 'undo dismissing /api/repos/acme/widgets/pulls/9', 'open /acme/widgets/pull/5', 'open /acme/widgets/pull/4', 'browser https://github.com/acme/widgets/pull/41']);
 });
 
 test("the main reason first: on your turn what to see to, then what changed since your review; on the reviewer agents', who has the head to review", () => {

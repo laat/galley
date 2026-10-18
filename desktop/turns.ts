@@ -22,9 +22,11 @@ export interface Pull {
   title: string;
   /** Where it is in the web UI, on the server's origin: /owner/name/pull/4. */
   path: string;
+  /** Where it is in the API, on the server's origin: /api/repos/owner/name/pulls/4. */
+  api: string;
   /** Where it is on GitHub once published; null while staged. */
   published: string | null;
-  /** Whose move it waits for: the author agent's, the reviewer agents', the user's (reviewer) or nobody's. */
+  /** Whose move it waits for: the author agent's, the reviewer agents', the user's (reviewer) or nobody's, also once the user dismissed their turn (a reason of kind `dismissed`). */
   whose: 'author' | 'reviewer_agents' | 'reviewer' | 'none';
   /** Why, as the front page's rows and notifications say it. */
   reasons: Reason[];
@@ -35,13 +37,14 @@ export interface Pull {
 export async function openPulls(base: string): Promise<Pull[]> {
   const res = await fetch(`${base}/api/pulls?state=open`, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`GET /api/pulls answered ${res.status}`);
-  type Json = { id: number; number: number; title: string; html_url: string; published_url: string | null; updated_at: string; repository: { full_name: string }; turn: { whose: Pull['whose']; reasons: Reason[] } };
+  type Json = { id: number; number: number; title: string; url: string; html_url: string; published_url: string | null; updated_at: string; repository: { full_name: string }; turn: { whose: Pull['whose']; reasons: Reason[] } };
   return ((await res.json()) as Json[]).map((p) => ({
     id: p.id,
     repo: p.repository.full_name,
     number: p.number,
     title: p.title,
     path: new URL(p.html_url).pathname,
+    api: new URL(p.url).pathname,
     published: p.published_url,
     whose: p.turn.whose,
     reasons: p.turn.reasons,
@@ -61,12 +64,16 @@ export function yourTurns(pulls: Pull[]): Pull[] {
  */
 export const NOTIFY_AFTER_MS = 10_000;
 
+/** How long, at most, a pull request the user made their turn again themselves tells nothing, should no look come (Turns.madeYours). */
+const UNDONE_MS = 60_000;
+
 /**
  * The open pull requests as last fetched (`pulls`), and those where it is the user's turn (`list`),
  * fetched again on each change. What became the user's turn since the fetch before is `turned`
  * once it has stayed so for `delayMs`, as a fetch then says too, once per change; the first fetch
  * only says what is, as the front page's Notify me does. A fetch that fails (the server stopping)
- * changes nothing, so what changed while the server was away is told once it is back.
+ * changes nothing, so what changed while the server was away is told once it is back. What the
+ * user made their turn again themselves (madeYours) is not told.
  */
 export class Turns {
   pulls: Pull[] = [];
@@ -78,6 +85,10 @@ export class Turns {
   private loads = 0;
   /** What became the user's turn, until it has been for delayMs or is not any more. */
   private held = new Map<number, ReturnType<typeof setTimeout>>();
+  /** Fetches begun, so an Undo can tell the looks that began after it from those in flight. */
+  private begun = 0;
+  /** When the user made each pull request their turn again themselves (madeYours), and how many fetches had begun then. */
+  private undone = new Map<number, { at: number; begun: number }>();
   private soonTimer: ReturnType<typeof setTimeout> | null = null;
   private load: () => Promise<Pull[]>;
   private on: { list(turns: Pull[]): void; turned(t: Pull): void };
@@ -99,12 +110,13 @@ export class Turns {
       do {
         this.again = false;
         let pulls: Pull[];
+        const begun = ++this.begun;
         try {
           pulls = await this.load();
         } catch {
           continue;
         }
-        this.update(pulls);
+        this.update(pulls, begun);
       } while (this.again);
     })().finally(() => (this.running = null));
     return this.running;
@@ -121,7 +133,18 @@ export class Turns {
     }, ms);
   }
 
-  private update(pulls: Pull[]): void {
+  /**
+   * The user made pull request `id` their turn again themselves, undoing its dismissal: nothing to
+   * tell of it becoming their turn, in the looks in flight and the first that begins after, which
+   * sees what the Undo did. A turn after that is news again. Within UNDONE_MS, should no look come.
+   */
+  madeYours(id: number): void {
+    clearTimeout(this.held.get(id));
+    this.held.delete(id);
+    this.undone.set(id, { at: Date.now(), begun: this.begun });
+  }
+
+  private update(pulls: Pull[], begun = this.begun): void {
     const list = yourTurns(pulls);
     const before = this.known;
     this.known = new Set(list.map((t) => t.id));
@@ -135,7 +158,10 @@ export class Turns {
       clearTimeout(timer);
       this.held.delete(id);
     }
-    if (before) for (const t of list) if (!before.has(t.id)) this.hold(t.id);
+    const quiet = (id: number) => Date.now() - (this.undone.get(id)?.at ?? -Infinity) < UNDONE_MS;
+    if (before) for (const t of list) if (!before.has(t.id) && !quiet(t.id)) this.hold(t.id);
+    // A look that began after the Undo saw what it did.
+    for (const [id, u] of this.undone) if (begun > u.begun) this.undone.delete(id);
   }
 
   private hold(id: number): void {

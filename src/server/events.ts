@@ -3,7 +3,8 @@
 // failed push is tried again (Service.pushFailed), whose edits of the title and description a wait
 // publishes (Service.authorEdits, Service.editsLeft), when auto-publish tries signing again
 // (Service.autoPublishRetry), whether a push goes on top of a branch rewritten on GitHub
-// (Service.fetchedRewritten), and which merge method auto-merge asks for again after a push. So events are written and read back here, typed by their type, and
+// (Service.fetchedRewritten), which merge method auto-merge asks for again after a push, and whether
+// the user's turn is dismissed (Service.dismissal). So events are written and read back here, typed by their type, and
 // reshaping one for the timeline fails typecheck where it is read.
 import { now, type Actor, type CancelReason, type Db, type EventRow, type PullRow } from './db.ts';
 import type { AutoPublishOff, GithubEdit, GithubPush, SigningFailure } from './service.ts';
@@ -50,6 +51,14 @@ export interface EventData {
   iterations_stopped: { round: number };
   iterations_resumed: Record<string, never>;
   review_cancelled: { head: string; reason: CancelReason };
+  /**
+   * The user dismissed their turn until something new happens (Service.dismissal). `github`: how
+   * many times what GitHub says had changed then (GithubStatus.changes), 0 before galley asked it.
+   * `ended`: when galley heard of something new, which ended it for good (Service.settleDismissal).
+   */
+  turn_dismissed: { github: number; ended?: string };
+  /** The user undid that dismissal. */
+  turn_undismissed: Record<string, never>;
 }
 
 export type EventType = keyof EventData;

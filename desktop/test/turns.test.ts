@@ -16,6 +16,7 @@ const turn = (id: number, whose: Pull['whose'] = 'reviewer'): Pull => ({
   number: id,
   title: `Pull ${id}`,
   path: `/acme/widgets/pull/${id}`,
+  api: `/api/repos/acme/widgets/pulls/${id}`,
   published: null,
   whose,
   reasons: [],
@@ -86,6 +87,54 @@ test('tells nothing of a turn that is yours for less than the wait, or flips bac
   await until(() => lists() > before, 'it looks again');
   await sleep(DELAY_MS * 2);
   assert.deepEqual(turns.list, []);
+  assert.deepEqual(turned(), []);
+});
+
+test("tells nothing of what you made your turn again yourself, by undoing its dismissal, also when a look had it already", async () => {
+  let list: Pull[] = [];
+  const { turns, turned } = following(async () => list);
+  await turns.refresh();
+  turns.madeYours(1);
+  list = [turn(1)];
+  await turns.refresh();
+  // A look that had it before the Undo was heard of.
+  list = [turn(1), turn(2)];
+  await turns.refresh();
+  turns.madeYours(2);
+  await sleep(DELAY_MS * 3);
+  assert.deepEqual(turned(), []);
+  // Your turn again later, by something new, is told, also soon after the Undo a look had seen.
+  list = [];
+  await turns.refresh();
+  list = [turn(1), turn(2)];
+  await turns.refresh();
+  await until(() => turned().length > 1, 'they are told');
+  assert.deepEqual(turned().sort(), [1, 2]);
+});
+
+test('an Undo heard while a look from before it is in flight: that look takes it away, and the next brings it back, telling nothing', async () => {
+  let list = [turn(1)];
+  let release = () => {};
+  let gate: Promise<void> | null = null;
+  const { turns, turned } = following(async () => {
+    const seen = list;
+    await gate;
+    return seen;
+  });
+  await turns.refresh();
+  // Dismissed: the look that says so is in flight when the Undo is heard.
+  list = [];
+  gate = new Promise((resolve) => (release = resolve));
+  const inFlight = turns.refresh();
+  await sleep(10);
+  turns.madeYours(1);
+  release();
+  await inFlight;
+  gate = null;
+  assert.deepEqual(turns.list, []);
+  list = [turn(1)];
+  await turns.refresh();
+  await sleep(DELAY_MS * 3);
   assert.deepEqual(turned(), []);
 });
 
@@ -172,7 +221,7 @@ test("from galley's live updates: a staged pull request that becomes your turn i
     await until(() => told.length > 0, 'it is told');
     assert.deepEqual(
       { ...told[0], reasons: undefined, updated: undefined },
-      { id, repo: fullName, number, title: 'Add notify', path: `/${fullName}/pull/${number}`, published: null, whose: 'reviewer', reasons: undefined, updated: undefined },
+      { id, repo: fullName, number, title: 'Add notify', path: `/${fullName}/pull/${number}`, api: `/api/repos/${fullName}/pulls/${number}`, published: null, whose: 'reviewer', reasons: undefined, updated: undefined },
     );
     assert.match(told[0].reasons[0].text, /^agent is not waiting/);
     // Your comment changes it, but it stays your turn: nothing more is told.
