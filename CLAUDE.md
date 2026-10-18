@@ -12,7 +12,7 @@ Local pull request staging server: a CLI mirroring `gh pr`/`gh api` for agents, 
 ## Conventions
 
 - No build step: Node 24 strips types. Only erasable syntax (no enums, no parameter properties, no namespaces), and relative imports end in `.ts`.
-- `src/cli` never touches the database or runs git against the server's view; it talks HTTP to the server. When nothing answers at a local URL, `src/cli/client.ts` starts a detached `galley serve`, so agents never have to.
+- `src/cli` never touches the database or runs git against the server's view; it talks HTTP to the server. When nothing answers at a local URL on a machine that has run a server (its database is in the data directory), `src/cli/client.ts` starts a detached `galley serve`, so agents never have to.
 - API responses copy GitHub's REST shapes (snake_case); `gh --json` output copies gh's shapes (camelCase). Both live in `src/server/github.ts`. Additions beyond GitHub are named as extensions in comments.
 - HTML is built with the `html` tagged template (`src/server/web/html.ts`), which escapes every interpolation unless it is `Safe`. Use `raw()` only for markup we produced (sanitized markdown, highlight.js output, octicons).
 - Every state change goes through `Service` and calls `emit()`, or `emitSystem()` for one no actor made (from GitHub or git), which drives live UI updates and wakes `pr wait`.

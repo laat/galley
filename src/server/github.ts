@@ -36,13 +36,18 @@ function agentLogo(s: Service, a: Actor): string | undefined {
   return AUTHOR_LOGOS.get(a.login);
 }
 
-export function avatarUrl(s: Service, a: Actor): string {
+/**
+ * An actor's avatar: the user's on GitHub, an agent's logo, or the one galley generates, under
+ * `base`. The API gives the generated one in full; pages from the host they were opened at, which
+ * may not be the public URL.
+ */
+export function avatarUrl(s: Service, a: Actor, base = ''): string {
   if (a.type === 'User' && s.db.getMeta('viewer_login') === a.login) return `https://github.com/${a.login}.png?size=80`;
-  return agentLogo(s, a) ?? `${s.baseUrl}/avatars/${encodeURIComponent(a.login)}.svg`;
+  return agentLogo(s, a) ?? `${base}/avatars/${encodeURIComponent(a.login)}.svg`;
 }
 
 export function userJson(s: Service, a: Actor) {
-  return { login: a.login, id: a.id, type: a.type, avatar_url: avatarUrl(s, a) };
+  return { login: a.login, id: a.id, type: a.type, avatar_url: avatarUrl(s, a, s.baseUrl) };
 }
 
 /** A GitHub user galley knows only by login, such as whoever merged a pull request there. */

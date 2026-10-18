@@ -32,3 +32,5 @@ process.env.GIT_CONFIG_GLOBAL = gitconfig;
 process.env.GIT_CONFIG_NOSYSTEM = '1';
 delete process.env.NO_PROXY;
 delete process.env.no_proxy;
+// The CLI goes to its server directly, not through a proxy the environment names (a sandbox's), unless a test says so.
+for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) delete process.env[name];

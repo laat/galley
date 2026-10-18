@@ -5,6 +5,11 @@ issue comments, the timeline, commits and contents), in GitHub's shapes, so `gal
 look like `gh api` calls. This page lists only what galley adds. Paths starting with `…` are
 under `/api/repos/{owner}/{repo}`.
 
+## Hosts and links
+
+- The server takes requests addressed to `localhost`, `127.0.0.1` or `[::1]` at its port, the address it listens on, its public URL's host (`galley serve --public-url`, `GALLEY_PUBLIC_URL`), and the hosts in `--allowed-host` or `GALLEY_ALLOWED_HOSTS`; others get 403. A request other than GET or HEAD that has an `Origin` gets 403 unless it is `http://` or `https://` one of those hosts.
+- Links in responses (`html_url`, `url`, a user's generated `avatar_url`) start with the public URL, by default the server's URL on its machine.
+
 ## Identity
 
 - `X-Galley-Actor: <login>`: who the caller is; without it, the user. `X-Galley-Actor-Type: User|Bot` (default `Bot` unless the login is the user's). A reviewer agent's name is refused with 409.
@@ -55,6 +60,6 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 - `POST /api/repos` `{path}`: register the repository at that path. Its `full_name` is the GitHub owner/name of its remote, and follows the remote when it names another (a repository renamed on GitHub); the old name still works under `/api/repos`, and its pages redirect.
 - `POST /api/markdown`: also takes `pull` (a pull request's API path), to link references as its pages do, `s#4` to staged pull request 4 among them.
 - `POST /api/uploads`: an image's bytes; answers with its `path`, `/uploads/<sha256>.<ext>`, served by `GET /uploads/<sha256>.<ext>`.
-- `GET /api/meta`: `{"name": "galley", "version": …}`, so the CLI knows it reached galley and not another program on its port. While the server starts, the same with 503.
+- `GET /api/meta`: `{"name": "galley", "version": …, "features": […]}`, so the CLI knows it reached galley and not another program on its port. While the server starts, the same with 503. `features` names what the server can do that an older one could not, so a newer CLI can ask for the server to be updated; none yet. Once started, `url` is its public URL, which the CLI's own links (`galley browse`, `--web`) start with.
 - `GET /api/health`, and `GET /events` (server-sent events).
 - `contents` defaults `ref` to `HEAD`, not the default branch.

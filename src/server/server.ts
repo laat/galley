@@ -12,7 +12,7 @@ import { avatarSvg } from './web/html.ts';
 import { CodexReviewer } from './reviewers/codex.ts';
 import { ClaudeReviewer } from './reviewers/claude.ts';
 import { CustomReviewers } from './reviewers/custom.ts';
-import { configDir, fromEnv, META } from '../config.ts';
+import { configDir, fromEnv, localUrl, META } from '../config.ts';
 import { uploads } from './uploads.ts';
 import { AutoPublisher } from './auto-publish.ts';
 import type { ProgressEvent } from './reviewers/transcript.ts';
@@ -24,12 +24,15 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
   const app = new Hono();
 
   // The API can push to GitHub, so only accept requests addressed to us (no DNS rebinding)
-  // and refuse cross-site writes from other pages open in the browser.
+  // and refuse cross-site writes from other pages open in the browser. Our own pages may be served
+  // over https by a proxy in front of us (`tailscale serve`).
+  const hosts = new Set(opts.allowedHosts.map((h) => h.toLowerCase()));
+  const origins = new Set([...hosts].flatMap((h) => [`http://${h}`, `https://${h}`]));
   app.use('*', async (c, next) => {
     const host = c.req.header('host') ?? '';
-    if (!opts.allowedHosts.includes(host)) return c.text(`galley: unexpected Host header "${host}"`, 403);
+    if (!hosts.has(host.toLowerCase())) return c.text(`galley: unexpected Host header "${host}"`, 403);
     const origin = c.req.header('origin');
-    if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && origin && !opts.allowedHosts.some((h) => origin === `http://${h}`)) {
+    if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && origin && !origins.has(origin.toLowerCase())) {
       return c.text('galley: cross-origin request refused', 403);
     }
     await next();
@@ -92,6 +95,14 @@ export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir
 export interface StartOptions {
   port: number;
   host?: string;
+  /**
+   * Where the server is reached from other machines, as http(s)://host[:port] with no path, such
+   * as the HTTPS URL `tailscale serve` gives it. Every link galley gives starts with it (by default
+   * the URL it answers at on this machine), and requests addressed to its host are accepted.
+   */
+  publicUrl?: string;
+  /** More Host values to accept besides localhost's and the public URL's, as host or host:port. */
+  allowedHosts?: string[];
   dataDir: string;
   ghBin?: string;
   codexBin?: string;
@@ -113,7 +124,15 @@ export interface CloseOptions {
   graceMs?: number;
 }
 
-export async function startServer(opts: StartOptions): Promise<{ url: string; port: number; service: Service; autoPublisher: AutoPublisher; close: (o?: CloseOptions) => Promise<void> }> {
+export async function startServer(opts: StartOptions): Promise<{
+  url: string;
+  port: number;
+  /** The Host values it accepts. */
+  allowedHosts: string[];
+  service: Service;
+  autoPublisher: AutoPublisher;
+  close: (o?: CloseOptions) => Promise<void>;
+}> {
   const host = opts.host ?? '127.0.0.1';
 
   let server: ServerType;
@@ -151,13 +170,16 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
     server!.close();
     throw e;
   }
-  const url = `http://localhost:${port}`;
-  const service = new Service({ db, baseUrl: url, ghBin: opts.ghBin ?? fromEnv('GH'), viewerLogin: opts.viewerLogin ?? fromEnv('USER'), fetchEveryMs: opts.fetchMs });
+  // Where it answers on this machine: localhost, unless it listens on one address that is not.
+  const url = localUrl(host, port);
+  const publicUrl = opts.publicUrl ? new URL(opts.publicUrl) : null;
+  const service = new Service({ db, baseUrl: publicUrl?.origin ?? url, ghBin: opts.ghBin ?? fromEnv('GH'), viewerLogin: opts.viewerLogin ?? fromEnv('USER'), fetchEveryMs: opts.fetchMs });
   // A new instance id (a copied database, or one from before namespaces) pins what it has first.
   await service.pinRevisions();
   // A repository whose remote names another GitHub repository now (renamed there) takes its name before the first page.
   await service.followRemotes();
-  const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
+  // localhost's, the address it listens on when that is one, the public URL's, and those it is told.
+  const allowedHosts = [...new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, new URL(url).host, ...(publicUrl ? [publicUrl.host] : []), ...(opts.allowedHosts ?? [])])];
   service.codex = new CodexReviewer(service, opts.codexBin ?? fromEnv('CODEX') ?? 'codex');
   service.claude = new ClaudeReviewer(service, opts.claudeBin ?? fromEnv('CLAUDE') ?? 'claude', opts.sandboxExec);
   // Custom reviewers run with Codex's and Claude's tools.
@@ -246,6 +268,7 @@ export async function startServer(opts: StartOptions): Promise<{ url: string; po
   return {
     url,
     port,
+    allowedHosts,
     service,
     autoPublisher,
     // Closing again while running reviews have time to post interrupts them.

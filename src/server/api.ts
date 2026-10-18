@@ -152,7 +152,8 @@ export function api(s: Service): Hono {
   });
 
   app.get('/health', (c) => c.json({ ok: true, pid: process.pid, viewer: s.viewer().login }));
-  app.get('/meta', (c) => c.json(META));
+  // Extension: where the server's links point (its public URL), for the links the CLI makes.
+  app.get('/meta', (c) => c.json({ ...META, url: s.baseUrl }));
   app.get('/user', (c) => c.json(userJson(s, actor(c))));
 
   app.post('/markdown', async (c) => {
