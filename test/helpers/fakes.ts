@@ -1,5 +1,8 @@
 // The fake gh, codex and claude of the tests do what FAKE_* variables say. They get them from the
 // server that starts them, which has this process's, and read them when they start.
+import assert from 'node:assert/strict';
+import type { PullRow } from '../../src/server/db.ts';
+import type { Service } from '../../src/server/service.ts';
 
 /** The FAKE_* variables as they are now. */
 export function fakes(): Record<string, string> {
@@ -7,7 +10,7 @@ export function fakes(): Record<string, string> {
 }
 
 /** Puts the FAKE_* variables back as `fakes()` gave them. */
-export function restoreFakes(saved: Record<string, string>): void {
+function restoreFakes(saved: Record<string, string>): void {
   for (const name of Object.keys(process.env)) if (name.startsWith('FAKE_')) delete process.env[name];
   Object.assign(process.env, saved);
 }
@@ -29,4 +32,20 @@ export async function withFakes<T>(vars: Record<string, string | undefined>, fn:
   } finally {
     restoreFakes(saved);
   }
+}
+
+/**
+ * For `afterEach`: fails a test that left a review running or about to start on one of `services`,
+ * where it would answer with the fakes of the tests after it, or that left the FAKE_* variables
+ * other than `starting`. Puts the variables back first, so the tests after it start from `starting`.
+ */
+export function assertLeftAsFound(services: Service[], starting: Record<string, string>): void {
+  const left = fakes();
+  restoreFakes(starting);
+  const atWork = services.flatMap((s) => {
+    const pulls = s.db.all<PullRow>('SELECT * FROM pulls');
+    return s.reviewerAgents().flatMap((r) => pulls.filter((p) => r.atWork(p)).map((p) => `${r.key} on s#${p.number}`));
+  });
+  assert.deepEqual(atWork, [], 'reviews still running or about to start');
+  assert.deepEqual(left, starting, 'FAKE_* variables the test changed');
 }

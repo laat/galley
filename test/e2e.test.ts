@@ -1,13 +1,13 @@
 // The whole loop: an agent stages a pull request with the CLI, a reviewer comments
 // through the API (as the web UI does), the agent rewrites history, and the reviewer publishes.
 import './helpers/env.ts';
-import { fakes, restoreFakes, withFakes } from './helpers/fakes.ts';
+import { assertLeftAsFound, fakes, withFakes } from './helpers/fakes.ts';
 import { until } from './helpers/until.ts';
 import { after, afterEach, before, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -64,6 +64,16 @@ process.env.GIT_CONFIG_NOSYSTEM = '1';
 
 function git(...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' } }).trim();
+}
+
+/**
+ * The worktrees of the repository that are review checkouts of the test's server: galley-review-*
+ * in the temporary directory. A reviewer agent that runs this suite runs it in a galley-review-*
+ * of its own, with the temporary directory in it, so the repository's own path may have the name.
+ */
+function reviewCheckouts(): string[] {
+  const made = join(realpathSync(tmpdir()), 'galley-review-');
+  return git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith(`worktree ${made}`));
 }
 
 /** A commit on top of `parent` whose short SHA is all digits, as about one commit in 27 has by chance. */
@@ -281,13 +291,7 @@ console.log('Packages: +1\\nDone in 1s');
 // with the fakes of the tests after it, and leaves the fakes as it found them. Checked after each
 // test, not each step: a step may leave a review or a fake to the next.
 afterEach((t) => {
-  if (t.fullName !== t.name) return;
-  const pulls = server.service.db.all<PullRow>('SELECT * FROM pulls');
-  const atWork = server.service.reviewerAgents().flatMap((r) => pulls.filter((p) => r.atWork(p)).map((p) => `${r.key} on s#${p.number}`));
-  const left = fakes();
-  restoreFakes(startingFakes);
-  assert.deepEqual(atWork, [], 'reviews still running or about to start');
-  assert.deepEqual(left, startingFakes, 'FAKE_* variables the test changed');
+  if (t.fullName === t.name) assertLeftAsFound([server.service], startingFakes);
 });
 
 after(async () => {
@@ -795,7 +799,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
     // Removed afterwards, read-only directories and all. The review is posted before the cleanup finishes.
     await server.service.codex!.settle((await human('GET', base)).id);
     assert.equal(existsSync(dirname(checkout)), false);
-    assert.doesNotMatch(git('worktree', 'list'), /galley-review-/);
+    assert.deepEqual(reviewCheckouts(), []);
 
     // The cap: after one automatic review, a new commit and another wait start nothing. The
     // reviewer agents are done with it, and the wait says so.
@@ -3270,7 +3274,7 @@ test('a review the server stops under is interrupted, runs again when it starts,
       const started = Date.now();
       await s.close();
       assert.ok(Date.now() - started < 5000, `close took ${Date.now() - started} ms`);
-      assert.doesNotMatch(git('worktree', 'list'), /galley-review-/);
+      assert.deepEqual(reviewCheckouts(), []);
 
       // Interrupted, not failed: it runs again once the author's wait is back (on the same port), and the wait gets its review.
       writeFileSync(gate, '');
