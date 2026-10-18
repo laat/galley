@@ -1,4 +1,4 @@
-// The desktop app's notifications: which pull requests are the user's turn, and which became it.
+// The desktop app's open pull requests and notifications: whose turn each is, and which became the user's.
 import '../../test/helpers/env.ts';
 import { human, scratchRepo, server, startHarness } from '../../test/helpers/harness.ts';
 import { until } from '../../test/helpers/until.ts';
@@ -6,18 +6,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { follow } from '../live.ts';
-import { Turns, yourTurns, type YourTurn } from '../turns.ts';
+import { openPulls, Turns, type Pull } from '../turns.ts';
 
 startHarness();
 
-const turn = (id: number): YourTurn => ({ id, repo: 'acme/widgets', number: id, title: `Pull ${id}`, path: `/acme/widgets/pull/${id}`, reasons: '' });
+const turn = (id: number, whose: Pull['whose'] = 'reviewer'): Pull => ({
+  id,
+  repo: 'acme/widgets',
+  number: id,
+  title: `Pull ${id}`,
+  path: `/acme/widgets/pull/${id}`,
+  published: null,
+  whose,
+  reasons: [],
+  updated: `2026-10-18T10:00:0${id}.000Z`,
+});
 
 /** How long a turn has to stay the user's here, in place of NOTIFY_AFTER_MS. */
 const DELAY_MS = 50;
 
 /** Turns over a list the test sets, with what it said. */
-function following(load: () => Promise<YourTurn[]>) {
-  const told: YourTurn[] = [];
+function following(load: () => Promise<Pull[]>) {
+  const told: Pull[] = [];
   let lists = 0;
   const turns = new Turns(load, { list: () => lists++, turned: (t) => told.push(t) }, DELAY_MS);
   return { turns, told, turned: () => told.map((t) => t.id), lists: () => lists };
@@ -51,7 +61,7 @@ test('tells once of each pull request that becomes your turn and stays so, and n
 });
 
 test('tells nothing of a turn that is yours for less than the wait, or flips back and forth', async () => {
-  let list: YourTurn[] = [];
+  let list: Pull[] = [];
   const { turns, turned, lists } = following(async () => list);
   await turns.refresh();
   // On its way from the agents to auto-publish, say.
@@ -80,7 +90,7 @@ test('tells nothing of a turn that is yours for less than the wait, or flips bac
 });
 
 test('a fetch that fails changes nothing, and what changed meanwhile is told once one works', async () => {
-  let list: YourTurn[] | null = [turn(1)];
+  let list: Pull[] | null = [turn(1)];
   const { turns, turned, lists } = following(async () => {
     if (!list) throw new Error('ECONNREFUSED');
     return list;
@@ -107,6 +117,33 @@ test('a fetch that fails changes nothing, and what changed meanwhile is told onc
   assert.deepEqual(turned(), [3, 4]);
 });
 
+test('lists every open pull request, and tells only of those that become your turn, waiting longest first', async () => {
+  let list = [turn(2), turn(1, 'reviewer_agents')];
+  const { turns, turned } = following(async () => list);
+  await turns.refresh();
+  assert.deepEqual(turns.pulls, list);
+  assert.deepEqual(turns.list, [turn(2)]);
+  // The agents are done with it: it is your turn.
+  list = [turn(1), turn(2)];
+  await turns.refresh();
+  assert.deepEqual(turns.list, [turn(1), turn(2)]);
+  await until(() => turned().length, 'it is told');
+  assert.deepEqual(turned(), [1]);
+});
+
+test('changes that come together make one fetch', async () => {
+  let loads = 0;
+  const { turns, lists } = following(async () => {
+    loads++;
+    return [];
+  });
+  for (let i = 0; i < 5; i++) turns.soon(20);
+  await until(() => lists() > 0, 'it looks');
+  turns.soon(20);
+  await until(() => lists() > 1, 'it looks again');
+  assert.equal(loads, 2);
+});
+
 test('fetches one at a time, and once more for the changes during one', async () => {
   let loads = 0;
   let release = () => {};
@@ -125,7 +162,7 @@ test('fetches one at a time, and once more for the changes during one', async ()
 
 test("from galley's live updates: a staged pull request that becomes your turn is told once, with its title and why", async () => {
   const { stage, fullName } = await scratchRepo('desktop');
-  const { turns, told, lists } = following(() => yourTurns(server.url));
+  const { turns, told, lists } = following(() => openPulls(server.url));
   const refresh = () => void turns.refresh();
   const live = follow(server.url, { up: refresh, down() {}, change: refresh });
   try {
@@ -133,8 +170,11 @@ test("from galley's live updates: a staged pull request that becomes your turn i
     assert.deepEqual(turns.list, []);
     const { id, number } = await stage('notify');
     await until(() => told.length > 0, 'it is told');
-    assert.deepEqual({ ...told[0], reasons: undefined }, { id, repo: fullName, number, title: 'Add notify', path: `/${fullName}/pull/${number}`, reasons: undefined });
-    assert.match(told[0].reasons, /^agent is not waiting/);
+    assert.deepEqual(
+      { ...told[0], reasons: undefined, updated: undefined },
+      { id, repo: fullName, number, title: 'Add notify', path: `/${fullName}/pull/${number}`, published: null, whose: 'reviewer', reasons: undefined, updated: undefined },
+    );
+    assert.match(told[0].reasons[0].text, /^agent is not waiting/);
     // Your comment changes it, but it stays your turn: nothing more is told.
     const before = lists();
     await human('POST', `/api/repos/${fullName}/issues/${number}/comments`, { body: 'Looks fine.' });
@@ -145,4 +185,21 @@ test("from galley's live updates: a staged pull request that becomes your turn i
   } finally {
     live.stop();
   }
+});
+
+test("one request lists every repository's open pull requests, latest update first, with whose turn each is", async () => {
+  const a = await scratchRepo('desktop-a');
+  const b = await scratchRepo('desktop-b');
+  const first = await a.stage('first');
+  const closed = await a.stage('closed');
+  await human('PATCH', `/api/repos/${a.fullName}/pulls/${closed.number}`, { state: 'closed' });
+  const second = await b.stage('second');
+  const pulls = (await openPulls(server.url)).filter((p) => [a.fullName, b.fullName].includes(p.repo));
+  assert.deepEqual(
+    pulls.map((p) => ({ id: p.id, repo: p.repo, number: p.number, path: p.path, whose: p.whose })),
+    [
+      { id: second.id, repo: b.fullName, number: second.number, path: `/${b.fullName}/pull/${second.number}`, whose: 'reviewer' },
+      { id: first.id, repo: a.fullName, number: first.number, path: `/${a.fullName}/pull/${first.number}`, whose: 'reviewer' },
+    ],
+  );
 });

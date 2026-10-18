@@ -238,6 +238,19 @@ export function api(s: Service): Hono {
 
   // ------------------------------------------------------------------ pulls
 
+  // galley extension: every repository's pull requests in one list, each with its repository, as
+  // GitHub's /issues has them. The desktop app's menu reads it on each change.
+  app.get('/pulls', (c) => {
+    const repos = new Map(s.repos().map((r) => [r.id, r]));
+    const list = s.pulls(null, { state: c.req.query('state') ?? 'open' });
+    return c.json(
+      list.map((p) => {
+        const repo = repos.get(p.repo_id)!;
+        return { ...pullJson(s, repo, p), repository: repoJson(s, repo) };
+      }),
+    );
+  });
+
   app.get('/repos/:owner/:repo/pulls', (c) => {
     const repo = s.repo(c.req.param('owner'), c.req.param('repo'));
     const list = s.pulls(repo, { state: c.req.query('state') ?? 'open', head: c.req.query('head'), base: c.req.query('base') });

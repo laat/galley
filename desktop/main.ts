@@ -1,5 +1,6 @@
 // galley's desktop app: a window onto the galley server the CLI uses, a notification when it
-// becomes the user's turn on a pull request, and a menu-bar status of what waits for the user.
+// becomes the user's turn on a pull request, and a menu-bar status of what waits for the user and
+// what the agents are at.
 // It is never a second server, and quitting it leaves the server running for the agents.
 import { app, BrowserWindow, Menu, nativeImage, Notification, session, shell, Tray, type BrowserWindowConstructorOptions, type MenuItemConstructorOptions } from 'electron';
 import { join } from 'node:path';
@@ -9,7 +10,7 @@ import { follow } from './live.ts';
 import { trayMenu, trayTitle, trayToolTip } from './menu.ts';
 import { notAPage } from './pages.ts';
 import { attach, findNode, loginShellEnv, noAutostart, startServer, type Found } from './server.ts';
-import { Turns, yourTurns, type YourTurn } from './turns.ts';
+import { openPulls, Turns, type Pull } from './turns.ts';
 
 const root = join(import.meta.dirname, '..');
 const icons = join(import.meta.dirname, 'icons');
@@ -95,7 +96,7 @@ async function start(): Promise<void> {
   const image = nativeImage.createFromPath(join(icons, 'trayTemplate.png'));
   image.setTemplateImage(true);
   tray = new Tray(image);
-  turns = new Turns(() => yourTurns(base), { list: () => render(), turned: notify });
+  turns = new Turns(() => openPulls(base), { list: () => render(), turned: notify });
   render();
 
   let answered = () => {};
@@ -116,7 +117,7 @@ async function start(): Promise<void> {
       connected = false;
       render();
     },
-    change: () => void turns.refresh(),
+    change: () => turns.soon(),
   });
   // A window opened before the stream answers would show the waiting page for a moment.
   await Promise.race([firstAnswer, sleep(2000)]);
@@ -297,7 +298,7 @@ function openAtLogin(): boolean | null {
 }
 
 function render(): void {
-  const state = { status: status(), turns: turns.list, openAtLogin: openAtLogin() };
+  const state = { status: status(), pulls: turns.pulls, openAtLogin: openAtLogin() };
   tray.setContextMenu(
     Menu.buildFromTemplate(
       trayMenu(state, {
@@ -310,14 +311,14 @@ function render(): void {
       }),
     ),
   );
-  tray.setTitle(trayTitle(turns.list));
+  tray.setTitle(trayTitle(turns.pulls), { fontType: 'monospacedDigit' });
   tray.setToolTip(trayToolTip(state));
   if (!connected) for (const [win] of waiting) void win.loadURL(waitingPage()).catch(() => {});
 }
 
-function notify(t: YourTurn): void {
+function notify(t: Pull): void {
   if (!Notification.isSupported()) return;
-  const n = new Notification({ title: `Your turn: ${t.title}`, subtitle: `${t.repo} s#${t.number}`, body: t.reasons });
+  const n = new Notification({ title: `Your turn: ${t.title}`, subtitle: `${t.repo} s#${t.number}`, body: t.reasons.map((r) => r.text).join(' · ') });
   notifications.add(n);
   n.on('click', () => {
     notifications.delete(n);

@@ -1,9 +1,20 @@
-// The pull requests where it is the user's turn (the API's turn.whose "reviewer", as the front
-// page lists them first), for the menu-bar status, and which of them became the user's turn, for
-// a notification each.
+// The open pull requests with whose turn each is, for the menu-bar status, and which of them
+// became the user's turn (the API's turn.whose "reviewer", as the front page lists them first),
+// for a notification each.
 
-/** A pull request where it is the user's turn. */
-export interface YourTurn {
+/** One reason for whose turn it is, as the API says it (the server's TurnReason). */
+export interface Reason {
+  kind: string;
+  /** A few words. */
+  text: string;
+  /** The author's state, or a reviewer agent's. */
+  state?: string;
+  /** A reviewer agent's: it still has the head to review. */
+  to_review?: boolean;
+}
+
+/** An open pull request: staged, or published and open on GitHub. */
+export interface Pull {
   id: number;
   /** owner/name */
   repo: string;
@@ -11,27 +22,36 @@ export interface YourTurn {
   title: string;
   /** Where it is in the web UI, on the server's origin: /owner/name/pull/4. */
   path: string;
-  /** Why it is the user's turn, as the front page's notifications say it. */
-  reasons: string;
+  /** Where it is on GitHub once published; null while staged. */
+  published: string | null;
+  /** Whose move it waits for: the author agent's, the reviewer agents', the user's (reviewer) or nobody's. */
+  whose: 'author' | 'reviewer_agents' | 'reviewer' | 'none';
+  /** Why, as the front page's rows and notifications say it. */
+  reasons: Reason[];
+  updated: string;
 }
 
-/**
- * Every pull request where it is the user's turn, from the API: each repository's open pull
- * requests with their turn. Waiting longest first, as the front page has them.
- */
-export async function yourTurns(base: string): Promise<YourTurn[]> {
-  const get = async <T>(path: string): Promise<T> => {
-    const res = await fetch(base + path, { headers: { accept: 'application/json' } });
-    if (!res.ok) throw new Error(`GET ${path} answered ${res.status}`);
-    return (await res.json()) as T;
-  };
-  type Pull = { id: number; number: number; title: string; html_url: string; updated_at: string; turn: { whose: string; reasons: { text: string }[] } };
-  const repos = await get<{ full_name: string; owner: { login: string }; name: string }[]>('/api/repos');
-  const lists = await Promise.all(repos.map(async (r) => ({ r, pulls: await get<Pull[]>(`/api/repos/${encodeURIComponent(r.owner.login)}/${encodeURIComponent(r.name)}/pulls?state=open`) })));
-  return lists
-    .flatMap(({ r, pulls }) => pulls.filter((p) => p.turn.whose === 'reviewer').map((p) => ({ r, p })))
-    .sort((a, b) => a.p.updated_at.localeCompare(b.p.updated_at))
-    .map(({ r, p }) => ({ id: p.id, repo: r.full_name, number: p.number, title: p.title, path: new URL(p.html_url).pathname, reasons: p.turn.reasons.map((x) => x.text).join(' · ') }));
+/** Every open pull request with its turn, from the API, in one request: latest update first. */
+export async function openPulls(base: string): Promise<Pull[]> {
+  const res = await fetch(`${base}/api/pulls?state=open`, { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`GET /api/pulls answered ${res.status}`);
+  type Json = { id: number; number: number; title: string; html_url: string; published_url: string | null; updated_at: string; repository: { full_name: string }; turn: { whose: Pull['whose']; reasons: Reason[] } };
+  return ((await res.json()) as Json[]).map((p) => ({
+    id: p.id,
+    repo: p.repository.full_name,
+    number: p.number,
+    title: p.title,
+    path: new URL(p.html_url).pathname,
+    published: p.published_url,
+    whose: p.turn.whose,
+    reasons: p.turn.reasons,
+    updated: p.updated_at,
+  }));
+}
+
+/** Where it is the user's turn, waiting longest first, as the front page has them. */
+export function yourTurns(pulls: Pull[]): Pull[] {
+  return pulls.filter((p) => p.whose === 'reviewer').sort((a, b) => a.updated.localeCompare(b.updated));
 }
 
 /**
@@ -42,14 +62,15 @@ export async function yourTurns(base: string): Promise<YourTurn[]> {
 export const NOTIFY_AFTER_MS = 10_000;
 
 /**
- * The user's turns as last fetched, fetched again on each change. What became the user's turn
- * since the fetch before is `turned` once it has stayed so for `delayMs`, as a fetch then says
- * too, once per change; the first fetch only says what is, as the front page's Notify me does. A
- * fetch that fails (the server stopping) changes nothing, so what changed while the server was
- * away is told once it is back.
+ * The open pull requests as last fetched (`pulls`), and those where it is the user's turn (`list`),
+ * fetched again on each change. What became the user's turn since the fetch before is `turned`
+ * once it has stayed so for `delayMs`, as a fetch then says too, once per change; the first fetch
+ * only says what is, as the front page's Notify me does. A fetch that fails (the server stopping)
+ * changes nothing, so what changed while the server was away is told once it is back.
  */
 export class Turns {
-  list: YourTurn[] = [];
+  pulls: Pull[] = [];
+  list: Pull[] = [];
   private known: Set<number> | null = null;
   private running: Promise<void> | null = null;
   private again = false;
@@ -57,11 +78,12 @@ export class Turns {
   private loads = 0;
   /** What became the user's turn, until it has been for delayMs or is not any more. */
   private held = new Map<number, ReturnType<typeof setTimeout>>();
-  private load: () => Promise<YourTurn[]>;
-  private on: { list(turns: YourTurn[]): void; turned(t: YourTurn): void };
+  private soonTimer: ReturnType<typeof setTimeout> | null = null;
+  private load: () => Promise<Pull[]>;
+  private on: { list(turns: Pull[]): void; turned(t: Pull): void };
   private delayMs: number;
 
-  constructor(load: () => Promise<YourTurn[]>, on: { list(turns: YourTurn[]): void; turned(t: YourTurn): void }, delayMs = NOTIFY_AFTER_MS) {
+  constructor(load: () => Promise<Pull[]>, on: { list(turns: Pull[]): void; turned(t: Pull): void }, delayMs = NOTIFY_AFTER_MS) {
     this.load = load;
     this.on = on;
     this.delayMs = delayMs;
@@ -76,21 +98,34 @@ export class Turns {
     this.running = (async () => {
       do {
         this.again = false;
-        let list: YourTurn[];
+        let pulls: Pull[];
         try {
-          list = await this.load();
+          pulls = await this.load();
         } catch {
           continue;
         }
-        this.update(list);
+        this.update(pulls);
       } while (this.again);
     })().finally(() => (this.running = null));
     return this.running;
   }
 
-  private update(list: YourTurn[]): void {
+  /**
+   * Fetch again in `ms`, for a change: the changes until then, which come in bursts (a review and
+   * its comments, a publish), make one fetch.
+   */
+  soon(ms = 300): void {
+    this.soonTimer ??= setTimeout(() => {
+      this.soonTimer = null;
+      void this.refresh();
+    }, ms);
+  }
+
+  private update(pulls: Pull[]): void {
+    const list = yourTurns(pulls);
     const before = this.known;
     this.known = new Set(list.map((t) => t.id));
+    this.pulls = pulls;
     this.list = list;
     this.loads++;
     this.on.list(list);

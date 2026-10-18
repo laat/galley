@@ -1,10 +1,14 @@
-// The menu-bar status: how many pull requests wait for the user, and a menu listing them.
-import type { YourTurn } from './turns.ts';
+// The menu-bar status: next to the icon, how many pull requests wait for the user and how many are
+// in motion without them; in the menu, the open pull requests in the front page's groups.
+import { yourTurns, type Pull, type Reason } from './turns.ts';
 
 /** A menu item as Electron's Menu.buildFromTemplate takes it. */
 export interface MenuItem {
   label?: string;
-  type?: 'normal' | 'separator' | 'checkbox';
+  /** A second line, smaller (macOS 14.4 and later). */
+  sublabel?: string;
+  /** `header`: a section's title (macOS 14 and later). */
+  type?: 'normal' | 'separator' | 'checkbox' | 'header';
   enabled?: boolean;
   checked?: boolean;
   /** Shown on hover (macOS). */
@@ -15,7 +19,8 @@ export interface MenuItem {
 export interface MenuState {
   /** What the menu says about the server while the app does not hear from it; null while it does. */
   status: string | null;
-  turns: YourTurn[];
+  /** The open pull requests, staged and published. */
+  pulls: Pull[];
   /** Whether the app starts at login; null where it cannot say (not a built app, or not macOS or Windows). */
   openAtLogin: boolean | null;
 }
@@ -27,17 +32,67 @@ export interface MenuActions {
   quit(): void;
 }
 
-const MAX_TITLE = 60;
+/**
+ * The front page's groups: the user's turn; the agents' (the reviewer agents reviewing, the author
+ * working on feedback or yet to wait); staged and nobody's turn, auto-publish's, which publishes
+ * it on its own; published and nobody's turn, GitHub's (its review, checks, the merge).
+ */
+export type Group = 'yours' | 'agents' | 'auto_publish' | 'github';
 
-/** The menu: the pull requests where it is the user's turn (repo, s#N, title), then the app's own items. */
+const GROUPS: { group: Group; title: string }[] = [
+  { group: 'yours', title: 'Your turn' },
+  { group: 'agents', title: 'Agents at work' },
+  { group: 'auto_publish', title: 'Auto-publish' },
+  { group: 'github', title: 'Waiting on GitHub' },
+];
+
+export function groupOf(p: Pull): Group {
+  if (p.whose === 'reviewer') return 'yours';
+  if (p.whose === 'author' || p.whose === 'reviewer_agents') return 'agents';
+  return p.published ? 'github' : 'auto_publish';
+}
+
+/** The pull requests of each group: the user's turn waiting longest first, the others latest update first, as the API lists them. */
+export function grouped(pulls: Pull[]): Record<Group, Pull[]> {
+  const out: Record<Group, Pull[]> = { yours: yourTurns(pulls), agents: [], auto_publish: [], github: [] };
+  for (const p of pulls) {
+    const group = groupOf(p);
+    if (group !== 'yours') out[group].push(p);
+  }
+  return out;
+}
+
+const MAX_TITLE = 60;
+const MAX_SUBLABEL = 72;
+/** A group lists this many, then how many more there are, which opens the front page. */
+const MAX_PER_GROUP = 10;
+
+/**
+ * The menu: what it says about the server, or that nothing waits for the user, then each group
+ * with pull requests in it (repository, s#N and title, and under it the main reasons), then the
+ * app's own items.
+ */
 export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
   const items: MenuItem[] = [];
   if (s.status) items.push({ label: s.status, enabled: false });
-  if (s.turns.length) items.push({ label: 'Your turn', enabled: false });
-  else if (!s.status) items.push({ label: 'Nothing waits for you', enabled: false });
-  for (const t of s.turns) {
-    const title = t.title.length > MAX_TITLE ? t.title.slice(0, MAX_TITLE - 1) + '…' : t.title;
-    items.push({ label: `${t.repo} s#${t.number}  ${title}`, toolTip: t.reasons, click: () => a.open(t.path) });
+  const groups = grouped(s.pulls);
+  if (!groups.yours.length && !s.status) items.push({ label: 'Nothing waits for you', enabled: false });
+  for (const { group, title } of GROUPS) {
+    const pulls = groups[group];
+    if (!pulls.length) continue;
+    if (items.length) items.push({ type: 'separator' });
+    items.push({ label: title, type: 'header', enabled: false });
+    for (const p of pulls.slice(0, MAX_PER_GROUP)) {
+      const name = p.title.length > MAX_TITLE ? p.title.slice(0, MAX_TITLE - 1) + '…' : p.title;
+      const ranked = rankedReasons(p);
+      items.push({ label: `${p.repo} s#${p.number}  ${name}`, sublabel: sublabel(p, ranked), toolTip: ranked.map((r) => r.text).join(' · '), click: () => a.open(p.path) });
+    }
+    // The rest, on the front page's tab that has them all: staged, published, or both.
+    const rest = pulls.slice(MAX_PER_GROUP);
+    if (rest.length) {
+      const tab = rest.every((p) => p.published) ? '/?state=published' : rest.some((p) => p.published) ? '/?state=all' : '/';
+      items.push({ label: `${rest.length} more…`, click: () => a.open(tab) });
+    }
   }
   items.push({ type: 'separator' }, { label: 'Open galley', click: () => a.open() });
   if (s.openAtLogin !== null) {
@@ -48,14 +103,61 @@ export function trayMenu(s: MenuState, a: MenuActions): MenuItem[] {
   return items;
 }
 
-/** Next to the icon: how many wait for the user, nothing when none do. */
-export function trayTitle(turns: YourTurn[]): string {
-  return turns.length ? String(turns.length) : '';
+/**
+ * A pull request's reasons, what says most about its group first, as the front page's rows have
+ * them. The user's turn: something to see to (a stalled author, feedback to pass on, a review to
+ * retry, GitHub, auto-publish held up, a conflict), then what changed since the user's review, then
+ * the decision, threads and what GitHub does not have, then what the reviewer agents made of the
+ * head, the author last. The reviewer agents': those with the head to review, then the author. The
+ * author's: the author first.
+ */
+export function rankedReasons(p: Pull): Reason[] {
+  const rank = (r: Reason): number => {
+    if (p.whose === 'reviewer') {
+      if (r.state === 'stalled' || r.state === 'unseen' || r.state === 'failed' || ['github', 'auto_publish', 'conflicts'].includes(r.kind)) return 0;
+      if (r.kind === 'changes') return 1;
+      return r.kind === 'reviewer_agent' ? 3 : r.kind === 'author' ? 4 : 2;
+    }
+    if (p.whose === 'reviewer_agents' && r.to_review) return 0;
+    return r.kind === 'author' ? 1 : 2;
+  };
+  return [...p.reasons].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * Under a pull request's title: its main reason, and the next when both fit. Waiting on GitHub,
+ * where it is there first, as owner/name#N.
+ */
+function sublabel(p: Pull, ranked: Reason[]): string | undefined {
+  const texts = ranked.map((r) => r.text);
+  if (p.published && groupOf(p) === 'github') texts.unshift(p.published.replace(/^https:\/\/github\.com\//, '').replace('/pull/', '#'));
+  const [first, second] = texts;
+  if (!first) return undefined;
+  if (second && first.length + 3 + second.length <= MAX_SUBLABEL) return `${first} · ${second}`;
+  return first.length > MAX_SUBLABEL ? first.slice(0, MAX_SUBLABEL - 1) + '…' : first;
+}
+
+/**
+ * Next to the icon, short: how many are the user's turn, then, after ↻, how many are in motion
+ * without the user, with the agents or auto-publish; nothing when neither, so all quiet is the icon
+ * alone. What waits on GitHub is not counted.
+ */
+export function trayTitle(pulls: Pull[]): string {
+  const g = grouped(pulls);
+  const moving = g.agents.length + g.auto_publish.length;
+  return [g.yours.length ? String(g.yours.length) : '', moving ? `↻${moving}` : ''].filter(Boolean).join(' ');
 }
 
 /** On hover over the icon. */
-export function trayToolTip(s: Pick<MenuState, 'status' | 'turns'>): string {
+export function trayToolTip(s: Pick<MenuState, 'status' | 'pulls'>): string {
   if (s.status) return `galley: ${s.status}`;
-  const n = s.turns.length;
-  return n ? `galley: ${n} pull request${n === 1 ? '' : 's'} wait${n === 1 ? 's' : ''} for you` : 'galley';
+  const g = grouped(s.pulls);
+  const n = g.yours.length;
+  const parts = [
+    n ? `${n} pull request${n === 1 ? '' : 's'} wait${n === 1 ? 's' : ''} for you` : '',
+    g.agents.length ? `${g.agents.length} with agents` : '',
+    g.auto_publish.length ? `${g.auto_publish.length} with auto-publish` : '',
+    g.github.length ? `${g.github.length} waiting on GitHub` : '',
+  ].filter(Boolean);
+  return parts.length ? `galley: ${parts.join(' · ')}` : 'galley';
 }
