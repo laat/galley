@@ -1,6 +1,6 @@
 ---
 name: release
-description: Release galley to npm, as the package galley-proof. Use when the user asks to release galley, cut a version, or publish it to npm. Bumps the version in a staged pull request, then publishes a GitHub Release, whose workflow publishes the package with npm's trusted publishing.
+description: Release galley to npm, as the package galley-proof. Use when the user asks to release galley, cut a version, or publish it to npm. Bumps the version in a staged pull request, then publishes a GitHub Release, whose workflow stages the package on npm with trusted publishing, for the user to approve with 2FA.
 ---
 
 # Release galley
@@ -8,21 +8,25 @@ description: Release galley to npm, as the package galley-proof. Use when the us
 galley is on npm as `galley-proof`; the command it installs is `galley`. Publishing a GitHub
 Release runs `.github/workflows/release.yml` on the release's tag. It checks that the tag is
 package.json's version with a `v` (`v0.3.0`), and that npm does not have that version yet. It runs
-the tests, installs the package from its tarball and runs it, and then publishes `dist/`
-(`pnpm build`) to npm. npm's trusted publishing takes the workflow's OIDC token in place of an npm token, and adds
-provenance.
+the tests, installs the package from its tarball and runs it, and then stages `dist/`
+(`pnpm build`) on npm with `npm stage publish`. npm's trusted publishing takes the workflow's OIDC
+token in place of an npm token, and adds provenance. A staged version is on npm, but nobody can
+install it until the user approves it with `npm stage approve`, which asks for their 2FA. The
+trusted publisher allows staging only, so no version reaches npm's users without that approval.
 
 ## Rules
 
 - Release only when the user asks.
-- Never run `npm publish`. The workflow publishes every version but the first, which the user
-  published by hand ([Setting it up](#setting-it-up)).
+- Never run `npm publish`, `npm stage approve` or `npm stage reject`. The workflow stages every
+  version but the first, which the user published by hand ([Setting it up](#setting-it-up)), and
+  the user approves or rejects it: both ask for their 2FA.
 - A version on npm is there for good: npm never takes the same version again, even after
-  `npm unpublish`. A failed release gets a new version once npm has the old one.
+  `npm unpublish`. A failed release gets a new version once npm has the old one. A staged
+  version the user rejects is gone, and that version can be staged again.
 - The version changes only in package.json (`galley --version` and `/api/meta` read it there).
   desktop/package.json stays: the app is not released, and runs its checkout's code.
-- Before `npm install`, run `npm whoami`. When it fails, ask the user to run `! npm login`, and
-  wait.
+- Before `npm install` or `npm stage`, run `npm whoami`. When it fails, ask the user to run
+  `! npm login`, and wait. `npm stage list`, `view` and `download` need the login, but no 2FA.
 
 ## The release
 
@@ -88,16 +92,50 @@ provenance.
 
    `gh release create` makes the tag on `$sha` and publishes the release, which starts the
    workflow. A pre-release has a pre-release version (`0.3.0-rc.1`) and `--prerelease`; npm gets
-   it under the dist-tag `next` (`npm install galley-proof@next`), and `latest` stays.
+   it under the dist-tag `next` (`npm install galley-proof@next`), and `latest` stays. Keep `$sha`
+   for step 6.
 
 5. Watch the workflow:
 
    ```sh
    gh run list --repo laat/galley --workflow release.yml --limit 1
    gh run watch <id> --repo laat/galley --exit-status
+   gh run view <id> --repo laat/galley --log | grep -E '"(stageId|shasum)"'
    ```
 
-6. Check npm, and install the version in a directory of its own:
+   The stage job printed the stage id and the shasum of what it staged; its summary on GitHub
+   has them too.
+
+6. Check the staged version, for the user to approve:
+
+   ```sh
+   npm whoami
+   npm stage list galley-proof
+   dir=$(mktemp -d)
+   (cd "$dir" && npm stage view <stage-id> && npm stage download <stage-id>)
+   ```
+
+   The list has the stage id the run printed. `npm stage view` says package name `galley-proof`,
+   version `0.3.0`, tag `latest` (`next` for a pre-release), and the shasum the run printed.
+   `npm stage download` lists the files and writes the tarball in `$dir`. Check that it is what
+   `$sha` builds, file for file:
+
+   ```sh
+   mkdir "$dir/src" && git archive "$sha" | tar -x -C "$dir/src"
+   node --disable-warning=ExperimentalWarning "$dir/src/scripts/build.ts" "$dir/built"
+   tar -xzf "$dir"/*.tgz -C "$dir"
+   diff -r "$dir/package" "$dir/built" && echo same
+   rm -rf "$dir"
+   ```
+
+   When all of it holds, tell the user the stage id and what you checked, and ask them to run
+   `! npm stage approve <stage-id>`, which asks for their one-time password. Wait for them.
+   When something does not hold, tell the user what (with `diff`'s output), and do not ask for
+   the approval. When they decide the staged version is wrong, they reject it with
+   `! npm stage reject <stage-id>`; then delete the release and fix it as in
+   [When the workflow fails](#when-the-workflow-fails).
+
+7. After the user approved, check npm, and install the version in a directory of its own:
 
    ```sh
    npm whoami
@@ -121,11 +159,16 @@ Read why with `gh run view <id> --repo laat/galley --log-failed`.
   its tag (`gh release delete v0.3.0 --repo laat/galley --cleanup-tag --yes`), fix it in a pull
   request, and publish the release again on the new merge.
 - `already on npm`: that version was published. Bump to the next version and release that.
-- The publish step failed with 404, ENEEDAUTH or an OIDC error: npm did not take the workflow as
+- The stage step failed with 404, ENEEDAUTH or an OIDC error: npm did not take the workflow as
   the package's trusted publisher. Tell the user, with the error, and that the trusted publisher
-  on npmjs.com must name owner `laat`, repository `galley` and workflow `release.yml`, with
-  `npm publish` allowed. Once it does, re-run the failed job: `gh run rerun <id> --repo
-  laat/galley --failed`. Never publish from a laptop instead.
+  on npmjs.com must name owner `laat`, repository `galley` and workflow `release.yml`. Once it
+  does, re-run the failed job: `gh run rerun <id> --repo laat/galley --failed`. Never stage or
+  publish from a laptop instead.
+- The stage step failed because npm has that version staged already, from an earlier run:
+  `npm stage list galley-proof` shows it. The workflow can not check this first, since
+  `npm stage list` needs a login. Check the staged version as in step 6, against the commit that
+  run released. If it holds, the user may approve it. If not, the user rejects it, and you re-run
+  the failed job.
 
 ## Setting it up
 
@@ -151,14 +194,21 @@ is published by hand:
    - Repository: `galley`
    - Workflow filename: `release.yml`
    - Environment name: empty
-   - Allowed actions: `npm publish`
+   - Allowed actions: `npm stage publish` only, which is always on. Leave `npm publish` and
+     `npm dist-tag` off, so the workflow can never publish on its own.
 
    Or with npm 11.15.0 or newer and 2FA on the account:
-   `npm trust github galley-proof --file release.yml --repo laat/galley --allow-publish`.
+   `npm trust github galley-proof --file release.yml --repo laat/galley --allow-stage-publish`.
 
-   A trusted publisher that has not published within 2 days expires, and must be deleted and
-   added again. So add it when the next version is ready, and release it within 2 days.
+   npm has one trusted publisher per package. If galley-proof has one already that allows
+   `npm publish`, turn that off on npmjs.com, or replace it with the CLI:
+   `npm trust list galley-proof`, `npm trust revoke galley-proof --id <id>`, then the command
+   above.
 
-3. After the workflow has published: Settings → Publishing access → **Require two-factor
-   authentication and disallow tokens**. The workflow publishes without a token; nothing else
-   should.
+   A new trusted publisher that has not published within 2 days expires, and must be deleted and
+   added again. npm does not say whether a staged version counts, so add it when the next
+   version is ready, and release and approve that within 2 days.
+
+3. After the first version the workflow staged is approved: Settings → Publishing access →
+   **Require two-factor authentication and disallow tokens**. That leaves trusted publishing
+   alone. The workflow stages without a token, and only the user's 2FA publishes.

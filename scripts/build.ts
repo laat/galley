@@ -1,5 +1,5 @@
 // Builds the npm package, galley-proof, in dist/ or the directory given: `pnpm build`, then
-// `npm pack ./dist`. The release workflow (.github/workflows/release.yml) publishes it.
+// `npm pack ./dist`. The release workflow (.github/workflows/release.yml) stages it on npm.
 //
 // Node strips types from no file under node_modules, so the package is JavaScript: each module
 // in bin/ and src/ with its types stripped by Node's own stripper, the one that runs the checkout

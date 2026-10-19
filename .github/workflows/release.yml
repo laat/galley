@@ -1,11 +1,13 @@
 name: release
 
-# Publishes galley-proof to npm when a GitHub Release is published (.claude/skills/release/SKILL.md),
-# from the release's tag. A tag pushed without a release publishes nothing.
+# Stages galley-proof on npm when a GitHub Release is published (.claude/skills/release/SKILL.md),
+# from the release's tag. A tag pushed without a release stages nothing. A staged version is on
+# npm, but nobody can install it until the user approves it with 2FA (`npm stage approve`).
 #
 # npm's trusted publishing: npm takes this workflow's OIDC token, for the trusted publisher set up
 # on npmjs.com (owner laat, repository galley, workflow release.yml), in place of a token in the
-# repository, and adds provenance. Only the publish job can ask for that token, and it installs
+# repository, and adds provenance. The trusted publisher allows `npm stage publish` only, so the
+# workflow can not publish on its own. Only the stage job can ask for that token, and it installs
 # no dependencies and runs no tests.
 on:
   release:
@@ -78,8 +80,8 @@ jobs:
     permissions:
       contents: read
 
-  publish:
-    name: publish
+  stage:
+    name: stage
     needs: [package, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -94,17 +96,35 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      # Trusted publishing needs npm 11.5.1 or newer.
+      # `npm stage`, with trusted publishing, needs npm 11.15.0 or newer.
       - name: Update npm
         run: |
-          if node -e 'process.exit(process.argv[1].localeCompare("11.5.1", undefined, { numeric: true }) < 0 ? 0 : 1)' "$(npm --version)"; then
-            npm install --global npm@^11.5.1
+          if node -e 'process.exit(process.argv[1].localeCompare("11.15.0", undefined, { numeric: true }) < 0 ? 0 : 1)' "$(npm --version)"; then
+            npm install --global npm@^11.15.0
           fi
           npm --version
       # The build needs nothing but Node (scripts/build.ts).
       - run: npm run build
       # A pre-release goes to npm's next, so that `npm install galley-proof` keeps getting the last release.
-      - name: Publish
+      # npm refuses to stage a version it has staged already. The job can not ask first with
+      # `npm stage list`, which needs a login: npm's OIDC token runs `npm stage publish`, but not
+      # the other `npm stage` commands.
+      - name: Stage
         run: |
-          case "$(node -p "require('./package.json').version")" in *-*) tag=next ;; *) tag=latest ;; esac
-          npm publish ./dist --access public --tag "$tag"
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          npm stage publish ./dist --access public --tag "$tag" --json >"$RUNNER_TEMP/stage.json"
+          cat "$RUNNER_TEMP/stage.json"
+          staged() { node -p "Object.values(require(process.argv[1]))[0].$1 ?? ''" "$RUNNER_TEMP/stage.json"; }
+          id=$(staged stageId)
+          if [ -z "$id" ]; then
+            echo "::error::npm staged $name $version without saying its stage id. npm stage list $name has it."
+            exit 1
+          fi
+          echo "::notice::Staged $name@$version as $id: approve with npm stage approve $id"
+          {
+            echo "Staged $name@$version as \`$id\`, with the dist-tag \`$tag\` and the shasum \`$(staged shasum)\`."
+            echo
+            echo "Nobody can install it until it is approved: approve with \`npm stage approve $id\`, or reject it with \`npm stage reject $id\`. Both ask for 2FA."
+          } >>"$GITHUB_STEP_SUMMARY"
