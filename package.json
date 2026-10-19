@@ -1,9 +1,14 @@
 {
-  "name": "galley",
+  "name": "galley-proof",
   "version": "0.1.0",
+  "private": true,
   "description": "A local staging area for pull requests: agents open PRs with a gh-compatible CLI, you review them in a GitHub-like UI, then publish to GitHub.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laat/galley.git"
+  },
   "bin": {
     "galley": "./bin/galley.ts"
   },
@@ -13,6 +18,7 @@
   "scripts": {
     "start": "node bin/galley.ts serve",
     "dev": "node --watch bin/galley.ts serve",
+    "build": "node --disable-warning=ExperimentalWarning scripts/build.ts",
     "test": "node --test --test-timeout=120000 'test/**/*.test.ts' 'desktop/test/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },

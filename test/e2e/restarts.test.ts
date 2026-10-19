@@ -15,6 +15,7 @@ import { startServer } from '../../src/server/server.ts';
 import { Db } from '../../src/server/db.ts';
 import { Service, type ChangeEvent } from '../../src/server/service.ts';
 import { CodexReviewer } from '../../src/server/reviewers/codex.ts';
+import { VERSION } from '../../src/config.ts';
 
 startHarness();
 
@@ -522,7 +523,7 @@ test('the server leaves an idle connection open until the client closes it', asy
 });
 
 test('the server says it is galley, and serve says who has its port', async () => {
-  assert.deepEqual(await (await fetch(`${server.url}/api/meta`)).json(), { name: 'galley', version: '0.1.0', features: [], url: server.url, desktop_app: { connected: false, open_links: false } });
+  assert.deepEqual(await (await fetch(`${server.url}/api/meta`)).json(), { name: 'galley', version: VERSION, features: [], url: server.url, desktop_app: { connected: false, open_links: false } });
   const home = mkdtempSync(join(tmpdir(), 'galley-taken-'));
   const other = createHttpServer((req, res) => res.end('hello'));
   try {

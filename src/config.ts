@@ -1,7 +1,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import pkg from '../package.json' with { type: 'json' };
 
-export const VERSION = '0.1.0';
+/** package.json's, which a release bumps (.claude/skills/release). */
+export const VERSION = pkg.version;
 /** Unassigned with IANA, below the ports macOS and Linux hand out for outgoing connections, and no dev server's default (#41). */
 export const DEFAULT_PORT = 24823;
 /**

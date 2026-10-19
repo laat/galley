@@ -6,7 +6,7 @@
 // galley kept clones, and left where it was (Service.migrateRepos), has no git endpoint.
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { extname, join, relative } from 'node:path';
 import { Readable, type Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
@@ -19,13 +19,16 @@ const GIT_PATH = /^\/git\/([^/]+)\/([^/]+)\.git(\/.*)?$/;
 
 export function gitHttp(s: Service): MiddlewareHandler {
   let hooks: string | null = null;
-  /** The pre-receive hook runs receive-hook.ts with this server's node, written once each time the server starts, so it is the running code's. */
+  /**
+   * The pre-receive hook runs receive-hook.ts (receive-hook.js in the npm package, which is built)
+   * with this server's node, written once each time the server starts, so it is the running code's.
+   */
   const hooksDir = (): string => {
     if (hooks) return hooks;
     const dir = join(s.dataDir!, 'hooks');
     const quote = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`;
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'pre-receive'), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(import.meta.dirname, 'receive-hook.ts'))}\n`);
+    writeFileSync(join(dir, 'pre-receive'), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(import.meta.dirname, `receive-hook${extname(import.meta.filename)}`))}\n`);
     chmodSync(join(dir, 'pre-receive'), 0o755);
     return (hooks = dir);
   };
