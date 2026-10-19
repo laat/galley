@@ -342,6 +342,8 @@ test('the agent loop, from staging to publishing', async (t) => {
     }
     const front = await (await fetch(`${server.url}/`)).text();
     assert.match(front, /<a class="app-header-logo" href="\/" title="All staged pull requests" aria-label="galley">[^]*?<\/a>\s*<nav class="app-header-context"><\/nav>/);
+    // At the other end, your avatar is the way to the settings.
+    assert.match(front, /<a class="app-header-avatar" href="\/settings" title="Settings" aria-label="Settings"><img class="avatar avatar-circle" [^>]*><\/a>\s*<\/div>\s*<\/div>\s*<\/header>/);
     // One registered by path before galley kept clones, without a GitHub remote: no link.
     server.service.db.insert('repos', { git_dir: join(dir, 'elsewhere', '.git'), work_dir: join(dir, 'elsewhere'), owner: 'local', name: 'elsewhere', remote: 'origin', github_slug: null, created_at: new Date().toISOString() });
     const local = await (await fetch(`${server.url}/local/elsewhere`)).text();

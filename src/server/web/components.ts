@@ -46,8 +46,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
   <nav class="app-header-context">${opts.crumbs ?? ''}</nav>
   <div class="app-header-actions">
     ${running ? html`<span id="server-stopping" class="stopping-indicator" role="status" title="${waiting}" aria-label="${waiting}">${icon('alert')}<span class="stopping-indicator-long">Stopping · ${plural(running, 'review')} running</span><span class="stopping-indicator-short">${running}</span></span>` : html`<span id="server-stopping" hidden></span>`}
-    <a class="app-header-button" href="/settings" title="Settings" aria-label="Settings">${icon('gear')}</a>
-    ${avatar(avatarUrl(s, viewer), viewer.login, 28, 'avatar-circle')}
+    <a class="app-header-avatar" href="/settings" title="Settings" aria-label="Settings">${avatar(avatarUrl(s, viewer), viewer.login, 28, 'avatar-circle')}</a>
   </div>
 </div>
 </header>

@@ -304,7 +304,7 @@ removed, deleting, pinning, settings and stopping automatic reviews stay yours.
 
 ## Settings
 
-The gear in the header. Per reviewer agent: whether it reviews automatically, its name, model,
+Your avatar in the header. Per reviewer agent: whether it reviews automatically, its name, model,
 reasoning effort, limit of automatic reviews, whether it may install dependencies and run the
 tests, whether it skips pull requests by its own kind of agent, and for Claude, whether those
 tests may listen on localhost. Under Publishing: the merge method for auto-merge, and how many
