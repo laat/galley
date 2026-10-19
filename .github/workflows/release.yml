@@ -1,0 +1,110 @@
+name: release
+
+# Publishes galley-proof to npm when a GitHub Release is published (.claude/skills/release/SKILL.md),
+# from the release's tag. A tag pushed without a release publishes nothing.
+#
+# npm's trusted publishing: npm takes this workflow's OIDC token, for the trusted publisher set up
+# on npmjs.com (owner laat, repository galley, workflow release.yml), in place of a token in the
+# repository, and adds provenance. Only the publish job can ask for that token, and it installs
+# no dependencies and runs no tests.
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+# One release at a time, and none cancelled halfway.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # The release's tag against package.json and npm, and the package as npm installs it.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check the version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::The release's tag is $TAG, but package.json's version is $version. Bump package.json in a pull request and release that, or name the release's tag v$version."
+            exit 1
+          fi
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          if [ "$PRERELEASE" != "$prerelease" ]; then
+            echo "::error::A release is a pre-release on GitHub exactly when its version is one (0.3.0-rc.1). $TAG is marked prerelease=$PRERELEASE."
+            exit 1
+          fi
+          if npm view "$name@$version" version 2>"$RUNNER_TEMP/npm-view.log"; then
+            echo "::error::$name $version is already on npm. Bump package.json's version in a pull request, and release that."
+            exit 1
+          elif ! grep -q E404 "$RUNNER_TEMP/npm-view.log"; then
+            cat "$RUNNER_TEMP/npm-view.log"
+            echo "::error::Could not ask npm whether $name $version is published."
+            exit 1
+          fi
+      # Installed from its tarball, as npm installs it: Node strips types from no file under
+      # node_modules, so a module the build left out or left as .ts fails here. No install scripts:
+      # galley has none, and its dependencies need none.
+      - name: Install the package
+        run: |
+          npm run build
+          npm pack ./dist --pack-destination "$RUNNER_TEMP"
+          npm install --global --ignore-scripts --prefix "$RUNNER_TEMP/global" "$RUNNER_TEMP"/galley-proof-*.tgz
+          got=$("$RUNNER_TEMP/global/bin/galley" --version)
+          want="galley version $(node -p "require('./package.json').version")"
+          if [ "$got" != "$want" ]; then
+            echo "::error::The installed galley --version says \"$got\", not \"$want\"."
+            exit 1
+          fi
+
+  test:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: publish
+    needs: [package, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - name: Update npm
+        run: |
+          if node -e 'process.exit(process.argv[1].localeCompare("11.5.1", undefined, { numeric: true }) < 0 ? 0 : 1)' "$(npm --version)"; then
+            npm install --global npm@^11.5.1
+          fi
+          npm --version
+      # The build needs nothing but Node (scripts/build.ts).
+      - run: npm run build
+      # A pre-release goes to npm's next, so that `npm install galley-proof` keeps getting the last release.
+      - name: Publish
+        run: |
+          case "$(node -p "require('./package.json').version")" in *-*) tag=next ;; *) tag=latest ;; esac
+          npm publish ./dist --access public --tag "$tag"

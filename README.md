@@ -20,18 +20,29 @@ title, description and commits are right, you publish it to GitHub.
 
 ## Install
 
+From npm, where the package is called galley-proof and the command it installs `galley`:
+
+```sh
+npm install --global galley-proof
+skill="$(npm root --global)/galley-proof/skills/galley"
+```
+
+Or from a checkout, which follows `git pull`:
+
 ```sh
 git clone https://github.com/laat/galley && cd galley
 pnpm install
 ln -s "$PWD/bin/galley.ts" ~/.local/bin/galley   # or: npm link
+skill="$PWD/skills/galley"
 ```
 
-Give your agents the `galley` skill, which tells them how to stage, wait and answer feedback.
-Codex and opencode read skills from `~/.agents/skills`, Claude Code from `~/.claude/skills`:
+Give your agents the `galley` skill, which tells them how to stage, wait and answer feedback. It
+is in `skills/galley`, in the global install or the checkout (`$skill` above). Codex and opencode
+read skills from `~/.agents/skills`, Claude Code from `~/.claude/skills`:
 
 ```sh
 mkdir -p ~/.agents/skills ~/.claude/skills
-ln -s "$PWD/skills/galley" ~/.agents/skills/galley       # Codex, opencode
+ln -s "$skill" ~/.agents/skills/galley                   # Codex, opencode
 ln -s ~/.agents/skills/galley ~/.claude/skills/galley    # Claude Code
 ```
 
@@ -41,7 +52,7 @@ To use it as a gh extension too (`gh galley pr create …`):
 
 ```sh
 dir="${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-galley"
-mkdir -p "$dir" && ln -s "$PWD/bin/galley.ts" "$dir/gh-galley"
+mkdir -p "$dir" && ln -s "$(command -v galley)" "$dir/gh-galley"
 ```
 
 ## Run
@@ -89,7 +100,8 @@ in the shell profile there, and restart them:
 export GALLEY_URL=https://<host>.<tailnet>.ts.net
 ```
 
-That machine needs only the checkout and the CLI, without `pnpm install`:
+That machine needs only the CLI: `npm install --global galley-proof`, or a checkout without
+`pnpm install`:
 
 ```sh
 git clone https://github.com/laat/galley && cd galley
@@ -168,7 +180,7 @@ sandbox's own.
 
 ## Desktop app
 
-On macOS, `desktop/` has an app: galley in a window of its own with a Dock icon, a notification
+On macOS, the checkout's `desktop/` has an app: galley in a window of its own with a Dock icon, a notification
 when a pull request has been your turn for 10 seconds (clicking it opens the pull request), and a
 menu-bar status. Next to its icon is the number waiting for you and, after ↻, the number the agents
 or auto-publish are working on. Its menu lists the open pull requests in the front page's groups,

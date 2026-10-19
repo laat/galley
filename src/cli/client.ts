@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, openSync } from 'node:fs';
 import http from 'node:http';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cliActor, dataDir, DEFAULT_PORT, fromEnv, githubSlug, serverUrl } from '../config.ts';
 
@@ -158,7 +158,8 @@ async function autostart(base: string): Promise<boolean> {
   if (!isLocal(base)) return false;
   if (!ranHere()) return false;
   const url = new URL(base);
-  const bin = fileURLToPath(new URL('../../bin/galley.ts', import.meta.url));
+  // bin/galley.js in the npm package, which is built (scripts/build.ts).
+  const bin = fileURLToPath(new URL(`../../bin/galley${extname(import.meta.filename)}`, import.meta.url));
   let out: 'ignore' | number = 'ignore';
   const logFile = join(dataDir(), 'server.log');
   try {
