@@ -182,19 +182,9 @@ html { scroll-padding-top: var(--header-stuck); }
   min-height: env(titlebar-area-height, 0px);
 }
 .app-header :is(a, button, input, select, textarea, summary, [title]) { app-region: no-drag; }
-.app-header-logo {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-}
-.app-header-logo .octicon { width: 20px; height: 20px; }
-.app-header-logo:hover { background: var(--btn-hover); text-decoration: none; }
+/* The logo is the app's icon, a blue tile, which stands out on the header in light and in dark. */
+.app-header-logo { display: inline-flex; border-radius: 8px; }
+.app-header-logo:hover { filter: brightness(1.1); }
 /* The crumbs stay on one line, so the header keeps its height, which the overlay and --header-stuck
    count on in the app: in a narrow window the bold one, the repository's or the page's, gives way. */
 .app-header-context { flex: 1; font-size: 14px; display: flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }

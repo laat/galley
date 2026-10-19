@@ -21,7 +21,7 @@ import { askingComputer, computerOf, requestComputer } from './computer.ts';
 import type { IncomingMessage } from 'node:http';
 
 const PUBLIC = join(import.meta.dirname, '..', '..', 'public');
-const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
+const TYPES: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 export function createApp(s: Service, opts: { allowedHosts: string[]; uploadsDir: string }): Hono {
   const app = new Hono();

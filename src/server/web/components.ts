@@ -7,6 +7,15 @@ import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 import type { ReferenceContext } from './references.ts';
 import { askingComputer } from '../computer.ts';
 
+/** galley's logo in the header: the app's icon (desktop/icons/icon.svg) without its margin, so that its tile fills the 28px. */
+const LOGO = raw(
+  `<svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true">` +
+    `<path fill="#3d73b6" d="M22.01 0L41.99 0C48.33 0 51.49 0 54.91 1.08C58.63 2.43 61.57 5.37 62.92 9.09C64 12.51 64 15.67 64 22.01L64 41.99C64 48.33 64 51.49 62.92 54.91C61.57 58.63 58.63 61.57 54.91 62.92C51.49 64 48.33 64 41.99 64L22.01 64C15.67 64 12.51 64 9.09 62.92C5.37 61.57 2.43 58.63 1.08 54.91C0 51.49 0 48.33 0 41.99L0 22.01C0 15.67 0 12.51 1.08 9.09C2.43 5.37 5.37 2.43 9.09 1.08C12.51 0 15.67 0 22.01 0Z"/>` +
+    `<path fill="#fbf7ef" d="M33.6 34.39L51.6 34.39L51.6 42.72L47.53 45.59C44.16 50.14 38.88 52.8 32.4 52.8C21.82 52.8 14.44 45.71 13.34 34.87L22.51 34.29C23.17 41.39 26.98 46 32.4 46C36.05 46 38.96 43.91 40.68 40.39L33.6 40.39ZM14.63 23.38C17.36 15.85 23.83 11.2 32.4 11.2C36.26 11.2 39.7 12.14 42.56 13.87L42.56 13.85L48 13.85L48 21.69L39.52 21.69C37.78 19.34 35.32 18 32.4 18C28.92 18 26.11 19.9 24.36 23.14L14.63 23.38Z"/>` +
+    `<path fill="#f05a42" d="M11.41 32.58C11.34 32.59 11.27 32.59 11.2 32.59C10.31 32.59 9.45 32.23 8.82 31.6C8.19 30.97 7.84 30.12 7.84 29.23C7.84 28.34 8.19 27.48 8.82 26.85C9.43 26.24 10.26 25.89 11.12 25.87L53.53 24.82L53.54 24.82C53.56 24.82 53.58 24.82 53.6 24.82C54.28 24.82 54.93 25.09 55.41 25.57C55.89 26.05 56.16 26.7 56.16 27.38C56.16 28.06 55.89 28.71 55.41 29.19C54.97 29.63 54.38 29.89 53.76 29.93Z"/>` +
+    `</svg>`,
+);
+
 export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: Safe; live?: number | 'all'; data?: Record<string, string | number> }): string {
   const viewer = s.viewer();
   const data = Object.entries(opts.data ?? {}).map(([k, v]) => html` data-${raw(k)}="${v}"`);
@@ -25,6 +34,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${opts.title}</title>
+<link rel="icon" href="/static/favicon.png" sizes="32x32" type="image/png">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
@@ -32,7 +42,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 <body data-live="${opts.live ?? ''}" data-viewer="${viewer.login}" data-desktop-app="${desktopApp}">
 <header class="app-header-wrap">
 <div class="app-header">
-  <a class="app-header-logo" href="/" title="All staged pull requests" aria-label="galley">${icon('git-pull-request', { size: 24 })}</a>
+  <a class="app-header-logo" href="/" title="All staged pull requests" aria-label="galley">${LOGO}</a>
   <nav class="app-header-context">${opts.crumbs ?? ''}</nav>
   <div class="app-header-actions">
     ${running ? html`<span id="server-stopping" class="stopping-indicator" role="status" title="${waiting}" aria-label="${waiting}">${icon('alert')}<span class="stopping-indicator-long">Stopping · ${plural(running, 'review')} running</span><span class="stopping-indicator-short">${running}</span></span>` : html`<span id="server-stopping" hidden></span>`}
