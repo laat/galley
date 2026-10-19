@@ -8,7 +8,7 @@ import { diffHunkFor, expandedLine, lineInDiff, mapLine, rangeTouched, withConte
 import type { CodexReviewer } from './reviewers/codex.ts';
 import type { ClaudeReviewer } from './reviewers/claude.ts';
 import type { CustomReviewers } from './reviewers/custom.ts';
-import type { ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
+import type { LiveRun, ReviewAtWork, Reviewer } from './reviewers/reviewer.ts';
 import { busy, doneForAutoPublish, doneForHandover, toReview, type HeadState, type HeadStatus } from './reviewers/head-status.ts';
 import { agentReviews, askedAt, unansweredThreads, unseenFeedback, type Feedback } from './feedback.ts';
 import { addEvent, eventsAfter, eventsSince, lastEvent, type EventData, type EventType, type TimelineEvent } from './events.ts';
@@ -2471,6 +2471,13 @@ export class Service {
     return this.reviewerAgents().reduce((n, r) => n + r.runningCount(), 0);
   }
 
+  /** The reviews the reviewer agents are running, on all pull requests, the earliest started first, with what each has done so far. */
+  liveRuns(): (LiveRun & { reviewer: Reviewer })[] {
+    return this.reviewerAgents()
+      .flatMap((reviewer) => reviewer.liveRuns().map((live) => ({ ...live, reviewer })))
+      .sort((a, b) => a.run.id - b.run.id);
+  }
+
   /**
    * The reviewers of the description have a new version of it to review: an author waiting now
    * need not wait again for them. (Those of the code review what a push brings when the author waits.)
@@ -4193,6 +4200,7 @@ export const CANCELLED: Record<CancelReason, string> = {
   pushed: 'new commits pushed',
   edited: 'title or description edited',
   base_moved: 'the base moved',
+  stopped: 'asked to stop',
 };
 
 /**

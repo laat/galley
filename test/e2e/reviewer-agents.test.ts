@@ -413,7 +413,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
   });
 });
 
-test("a reviewer agent's progress shows while it runs, and its transcript stays", async () => {
+test("a reviewer agent's progress shows while it runs, also among every pull request's, and its transcript stays", async () => {
   git('checkout', '-q', 'main');
   git('checkout', '-qb', 'feature/progress');
   writeFileSync(join(repo, 'progress.js'), 'export const progress = 1;\n');
@@ -460,6 +460,16 @@ test("a reviewer agent's progress shows while it runs, and its transcript stays"
       const live = await page(`/runs/${runId}`);
       assert.match(live, new RegExp(`<div id="main"[^>]* data-run-live="${runId}"`));
       assert.match(live, /Reviewing for <relative-time/);
+      // So does the page of every pull request's reviews, with the same box, and the header counts it.
+      const all = await (await fetch(`${server.url}/runs`)).text();
+      assert.match(all, /<body data-live="all"/);
+      assert.ok(all.includes(box), all);
+      assert.match(all, new RegExp(`<a class="pr-row-title" href="${pullPath}">Show the progress</a> <a class="pr-row-number" href="${pullPath}">s#${number}</a>`));
+      assert.match(all, /<strong>codex-review<\/strong>'s review on request of <code>[0-9a-f]{7}<\/code>/);
+      assert.match(all, new RegExp(`<a class="agent-state agent-state--running" href="${pullPath}/runs/${runId}" title="Reviewing [0-9a-f]{7}">`));
+      const indicator = await (await fetch(`${server.url}/runs/indicator`)).text();
+      assert.match(indicator, /^<a id="runs-indicator" class="runs-indicator runs-indicator--running" href="\/runs" title="Reviewer agents: 1 review running"[^>]*><svg[^>]*>[^]*?<\/svg><span>1<\/span><\/a>$/);
+      assert.ok(html.includes(indicator), 'in the header of every page');
       writeFileSync(gate, '');
       await server.service.codex!.settle(pull.id);
     } finally {
@@ -470,6 +480,11 @@ test("a reviewer agent's progress shows while it runs, and its transcript stays"
 
     // Once it is done, the box is gone, and the sidebar and the review link to the transcript.
     assert.equal((await fetch(`${server.url}${pullPath}/runs/${runId}/progress`)).status, 204);
+    // The page of every pull request's reviews lists it among the finished ones, with what it found.
+    const all = await (await fetch(`${server.url}/runs`)).text();
+    assert.match(all, /No reviewer agent is reviewing\./);
+    assert.match(all, new RegExp(`<a class="agent-state" href="${pullPath}/runs/${runId}" title="Found 1 problem in [0-9a-f]{7}"><svg class="octicon octicon-comment color-fg-muted"[^>]*>[^]*?</svg><span>1 finding</span></a>`));
+    assert.match(await (await fetch(`${server.url}/runs/indicator`)).text(), /^<a id="runs-indicator" class="runs-indicator" href="\/runs" title="Reviewer agents" aria-label="Reviewer agents"><svg[^>]*>[^]*?<\/svg><\/a>$/);
     const html = await page();
     assert.doesNotMatch(html, /js-run-progress/);
     // Its row says what it found, with a comment in the attention colour: agent has not answered it.

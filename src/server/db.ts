@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS signed_commits (
  * closed here, merged or closed on GitHub, published, a new head pushed, or (for reviewers of the
  * description) the title or description edited, or the base moved, changing the commits.
  */
-export type CancelReason = 'closed' | 'merged' | 'closed_on_github' | 'published' | 'pushed' | 'edited' | 'base_moved';
+export type CancelReason = 'closed' | 'merged' | 'closed_on_github' | 'published' | 'pushed' | 'edited' | 'base_moved' | 'stopped';
 
 export interface ReviewRunRow {
   id: number;

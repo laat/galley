@@ -68,7 +68,7 @@ function stepLabel(b: RunBase, run: ReviewRunRow, step: Pick<Step, 'title' | 'ki
 }
 
 /** How long a run took: "40 s", "3 min 5 s", "25 min". */
-function took(ms: number): string {
+export function took(ms: number): string {
   const s = Math.max(1, Math.round(ms / 1000));
   if (s < 60) return `${s} s`;
   const m = Math.floor(s / 60);

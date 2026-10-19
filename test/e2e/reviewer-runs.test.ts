@@ -226,6 +226,43 @@ test('a running review is cancelled when the pull request is published, closed, 
         assert.match(transcript, /<code class="run-command">git diff HEAD~1 HEAD<\/code><\/span> <svg[^>]*octicon-circle-slash[^>]*aria-label="Did not finish"/);
       });
 
+      await t.test('stopped by the user: the waiting author hears it is done, and it does not review the commit again on its own', async () => {
+        const pr = await stage('feature/cancel-stop', 'cancel-stop.js', ['--reviewer', 'codex']);
+        const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+        await until(() => reviewer('codex').atWork(row(pr))?.status === 'IN_PROGRESS', 'Codex reviews');
+        const [{ id: runId }] = (await human('GET', `${pr.base}/reviewers/codex`)).runs;
+        const cancel = `${pr.base}/reviewers/codex/cancel`;
+        const stopButton = `data-api="${cancel}" data-run="${runId}"`;
+        // From the page of every pull request's reviews, and from the reviewer's menu in the sidebar.
+        assert.ok((await (await fetch(`${server.url}/runs`)).text()).includes(`<button type="button" class="btn btn-sm js-stop-review" id="stop-run-${runId}" ${stopButton}`));
+        assert.ok((await pr.page()).includes(`<button type="button" class="dropdown-item js-stop-review" id="agent-codex:stop-${runId}" ${stopButton}>Stop the review`));
+        // Only the user stops it, and only the review the page showed.
+        const post = (body: object, actor?: string) =>
+          fetch(server.url + cancel, { method: 'POST', headers: { 'content-type': 'application/json', ...(actor ? { 'x-galley-actor': actor } : {}) }, body: JSON.stringify(body) });
+        assert.equal((await post({}, 'agent')).status, 403);
+        const other = await post({ run_id: runId + 1000 });
+        assert.equal(other.status, 409);
+        assert.match((await other.json()).message, /^that review by Codex has ended, and another is running$/);
+        assert.equal((await post({ run_id: runId })).status, 204);
+        assert.equal(reviewer('codex').atWork(row(pr)), null, 'at once');
+        const r = await waiting;
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /codex-review's review of [0-9a-f]{7} was cancelled \(asked to stop\)/);
+        assert.match(r.stdout, /; ask the user to review it: /);
+        await reviewer('codex').settle(pr.id);
+        assert.deepEqual(await runs(pr, 'codex'), [['cancelled', 'stopped']]);
+        const page = await pr.page();
+        assert.match(page, /title="Review of [0-9a-f]{7} cancelled">[^]*?<span class="agent-chunk">Asked to stop<\/span>/);
+        assert.match(page, /codex-review<\/a><span class="Label Label--bot">bot<\/span> stopped reviewing <code>[0-9a-f]{7}<\/code> .*?: asked to stop/);
+        assert.doesNotMatch(page, /js-stop-review/);
+        const stopped = await post({});
+        assert.equal(stopped.status, 409);
+        assert.match((await stopped.json()).message, /^Codex is not reviewing this pull request$/);
+        // The author waits again, and Codex does not review the commit again.
+        assert.equal((await cli(['pr', 'wait', String(pr.number), '--timeout', '1s'])).code, 124);
+        assert.equal((await runs(pr, 'codex')).length, 1);
+      });
+
       await t.test('merged on GitHub, after which it can not be asked for again', async () => {
         const pr = await stage('feature/cancel-merge', 'cancel-merge.js');
         await human('POST', `${pr.base}/publish`, { sign: false });

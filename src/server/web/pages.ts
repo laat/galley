@@ -3,7 +3,7 @@ import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
 import { afterRound, andList, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type EditField, type GithubEdit, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { HeadStatus } from '../reviewers/head-status.ts';
-import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
+import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type LiveRun, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
 import { lastEvent, readEvent } from '../events.ts';
@@ -29,7 +29,7 @@ import {
 } from './components.ts';
 import { browseUrl, diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
 import { withThreadContext } from './browse.ts';
-import { dollars, runProgress, runUrl, tokens, transcriptContent, usageParts } from './runs.ts';
+import { dollars, runProgress, runUrl, tokens, took, transcriptContent, usageParts } from './runs.ts';
 import type { Span } from '../diff.ts';
 
 // ------------------------------------------------------------------ lists
@@ -1495,6 +1495,7 @@ function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; li
   const onOff = (on: boolean) => (on ? 'on' : 'off');
   const bySettings = reviewer.bySettings(pull);
   const busy = reviewer.isRunning(pull.id) || pull.state === 'closed' || pull.github_state === 'merged';
+  const live = reviewer.live(pull);
   // The limit is changed in place, and saved shortly after the last click.
   const limitRow = enabled
     ? html`<div class="agent-menu-limit">
@@ -1518,6 +1519,7 @@ function reviewerMenu(p: PullPage, reviewer: Reviewer, o: { enabled: boolean; li
     <summary class="btn-octicon" id="${id('options')}" aria-label="Options for ${reviewer.actor().login}" title="Options">${icon('gear')}</summary>
     <div class="dropdown-menu dropdown-menu-sw">
       <button type="button" class="dropdown-item js-run-reviewer" id="${id('ask')}" data-api="${api}"${busy ? raw(' disabled') : ''}>Ask ${reviewer.label} to review</button>
+      ${live ? html`<button type="button" class="dropdown-item js-stop-review" id="${id(`stop-${live.run.id}`)}" data-api="${api}/cancel" data-run="${live.run.id}">Stop the review<span class="dropdown-item-desc">It does not review ${shortSha(live.run.head_sha)} again on its own</span></button>` : ''}
       <div class="dropdown-divider"></div>
       ${automatic}
       <a class="dropdown-item" id="${id('settings')}" href="${reviewer.settingsUrl()}">Settings${about ? html`<span class="dropdown-item-desc">${about}</span>` : ''}</a>
@@ -1563,9 +1565,9 @@ function findRun(p: PullPage, runId: number): { run: ReviewRunRow; reviewer: Rev
 }
 
 /** A run's reviewer's bot, when the reviewer no longer runs: the custom reviewer's, by its name. */
-function formerLogin(s: Service, run: ReviewRunRow): string {
+function formerActor(s: Service, run: ReviewRunRow): Actor | null {
   const id = Number(s.db.getMeta(customActorKey(run.reviewer)));
-  return (id && s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)?.login) || run.reviewer;
+  return (id && s.db.get<Actor>('SELECT * FROM actors WHERE id = ?', id)) || null;
 }
 
 /** A run's transcript, on a page of its own (an extension). While the run goes on, the page follows it. */
@@ -1573,7 +1575,7 @@ export function transcriptPage(p: PullPage, runId: number): string {
   const { run, reviewer } = findRun(p, runId);
   const live = reviewer?.live(p.pull);
   const progress = live?.run.id === run.id ? live.progress : null;
-  const login = reviewer?.actor().login ?? formerLogin(p.s, run);
+  const login = reviewer?.actor().login ?? formerActor(p.s, run)?.login ?? run.reviewer;
   const content = transcriptContent(runBase(p), { run, login, label: reviewer?.label ?? run.reviewer, entries: transcript(p.s.db, run.id), live: progress });
   return pullLayout(p, null, content, progress ? { 'run-live': run.id } : {});
 }
@@ -1587,6 +1589,103 @@ export async function progressPart(s: Service, owner: string, name: string, numb
     if (live?.run.id === runId) return runProgress({ htmlBase: `/${owner}/${name}/pull/${number}`, repoBase: `/${owner}/${name}` }, live.run, live.progress).value;
   }
   return null;
+}
+
+/** How many finished runs the reviewer agents' page lists. */
+const FINISHED_RUNS = 20;
+
+/**
+ * The reviewer agents' runs on every pull request, on a page of their own (an extension): the
+ * reviews running now, each with its progress as the sidebar shows it, and the latest finished
+ * ones. The page follows every pull request.
+ */
+export function runsPage(s: Service): string {
+  const reviewers = new Map(s.reviewerAgents().map((r) => [r.key, r]));
+  const running = s.liveRuns();
+  const finished = s.db.all<ReviewRunRow>("SELECT * FROM review_runs WHERE status != 'running' ORDER BY finished_at DESC, id DESC LIMIT ?", FINISHED_RUNS);
+  const row = (run: ReviewRunRow, live: LiveRun | null) => {
+    const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', run.pull_id)!;
+    const repo = s.repoById(pull.repo_id);
+    const b = { htmlBase: `/${repo.owner}/${repo.name}/pull/${pull.number}`, repoBase: `/${repo.owner}/${repo.name}` };
+    const actor = reviewers.get(run.reviewer)?.actor() ?? formerActor(s, run);
+    const login = actor?.login ?? run.reviewer;
+    const api = `/api/repos/${repo.owner}/${repo.name}/pulls/${pull.number}/reviewers/${run.reviewer}`;
+    const sha = shortSha(run.head_sha);
+    const what = runSubject(run).startsWith('description:') ? html`the description at <code>${sha}</code>` : html`<code>${sha}</code>`;
+    const model = [run.model || 'default model', run.effort ? `${run.effort} effort` : null].filter(Boolean).join(', ');
+    const meta: Safe[] = [html`<strong>${login}</strong>'s ${run.trigger === 'auto' ? 'automatic review' : 'review on request'} of ${what}`, html`${model}`];
+    let state: RunState;
+    if (live) {
+      state = { mark: icon('dot-fill'), text: html`Reviewing · ${since(run.started_at)}`, title: `Reviewing ${sha}`, running: true };
+    } else {
+      state = finishedState(s, run);
+      const after = run.finished_at ? ` after ${took(Date.parse(run.finished_at) - Date.parse(run.started_at))}` : '';
+      meta.push(html`finished ${relTime(run.finished_at)}${after}`);
+      const usage = runUsage([run]);
+      if (usage) meta.push(usage);
+      const error = (run.error ?? '').trim();
+      if (run.status === 'failed' && error) meta.push(html`<span class="agent-error" title="${error}">${error.replace(/\s+/g, ' ')}</span>`);
+      if (run.status === 'cancelled' && run.reason) meta.push(html`${capitalize(CANCELLED[run.reason])}`);
+    }
+    return html`<div class="Box-row pr-row">
+  <span class="pr-row-icon">${actor ? avatar(avatarUrl(s, actor), login, 20, 'avatar-bot') : icon('hubot')}</span>
+  <div class="pr-row-main">
+    <span class="pr-row-heading"><a class="pr-row-repo" href="${b.repoBase}">${repo.owner}/${repo.name}</a> <a class="pr-row-title" href="${b.htmlBase}">${pull.title}</a> <a class="pr-row-number" href="${b.htmlBase}">s#${pull.number}</a></span>
+    <div class="pr-row-meta">${meta.map((m, i) => html`${i ? ' · ' : ''}<span class="agent-chunk">${m}</span>`)}</div>
+    ${live ? runProgress(b, run, live.progress) : ''}
+  </div>
+  <div class="pr-row-side run-side">
+    <a class="agent-state${state.running ? ' agent-state--running' : ''}" href="${runUrl(b, run)}" title="${state.title}">${state.mark}<span>${state.text}</span></a>
+    ${live ? html`<button type="button" class="btn btn-sm js-stop-review" id="stop-run-${run.id}" data-api="${api}/cancel" data-run="${run.id}" title="Stop ${login}'s review; it does not review ${sha} again on its own">${icon('square-fill')} Stop</button>` : ''}
+  </div>
+</div>`;
+  };
+  const group = (iconName: string, title: string, n: number, note = '') =>
+    html`<div class="Box-row turn-group">${icon(iconName)} <h2 class="turn-group-title">${title}</h2> <span class="Counter">${n}</span>${note ? html` <span class="turn-group-note">${note}</span>` : ''}</div>`;
+  const list =
+    running.length || finished.length
+      ? html`<div class="Box">
+    ${group('dot-fill', 'Reviewing', running.length)}
+    ${running.length ? running.map((live) => row(live.run, live)) : html`<div class="Box-row turn-empty">No reviewer agent is reviewing.</div>`}
+    ${finished.length ? html`${group('history', 'Finished', finished.length, 'latest first')}${finished.map((run) => row(run, null))}` : ''}
+  </div>`
+      : html`<div class="Box"><div class="blankslate">
+    ${icon('hubot', { size: 24 })}
+    <h3>No reviews yet</h3>
+    <p>Reviewer agents review each commit an agent waits with. Turn them on in <a href="/settings">Settings</a>.</p>
+  </div></div>`;
+  return layout(s, {
+    title: 'Reviewer agents · galley',
+    crumbs: html`<a href="/runs"><strong>Reviewer agents</strong></a>`,
+    body: html`<div class="container container-xl"><div class="list-header-row"><h1 class="page-title">Reviewer agents</h1></div>${list}</div>`,
+    live: 'all',
+  });
+}
+
+/** What a row of the reviewer agents' page says of its run, as a reviewer's row in the sidebar does. */
+type RunState = Omit<AgentState, 'href'>;
+
+/** How a finished run ended, in a word or two: what its review found, or that it posted none. */
+function finishedState(s: Service, run: ReviewRunRow): RunState {
+  const sha = shortSha(run.head_sha);
+  const state = (mark: Safe, words: string, title: string): RunState => ({ mark, text: html`${words}`, title });
+  switch (run.status) {
+    case 'done': {
+      if (run.review_id !== null && s.db.get<ReviewRow>('SELECT * FROM reviews WHERE id = ?', run.review_id)?.state === 'APPROVED') {
+        return state(icon('check', { cls: 'color-fg-success' }), 'Approved', `Approved ${sha}`);
+      }
+      // Older runs did not count their findings.
+      if (run.findings === null) return state(icon('comment', { cls: 'color-fg-muted' }), 'Reviewed', `Reviewed ${sha}`);
+      if (!run.findings) return state(icon('check', { cls: 'color-fg-muted' }), 'No findings', `Found nothing in ${sha}`);
+      return state(icon('comment', { cls: 'color-fg-muted' }), plural(run.findings, 'finding'), `Found ${plural(run.findings, 'problem')} in ${sha}`);
+    }
+    case 'failed':
+      return state(icon('x-circle-fill', { cls: 'color-fg-danger' }), 'Failed', `Review of ${sha} failed`);
+    case 'cancelled':
+      return state(icon('circle-slash', { cls: 'color-fg-muted' }), 'Cancelled', `Review of ${sha} cancelled`);
+    default:
+      return state(icon('sync', { cls: 'color-fg-attention' }), 'Interrupted', `Review of ${sha} interrupted by a restart`);
+  }
 }
 
 export async function conversationPage(p: PullPage): Promise<string> {

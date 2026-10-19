@@ -436,6 +436,28 @@ test('a review goes by the definition it started with, also when the definition 
   await human('PATCH', '/api/settings/reviewers/house-rules', { reviews: 'description', engine: 'claude' });
 });
 
+test('a review running on a repository its reviewer no longer names can still be stopped', async () => {
+  const number = 1;
+  const base = `/api/repos/acme/widgets/pulls/${number}`;
+  const gate = join(dir, 'gate-stopped');
+  const house = reviewer('house-rules');
+  await withFakes({ FAKE_CLAUDE_GATE: gate, FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine.', verdict: 'comment', comments: [] }) }, async () => {
+    try {
+      const { run_id } = await human('POST', `${base}/reviewers/house-rules`);
+      await human('PATCH', '/api/settings/reviewers/house-rules', { repos: ['other/*'] });
+      await human('POST', `${base}/reviewers/house-rules`, undefined, 404);
+      await human('POST', `${base}/reviewers/house-rules/cancel`, { run_id }, 204);
+      assert.equal(house.atWork(row('acme', number)), null);
+    } finally {
+      writeFileSync(gate, '');
+      await house.settle(row('acme', number).id);
+      await human('PATCH', '/api/settings/reviewers/house-rules', { repos: ['acme/*'] });
+    }
+  });
+  const runs = server.service.db.all<{ status: string; reason: string | null }>("SELECT status, reason FROM review_runs WHERE reviewer = 'house-rules' ORDER BY id DESC LIMIT 1");
+  assert.deepEqual(runs.map((r) => [r.status, r.reason]), [['cancelled', 'stopped']]);
+});
+
 test('it reviews only the repositories it names', async () => {
   const { number, stderr } = await stage(other, ['--reviewer', 'house-rules']);
   assert.match(stderr, /Ignored reviewer house-rules: galley has no reviewer agent by that name for this repository\./);

@@ -1,7 +1,8 @@
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import { HttpError, type Service } from '../service.ts';
-import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, progressPart, pullList, transcriptPage } from './pages.ts';
+import { commitsPage, conversationPage, filesPage, loadPull, notFoundPage, progressPart, pullList, runsPage, transcriptPage } from './pages.ts';
+import { runsIndicator } from './components.ts';
 import { customReviewerPage, customReviewersPage, desktopSettingsPage, publishingSettingsPage, settingsPage } from './settings.ts';
 import { browseUrl, type DiffMode } from './diffview.ts';
 import { blobPage, excerpt, locate, rawFile, treeItemsHtml, treePage } from './browse.ts';
@@ -56,6 +57,9 @@ export function web(s: Service): Hono {
     s.custom?.load();
     return c.html(await customReviewerPage(s, c.req.param('name')));
   });
+  // The reviewer agents' runs on every pull request (an extension), and the header's count of those running.
+  app.get('/runs', (c) => c.html(runsPage(s)));
+  app.get('/runs/indicator', (c) => c.html(runsIndicator(s).value));
   app.get('/:owner/:repo', (c) => c.html(pullList(s, { repo: s.repo(c.req.param('owner'), c.req.param('repo')), state: c.req.query('state') ?? 'staged' })));
   app.get('/:owner/:repo/pulls', (c) => c.redirect(`/${c.req.param('owner')}/${c.req.param('repo')}`));
   app.get('/:owner/:repo/pull/:n', async (c) => c.html(await conversationPage(await load(c))));
