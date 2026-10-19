@@ -1,6 +1,6 @@
 {
   "name": "galley-proof",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A local staging area for pull requests: agents open PRs with a gh-compatible CLI, you review them in a GitHub-like UI, then publish to GitHub.",
   "type": "module",
