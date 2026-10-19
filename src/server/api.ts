@@ -445,6 +445,17 @@ export function api(s: Service): Hono {
     const reviewer = reviewerOf(c, x.repo);
     return c.json({ run_id: reviewer.request(x, who) }, 202);
   });
+  // galley extension: stop the review a reviewer agent is running, the one `run_id` names when given.
+  // Also one a custom reviewer runs on a repository its definition no longer names.
+  app.post('/repos/:owner/:repo/pulls/:n/reviewers/:reviewer/cancel', async (c) => {
+    const who = human(c);
+    const x = await ctx(c, { sync: false });
+    const reviewer = reviewerOf(c);
+    const b = await body(c);
+    if (b.run_id !== undefined && !Number.isInteger(b.run_id)) throw new HttpError(422, 'run_id must be a whole number');
+    reviewer.stopReview(x, who, b.run_id);
+    return c.body(null, 204);
+  });
   // galley extension: this pull request's own settings for a reviewer agent, `enabled` and `max_iterations` (null for the setting).
   app.patch('/repos/:owner/:repo/pulls/:n/reviewers/:reviewer', async (c) => {
     const who = human(c);

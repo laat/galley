@@ -259,6 +259,12 @@ export interface OwnSettings {
   maxIterations: number | null;
 }
 
+/** A review running on a pull request, and what it has done so far. */
+export interface LiveRun {
+  run: ReviewRunRow;
+  progress: Progress;
+}
+
 /** A review running on a pull request. */
 interface Job {
   runId: number;
@@ -554,8 +560,8 @@ export class Reviewer {
   }
 
   /**
-   * Cancel the review running on the pull request, for what just happened to it: closed here,
-   * merged or closed on GitHub, published (which cancels only a review of the commit published),
+   * Cancel the review running on the pull request, for what just happened to it: stopped by the
+   * user, closed here, merged or closed on GitHub, published (which cancels only a review of the commit published),
    * or pushed to, edited, or moved onto another base (only a review of what changed since: an
    * earlier commit, or an earlier version of the title, description and commit messages). It does
    * not count and does not run again; the timeline says why. If the author is waiting, a review of its head is about to start before
@@ -612,10 +618,20 @@ export class Reviewer {
   }
 
   /** The review running on this pull request, and what it has done so far. */
-  live(pull: PullRow): { run: ReviewRunRow; progress: Progress } | null {
+  live(pull: PullRow): LiveRun | null {
     const job = this.jobs.get(pull.id);
-    const run = job && this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', job.runId);
-    return job && run?.status === 'running' ? { run, progress: job.log.progress() } : null;
+    return job ? this.liveRun(job) : null;
+  }
+
+  /** The reviews running on all pull requests, and what each has done so far. */
+  liveRuns(): LiveRun[] {
+    return [...this.jobs.values()].flatMap((job) => this.liveRun(job) ?? []);
+  }
+
+  /** A job's run while it runs: one being stopped is recorded as ended (halt) before its job is gone. */
+  private liveRun(job: Job): LiveRun | null {
+    const run = this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', job.runId);
+    return run?.status === 'running' ? { run, progress: job.log.progress() } : null;
   }
 
   runs(pull: PullRow): ReviewRunRow[] {
@@ -859,6 +875,20 @@ export class Reviewer {
     // Published, it can be reviewed again to check an update, until it is merged.
     if (ctx.pull.github_state === 'merged') throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
     return this.launch(ctx, 'manual');
+  }
+
+  /**
+   * Stop the review running on the pull request: `runId`, when given, so that one that ended
+   * meanwhile is not taken for the next. Cancelled, it does not review what it read again on its
+   * own (see attempt), and is done with it. The user's to ask for.
+   */
+  stopReview(ctx: Ctx, actor: Actor, runId?: number): void {
+    this.s.requireHuman(actor);
+    const job = this.jobs.get(ctx.pull.id);
+    const live = job && this.liveRun(job);
+    if (!live) throw new HttpError(409, `${this.label} is not reviewing this pull request`);
+    if (runId !== undefined && live.run.id !== runId) throw new HttpError(409, `that review by ${this.label} has ended, and another is running`);
+    this.cancel(ctx.pull, 'stopped');
   }
 
   private launch(ctx: Ctx, trigger: 'auto' | 'manual'): number {

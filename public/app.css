@@ -585,6 +585,12 @@ kbd {
 .app-header-actions { display: flex; align-items: center; gap: 12px; }
 .stopping-indicator { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--attention); background: var(--attention-subtle); border: 1px solid var(--attention-muted); border-radius: 2em; cursor: default; }
 .stopping-indicator-short { display: none; }
+.runs-indicator { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px; font-size: 12px; font-weight: 600; color: var(--fg-muted); border: 1px solid transparent; border-radius: 2em; }
+.runs-indicator:hover { color: var(--accent); text-decoration: none; }
+.runs-indicator:focus-visible { outline: 2px solid var(--accent-emphasis); outline-offset: 2px; }
+.runs-indicator--running { padding: 0 10px; color: var(--accent); background: var(--accent-subtle); border-color: var(--accent-muted); }
+.runs-indicator--running > .octicon { animation: pulse 1.6s ease-in-out infinite; }
+.run-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 @media (max-width: 767px) {
   .stopping-indicator-long { display: none; }
   .stopping-indicator-short { display: inline; }

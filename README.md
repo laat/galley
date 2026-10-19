@@ -264,7 +264,9 @@ the tests, until it finds nothing, uses up its automatic reviews, or you publish
 done with a commit once the author has seen its review and replied to or resolved each thread
 the review opened. They only comment; the review decision is yours. A pull request's sidebar
 shows what each is doing and its transcript, and lets you turn it on or off, change its limit,
-or ask for a review now. **Stop iterating** in the merge box ends the automatic reviews. You can
+or ask for a review now or stop the one running. The robot in the header, with how many reviews
+are running, opens a page of the reviews running on every pull request, each with what it is
+doing and a Stop button, and the latest finished ones. **Stop iterating** in the merge box ends the automatic reviews. You can
 also name reviewers when you ask an agent to stage; `galley reviewers` lists those that review a repository.
 
 You can add reviewer agents of your own, each with its own instructions, in

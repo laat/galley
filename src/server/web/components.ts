@@ -46,6 +46,7 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
   <nav class="app-header-context">${opts.crumbs ?? ''}</nav>
   <div class="app-header-actions">
     ${running ? html`<span id="server-stopping" class="stopping-indicator" role="status" title="${waiting}" aria-label="${waiting}">${icon('alert')}<span class="stopping-indicator-long">Stopping · ${plural(running, 'review')} running</span><span class="stopping-indicator-short">${running}</span></span>` : html`<span id="server-stopping" hidden></span>`}
+    ${runsIndicator(s)}
     <a class="app-header-avatar" href="/settings" title="Settings" aria-label="Settings">${avatar(avatarUrl(s, viewer), viewer.login, 28, 'avatar-circle')}</a>
   </div>
 </div>
@@ -55,6 +56,17 @@ export function layout(s: Service, opts: { title: string; crumbs?: Safe; body: S
 </body>
 </html>`.value
   );
+}
+
+/**
+ * The header's link to the reviewer agents' page, with how many reviews are running. Live updates
+ * swap it along with #main, and pages that do not refresh for a review fetch it from /runs/indicator
+ * (public/app.js).
+ */
+export function runsIndicator(s: Service): Safe {
+  const n = s.liveRuns().length;
+  const label = n ? `Reviewer agents: ${plural(n, 'review')} running` : 'Reviewer agents';
+  return html`<a id="runs-indicator" class="runs-indicator${n ? ' runs-indicator--running' : ''}" href="/runs" title="${label}" aria-label="${label}">${icon('hubot')}${n ? html`<span>${n}</span>` : ''}</a>`;
 }
 
 export function repoCrumbs(repo: RepoRow, extra?: Safe): Safe {

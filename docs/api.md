@@ -49,6 +49,7 @@ Fields on a pull request: `staging_state` (`staged`, `published`, `done`), `publ
 `{reviewer}` is `codex`, `claude` or a custom reviewer's name; 404 for a custom reviewer that does not review the repository.
 
 - `POST …/pulls/{n}/reviewers/{reviewer}`: review now, whatever the limit. Answers 202 with `run_id`.
+- `POST …/pulls/{n}/reviewers/{reviewer}/cancel`: stop the review it is running, the user's only. With `run_id`, only that one: 409 when it has ended. Answers 204; the run is `cancelled` with the `reason` `stopped`, and the reviewer does not review that commit again on its own.
 - `GET …/pulls/{n}/reviewers/{reviewer}`: its runs (with `usage`, what each cost) and this pull request's settings.
 - `PATCH …/pulls/{n}/reviewers/{reviewer}`: this pull request's `enabled` and `max_iterations`; null follows the settings.
 - `GET …/reviewers`: the reviewer agents that review the repository: `login`, `reviewer` (as `{reviewer}` above), `engine`, `reviews` (`code` or `description`), `automatic` (whether it reviews the caller's pull requests on its own) and `max_iterations`, never their instructions. `POST …/pulls` answers with those of the new pull request, for it, in `reviewer_agents`.

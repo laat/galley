@@ -135,6 +135,7 @@
     }
     refreshing = (async () => {
       const n = ++fetched;
+      const asked = ++headerAsked;
       const res = await fetch(location.href, { headers: { accept: 'text/html' } });
       if (!res.ok) return;
       const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
@@ -149,11 +150,21 @@
       const refocus = menuFocus && ((active && active.closest('.agent-menu')) || (lost && menuOpen && menuOpen.open)) ? menuFocus : null;
       // Steps of a transcript the reviewer opened stay open while the run goes on.
       const open = $$('details.js-keep-open[open]').map((d) => d.id);
+      // A Stop clicked once stays armed for its second click, for what is left of its time, as long
+      // as the page still has it for the same run (its id has the run's).
+      const armedStops = $$('.js-stop-review').flatMap((b) => (armed.has(b) ? [[b.id, armed.get(b)]] : []));
       main().replaceWith(document.adoptNode(next));
-      // The header says whether the server is stopping, and for how many reviews.
+      // The header says whether the server is stopping, and how many reviews are running.
       const stopping = doc.getElementById('server-stopping');
       const shown = document.getElementById('server-stopping');
       if (stopping && shown) shown.replaceWith(document.adoptNode(stopping));
+      const indicator = doc.getElementById('runs-indicator');
+      if (indicator) showRunsIndicator(document.adoptNode(indicator), asked);
+      for (const [id, was] of armedStops) {
+        const b = document.getElementById(id);
+        const left = was.until - Date.now();
+        if (b && left > 0) confirmed(b, was.prompt, left);
+      }
       for (const id of open) {
         const d = document.getElementById(id);
         if (d) d.open = true;
@@ -325,17 +336,57 @@
     }
   }
 
+  // The header's count of reviews running comes with every page refresh, and alone when a review
+  // starts or ends, also when the page does not refresh for it (another pull request's, or someone
+  // is typing). Answers can come out of order: the one asked for last of those that came is shown.
+  let headerAsked = 0;
+  let headerShown = 0;
+  function showRunsIndicator(next, asked) {
+    const shown = document.getElementById('runs-indicator');
+    if (!next || !shown || asked < headerShown) return;
+    headerShown = asked;
+    shown.replaceWith(next);
+  }
+
+  // The count alone. One request at a time; a change during it fetches once more after it.
+  let indicating = null;
+  async function refreshRunsIndicator() {
+    if (indicating !== null) {
+      indicating = true;
+      return;
+    }
+    indicating = false;
+    try {
+      const asked = ++headerAsked;
+      const res = await fetch('/runs/indicator', { headers: { accept: 'text/html' } });
+      if (!res.ok) return;
+      const t = document.createElement('template');
+      t.innerHTML = await res.text();
+      showRunsIndicator(t.content.firstElementChild, asked);
+    } catch {
+      // The next change tries again.
+    } finally {
+      const again = indicating;
+      indicating = null;
+      if (again) refreshRunsIndicator();
+    }
+  }
+
   // Live updates. All tabs share one connection through a SharedWorker, since each open
-  // EventSource holds one of the browser's six connections to the server.
+  // EventSource holds one of the browser's six connections to the server. A page without live
+  // updates of its own (Settings) follows only the header's count of reviews running.
   function connectLive() {
     const live = document.body.dataset.live;
-    if (!live) return;
-    const mine = (ev) => live === 'all' || ev.pullId === null || String(ev.pullId) === live;
+    const mine = (ev) => !!live && (live === 'all' || ev.pullId === null || String(ev.pullId) === live);
+    const catchUp = () => (live ? refresh() : refreshRunsIndicator());
     // What the server sends: { type, event }, passed on by the worker as it is.
     const hear = (message) => {
-      if (message.type === 'reconnected') refresh();
-      else if (message.type === 'change' && mine(message.event)) onChange(message.event);
-      else if (message.type === 'progress' && mine(message.event)) onProgress(message.event);
+      if (message.type === 'reconnected') catchUp();
+      else if (message.type === 'change') {
+        if (mine(message.event)) onChange(message.event);
+        // A review started or ended: the header's count, whether the page refreshes or not.
+        if (message.event.type.startsWith('reviewer_')) refreshRunsIndicator();
+      } else if (message.type === 'progress' && mine(message.event)) onProgress(message.event);
     };
 
     if (window.SharedWorker) {
@@ -355,7 +406,7 @@
         window.addEventListener('pageshow', (e) => {
           if (!e.persisted) return;
           port = join();
-          refresh();
+          catchUp();
         });
         return;
       } catch {
@@ -364,12 +415,13 @@
     }
 
     // Without a SharedWorker, hold a connection only while the tab is visible, and catch
-    // up on whatever happened while it was hidden.
+    // up on whatever happened while it was hidden. It hears of every pull request, as the
+    // worker's does, for the header's count.
     if (!window.EventSource) return;
     let es = null;
     const open = () => {
       if (es) return;
-      es = new EventSource(live === 'all' ? '/events' : `/events?pull=${live}`);
+      es = new EventSource('/events');
       es.addEventListener('message', (e) => hear(JSON.parse(e.data)));
     };
     const close = () => {
@@ -380,7 +432,7 @@
       if (document.hidden) close();
       else {
         open();
-        refresh();
+        catchUp();
       }
     });
     window.addEventListener('pagehide', close);
@@ -929,7 +981,7 @@
 
   // Two clicks for destructive actions, instead of a modal dialog.
   const armed = new WeakMap();
-  function confirmed(btn, prompt = 'Click again to confirm') {
+  function confirmed(btn, prompt = 'Click again to confirm', ms = 3000) {
     const was = armed.get(btn);
     if (was) {
       // Put the label back now, so a button still there after the action (an error, say) reads right.
@@ -942,10 +994,12 @@
     btn.textContent = prompt;
     armed.set(btn, {
       label,
+      prompt,
+      until: Date.now() + ms,
       timer: setTimeout(() => {
         armed.delete(btn);
         btn.innerHTML = label;
-      }, 3000),
+      }, ms),
     });
     return false;
   }
@@ -1484,6 +1538,16 @@
         $('summary', menu).focus();
       }
       await api('POST', el.dataset.api).catch((err) => toast(err.message));
+      refresh();
+    } else if ((el = on('.js-stop-review'))) {
+      if (!confirmed(el, 'Click again to stop')) return;
+      el.disabled = true;
+      const menu = el.closest('details.dropdown');
+      if (menu) {
+        menu.open = false;
+        $('summary', menu).focus();
+      }
+      await api('POST', el.dataset.api, { run_id: Number(el.dataset.run) }).catch((err) => toast(err.message));
       refresh();
     } else if ((el = on('.js-set-state'))) {
       el.disabled = true;
