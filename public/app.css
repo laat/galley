@@ -168,16 +168,16 @@ details.details-reset > summary::-webkit-details-marker { display: none; }
    room for the buttons, is at least the overlay's height, stays at the top over the page and its
    menus, and drags the window but for its links and buttons (app-region, which a browser tab
    ignores). What sticks under it adds --header-stuck, the header's height there and 0 elsewhere:
-   64px, or the overlay's height when the page is zoomed out (the overlay is in CSS pixels, so zoom
+   40px, or the overlay's height when the page is zoomed out (the overlay is in CSS pixels, so zoom
    scales it the other way). */
-:root { --header-stuck: max(env(titlebar-area-height, 0px), sign(env(titlebar-area-height, 0px)) * 64px); }
+:root { --header-stuck: max(env(titlebar-area-height, 0px), sign(env(titlebar-area-height, 0px)) * 40px); }
 html { scroll-padding-top: var(--header-stuck); }
 .app-header-wrap { position: sticky; top: env(titlebar-area-y, auto); z-index: 150; background: var(--header-bg); border-bottom: 1px solid var(--border); app-region: drag; }
 .app-header {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px 24px;
+  padding: 6px 24px;
   padding-left: max(24px, env(titlebar-area-x, 0px));
   min-height: env(titlebar-area-height, 0px);
 }
@@ -186,13 +186,14 @@ html { scroll-padding-top: var(--header-stuck); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
 }
+.app-header-logo .octicon { width: 20px; height: 20px; }
 .app-header-logo:hover { background: var(--btn-hover); text-decoration: none; }
 /* The crumbs stay on one line, so the header keeps its height, which the overlay and --header-stuck
    count on in the app: in a narrow window the bold one, the repository's or the page's, gives way. */
@@ -584,7 +585,7 @@ kbd {
 /* ------------------------------------------------------------- settings */
 
 .app-header-actions { display: flex; align-items: center; gap: 12px; }
-.app-header-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; color: var(--fg-muted); border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.app-header-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; color: var(--fg-muted); border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .app-header-button:hover { color: var(--fg); background: var(--btn-hover); text-decoration: none; }
 .stopping-indicator { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--attention); background: var(--attention-subtle); border: 1px solid var(--attention-muted); border-radius: 2em; cursor: default; }
 .stopping-indicator-short { display: none; }

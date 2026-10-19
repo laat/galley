@@ -23,7 +23,7 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
   </nav>
   <div class="settings-main">${main}</div>
 </div>`;
-  return layout(s, { title: 'Settings · galley', crumbs: html`<a href="/">galley</a><span class="crumb-sep">/</span><a href="/settings"><strong>Settings</strong></a>`, body });
+  return layout(s, { title: 'Settings · galley', crumbs: html`<a href="/settings"><strong>Settings</strong></a>`, body });
 }
 
 export async function settingsPage(s: Service): Promise<string> {
