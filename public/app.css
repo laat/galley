@@ -340,7 +340,11 @@ a.Label:hover { text-decoration: none; border-color: currentColor; }
 .branch-name-sm { font-size: 11.5px; line-height: 18px; }
 
 .Box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
-.Box-header { padding: 16px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; }
+/* A full-width row's background (a header, a hovered row, the merge box's actions) keeps inside the box's
+   rounded corners, as round as the inside of its border, so it never paints a square corner over them. */
+.Box > :is(.Box-header, .Box-row, .merge-row):first-child { border-top-left-radius: 5px; border-top-right-radius: 5px; }
+.Box > :is(.Box-header, .Box-row, .merge-row):last-child { border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }
+.Box-header { padding: 16px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); }
 .Box-row { padding: 16px; border-top: 1px solid var(--border-muted); list-style: none; }
 .Box-row:first-of-type { border-top: 0; }
 .Box-header + .Box-row { border-top: 0; }
@@ -798,7 +802,7 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
 .merge-row:first-child { border-top: 0; }
 .merge-row > .octicon { margin-top: 3px; }
 .merge-row strong { display: block; }
-.merge-actions { align-items: center; background: var(--bg-subtle); border-radius: 0 0 6px 6px; }
+.merge-actions { align-items: center; background: var(--bg-subtle); }
 .merge-options { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 13px; }
 .merge-options label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .merge-buttons { display: flex; flex-direction: column; gap: 8px; }
