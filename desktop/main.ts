@@ -217,10 +217,10 @@ function windowOptions(noHeader = false): BrowserWindowConstructorOptions {
     // Until the page's own: the title bar does not show it, the Window menu and Mission Control do.
     title: 'galley',
     icon: join(icons, 'icon.png'),
-    // On macOS, galley's header is the title bar: the traffic lights sit at its left end, 24px down
-    // in its 64px, and the overlay tells the page where they are, so it makes room for them and
+    // On macOS, galley's header is the title bar: the traffic lights sit at its left end, 12px down
+    // in its 40px, and the overlay tells the page where they are, so it makes room for them and
     // keeps the header at the top (public/app.css). In full screen there is no overlay.
-    ...(headerIsTitleBar && !noHeader ? { titleBarStyle: 'hidden', titleBarOverlay: { height: 64 }, trafficLightPosition: { x: 20, y: 24 } } : {}),
+    ...(headerIsTitleBar && !noHeader ? { titleBarStyle: 'hidden', titleBarOverlay: { height: 40 }, trafficLightPosition: { x: 20, y: 12 } } : {}),
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   };
 }

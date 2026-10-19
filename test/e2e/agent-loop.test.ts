@@ -332,13 +332,16 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^api graphql -f query=.* -f owner=acme -f name=widgets$/m);
     const link = (slug: string) => new RegExp(`<h1 class="page-title">[^<]*</h1><a class="page-title-github" href="https://github\\.com/${slug}" target="_blank" rel="noopener" title="${slug} on GitHub"><svg class="octicon octicon-mark-github"[^]*?</svg> ${slug} <svg class="octicon octicon-link-external"`);
     assert.match(await (await fetch(`${server.url}/acme/widgets`)).text(), link('acme/widgets'));
-    // No tabs for the repository under the header; the breadcrumbs lead back to its page.
+    // No tabs for the repository under the header; the breadcrumbs lead back to its page, and start
+    // with it: the logo before them is the way to the front page, whose header has no crumbs.
     const { head } = await human('GET', '/api/repos/acme/widgets/pulls/1');
     for (const path of ['/acme/widgets', '/acme/widgets/pull/1', `/acme/widgets/tree/${head.sha}`]) {
       const page = await (await fetch(server.url + path)).text();
       assert.doesNotMatch(page, /UnderlineNav|github\.com\/acme\/widgets\/(pulls|issues)/, path);
-      assert.match(page, /<nav class="app-header-context">[^]*?<a href="\/acme\/widgets"><strong>acme\/widgets<\/strong><\/a>/, path);
+      assert.match(page, /<nav class="app-header-context"><a href="\/acme\/widgets"><strong>acme\/widgets<\/strong><\/a>/, path);
     }
+    const front = await (await fetch(`${server.url}/`)).text();
+    assert.match(front, /<a class="app-header-logo" href="\/" title="All staged pull requests" aria-label="galley">[^]*?<\/a>\s*<nav class="app-header-context"><\/nav>/);
     // One registered by path before galley kept clones, without a GitHub remote: no link.
     server.service.db.insert('repos', { git_dir: join(dir, 'elsewhere', '.git'), work_dir: join(dir, 'elsewhere'), owner: 'local', name: 'elsewhere', remote: 'origin', github_slug: null, created_at: new Date().toISOString() });
     const local = await (await fetch(`${server.url}/local/elsewhere`)).text();
