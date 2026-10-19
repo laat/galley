@@ -185,6 +185,10 @@ html { scroll-padding-top: var(--header-stuck); }
 /* The logo is the app's icon, a blue tile, which stands out on the header in light and in dark. */
 .app-header-logo { display: inline-flex; border-radius: 8px; }
 .app-header-logo:hover { filter: brightness(1.1); }
+/* Your avatar at the right end opens the settings. */
+.app-header-avatar { display: inline-flex; border-radius: 50%; }
+.app-header-avatar:hover .avatar { box-shadow: 0 0 0 2px var(--fg-muted); }
+.app-header-avatar:focus-visible { outline: 2px solid var(--accent-emphasis); outline-offset: 2px; }
 /* The crumbs stay on one line, so the header keeps its height, which the overlay and --header-stuck
    count on in the app: in a narrow window the bold one, the repository's or the page's, gives way. */
 .app-header-context { flex: 1; font-size: 14px; display: flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }
@@ -575,8 +579,6 @@ kbd {
 /* ------------------------------------------------------------- settings */
 
 .app-header-actions { display: flex; align-items: center; gap: 12px; }
-.app-header-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; color: var(--fg-muted); border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
-.app-header-button:hover { color: var(--fg); background: var(--btn-hover); text-decoration: none; }
 .stopping-indicator { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--attention); background: var(--attention-subtle); border: 1px solid var(--attention-muted); border-radius: 2em; cursor: default; }
 .stopping-indicator-short { display: none; }
 @media (max-width: 767px) {
