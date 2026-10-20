@@ -245,7 +245,7 @@ test('whose turn it is: the author agent, the reviewer agents, or the reviewer',
         assert.match(r.stdout, new RegExp(`^Pushed ${sha()} to GitHub: https://github\\.com/acme/widgets/pull/7$`, 'm'));
         assert.equal((await human('GET', `${base}/reviewers/codex`)).runs.length, runs);
         await waitEnded();
-        assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent is not waiting', "1 push since reviewer's review", 'approved', 'update not published: title'] });
+        assert.deepEqual(await turn(), { whose: 'reviewer', reasons: ['agent is not waiting', '1 push since reviewer published', 'approved', 'update not published: title'] });
         assert.equal(await group(), 'published: Your turn');
       });
 
@@ -520,7 +520,8 @@ test("while the reviewer agents still have the head to review, it is theirs or t
       await send('feature/agents-first');
       await until(() => row().head_sha === git('rev-parse', 'HEAD'), 'the push is seen');
       // No reviewer agent reviews it on its own once it is published: the author's wait pushes it.
-      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not waited since its last commit', 'update not published: commits'] });
+      // Published by the user, it is approved.
+      assert.deepEqual(await turn(), { whose: 'author', reasons: ['agent has not waited since its last commit', 'approved', 'update not published: commits'] });
       assert.equal(await group(), 'published: With agents');
     });
 

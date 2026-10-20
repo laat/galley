@@ -1,7 +1,7 @@
 import type { Commit } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
-import { afterRound, andList, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type EditField, type GithubEdit, type GithubPush, type Readiness, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
+import { afterRound, andList, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type EditField, type GithubEdit, type GithubPush, type Readiness, type Reviewed, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
 import type { HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type LiveRun, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
@@ -607,6 +607,7 @@ const AUTO_PUBLISH_OFF: Record<string, string> = {
   closed: ' by closing the pull request',
   changes_requested: ' by requesting changes',
   base_changed: ' by changing the base branch',
+  pushed: ' by pushing after the approval that turned it on',
 };
 
 async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
@@ -697,7 +698,9 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
     }
     case 'auto_publish_enabled': {
       const options = [data.sign ? 'signed' : null, data.draft ? 'as a draft' : null, data.force ? 'with force if needed' : null, data.auto_merge ? `with auto-merge (${data.auto_merge}) on GitHub` : null].filter(Boolean);
-      return timelineBadge('clock', html`${who} enabled auto-publish${options.length ? ` (${options.join(', ')})` : ''} ${when}`);
+      // Turned on by approving, with nothing else left (Service.approvalPublishes): it publishes at once.
+      const approving = data.approved ? html` by approving <code>${shortSha(String(data.approved))}</code> with nothing else left` : '';
+      return timelineBadge('clock', html`${who} enabled auto-publish${options.length ? ` (${options.join(', ')})` : ''}${approving} ${when}`);
     }
     case 'auto_merge_enabled':
       if (data.merged === true) {
@@ -798,7 +801,7 @@ async function mergeBox(p: PullPage): Promise<Safe> {
     </div>`;
   }
   const submitted = p.reviews.filter((r) => r.state !== 'PENDING');
-  const decision = submitted.length ? s.reviewDecision(pull, submitted) : null;
+  const decision = s.reviewDecision(pull, submitted);
   const unresolved = p.threads.filter((t) => !t.resolved && !t.pending).length;
   const waiting = s.authorWaiting(pull.id);
   // A review still to come may ask for changes, so publishing before it takes a second click.
@@ -1267,7 +1270,7 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   });
   return html`<div class="merge-row">${icon('clock', { cls: 'color-fg-open' })}<div class="flex-auto">
     <strong>Auto-publish is on</strong>
-    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}. It publishes the pull request${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with the latest commit and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method})` : ''}. After that, each commit ${author.login} waits with is pushed.</div>
+    <div class="color-fg-muted">${by.login} turned it on ${relTime(auto.at)}${auto.approved ? html` by approving <code>${shortSha(auto.approved)}</code> with nothing else left` : ''}. It publishes the pull request${options.length ? ` ${options.join(', ')}` : ''} once the reviewer agents are done with the latest commit and ${author.login} has answered them${auto.autoMerge ? `, and enables auto-merge on GitHub (${method})` : ''}. After that, each commit ${author.login} waits with is pushed.</div>
     <ul class="merge-checks">${items}</ul>
   </div>
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;
@@ -1315,8 +1318,15 @@ function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: 
 
 function sidebar(p: PullPage): Safe {
   const { s, pull, repo } = p;
-  const latest = new Map<number, ReviewRow>();
-  for (const r of p.reviews) if (r.state !== 'PENDING' && r.author_id !== pull.author_id) latest.set(r.author_id, r);
+  // Each one's latest review, or the user's publish after theirs, which approves (Service.withPublishes).
+  // The user's comment after an approval or a request for changes leaves it standing, as on GitHub;
+  // a reviewer agent's review says what it last made of the pull request.
+  const latest = new Map<number, Reviewed>();
+  for (const r of s.withPublishes(pull, p.reviews.filter((r) => r.state !== 'PENDING' && r.author_id !== pull.author_id))) {
+    const before = latest.get(r.author_id);
+    if (r.state === 'COMMENTED' && before && before.state !== 'COMMENTED' && s.db.actorById(r.author_id).type === 'User') continue;
+    latest.set(r.author_id, r);
+  }
   const reviewIcon: Record<string, Safe> = {
     APPROVED: icon('check', { cls: 'color-fg-success' }),
     CHANGES_REQUESTED: icon('file-diff', { cls: 'color-fg-danger' }),
@@ -1332,9 +1342,11 @@ function sidebar(p: PullPage): Safe {
         const state = latest.get(id)?.state;
         const mark = work
           ? html`<span title="${work.status === 'QUEUED' ? 'About to review' : 'Reviewing'} ${shortSha(work.head_sha)}">${icon('dot-fill', { cls: 'color-fg-attention' })}</span>`
-          : state
-            ? (reviewIcon[state] ?? '')
-            : '';
+          : latest.get(id)?.published
+            ? html`<span title="Approved by publishing">${reviewIcon.APPROVED}</span>`
+            : state
+              ? (reviewIcon[state] ?? '')
+              : '';
         return html`<li class="sidebar-person">${avatar(avatarUrl(s, a), a.login, 20, a.type === 'Bot' ? 'avatar-bot' : 'avatar-circle')} <span class="flex-auto">${a.login}</span> ${mark}</li>`;
       })
     : html`<li class="color-fg-muted">No reviews yet</li>`;
@@ -1944,11 +1956,12 @@ export async function filesPage(p: PullPage, query: { commit?: string; range?: s
     <summary class="btn btn-sm btn-primary">${p.pending ? 'Finish your review' : 'Review changes'}${pendingCount ? html` <span class="Counter Counter--primary">${pendingCount}</span>` : ''} ${icon('triangle-down')}</summary>
     <div class="dropdown-menu dropdown-menu-sw review-dialog">
       <form class="js-api-form" data-api="${reviewApi}" data-method="POST">
+        <input type="hidden" name="commit_id" value="${head}">
         <div class="review-dialog-header"><strong>Finish your review</strong></div>
         ${markdownEditor({ placeholder: 'Leave a comment', draftKey: 'review-body', rows: 4 })}
         <div class="review-dialog-options">
           <label class="review-option"><input type="radio" name="event" value="COMMENT" checked> <span><strong>Comment</strong><span class="color-fg-muted">Submit general feedback without explicit approval.</span></span></label>
-          <label class="review-option"><input type="radio" name="event" value="APPROVE"> <span><strong>Approve</strong><span class="color-fg-muted">The changes are good to publish.</span></span></label>
+          <label class="review-option"><input type="radio" name="event" value="APPROVE"> <span><strong>Approve</strong><span class="color-fg-muted">The changes are good to publish. With nothing else left, this publishes them.</span></span></label>
           <label class="review-option"><input type="radio" name="event" value="REQUEST_CHANGES"> <span><strong>Request changes</strong><span class="color-fg-muted">The agent must address this feedback.</span></span></label>
         </div>
         <div class="flash flash-error js-form-error" hidden></div>

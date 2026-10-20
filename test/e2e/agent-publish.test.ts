@@ -44,6 +44,8 @@ test('the author agent publishes its own pull request', async (t) => {
     const published = await pr.event('published');
     assert.deepEqual([published.actor.login, published.auto, published.signed], ['agent', false, 1]);
     assert.ok((await pr.page()).includes(`${agent} published this pull request to <a href="${url}"`));
+    // The agent's publish is not the user's approval.
+    assert.equal(JSON.parse((await cli(['pr', 'view', pr.n, '--json', 'reviewDecision'])).stdout).reviewDecision, 'REVIEW_REQUIRED');
     // Its wait says so, without saying the user is done with it.
     const waited = await cli(['pr', 'wait', pr.n, '--timeout', '20s']);
     assert.equal(waited.code, 0, waited.stderr);

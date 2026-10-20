@@ -222,6 +222,10 @@ this off.
    rewrites history, and reviewer agents review its new commits before you.
 5. **You publish**, or the agent does when you asked it to ([Auto-publish](#auto-publish)).
    Publish pushes the commit you reviewed and opens the pull request on GitHub, or updates it.
+   Publishing counts as your approval, over a request for changes before it. Approving publishes
+   too, when nothing else is left: the reviewer agents are done, the agent is waiting with all
+   feedback seen, your conversations are resolved, and the branch merges cleanly. It turns on
+   [auto-publish](#auto-publish) with the publish box's defaults, which publishes at once.
    It can sign the agent's commits as you and turn on auto-merge. galley then shows the pull
    request's checks and reviews on GitHub, and tells the agent when it is merged.
 6. **After that, GitHub's reviews and checks take over.** The agent commits and waits, and

@@ -151,7 +151,7 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
 /** Auto-publish while it is on (a galley extension, after GitHub's auto_merge), or null. */
 function autoPublishJson(s: Service, pull: PullRow) {
   const auto = s.autoPublish(pull);
-  return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge };
+  return auto && { enabled_by: userJson(s, s.db.actorById(auto.by)), enabled_at: auto.at, sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge, approved: auto.approved ?? null };
 }
 
 function iterationsStoppedJson(s: Service, pull: PullRow) {
@@ -319,12 +319,12 @@ function ghState(pull: PullRow) {
   return pull.state.toUpperCase();
 }
 
-export function reviewDecision(reviews: ReviewRow[]): string {
-  const latest = new Map<number, ReviewRow>();
+export function reviewDecision(reviews: Pick<ReviewRow, 'author_id' | 'state'>[]): string {
+  const latest = new Map<number, ReviewRow['state']>();
   for (const r of reviews) {
-    if (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') latest.set(r.author_id, r);
+    if (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') latest.set(r.author_id, r.state);
   }
-  const states = [...latest.values()].map((r) => r.state);
+  const states = [...latest.values()];
   if (states.includes('CHANGES_REQUESTED')) return 'CHANGES_REQUESTED';
   if (states.includes('APPROVED')) return 'APPROVED';
   return 'REVIEW_REQUIRED';
