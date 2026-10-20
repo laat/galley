@@ -18,7 +18,10 @@ description: Stage a pull request in galley, the user's local review server, ins
   it printed and wait for them. Do not work around it: do not start a server yourself, run
   `galley` outside the sandbox, or open the pull request on GitHub.
 - Commit on a branch, with at least one commit over the base.
-- Commit unsigned. If `git commit` tries to sign, use `git -c commit.gpgsign=false commit …`.
+- Signing your commits is optional: commit as git is set up. If `git commit` asks for a
+  passphrase, waits for a prompt or fails on signing, commit with
+  `git -c commit.gpgsign=false commit …`. galley pushes commits you signed as they are, and signs
+  the rest as the user when they publish.
 - Write a staged pull request as `s#4` ("s" for staged), to the user and in galley's comments,
   where it links to it. `#4` is GitHub's issue or pull request 4. In commands, `s4` (`galley pr
   wait s4`).

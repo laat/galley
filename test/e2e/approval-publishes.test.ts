@@ -1,11 +1,13 @@
 // Approving and publishing. The user's approval of the head publishes the pull request when
 // nothing else is left: it turns on auto-publish, which publishes at once. With something left, it
-// is an approval and nothing more. And the user's publish counts as their approval.
+// is an approval and nothing more. And the user's publish counts as their approval, and signs
+// what the agent did not.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, dir, git, handedOver, human, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -198,4 +200,29 @@ test("the user's publish of a pull request they staged themselves approves nothi
   const { reviewDecision } = await human('GET', `/api/repos/acme/widgets/gh/pulls/${created.number}?fields=reviewDecision`);
   assert.equal(reviewDecision, 'REVIEW_REQUIRED');
   assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${created.number}`)).text(), /<h3 class="sidebar-heading">Reviewers<\/h3><ul class="sidebar-list"><li class="color-fg-muted">No reviews yet<\/li>/);
+});
+
+test('commits the agent signed are pushed as they are, and the rest signed as the user', async () => {
+  git('checkout', '-q', 'main');
+  git('checkout', '-qb', 'feature/agent-signed');
+  writeFileSync(join(repo, 'agent-signed.js'), 'export const signed = 1;\n');
+  git('add', 'agent-signed.js');
+  // As an agent whose git signs: the skill leaves signing to how git is set up.
+  git('commit', '-S', '-qm', 'Add agent-signed.js');
+  const signed = git('rev-parse', 'HEAD');
+  writeFileSync(join(repo, 'agent-signed.js'), 'export const signed = 2;\n');
+  git('commit', '-qam', 'Change agent-signed.js');
+  const unsigned = git('rev-parse', 'HEAD');
+  const created = await cli(['pr', 'create', '--title', 'Add agent-signed.js', '--body', 'x', '--no-review']);
+  assert.equal(created.code, 0, created.stderr);
+  const number = Number(created.stdout.trim().split('/').pop());
+  assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text(), /Sign the 1 unsigned commit as <strong>Reviewer<\/strong>/);
+  await human('POST', `/api/repos/acme/widgets/pulls/${number}/publish`, { sign: true });
+  const onGithub = (...args: string[]) => execFileSync('git', ['--git-dir', remote, ...args], { encoding: 'utf8' }).trim();
+  const head = onGithub('rev-parse', 'feature/agent-signed');
+  assert.equal(onGithub('rev-parse', `${head}^`), signed, 'the signed commit as it is');
+  assert.notEqual(head, unsigned);
+  assert.match(onGithub('cat-file', 'commit', head), /^gpgsig /m);
+  const published = (await human('GET', `/api/repos/acme/widgets/issues/${number}/timeline`)).find((e: any) => e.event === 'published');
+  assert.equal(published.signed, 1);
 });
