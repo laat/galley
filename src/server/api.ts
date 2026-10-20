@@ -420,7 +420,8 @@ export function api(s: Service): Hono {
   app.post('/repos/:owner/:repo/pulls/:n/reviews/:id/events', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
-    const r = s.submitReview(x, num(c.req.param('id'), 'review id'), b.event as ReviewEvent, b.body, actor(c));
+    // galley extension: `commit_id`, the commit the user reviewed, as for a new review; the head when left out.
+    const r = await s.submitReview(x, num(c.req.param('id'), 'review id'), b.event as ReviewEvent, b.body, actor(c), b.commit_id);
     return c.json(reviewJson(s, x.repo, x.pull, r));
   });
 

@@ -254,6 +254,29 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(r.stdout, /Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7/);
   });
 
+  await t.test("the reviewer's publish approves what it published, over their earlier request for changes, and feedback after it is the agent's to address", async () => {
+    const decision = async () => JSON.parse((await cli(['pr', 'view', '--json', 'reviewDecision'])).stdout).reviewDecision;
+    assert.equal(await decision(), 'APPROVED');
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
+    assert.match(page, /<span class="flex-auto">reviewer<\/span> <span title="Approved by publishing"><svg class="octicon octicon-check color-fg-success"/);
+    assert.match(page, /<strong>Changes approved<\/strong>/);
+    // A comment after it asks something of the agent: not an approval to wait on.
+    await human('POST', '/api/repos/acme/widgets/issues/1/comments', { body: 'Also bump the version.' });
+    const r = await cli(['pr', 'wait', '--timeout', '20s']);
+    assert.match(r.stdout, /Also bump the version\./);
+    assert.match(r.stdout, /^Address the feedback\./m);
+    assert.doesNotMatch(r.stdout, /Approved with nothing left open/);
+    // A review that only comments leaves the approval standing, as on GitHub.
+    await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', { event: 'COMMENT', body: 'Looks fine otherwise.' });
+    assert.equal(await decision(), 'APPROVED');
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/1`)).text(), /<span class="flex-auto">reviewer<\/span> <span title="Approved by publishing">/);
+    // Requesting changes after publishing counts over it.
+    await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', { event: 'REQUEST_CHANGES', body: 'One more thing.' });
+    assert.equal(await decision(), 'CHANGES_REQUESTED');
+    assert.match(await (await fetch(`${server.url}/acme/widgets/pull/1`)).text(), /<span class="flex-auto">reviewer<\/span> <svg class="octicon octicon-file-diff color-fg-danger"/);
+    await cli(['pr', 'view', '--comments']);
+  });
+
   await t.test('publishing new commits signs only those and fast-forwards GitHub', async () => {
     const before = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
     writeFileSync(join(repo, 'README.md'), '# widgets\n');

@@ -1054,9 +1054,12 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     }
     if (unresolved.length) out(`Unresolved threads: ${unresolved.map((th: any) => th.databaseId).join(', ')}`);
     for (const line of atWork) out(`${line}.`);
-    if (pr.reviewDecision === 'APPROVED' && !unresolved.length && atWork.length) {
+    // Approved, it waits for the user to publish it. Published, the approval is the publish or came
+    // before it (Service.withPublishes), and what came since is to address.
+    const approved = pr.reviewDecision === 'APPROVED' && pr.state !== 'PUBLISHED' && !unresolved.length;
+    if (approved && atWork.length) {
       out(c.gray(`${stillReviewing(pr)}; ${getIt}`));
-    } else if (pr.reviewDecision === 'APPROVED' && !unresolved.length) {
+    } else if (approved) {
       // Approved, but it conflicts with its base: the rebase is left.
       out(c.gray(rebase ?? `Approved with nothing left open. Run \`galley pr wait ${all}\` to wait until the user publishes it.`));
     } else if (toCome) {

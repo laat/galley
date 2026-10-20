@@ -263,9 +263,9 @@ test('published: following GitHub again with nothing new keeps it; a review, a c
     writeFileSync(join(dir, 'gh-pulls.json'), JSON.stringify({ data: { repository: { [`p${pr.id}`]: node } } }));
     await server.service.followGithub();
   };
-  // As the user found it: published, ready to merge on GitHub, not reviewed here, and for the team to review.
+  // As the user found it: published by them, which approves it, ready to merge on GitHub, and for the team to review.
   await githubSays();
-  assert.deepEqual(await pr.turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'no review from reviewer yet', 'ready to merge on GitHub'], dismissed: null });
+  assert.deepEqual(await pr.turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'approved', 'ready to merge on GitHub'], dismissed: null });
   await pr.dismiss();
   assert.equal(await group(pr.number), 'published: Dismissed');
 
@@ -284,7 +284,7 @@ test('published: following GitHub again with nothing new keeps it; a review, a c
 
   // A teammate's review, which GitHub does not require: your turn again, to merge it.
   await githubSays({ reviews: { totalCount: 1 } });
-  assert.deepEqual(await pr.turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'no review from reviewer yet', 'ready to merge on GitHub'], dismissed: null });
+  assert.deepEqual(await pr.turn(), { whose: 'reviewer', reasons: ['agent is not waiting', 'approved', 'ready to merge on GitHub'], dismissed: null });
   await pr.dismiss();
   await githubSays({ reviews: { totalCount: 1 } });
   assert.ok(await pr.dismissed());

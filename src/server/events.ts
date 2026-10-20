@@ -26,8 +26,9 @@ export interface EventData {
    * what the pushes after it do. `rewritten`: on top of the branch as rewritten on GitHub (GithubPush).
    * `brought_back`: commits that rewrite removed, which the user confirmed bringing back.
    * `read_upto`: the edits the title and description it published include (GithubEdit.read_upto).
+   * `began`: when publishing was asked for, where the review decision places it (Service.withPublishes).
    */
-  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; rewritten?: { from: string; to: string }; brought_back?: string[]; read_upto?: number };
+  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; began?: string; rewritten?: { from: string; to: string }; brought_back?: string[]; read_upto?: number };
   /** A push when the author waited (Service.pushUpdate). */
   github_push: Omit<GithubPush, 'at'>;
   /** The author's edits of the title and description, published when it waited (Service.publishEdits). */
@@ -38,7 +39,8 @@ export interface EventData {
   /** `merged`: whether GitHub merged it at once; null when that could not be checked. */
   auto_merge_enabled: { url: string; method: MergeMethod; merged: boolean | null };
   auto_merge_failed: { url: string; method: MergeMethod; error: string };
-  auto_publish_enabled: { sign: boolean; draft: boolean; force: boolean; auto_merge?: MergeMethod | null };
+  /** `approved`: the head the user's approval turned it on for, with nothing else left (Service.approvalPublishes). */
+  auto_publish_enabled: { sign: boolean; draft: boolean; force: boolean; auto_merge?: MergeMethod | null; approved?: string };
   /** Before auto-publish ended at the first publish, it also turned off when merged or closed on GitHub. */
   auto_publish_disabled: { reason: AutoPublishOff | 'merged' | 'closed_on_github' };
   /** `signing`: it could not sign, and did not try again (Service.autoPublishSigningFailed). */

@@ -326,6 +326,8 @@ export interface Readiness {
   authorWaiting: boolean;
   /** Reviews and comments the author has not been shown. */
   unseen: number;
+  /** Some of them ask something of the author (Feedback.asks). */
+  asks: boolean;
   /** Unresolved threads a person started (agents' threads do not count). */
   openThreads: number;
 }
@@ -419,6 +421,9 @@ const NEWS_EVENTS = `FROM events WHERE pull_id = ?1 AND id > ?2 AND type NOT IN 
 const SAID = `SELECT submitted_at AS at FROM reviews WHERE pull_id = ?1 AND state != 'PENDING'
   UNION ALL SELECT updated_at FROM comments WHERE pull_id = ?1 AND (review_id IS NULL OR review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`;
 
+/** A submitted review, or the user's publish, which approves (Service.withPublishes). */
+export type Reviewed = Pick<ReviewRow, 'author_id' | 'state' | 'submitted_at'> & { published?: true };
+
 /** Auto-publish, while it is on: who turned it on, when, and the publish options fixed then. */
 export interface AutoPublish {
   by: number;
@@ -429,6 +434,8 @@ export interface AutoPublish {
   force: boolean;
   /** Turn on auto-merge on GitHub after publishing, with this merge method; null for no auto-merge. */
   autoMerge: MergeMethod | null;
+  /** The head the user's approval turned it on for (Service.approvalPublishes). */
+  approved?: string;
 }
 
 /**
@@ -480,7 +487,7 @@ export interface AutoMerge {
  * Why auto-publish was turned off before it published. (Events from before it ended at the first
  * publish also say `merged` or `closed_on_github`.)
  */
-export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed';
+export type AutoPublishOff = 'cancelled' | 'closed' | 'changes_requested' | 'base_changed' | 'pushed';
 
 /** A repository on GitHub, as galley shows it: what merging there allows. */
 export interface GithubRepo {
@@ -1470,6 +1477,9 @@ export class Service {
       this.db.insert('revisions', { pull_id: pull.id, seq, head_sha: head, base_sha: mergeBase, before_sha: pull.head_sha, forced: forced ? 1 : 0, actor_id: author.id, created_at: ts });
       this.db.update('pulls', pull.id, { head_sha: head, base_sha: mergeBase, messages_sha: messages, updated_at: ts });
       this.addEvent(pull, author, 'pushed', { before: pull.head_sha, after: head, forced, commits: newCommits, base_before: pull.base_sha, base_after: mergeBase }, ts);
+      // Auto-publish an approval turned on was for the head approved (approvalPublishes).
+      const approved = this.autoPublish(current())?.approved;
+      if (approved && approved !== head) this.autoPublishOff(pull, author, 'pushed', ts);
       return seq;
     });
     if (seq === null) return current();
@@ -2101,8 +2111,11 @@ export class Service {
     const commitId = input.commit_id ?? pull.head_sha;
     const anchors: { body: string; anchor: Record<string, string | number | null> }[] = [];
     for (const c of input.comments ?? []) anchors.push({ body: c.body, anchor: await this.anchor(ctx, { ...c, commit_id: c.commit_id ?? commitId }) });
-    const id = this.db.transaction(() => {
+    // Looked up first: whether the approval publishes is decided with it, at once (approvalPublishes).
+    const sign = event === 'APPROVE' && actor.type === 'User' ? await this.signsByDefault(ctx) : null;
+    const { id, publishes } = this.db.transaction(() => {
       const ts = now();
+      const publishes = sign !== null && this.approvalPublishes(pull.id, actor, commitId, anchors.length, sign, ts);
       const reviewId = this.db.insert('reviews', {
         pull_id: pull.id,
         author_id: actor.id,
@@ -2115,14 +2128,19 @@ export class Service {
       for (const a of anchors) this.insertReviewComment(pull, actor, reviewId, a.body, a.anchor);
       if (event === 'REQUEST_CHANGES' && actor.type === 'User') this.autoPublishOff(pull, actor, 'changes_requested', ts);
       stored?.(reviewId);
-      return reviewId;
+      return { id: reviewId, publishes };
     });
     if (event) this.touch(pull);
     this.emit(pull.id, event ? 'review' : 'pending_review', actor);
+    if (publishes) this.emit(pull.id, 'auto_publish', actor);
     return this.review(id);
   }
 
-  submitReview(ctx: Ctx, reviewId: number, event: ReviewEvent, body: string | undefined, actor: Actor): ReviewRow {
+  /** Submit a pending review. `commitId`: what the user reviewed, the head when not given. */
+  async submitReview(ctx: Ctx, reviewId: number, event: ReviewEvent, body: string | undefined, actor: Actor, commitId?: string): Promise<ReviewRow> {
+    // Looked up first, so that from reading the review to deciding whether its approval publishes
+    // (approvalPublishes) nothing comes between: not a discard, nor another submission of it.
+    const sign = event === 'APPROVE' && actor.type === 'User' ? await this.signsByDefault(ctx) : null;
     const review = this.review(reviewId);
     if (review.pull_id !== ctx.pull.id || review.author_id !== actor.id) throw new HttpError(404, `review ${reviewId} not found`);
     if (review.state !== 'PENDING') throw new HttpError(422, 'review has already been submitted');
@@ -2131,13 +2149,19 @@ export class Service {
     const count = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM comments WHERE review_id = ?', review.id)!.n;
     if (event === 'REQUEST_CHANGES' && !body?.trim() && !count) throw new HttpError(422, 'a review requesting changes needs a body or comments');
     if (event === 'COMMENT' && !body?.trim() && !count) throw new HttpError(422, 'a review needs a body or comments');
-    const ts = now();
-    this.db.update('reviews', review.id, { state: EVENT_STATE[event], body: body ?? review.body, submitted_at: ts, commit_id: ctx.pull.head_sha });
-    // Comments written while the review was pending count as made now.
-    this.db.run('UPDATE comments SET created_at = ?, updated_at = ? WHERE review_id = ?', ts, ts, review.id);
-    if (event === 'REQUEST_CHANGES' && actor.type === 'User') this.autoPublishOff(ctx.pull, actor, 'changes_requested', ts);
+    const reviewed = commitId ?? ctx.pull.head_sha;
+    const { ts, publishes } = this.db.transaction(() => {
+      const ts = now();
+      const publishes = sign !== null && this.approvalPublishes(ctx.pull.id, actor, reviewed, count, sign, ts);
+      this.db.update('reviews', review.id, { state: EVENT_STATE[event], body: body ?? review.body, submitted_at: ts, commit_id: reviewed });
+      // Comments written while the review was pending count as made now.
+      this.db.run('UPDATE comments SET created_at = ?, updated_at = ? WHERE review_id = ?', ts, ts, review.id);
+      if (event === 'REQUEST_CHANGES' && actor.type === 'User') this.autoPublishOff(ctx.pull, actor, 'changes_requested', ts);
+      return { ts, publishes };
+    });
     this.touch(ctx.pull, ts);
     this.emit(ctx.pull.id, 'review', actor);
+    if (publishes) this.emit(ctx.pull.id, 'auto_publish', actor);
     return this.review(review.id);
   }
 
@@ -2548,17 +2572,39 @@ export class Service {
          AND (c.review_id IS NULL OR c.review_id IN (SELECT id FROM reviews WHERE state != 'PENDING'))`,
       pull.id,
     )!.n;
-    return { reviewers, authorWaiting, unseen, openThreads };
+    return { reviewers, authorWaiting, unseen, asks: fb.asks, openThreads };
   }
 
   /**
    * The review decision, as GitHub's reviewDecision: from the reviews of anyone but the reviewer
    * agents, whose approvals are theirs and stand in for nobody's (also once a custom reviewer's
-   * file is gone).
+   * file is gone), and the user's publishes (withPublishes).
    */
   reviewDecision(pull: PullRow, reviews: ReviewRow[]): string {
     const agents = agentReviews(this.db, pull);
-    return reviewDecision(reviews.filter((r) => !agents.has(r.id)));
+    return reviewDecision(this.withPublishes(pull, reviews.filter((r) => !agents.has(r.id))));
+  }
+
+  /**
+   * Submitted reviews with the user's publishes among them, in the order they came: publishing
+   * approves what it published, so a publish by the user counts as their approval, until a review
+   * of theirs after it. A publish is placed when it began (`began`, or when it was recorded for
+   * older ones), and a review at the same moment after it: a request for changes while it
+   * publishes counts over it. The author's publish (also auto-publish it turned on, as the user
+   * asked, and the user's own pull request's) approves nothing.
+   */
+  withPublishes(pull: PullRow, reviews: ReviewRow[]): Reviewed[] {
+    const publishes = this.db
+      .all<{ actor_id: number; at: string }>(
+        `SELECT e.actor_id, COALESCE(json_extract(e.data, '$.began'), e.created_at) AS at FROM events e JOIN actors a ON a.id = e.actor_id
+         WHERE e.pull_id = ? AND e.type = 'published' AND a.type = 'User' AND e.actor_id != ? ORDER BY e.id`,
+        pull.id,
+        pull.author_id,
+      )
+      .map((e) => ({ author_id: e.actor_id, state: 'APPROVED' as const, submitted_at: e.at, published: true as const }));
+    if (!publishes.length) return reviews;
+    const all: Reviewed[] = [...reviews, ...publishes];
+    return all.sort((a, b) => (a.submitted_at ?? '').localeCompare(b.submitted_at ?? '') || Number(!!b.published) - Number(!!a.published));
   }
 
   /** Whose move the pull request waits for, and why (see Turn), from its readiness when the caller has it already. */
@@ -2836,20 +2882,29 @@ export class Service {
     }
   }
 
-  /** What changed since the reviewer last reviewed: pushes, and threads the author answered. */
+  /** What changed since the reviewer last reviewed, or published, which approves (withPublishes): pushes, and threads the author answered. */
   private sinceReview(pull: PullRow, author: string): TurnReason[] {
     const viewer = this.viewer();
-    const last = this.db.get<ReviewRow>("SELECT * FROM reviews WHERE pull_id = ? AND author_id = ? AND state != 'PENDING' ORDER BY submitted_at DESC", pull.id, viewer.id);
+    // Placed as withPublishes places them.
+    const last = this.db.get<{ at: string; published: number }>(
+      `SELECT at, published FROM (
+         SELECT submitted_at AS at, 0 AS published FROM reviews WHERE pull_id = ?1 AND author_id = ?2 AND state != 'PENDING'
+         UNION ALL SELECT COALESCE(json_extract(data, '$.began'), created_at), 1 FROM events WHERE pull_id = ?1 AND actor_id = ?2 AND ?2 != ?3 AND type = 'published'
+       ) ORDER BY at DESC, published LIMIT 1`,
+      pull.id,
+      viewer.id,
+      pull.author_id,
+    );
     const out: TurnReason[] = [];
     if (last) {
-      const pushes = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM revisions WHERE pull_id = ? AND created_at > ?', pull.id, last.submitted_at)!.n;
-      if (pushes) out.push({ kind: 'changes', text: `${pushes} ${pushes === 1 ? 'push' : 'pushes'} since ${viewer.login}'s review` });
+      const pushes = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM revisions WHERE pull_id = ? AND created_at > ?', pull.id, last.at)!.n;
+      if (pushes) out.push({ kind: 'changes', text: `${pushes} ${pushes === 1 ? 'push' : 'pushes'} since ${viewer.login}${last.published ? ' published' : "'s review"}` });
     } else out.push({ kind: 'changes', text: `no review from ${viewer.login} yet` });
     const answered = this.db.get<{ n: number }>(
       'SELECT COUNT(DISTINCT in_reply_to_id) AS n FROM comments WHERE pull_id = ? AND author_id = ? AND in_reply_to_id IS NOT NULL AND created_at > ?',
       pull.id,
       pull.author_id,
-      last?.submitted_at ?? '',
+      last?.at ?? '',
     )!.n;
     if (answered) out.push({ kind: 'changes', text: `${author} answered ${answered} thread${answered === 1 ? '' : 's'}` });
     return out;
@@ -2957,6 +3012,9 @@ export class Service {
    */
   autoPublishReady(pull: PullRow): boolean {
     if (!pull.auto_publish || pull.state !== 'staged') return false;
+    // Turned on by an approval, it publishes the head approved only (approvalPublishes).
+    const approved = this.autoPublish(pull)?.approved;
+    if (approved && approved !== pull.head_sha) return false;
     return this.autoPublishChecklist(pull).every((i) => i.ok || !i.blocking);
   }
 
@@ -2983,14 +3041,21 @@ export class Service {
     // goes ahead without it, since agents often stop waiting once their work is done. Not once it
     // was handed feedback since, until it waits again.
     const waited = !seen && !!retry && r.unseen === 0 && this.waitedSinceHanded(pull);
+    // Turned on by the user's approval of this head, while the author waited with all feedback seen
+    // (approvalPublishes): the approval asks nothing of it, so it need not wait again, as long as
+    // nothing since does.
+    const auto = this.autoPublish(pull);
+    const approved = !seen && !waited && auto?.approved === pull.head_sha && !r.asks && !(pull.author_handed_at && pull.author_handed_at > auto.at);
     const text = seen
       ? `${author} is waiting for review, with all feedback seen`
       : waited
         ? `${author} waited for review with this commit, with all feedback seen`
-        : r.authorWaiting
-          ? `${author} has feedback it has not seen yet`
-          : `${author} is working (not waiting for review)`;
-    items.push({ key: 'author', ok: seen || waited, blocking: true, failed: false, text });
+        : approved
+          ? `${author} was waiting for review with all feedback seen when you approved this commit`
+          : r.authorWaiting
+            ? `${author} has feedback it has not seen yet`
+            : `${author} is working (not waiting for review)`;
+    items.push({ key: 'author', ok: seen || waited || approved, blocking: true, failed: false, text });
     if (r.openThreads) {
       const threads = r.openThreads === 1 ? '1 conversation you started is' : `${r.openThreads} conversations you started are`;
       items.push({ key: 'threads', ok: false, blocking: true, failed: false, text: `${threads} unresolved` });
@@ -3005,7 +3070,7 @@ export class Service {
     else items.push({ ...conflict, ok: true, failed: false, text: `No conflicts with ${conflicts.ref}` });
     // GitHub's settings may have changed since it was turned on; publishing refuses then (autoMergeMethod).
     // As GitHub last said, without asking again as githubRepo would: this runs on every change.
-    const method = this.autoPublish(pull)?.autoMerge;
+    const method = auto?.autoMerge;
     const slug = this.repoById(pull.repo_id).github_slug;
     const merging = method && slug ? this.githubRepoCache.get(slug)?.value?.merging : null;
     const refused = method && merging && (!merging.autoMerge ? 'auto-merge' : !merging.methods.includes(method) ? `${method} merges` : null);
@@ -3043,12 +3108,34 @@ export class Service {
       force: !!opts.force,
       autoMerge,
     };
-    this.db.transaction(() => {
-      this.db.update('pulls', pull.id, { auto_publish: JSON.stringify(auto) });
-      this.addEvent(pull, actor, 'auto_publish_enabled', { sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge }, auto.at);
-    });
+    this.db.transaction(() => this.autoPublishOn(pull, actor, auto));
     this.emit(pull.id, 'auto_publish', actor);
     return auto;
+  }
+
+  /** Turn auto-publish on with `auto`, in the caller's transaction; the caller emits. */
+  private autoPublishOn(pull: PullRow, actor: Actor, auto: AutoPublish): void {
+    this.db.update('pulls', pull.id, { auto_publish: JSON.stringify(auto) });
+    this.addEvent(pull, actor, 'auto_publish_enabled', { sign: auto.sign, draft: auto.draft, force: auto.force, auto_merge: auto.autoMerge, ...(auto.approved ? { approved: auto.approved } : {}) }, auto.at);
+  }
+
+  /**
+   * The user's approval of `commitId`, about to be stored in the caller's transaction, publishes
+   * the pull request when it is of the head, without comments, on a staged pull request without
+   * auto-publish, with nothing left that auto-publish waits for (autoPublishChecklist), the author
+   * waiting with all feedback seen among it. Asked before the approval is stored, which asks
+   * nothing of the author. Then it turns on auto-publish for the head, as the user, with what the
+   * publish box offers by default (`sign` as git signs, a draft as the pull request is, no force or
+   * auto-merge), which publishes at once, and whose failures and retries of signing go as usual.
+   * In the same transaction as the approval, so that nothing comes between.
+   */
+  private approvalPublishes(pullId: number, actor: Actor, commitId: string, comments: number, sign: boolean, at: string): boolean {
+    const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId)!;
+    if (actor.type !== 'User' || actor.id === pull.author_id || commitId !== pull.head_sha || comments) return false;
+    if (stagingState(pull) !== 'staged' || pull.auto_publish || !this.repoById(pull.repo_id).github_slug) return false;
+    if (!this.autoPublishChecklist(pull).every((i) => i.ok || !i.blocking)) return false;
+    this.autoPublishOn(pull, actor, { by: actor.id, at, sign, draft: !!pull.draft, force: false, autoMerge: null, approved: commitId });
+    return true;
   }
 
   disableAutoPublish(ctx: Ctx, actor: Actor): void {
@@ -3570,9 +3657,11 @@ export class Service {
     opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod; bringBack?: string[]; page?: boolean },
     actor: Actor,
   ): Promise<PullRow> {
+    // A review submitted while it publishes counts over it (withPublishes).
+    const began = now();
     const release = await this.pushLock(ctx.pull.id);
     try {
-      return await this.publishNow(ctx, opts, actor);
+      return await this.publishNow(ctx, opts, actor, began);
     } finally {
       release();
     }
@@ -3582,6 +3671,7 @@ export class Service {
     ctx: Ctx,
     opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod; bringBack?: string[]; page?: boolean },
     actor: Actor,
+    began: string,
   ): Promise<PullRow> {
     const { repo } = ctx;
     this.requireUserOrAuthor(actor, ctx.pull, 'publish it');
@@ -3673,7 +3763,7 @@ export class Service {
         ...(pull.github_state === 'closed' ? { github_state: null } : {}),
       });
       // `sign`, whether it signed: what the pushes after it do (signsUpdates).
-      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto, ...(rewritten ? { rewritten } : {}), ...(broughtBack ? { brought_back: broughtBack } : {}), read_upto: upto }, ts);
+      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto, began, ...(rewritten ? { rewritten } : {}), ...(broughtBack ? { brought_back: broughtBack } : {}), read_upto: upto }, ts);
     });
     // Published during a review (a second click): its findings would come too late.
     this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!, 'published');

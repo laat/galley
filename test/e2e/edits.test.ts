@@ -72,7 +72,7 @@ test("after publishing, the author's edits of the title and description are publ
       assert.equal((await cli(['pr', 'edit', pr.n, '--body', 'What it does, and why.'])).code, 0);
       // Not waiting, it is the author's turn: its wait publishes the edit.
       await until(() => !server.service.authorWaiting(pr.id, { grace: true }), 'the wait is over');
-      assert.deepEqual(await turn(pr.base), { whose: 'author', reasons: ['agent has not waited since its last edit', 'update not published: description'] });
+      assert.deepEqual(await turn(pr.base), { whose: 'author', reasons: ['agent has not waited since its last edit', 'approved', 'update not published: description'] });
       const calls = ghCalls().length;
       await withFakes({ FAKE_GH_EDIT_GATE: gate }, async () => {
         const waiting = pr.wait();
