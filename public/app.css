@@ -661,6 +661,8 @@ a.agent-state:hover { color: var(--accent); text-decoration: none; }
 .review-run-link { display: inline-flex; align-items: center; gap: 4px; margin: 0 16px 12px; font-size: 12px; color: var(--fg-muted); }
 .run-page { padding-top: 24px; padding-bottom: 32px; }
 .run-header { padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--border-muted); }
+.run-header-row { display: flex; align-items: flex-start; gap: 16px; }
+.run-header-row .run-title { flex: 1; min-width: 0; }
 .run-title { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
 .run-meta { margin: 4px 0; }
 .run-meta .octicon { vertical-align: text-bottom; }

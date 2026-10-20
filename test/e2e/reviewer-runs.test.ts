@@ -233,8 +233,10 @@ test('a running review is cancelled when the pull request is published, closed, 
         const [{ id: runId }] = (await human('GET', `${pr.base}/reviewers/codex`)).runs;
         const cancel = `${pr.base}/reviewers/codex/cancel`;
         const stopButton = `data-api="${cancel}" data-run="${runId}"`;
-        // From the page of every pull request's reviews, and from the reviewer's menu in the sidebar.
+        // From the page of every pull request's reviews, the run's transcript, and the reviewer's menu in the sidebar.
+        const transcript = async () => (await fetch(`${server.url}/acme/widgets/pull/${pr.number}/runs/${runId}`)).text();
         assert.ok((await (await fetch(`${server.url}/runs`)).text()).includes(`<button type="button" class="btn btn-sm js-stop-review" id="stop-run-${runId}" ${stopButton}`));
+        assert.match(await transcript(), new RegExp(`<h2 class="run-title">[^]*?</h2>\\s*<button type="button" class="btn btn-sm js-stop-review" id="stop-run-${runId}" ${stopButton}`));
         assert.ok((await pr.page()).includes(`<button type="button" class="dropdown-item js-stop-review" id="agent-codex:stop-${runId}" ${stopButton}>Stop the review`));
         // Only the user stops it, and only the review the page showed.
         const post = (body: object, actor?: string) =>
@@ -255,6 +257,7 @@ test('a running review is cancelled when the pull request is published, closed, 
         assert.match(page, /title="Review of [0-9a-f]{7} cancelled">[^]*?<span class="agent-chunk">Asked to stop<\/span>/);
         assert.match(page, /codex-review<\/a><span class="Label Label--bot">bot<\/span> stopped reviewing <code>[0-9a-f]{7}<\/code> .*?: asked to stop/);
         assert.doesNotMatch(page, /js-stop-review/);
+        assert.doesNotMatch(await transcript(), /js-stop-review/);
         const stopped = await post({});
         assert.equal(stopped.status, 409);
         assert.match((await stopped.json()).message, /^Codex is not reviewing this pull request$/);

@@ -29,7 +29,7 @@ import {
 } from './components.ts';
 import { browseUrl, diffstatBlocks, fileTree, renderFile, threadKey, type DiffMode } from './diffview.ts';
 import { withThreadContext } from './browse.ts';
-import { dollars, runProgress, runUrl, tokens, took, transcriptContent, usageParts } from './runs.ts';
+import { dollars, runProgress, runUrl, stopButton, tokens, took, transcriptContent, usageParts } from './runs.ts';
 import type { Span } from '../diff.ts';
 
 // ------------------------------------------------------------------ lists
@@ -1564,7 +1564,7 @@ function runUsage(runs: ReviewRunRow[]): Safe | null {
   return html`<span title="${detail.filter(Boolean).join('\n')}">${total}</span>`;
 }
 
-const runBase = (p: PullPage) => ({ htmlBase: p.htmlBase, repoBase: `/${p.repo.owner}/${p.repo.name}` });
+const runBase = (p: PullPage) => ({ htmlBase: p.htmlBase, repoBase: `/${p.repo.owner}/${p.repo.name}`, apiBase: p.apiBase });
 
 /**
  * A reviewer agent's run on this pull request, and its reviewer; none for a custom reviewer that
@@ -1598,7 +1598,7 @@ export async function progressPart(s: Service, owner: string, name: string, numb
   const { pull } = await s.ctx(owner, name, number, { sync: false });
   for (const reviewer of s.reviewerAgents()) {
     const live = reviewer.live(pull);
-    if (live?.run.id === runId) return runProgress({ htmlBase: `/${owner}/${name}/pull/${number}`, repoBase: `/${owner}/${name}` }, live.run, live.progress).value;
+    if (live?.run.id === runId) return runProgress({ htmlBase: `/${owner}/${name}/pull/${number}`, repoBase: `/${owner}/${name}`, apiBase: `/api/repos/${owner}/${name}/pulls/${number}` }, live.run, live.progress).value;
   }
   return null;
 }
@@ -1618,10 +1618,9 @@ export function runsPage(s: Service): string {
   const row = (run: ReviewRunRow, live: LiveRun | null) => {
     const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', run.pull_id)!;
     const repo = s.repoById(pull.repo_id);
-    const b = { htmlBase: `/${repo.owner}/${repo.name}/pull/${pull.number}`, repoBase: `/${repo.owner}/${repo.name}` };
+    const b = { htmlBase: `/${repo.owner}/${repo.name}/pull/${pull.number}`, repoBase: `/${repo.owner}/${repo.name}`, apiBase: `/api/repos/${repo.owner}/${repo.name}/pulls/${pull.number}` };
     const actor = reviewers.get(run.reviewer)?.actor() ?? formerActor(s, run);
     const login = actor?.login ?? run.reviewer;
-    const api = `/api/repos/${repo.owner}/${repo.name}/pulls/${pull.number}/reviewers/${run.reviewer}`;
     const sha = shortSha(run.head_sha);
     const what = runSubject(run).startsWith('description:') ? html`the description at <code>${sha}</code>` : html`<code>${sha}</code>`;
     const model = [run.model || 'default model', run.effort ? `${run.effort} effort` : null].filter(Boolean).join(', ');
@@ -1648,7 +1647,7 @@ export function runsPage(s: Service): string {
   </div>
   <div class="pr-row-side run-side">
     <a class="agent-state${state.running ? ' agent-state--running' : ''}" href="${runUrl(b, run)}" title="${state.title}">${state.mark}<span>${state.text}</span></a>
-    ${live ? html`<button type="button" class="btn btn-sm js-stop-review" id="stop-run-${run.id}" data-api="${api}/cancel" data-run="${run.id}" title="Stop ${login}'s review; it does not review ${sha} again on its own">${icon('square-fill')} Stop</button>` : ''}
+    ${live ? stopButton(b, run, login) : ''}
   </div>
 </div>`;
   };

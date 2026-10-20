@@ -8,15 +8,25 @@ import { html, icon, plural, raw, relTime, shortSha, since, type Safe } from './
 import { renderMarkdown } from './markdown.ts';
 import { browseUrl } from './diffview.ts';
 
-/** Where a run's pages are, and the repository browser its paths link into. */
+/** Where a run's pages are, the repository browser its paths link into, and its pull request's API. */
 export interface RunBase {
   /** The pull request's pages: /owner/repo/pull/N. */
   htmlBase: string;
   /** The repository: /owner/repo. */
   repoBase: string;
+  /** The pull request in the API: /api/repos/owner/repo/pulls/N. */
+  apiBase: string;
 }
 
 export const runUrl = (b: RunBase, run: ReviewRunRow) => `${b.htmlBase}/runs/${run.id}`;
+
+/**
+ * Stop for a running review (public/app.js asks for a second click), on the page of the reviews
+ * running and on the run's transcript. Its id has the run's, so it stays armed through a refresh.
+ */
+export function stopButton(b: RunBase, run: ReviewRunRow, login: string): Safe {
+  return html`<button type="button" class="btn btn-sm js-stop-review" id="stop-run-${run.id}" data-api="${b.apiBase}/reviewers/${run.reviewer}/cancel" data-run="${run.id}" title="Stop ${login}'s review; it does not review ${shortSha(run.head_sha)} again on its own">${icon('square-fill')} Stop</button>`;
+}
 
 export function tokens(n: number): string {
   return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
@@ -152,7 +162,10 @@ export function transcriptContent(b: RunBase, o: { run: ReviewRunRow; login: str
   const steps = entries.filter((e) => e.type === 'tool').length;
   return html`<div class="container container-xl run-page">
   <div class="run-header">
-    <h2 class="run-title">${o.login}'s ${run.trigger === 'auto' ? 'automatic review' : 'review on request'} of <code>${shortSha(run.head_sha)}</code></h2>
+    <div class="run-header-row">
+      <h2 class="run-title">${o.login}'s ${run.trigger === 'auto' ? 'automatic review' : 'review on request'} of <code>${shortSha(run.head_sha)}</code></h2>
+      ${live ? stopButton(b, run, o.login) : ''}
+    </div>
     <p class="run-meta color-fg-muted">${o.label} (${model}) · started ${relTime(run.started_at)} · ${state}</p>
     <p class="run-meta color-fg-muted">${plural(steps, 'step')}${usage ? ` · ${usageParts(usage).join(' · ')}` : ''}${run.status === 'running' && usage && usage.cost_usd === null ? ' so far' : ''}</p>
     ${run.status === 'failed' && run.error ? html`<pre class="run-output run-failure">${run.error}</pre>` : ''}
