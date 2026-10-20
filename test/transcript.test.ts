@@ -256,7 +256,7 @@ test("the transcript shows a shell step's command in full, also one too long for
   log.update({ sessionUpdate: 'tool_call', toolCallId: 'short', title: 'git status --short', kind: 'execute', status: 'completed', rawInput: { command: 'git status --short' } });
   log.finish();
   const run = db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE id = ?', runId)!;
-  const html = transcriptContent({ htmlBase: '/acme/widgets/pull/1', repoBase: '/acme/widgets' }, { run, login: 'codex-review', label: 'Codex', entries: transcript(db, runId), live: null }).value;
+  const html = transcriptContent({ htmlBase: '/acme/widgets/pull/1', repoBase: '/acme/widgets', apiBase: '/api/repos/acme/widgets/pulls/1' }, { run, login: 'codex-review', label: 'Codex', entries: transcript(db, runId), live: null }).value;
   // Its title, in the summary, keeps its start and end.
   assert.match(html, /<code class="run-command">rg -n &quot;x+\n… \d+ bytes left out …\nx+&quot; src<\/code>/);
   // Opened, each shows its command as it ran.
