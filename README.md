@@ -330,6 +330,7 @@ times to try signing again.
 | `GALLEY_GH` | `gh` | gh binary used for publishing |
 | `GALLEY_CODEX` | `codex` | Codex binary used for reviews |
 | `GALLEY_CLAUDE` | `claude` | Claude Code binary used for reviews |
+| `GALLEY_NPMRC` | unset | An `.npmrc` that installs for reviews and the reviewer agents' commands read in place of `~/.npmrc`, such as one with a read-only token for private packages |
 | `GALLEY_NO_AUTOSTART` | unset | Do not start a server when none is running |
 
 ## Security
@@ -347,7 +348,12 @@ times to try signing again.
   dependencies install. Code that gets past the install's precautions could reach the API.
   Turn off installing and running tests for repositories you do not trust. Claude installs in
   galley's own sandbox: sandbox-exec on macOS, bubblewrap on Linux. Where galley can not start
-  one, it installs nothing.
+  one, it installs nothing. Of your home directory and the temporary directories, the commands
+  Claude runs read only the review's checkout and the toolchains (Node.js, Go, Rust, Python,
+  Java, .NET and their version managers), not your keys, tokens, logins or other projects; git
+  gets your name and email and nothing else of your git settings, and npm only the `.npmrc` in
+  `GALLEY_NPMRC`. Codex's sandbox still lets its commands read your files, with no network to
+  send them over.
 - **Let Claude's tests listen on localhost** lets code in the pull request reach anything on
   localhost, the API included, and other machines on your network reach a server it starts
   that does not listen on 127.0.0.1 only. Turn it on only for code you trust.

@@ -6,8 +6,9 @@ import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { now } from '../../src/server/db.ts';
 import { doneForAutoPublish } from '../../src/server/reviewers/head-status.ts';
 
@@ -260,29 +261,45 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     assert.equal(flag('--disallowedTools'), 'mcp__*');
     assert.ok(!call.args.includes('--bare'));
     // Tools for reading and for running commands, with nobody to ask: what is not allowed is denied.
+    // It may run the tests, so any command runs (in the sandbox), also one Claude Code would ask about.
     assert.equal(flag('--tools'), 'Read,Grep,Glob,Bash');
-    assert.deepEqual(call.args.slice(call.args.indexOf('--allowedTools') + 1, call.args.indexOf('--disallowedTools')), ['Read', 'Grep', 'Glob']);
+    assert.deepEqual(call.args.slice(call.args.indexOf('--allowedTools') + 1, call.args.indexOf('--disallowedTools')), ['Read', 'Grep', 'Glob', 'Bash']);
     assert.equal(flag('--permission-mode'), 'dontAsk');
     assert.equal(flag('--permission-prompts'), 'none');
     // Commands run in Claude Code's sandbox, never outside it: no network (not even localhost, by
     // default), writes to the checkout, Claude Code's own temporary directory and the review's, and
     // not to the user's repository (nor to /tmp/claude-<uid>, where the user's own Claude Code
-    // sessions keep theirs).
+    // sessions keep theirs). Of the home directory and the temporary directories, it reads the
+    // review's directory, the git directory, its own temporary directory and the toolchains only.
     const checkout = call.cwd;
     const tmp = join(dirname(checkout), 'tmp');
     const uid = process.getuid!();
     const { git_dir } = await human('GET', '/api/repos/acme/widgets');
-    assert.deepEqual(JSON.parse(flag('--settings')), {
-      sandbox: {
-        enabled: true,
-        failIfUnavailable: true,
-        autoAllowBashIfSandboxed: true,
-        allowUnsandboxedCommands: false,
-        excludedCommands: [],
-        network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true, allowLocalBinding: false },
-        filesystem: { allowWrite: [tmp], denyWrite: [join(checkout, '.git'), git_dir, `/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`] },
+    const settings = JSON.parse(flag('--settings'));
+    const { allowRead, ...filesystem } = settings.sandbox.filesystem;
+    assert.deepEqual({ ...settings.sandbox, filesystem }, {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      excludedCommands: [],
+      network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true, allowLocalBinding: false },
+      filesystem: {
+        denyRead: [...new Set([homedir(), realpathSync(tmpdir()), realpathSync('/tmp')])],
+        allowWrite: [tmp],
+        denyWrite: [join(checkout, '.git'), git_dir, `/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`],
       },
     });
+    // Its own temporary directory as the sandbox resolves it (/tmp is /private/tmp on macOS); gone by now.
+    assert.deepEqual(allowRead.slice(0, 3), [dirname(checkout), git_dir, join(realpathSync(dirname(call.claudeTmpdir)), basename(call.claudeTmpdir))]);
+    for (const toolchain of ['.volta', '.nvm', 'go', '.rustup', '.dotnet', '.local/share/mise']) assert.ok(allowRead.includes(join(homedir(), toolchain)), toolchain);
+    for (const tokens of ['.npmrc', '.cargo', '.m2', '.ssh', '.config/gh']) assert.ok(!allowRead.includes(join(homedir(), tokens)), tokens);
+    // Its git, npm and dotnet read nothing in the home directory: git has the user's name for
+    // commits, and npm no token.
+    assert.equal(call.gitConfigGlobal, join(call.claudeTmpdir, 'gitconfig'));
+    assert.equal(call.gitconfig, '[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n');
+    assert.equal(call.npmUserconfig, join(call.claudeTmpdir, 'npmrc'));
+    assert.equal(call.dotnetCliHome, call.claudeTmpdir);
     assert.equal(call.tmpdir, tmp);
     // Short, or Claude Code falls back to /tmp/claude-<uid>. Where /tmp is not writable, it is under
     // $TMPDIR, which may be longer.
@@ -340,15 +357,26 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
 
     // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
     // read-only too, and nothing installed. Nothing listens on localhost, whatever that setting says.
-    // A failed run keeps Claude Code's error.
+    // A failed run keeps Claude Code's error. With npm settings for reviews (GALLEY_NPMRC), its
+    // commands read those, also through a symlink into a directory the sandbox denies.
     const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
     await human('PUT', '/api/settings/claude', { runTests: false, localhost: true });
     const pull = await human('GET', base);
-    await withFakes({ FAKE_CLAUDE_FAIL: '1' }, async () => {
-      await human('POST', `${base}/reviewers/claude`);
-      await server.service.claude!.settle(pull.id);
-    });
+    const npmrcTarget = join(dir, 'agents-npmrc');
+    writeFileSync(npmrcTarget, '');
+    const npmrc = join(dir, 'npmrc-link');
+    symlinkSync(npmrcTarget, npmrc);
+    process.env.GALLEY_NPMRC = npmrc;
+    try {
+      await withFakes({ FAKE_CLAUDE_FAIL: '1' }, async () => {
+        await human('POST', `${base}/reviewers/claude`);
+        await server.service.claude!.settle(pull.id);
+      });
+    } finally {
+      delete process.env.GALLEY_NPMRC;
+    }
     const readOnly = lastCall();
+    assert.equal(readOnly.npmUserconfig, npmrc);
     const readOnlyFlag = (name: string) => readOnly.args[readOnly.args.indexOf(name) + 1];
     const allowed = readOnly.args.slice(readOnly.args.indexOf('--allowedTools') + 1, readOnly.args.indexOf('--disallowedTools'));
     assert.deepEqual(allowed.slice(0, 5), ['Read', 'Grep', 'Glob', 'Bash(git diff:*)', 'Bash(git log:*)']);
@@ -357,6 +385,9 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     assert.equal(sandbox.autoAllowBashIfSandboxed, false);
     assert.deepEqual(sandbox.filesystem.allowWrite, []);
     assert.ok(sandbox.filesystem.denyWrite.includes(readOnly.cwd));
+    assert.ok(sandbox.filesystem.denyRead.includes(homedir()));
+    assert.ok(sandbox.filesystem.allowRead.includes(git_dir), 'git reads its objects');
+    assert.deepEqual(sandbox.filesystem.allowRead.slice(-2), [npmrc, realpathSync(npmrcTarget)]);
     assert.equal(sandbox.network.allowLocalBinding, false);
     assert.match(readOnly.prompt, /Do not modify any files\./);
     assert.equal(readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length, installs, 'nothing is installed for a read-only review');
