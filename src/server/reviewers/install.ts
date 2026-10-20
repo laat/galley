@@ -2,6 +2,7 @@
 // lockfile, and without running anything the repository provides: no lifecycle scripts, no
 // pnpmfile, no yarnPath, and no package manager version the repository asks for.
 import { join } from 'node:path';
+import { reviewNpmrc } from '../../config.ts';
 import type { Repo, TreeEntry } from '../git.ts';
 
 export interface Install {
@@ -26,9 +27,14 @@ const LOCKFILES: [file: string, manager: string][] = [
 const MAX_PACKAGE_JSON = 1024 * 1024;
 const GREP_TIMEOUT_MS = 30_000;
 
-/** What the review's environment sets so tools cache in `tmp`: the sandbox keeps the home directory read-only, and npm fails there. */
+/**
+ * What the review's environment sets so tools cache in `tmp` (the sandbox keeps the home directory
+ * read-only, and npm fails there), and npm's settings for reviews when the user has some
+ * (reviewNpmrc), so that the install reads those and not ~/.npmrc.
+ */
 export function cacheEnv(tmp: string): Record<string, string> {
-  return { TMPDIR: tmp, XDG_CACHE_HOME: join(tmp, 'cache'), npm_config_cache: join(tmp, 'npm'), npm_config_store_dir: join(tmp, 'pnpm-store') };
+  const npmrc = reviewNpmrc();
+  return { TMPDIR: tmp, XDG_CACHE_HOME: join(tmp, 'cache'), npm_config_cache: join(tmp, 'npm'), npm_config_store_dir: join(tmp, 'pnpm-store'), ...(npmrc ? { npm_config_userconfig: npmrc } : {}) };
 }
 
 /**

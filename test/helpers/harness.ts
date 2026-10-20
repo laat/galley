@@ -302,7 +302,7 @@ const args = process.argv.slice(2);
 if (args[0] !== '-p') process.exit(2);
 const prompt = fs.readFileSync(0, 'utf8');
 const env = process.env;
-fs.appendFileSync(env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt, cwd: process.cwd(), sawFile: fs.existsSync('claude.js'), tmpdir: env.TMPDIR, claudeTmpdir: env.CLAUDE_CODE_TMPDIR, claudeTmpdirExists: fs.existsSync(env.CLAUDE_CODE_TMPDIR), session: env.CLAUDECODE ?? env.CLAUDE_CODE_SESSION_ID ?? null }) + '\\n');
+fs.appendFileSync(env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt, cwd: process.cwd(), sawFile: fs.existsSync('claude.js'), tmpdir: env.TMPDIR, claudeTmpdir: env.CLAUDE_CODE_TMPDIR, claudeTmpdirExists: fs.existsSync(env.CLAUDE_CODE_TMPDIR), session: env.CLAUDECODE ?? env.CLAUDE_CODE_SESSION_ID ?? null, gitConfigGlobal: env.GIT_CONFIG_GLOBAL, gitconfig: env.GIT_CONFIG_GLOBAL && fs.readFileSync(env.GIT_CONFIG_GLOBAL, 'utf8'), npmUserconfig: env.npm_config_userconfig, dotnetCliHome: env.DOTNET_CLI_HOME }) + '\\n');
 // As a test run can (Go's module cache): a read-only directory with a file in it.
 fs.mkdirSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache', { recursive: true });
 fs.writeFileSync(env.CLAUDE_CODE_TMPDIR + '/mod/cache/file', 'x');

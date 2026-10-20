@@ -2,9 +2,10 @@
 // the user's own login, answering in the reviewer's JSON schema. Its bot is named
 // "claude-review" unless renamed in settings, since the CLI calls author agents in Claude Code
 // "claude".
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { reviewNpmrc } from '../../config.ts';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
 import { EngineError, lastLines, makeWritable, removeDir, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
@@ -26,6 +27,34 @@ const MODELS: ModelInfo[] = [
  * commands such as ls and cat through on its own; anything else is denied.
  */
 const READ_ONLY_GIT = ['diff', 'log', 'show', 'status', 'blame', 'grep', 'ls-files', 'ls-tree', 'rev-parse', 'cat-file', 'merge-base', 'describe', 'shortlog'];
+
+/**
+ * What the commands Claude runs may read in the home directory, which they can not read otherwise
+ * (sandbox): toolchains and the packages they keep there, after agent-safehouse's toolchain rules,
+ * without the files in them that hold tokens (~/.npmrc, ~/.cargo/credentials.toml,
+ * ~/.m2/settings.xml, ~/.gradle/gradle.properties, ~/.nuget/NuGet). Places on macOS and Linux
+ * both; one that is not there is fine.
+ */
+const TOOLCHAINS = [
+  // Node.js, its version managers and package managers.
+  '.volta', '.nvm', '.fnm', '.local/share/fnm', 'Library/Application Support/fnm', '.cache/node', 'Library/Caches/node', '.local/share/pnpm', 'Library/pnpm', '.bun', '.deno', '.cache/deno', 'Library/Caches/deno',
+  // Version managers for any language.
+  '.local/share/mise', '.local/state/mise', '.config/mise', '.cache/mise', 'Library/Caches/mise', '.asdf', '.tool-versions', '.proto',
+  // Go: GOPATH with the module cache, and its settings (go env -w).
+  'go', '.config/go', 'Library/Application Support/go',
+  // Rust: toolchains, and the crates cargo fetched.
+  '.rustup', '.cargo/bin', '.cargo/registry', '.cargo/git',
+  // Python.
+  '.pyenv', '.local/share/uv', '.local/share/pipx', '.local/pipx', '.virtualenvs',
+  // Java: JDKs, and the packages Maven and Gradle fetched.
+  '.sdkman', 'Library/Java', '.m2/repository', '.gradle/caches', '.gradle/wrapper',
+  // .NET: the SDK, and the packages NuGet fetched.
+  '.dotnet', '.nuget/packages',
+  // Ruby.
+  '.rbenv', '.rubies',
+  // Tools installed for the user (uv's, pipx's).
+  '.local/bin',
+];
 
 /**
  * What a Claude Code session sets for the commands it runs. A server started from one (the CLI
@@ -63,6 +92,34 @@ function ownTmp(): string {
     if (!['EPERM', 'EACCES', 'EROFS'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
     return mkdtempSync(join(tmpdir(), 'lx-'));
   }
+}
+
+/** The file `path` leads to through symlinks, or `path` when it is not there. */
+function realOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * What the commands Claude runs read in place of the user's settings in the home directory, which
+ * the sandbox hides: git a configuration of its own in `own`, with the user's name and email for
+ * commits the tests make and nothing else (git refuses to run when it can not read its global
+ * configuration), npm and pnpm the user's settings for reviews (reviewNpmrc) or none, and dotnet
+ * `own` as its home.
+ */
+async function homeless(own: string, cwd: string): Promise<NodeJS.ProcessEnv> {
+  const gitconfig = join(own, 'gitconfig');
+  writeFileSync(gitconfig, '');
+  for (const key of ['user.name', 'user.email']) {
+    const value = (await run('git', ['config', '--get', key], { cwd, allowFail: true })).stdout.trim();
+    if (value) await run('git', ['config', '--file', gitconfig, key, value], { cwd });
+  }
+  let npmrc = reviewNpmrc();
+  if (!npmrc) writeFileSync((npmrc = join(own, 'npmrc')), '');
+  return { GIT_CONFIG_GLOBAL: gitconfig, npm_config_userconfig: npmrc, DOTNET_CLI_HOME: own };
 }
 
 export class ClaudeEngine implements Engine {
@@ -111,10 +168,12 @@ export class ClaudeEngine implements Engine {
         '--safe-mode',
         '--strict-mcp-config',
         '--disable-slash-commands',
-        // A review of the description has what it reads in the prompt, and no tools.
+        // A review of the description has what it reads in the prompt, and no tools. One that may
+        // run the tests may run any command, in the sandbox below: Claude Code would ask about one
+        // it can not read through (a variable set, cd, $(…), a subshell), and nobody answers.
         ...(job.reads === 'description'
           ? ['--tools', '']
-          : ['--tools', 'Read,Grep,Glob,Bash', '--allowedTools', 'Read', 'Grep', 'Glob', ...(settings.runTests ? [] : READ_ONLY_GIT.map((c) => `Bash(git ${c}:*)`))]),
+          : ['--tools', 'Read,Grep,Glob,Bash', '--allowedTools', 'Read', 'Grep', 'Glob', ...(settings.runTests ? ['Bash'] : READ_ONLY_GIT.map((c) => `Bash(git ${c}:*)`))]),
         '--disallowedTools',
         'mcp__*',
         // Nobody is there to answer: what is not allowed above (or by the sandbox) is denied.
@@ -123,11 +182,11 @@ export class ClaudeEngine implements Engine {
         '--permission-prompts',
         'none',
         '--settings',
-        JSON.stringify({ sandbox: this.sandbox(job) }),
+        JSON.stringify({ sandbox: this.sandbox(job, own) }),
       ];
       if (settings.model) args.push('--model', settings.model);
       if (settings.effort) args.push('--effort', settings.effort);
-      const env: NodeJS.ProcessEnv = { ...job.env, CLAUDE_CODE_TMPDIR: own, DISABLE_AUTOUPDATER: '1' };
+      const env: NodeJS.ProcessEnv = { ...job.env, CLAUDE_CODE_TMPDIR: own, DISABLE_AUTOUPDATER: '1', ...(await homeless(own, checkout)) };
       for (const name of SESSION_VARIABLES) env[name] = undefined;
       const events = new ClaudeEvents(checkout);
       const stdout = jsonLines((e) => {
@@ -159,13 +218,22 @@ export class ClaudeEngine implements Engine {
    * pull request can not reach galley's API on localhost, which takes any local caller for the
    * user, unless the user lets the tests listen and connect on localhost (the localhost setting),
    * which opens every port there, galley's too, and lets them listen on every interface. It
-   * writes to the checkout (when it runs the tests), its own temporary directory and the
+   * writes to the checkout (when it runs the tests), its own temporary directory (`own`) and the
    * review's, and nowhere else: not to the git directory the checkout points into, which Claude
    * Code would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude Code
-   * fall back to it. It may not leave the sandbox.
+   * fall back to it. Of the home directory and the temporary directories it reads only what it
+   * needs: the review's directory, the git directory, its own temporary directory and the
+   * toolchains (TOOLCHAINS); not the user's keys, tokens and logins, other projects, or other
+   * reviews' checkouts. It may not leave the sandbox.
    */
-  private sandbox(job: EngineJob) {
+  private sandbox(job: EngineJob, own: string) {
     const uid = process.getuid?.();
+    const home = homedir();
+    // The user's npm settings for reviews, which may be in the home directory (homeless): the path
+    // npm opens, and the file a symlink there (into a dotfiles repository) leads to, which is what
+    // the sandbox checks.
+    const npmrc = reviewNpmrc();
+    const npmrcPaths = npmrc ? [...new Set([npmrc, realOr(npmrc)])] : [];
     return {
       enabled: true,
       failIfUnavailable: true,
@@ -174,6 +242,8 @@ export class ClaudeEngine implements Engine {
       excludedCommands: [],
       network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true, allowLocalBinding: job.settings.runTests && job.settings.localhost },
       filesystem: {
+        denyRead: [...new Set([home, realpathSync(tmpdir()), realpathSync('/tmp')])],
+        allowRead: [job.dir, ...(job.gitDir ? [job.gitDir] : []), realpathSync(own), ...TOOLCHAINS.map((p) => join(home, p)), ...npmrcPaths],
         allowWrite: job.tmp ? [job.tmp] : [],
         denyWrite: [
           join(job.checkout, '.git'),

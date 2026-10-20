@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Repo } from '../src/server/git.ts';
-import { installCommand } from '../src/server/reviewers/install.ts';
+import { cacheEnv, installCommand } from '../src/server/reviewers/install.ts';
 
 /** The install command for a commit holding these files; `{ symlink }` commits a symlink. */
 async function install(files: Record<string, string | { symlink: string }>) {
@@ -66,5 +66,18 @@ test('symlinks count as no file, so the server never reads through them', async 
     assert.equal((await install({ 'package.json': JSON.stringify({ packageManager: 'npm@11.0.0', pad: 'x'.repeat(1024 * 1024) }), 'yarn.lock': '', 'package-lock.json': '{}' }))?.lockfile, 'yarn.lock');
   } finally {
     rmSync(join(outside, '..'), { recursive: true, force: true });
+  }
+});
+
+test("the install reads the user's npm settings for reviews (GALLEY_NPMRC) in place of ~/.npmrc, when there are some", () => {
+  const before = process.env.GALLEY_NPMRC;
+  try {
+    delete process.env.GALLEY_NPMRC;
+    assert.deepEqual(cacheEnv('/review/tmp'), { TMPDIR: '/review/tmp', XDG_CACHE_HOME: '/review/tmp/cache', npm_config_cache: '/review/tmp/npm', npm_config_store_dir: '/review/tmp/pnpm-store' });
+    process.env.GALLEY_NPMRC = '/home/u/.config/agents/npmrc';
+    assert.equal(cacheEnv('/review/tmp').npm_config_userconfig, '/home/u/.config/agents/npmrc');
+  } finally {
+    if (before === undefined) delete process.env.GALLEY_NPMRC;
+    else process.env.GALLEY_NPMRC = before;
   }
 });

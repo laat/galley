@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
 
 /** package.json's, which a release bumps (.claude/skills/release). */
@@ -42,6 +42,17 @@ export function githubSlug(url: string | null): string | null {
   if (!url) return null;
   const m = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
   return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * npm's settings for reviews (GALLEY_NPMRC), in place of ~/.npmrc: what dependency installs and
+ * the reviewer agents' commands read, such as an .npmrc with a read-only token for private
+ * packages. Unset, installs read ~/.npmrc and Claude's commands no settings. A relative path is
+ * taken from where the server runs.
+ */
+export function reviewNpmrc(): string | undefined {
+  const npmrc = fromEnv('NPMRC');
+  return npmrc && resolve(npmrc);
 }
 
 /** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
