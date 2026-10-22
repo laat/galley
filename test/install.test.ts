@@ -29,7 +29,7 @@ test('each lockfile installs with its package manager, running nothing from the 
   assert.deepEqual(await install({ 'pnpm-lock.yaml': '' }), {
     lockfile: 'pnpm-lock.yaml',
     command: ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile', '--config.manage-package-manager-versions=false'],
-    env: {},
+    env: { XDG_RUNTIME_DIR: '/review/tmp' },
   });
   assert.deepEqual((await install({ 'package-lock.json': '{}' }))?.command, ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund']);
   assert.deepEqual((await install({ 'npm-shrinkwrap.json': '{}' }))?.command, ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund']);
@@ -73,7 +73,7 @@ test("the install reads the user's npm settings for reviews (GALLEY_NPMRC) in pl
   const before = process.env.GALLEY_NPMRC;
   try {
     delete process.env.GALLEY_NPMRC;
-    assert.deepEqual(cacheEnv('/review/tmp'), { TMPDIR: '/review/tmp', XDG_CACHE_HOME: '/review/tmp/cache', npm_config_cache: '/review/tmp/npm', npm_config_store_dir: '/review/tmp/pnpm-store' });
+    assert.deepEqual(cacheEnv('/review/tmp'), { TMPDIR: '/review/tmp', XDG_CACHE_HOME: '/review/tmp/cache', npm_config_cache: '/review/tmp/npm', npm_config_store_dir: '/review/tmp/pnpm-store', pnpm_config_store_dir: '/review/tmp/pnpm-store' });
     process.env.GALLEY_NPMRC = '/home/u/.config/agents/npmrc';
     assert.equal(cacheEnv('/review/tmp').npm_config_userconfig, '/home/u/.config/agents/npmrc');
   } finally {

@@ -30,11 +30,20 @@ const GREP_TIMEOUT_MS = 30_000;
 /**
  * What the review's environment sets so tools cache in `tmp` (the sandbox keeps the home directory
  * read-only, and npm fails there), and npm's settings for reviews when the user has some
- * (reviewNpmrc), so that the install reads those and not ~/.npmrc.
+ * (reviewNpmrc), so that the install reads those and not ~/.npmrc. pnpm 12 reads a
+ * setting of pnpm's own, such as its store, from pnpm_config_ and no longer from npm_config_.
  */
 export function cacheEnv(tmp: string): Record<string, string> {
   const npmrc = reviewNpmrc();
-  return { TMPDIR: tmp, XDG_CACHE_HOME: join(tmp, 'cache'), npm_config_cache: join(tmp, 'npm'), npm_config_store_dir: join(tmp, 'pnpm-store'), ...(npmrc ? { npm_config_userconfig: npmrc } : {}) };
+  const store = join(tmp, 'pnpm-store');
+  return {
+    TMPDIR: tmp,
+    XDG_CACHE_HOME: join(tmp, 'cache'),
+    npm_config_cache: join(tmp, 'npm'),
+    npm_config_store_dir: store,
+    pnpm_config_store_dir: store,
+    ...(npmrc ? { npm_config_userconfig: npmrc } : {}),
+  };
 }
 
 /**
@@ -59,7 +68,8 @@ export async function installCommand(git: Repo, sha: string, tmp: string): Promi
   const [lockfile, manager] = found.find(([, m]) => m === named) ?? found[0];
   switch (manager) {
     case 'pnpm':
-      return { lockfile, command: ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile', '--config.manage-package-manager-versions=false'], env: {} };
+      // pnpm 12 locks its store in $XDG_RUNTIME_DIR, which the sandbox keeps read-only.
+      return { lockfile, command: ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile', '--config.manage-package-manager-versions=false'], env: { XDG_RUNTIME_DIR: tmp } };
     case 'bun':
       return { lockfile, command: ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'], env: { BUN_INSTALL_CACHE_DIR: join(tmp, 'bun') } };
     case 'yarn': {
