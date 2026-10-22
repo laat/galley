@@ -5,7 +5,7 @@ import { api } from './api.ts';
 import { browse } from './browse.ts';
 import { reviewers } from './reviewers.ts';
 import { err, out } from './output.ts';
-import { DEFAULT_PORT, VERSION, dataDir, fromEnv, localUrl } from '../config.ts';
+import { ConfigError, DEFAULT_PORT, VERSION, configFile, dataDir, fromEnv, localUrl } from '../config.ts';
 
 const USAGE = `galley: a staging area for pull requests.
 
@@ -23,7 +23,7 @@ COMMANDS
   reviewers:   List the reviewer agents that review the repository
 
 ENVIRONMENT
-  GALLEY_URL     Server URL (default http://localhost:${DEFAULT_PORT})
+  GALLEY_URL     Server URL (default: url in ${configFile()}, or http://localhost:${DEFAULT_PORT})
   GALLEY_ACTOR   Who the CLI acts as (default: detected agent, or you)
   GALLEY_HOME    Data directory for the server (default ${dataDir()})
 
@@ -143,8 +143,8 @@ async function serve(args: string[]): Promise<number> {
 
 export async function main(argv: string[], cwd = process.cwd()): Promise<number> {
   const [cmd, ...rest] = argv;
-  const client = new Client();
   try {
+    const client = new Client();
     switch (cmd) {
       case 'pr':
         return await pr(client, cwd, rest);
@@ -183,6 +183,10 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
     if (e instanceof CliError) {
       err(e.message);
       return e.code;
+    }
+    if (e instanceof ConfigError) {
+      err(e.message);
+      return 1;
     }
     throw e;
   }

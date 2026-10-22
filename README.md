@@ -64,7 +64,7 @@ galley serve            # http://localhost:24823
 Run it once on the machine that keeps your pull requests. After that you rarely need to: when
 no server is running there, the CLI starts one in the background (log in
 `~/.local/share/galley/server.log`). It starts none on a machine where galley has never run, so
-a forgotten `GALLEY_URL` fails instead of starting a second galley. `GALLEY_NO_AUTOSTART=1`
+a forgotten `url` fails instead of starting a second galley. `GALLEY_NO_AUTOSTART=1`
 turns starting off. When another program has the port, the CLI and `galley serve` say so;
 `GALLEY_PORT` moves galley to another.
 
@@ -93,12 +93,15 @@ or pages on your other devices try to open the [desktop app](#desktop-app) of th
 
 ## Other machines
 
-For agents on another machine to stage on your galley, set `GALLEY_URL` to its tailnet address
-in the shell profile there, and restart them:
+For agents on another machine to stage on your galley, write its tailnet address in
+`~/.config/galley/config.json` there:
 
-```sh
-export GALLEY_URL=https://<host>.<tailnet>.ts.net
+```json
+{ "url": "https://<host>.<tailnet>.ts.net" }
 ```
+
+Every agent on that machine reads it, whatever app starts the agent. `GALLEY_URL`, when set,
+takes its place.
 
 That machine needs only the CLI: `npm install --global galley-proof`, or a checkout without
 `pnpm install`:
@@ -110,8 +113,8 @@ ln -s "$PWD/bin/galley.ts" ~/.local/bin/galley
 
 and the skill, as in [Install](#install). The desktop app there opens that galley and starts none.
 
-An agent's sandbox must let the CLI, and the git it runs, reach that address. When it does not,
-the agent tells you that it cannot reach galley.
+An agent's sandbox must let the CLI read `~/.config/galley/config.json`, and let it and the git
+it runs reach that address. When it does not, the agent tells you that it cannot reach galley.
 
 - Claude Code: add the host to `sandbox.network.allowedDomains` in `~/.claude/settings.json`:
 
@@ -174,9 +177,9 @@ rsync -a --delete ~/.config/galley/ <host>:.config/galley/
 ```
 
 Start the service again, and move `~/.local/share/galley` aside on the old machine, so that
-neither the CLI nor the desktop app starts a galley of its own there. Then set `GALLEY_URL` on
-every machine, the server's and the old one included: in an agent's sandbox, localhost may be the
-sandbox's own.
+neither the CLI nor the desktop app starts a galley of its own there. Then set the `url` in
+`~/.config/galley/config.json` on every machine, the server's and the old one included: in an
+agent's sandbox, localhost may be the sandbox's own.
 
 ## Desktop app
 
@@ -319,12 +322,12 @@ times to try signing again.
 
 | Variable | Default | |
 |---|---|---|
-| `GALLEY_URL` | `http://localhost:24823` | Where the CLI finds the server |
+| `GALLEY_URL` | `url` in `~/.config/galley/config.json`, or `http://localhost:24823` | Where the CLI and the desktop app find the server |
 | `GALLEY_PORT` | `24823` | Port for `serve` and the default URL |
 | `GALLEY_PUBLIC_URL` | the local URL | Where other machines reach the server (`serve --public-url`): its links use it, and it accepts requests to its host |
 | `GALLEY_ALLOWED_HOSTS` | unset | More hosts, or host:port, the server accepts requests to, comma-separated (`serve --allowed-host`) |
 | `GALLEY_HOME` | `~/.local/share/galley` | Server data directory |
-| `GALLEY_CONFIG_DIR` | `~/.config/galley` | Custom reviewers, in `reviewers/` |
+| `GALLEY_CONFIG_DIR` | `~/.config/galley` | `config.json`, and custom reviewers in `reviewers/` |
 | `GALLEY_ACTOR` | the detected agent | Who CLI calls act as |
 | `GALLEY_USER` | your `gh` login | Your name in the UI |
 | `GALLEY_GH` | `gh` | gh binary used for publishing |

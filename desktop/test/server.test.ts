@@ -63,8 +63,8 @@ test('starts no server where the CLI starts none: on another computer, or on one
     process.env.GALLEY_NO_AUTOSTART = '1';
     assert.equal(noAutostart('http://localhost:24823'), 'GALLEY_NO_AUTOSTART is set');
     delete process.env.GALLEY_NO_AUTOSTART;
-    // A new computer, where GALLEY_URL was likely forgotten.
-    const never = "no galley server has run on this computer: run galley serve once, or set GALLEY_URL to your server's URL";
+    // A new computer, where the server's URL was likely forgotten.
+    const never = `no galley server has run on this computer: run galley serve once, or set your server's URL as url in ${join(process.env.GALLEY_CONFIG_DIR!, 'config.json')}`;
     assert.equal(noAutostart('http://localhost:24823'), never);
     assert.equal(awayText('http://localhost:24823', 'none', never, ''), `galley is not running at http://localhost:24823 (${never})`);
     // One that has run a server: its database is in the data directory.

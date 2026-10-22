@@ -474,10 +474,10 @@ test('the CLI starts a server when none is running, on a machine that has run on
   const url = `http://localhost:${port}`;
   const home = mkdtempSync(join(tmpdir(), 'galley-autostart-'));
   try {
-    // Only on a machine that has run one: on another, GALLEY_URL was likely forgotten.
+    // Only on a machine that has run one: on another, the server's URL was likely forgotten.
     const elsewhere = await exec(process.execPath, [BIN, 'pr', 'list'], { cwd: repo, env: { ...process.env, GALLEY_URL: url, GALLEY_HOME: home, GALLEY_ACTOR: 'agent', GALLEY_NO_AUTOSTART: '' } }).catch((e) => e);
     assert.equal(elsewhere.code, 1);
-    assert.match(elsewhere.stderr, /, and none was started: no galley server has run on this machine with its data in .*\. Set GALLEY_URL to your galley server's URL, or run `galley serve` to start one here\./);
+    assert.match(elsewhere.stderr, /, and none was started: no galley server has run on this machine with its data in .*\. Set your galley server's URL as url in .*config\.json \(or GALLEY_URL\), or run `galley serve` to start one here\./);
     assert.equal(await fetch(`${url}/api/health`).then(() => 'answered', () => 'nothing'), 'nothing');
     await (await startServer({ port: 0, dataDir: home, ghBin: 'false', codexBin: 'false', claudeBin: 'false', reviewersDir: join(home, 'reviewers'), viewerLogin: 'reviewer' })).close();
     // It starts with the settings it would have from the user's shell, and the links are its.

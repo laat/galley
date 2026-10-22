@@ -3,12 +3,12 @@
 // what the agents are at.
 // It is never a second server, and quitting it leaves the server running for the agents. It opens
 // galley:// links (src/app-link.ts), which pages opened in the browser hand off to while it runs.
-import { app, BrowserWindow, Menu, nativeImage, Notification, session, shell, Tray, type BrowserWindowConstructorOptions, type MenuItemConstructorOptions } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, session, shell, Tray, type BrowserWindowConstructorOptions, type MenuItemConstructorOptions } from 'electron';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { APP_SCHEME, appLinkPath } from '../src/app-link.ts';
-import { serverUrl } from '../src/config.ts';
+import { ConfigError, serverUrl } from '../src/config.ts';
 import { follow, type Follower } from './live.ts';
 import { githubTarget, trayMenu, trayTitle, trayToolTip } from './menu.ts';
 import { notAPage } from './pages.ts';
@@ -104,7 +104,13 @@ async function start(): Promise<void> {
   // Opened from the Finder, the Dock or at login, the app has launchd's environment: the server
   // it starts needs the user's PATH (Node, git, gh, the agents), and the URL may be in GALLEY_URL or GALLEY_PORT.
   if (app.isPackaged) Object.assign(process.env, await loginShellEnv());
-  base = serverUrl();
+  try {
+    base = serverUrl();
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    dialog.showErrorBox('galley', e.message);
+    return app.quit();
+  }
   origin = new URL(base).origin;
   settings = readSettings();
   // galley:// links come here: the built app says it opens them (build.ts), and this makes it the
