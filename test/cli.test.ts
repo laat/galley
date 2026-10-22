@@ -183,6 +183,35 @@ test('the CLI starts no server for a galley on another machine, and says it does
   assert.match(sandboxed.stderr, / Codex runs this command in its sandbox without network access \(CODEX_SANDBOX_NETWORK_DISABLED\), which keeps galley out of reach: tell the user, rather than work around it\.\n$/);
 });
 
+test('the CLI finds the server at the url in the config file, unless GALLEY_URL is set', async (t) => {
+  const there = await fake(t, (path) => (path === '/api/meta' ? [200, META] : [200, { ok: true }]));
+  const dir = mkdtempSync(join(tmpdir(), 'galley-config-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'config.json');
+  // GALLEY_PORT keeps the default URL off a galley this machine may run.
+  const env = { GALLEY_CONFIG_DIR: dir, GALLEY_URL: '', GALLEY_PORT: '1', GALLEY_NO_AUTOSTART: '1' };
+
+  writeFileSync(file, JSON.stringify({ url: `${there.url}/` }));
+  const fromFile = await galley(t, env, 'api', 'health');
+  assert.equal(fromFile.code, 0, fromFile.stderr);
+  assert.deepEqual(there.paths, ['/api/meta', '/api/health']);
+  // GALLEY_URL wins over the file.
+  const fromEnv = await galley(t, { ...env, GALLEY_URL: 'http://galley.invalid:24823' }, 'api', 'health');
+  assert.match(fromEnv.stderr, /^galley does not answer at http:\/\/galley\.invalid:24823\./);
+  // Without a file, localhost.
+  rmSync(file);
+  const none = await galley(t, env, 'api', 'health');
+  assert.match(none.stderr, / at http:\/\/localhost:1\b/);
+  // A file galley can not use says so, rather than fall back to localhost.
+  writeFileSync(file, '{"url": ');
+  const broken = await galley(t, env, 'api', 'health');
+  assert.equal(broken.code, 1);
+  assert.ok(broken.stderr.startsWith(`could not read ${file}: `), broken.stderr);
+  writeFileSync(file, JSON.stringify({ url: 'galley.example' }));
+  const notUrl = await galley(t, env, 'api', 'health');
+  assert.equal(notUrl.stderr, `${file}: url is not an http or https URL: "galley.example"\n`);
+});
+
 test('the CLI goes through the proxy the environment names, to a galley on another machine only', async (t) => {
   const galleyThere = await fake(t, (path) => (path === '/api/meta' ? [200, META] : [200, { ok: true }]));
   // As `tailscale serve` answers for a galley that is down behind it.

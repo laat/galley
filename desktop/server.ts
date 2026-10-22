@@ -8,20 +8,20 @@ import { delimiter, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { identify, isLocal, ranHere } from '../src/cli/client.ts';
-import { dataDir, DEFAULT_PORT, fromEnv } from '../src/config.ts';
+import { configFile, dataDir, DEFAULT_PORT, fromEnv } from '../src/config.ts';
 
 /** What answers at the server's URL (identify). */
 export type Found = Awaited<ReturnType<typeof identify>>;
 
 /**
  * Why no server may be started at `base`, as the CLI starts none (client.ts autostart): null when
- * one may. Only on a computer where a galley server has run: on another, GALLEY_URL was likely
+ * one may. Only on a computer where a galley server has run: on another, the server's URL was likely
  * forgotten, and a second galley there would hold pull requests the user never sees.
  */
 export function noAutostart(base: string): string | null {
   if (fromEnv('NO_AUTOSTART')) return 'GALLEY_NO_AUTOSTART is set';
   if (!isLocal(base)) return `${base} is not on this computer`;
-  if (!ranHere()) return "no galley server has run on this computer: run galley serve once, or set GALLEY_URL to your server's URL";
+  if (!ranHere()) return `no galley server has run on this computer: run galley serve once, or set your server's URL as url in ${configFile()}`;
   return null;
 }
 

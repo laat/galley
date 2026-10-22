@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
@@ -18,8 +19,9 @@ export function fromEnv(name: string): string | undefined {
   return process.env[`GALLEY_${name}`] || undefined;
 }
 
+/** Where the CLI and the desktop app find the server: GALLEY_URL, the config file's `url`, or localhost. */
 export function serverUrl(): string {
-  const url = fromEnv('URL');
+  const url = fromEnv('URL') ?? readConfig().url;
   if (url) return url.replace(/\/$/, '');
   return `http://localhost:${fromEnv('PORT') ?? DEFAULT_PORT}`;
 }
@@ -58,6 +60,35 @@ export function reviewNpmrc(): string | undefined {
 /** Where the user's own configuration lives: the custom reviewers' definitions, in reviewers/. */
 export function configDir(): string {
   return fromEnv('CONFIG_DIR') || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'galley');
+}
+
+/** A config file galley can not use: the CLI and the desktop app say so and stop. */
+export class ConfigError extends Error {}
+
+/** The config file, in configDir(). */
+export const configFile = () => join(configDir(), 'config.json');
+
+/**
+ * The config file's settings, for when the environment sets none: on disk, they reach every
+ * agent on the machine, whatever app starts it and whichever shell profile it reads. Only `url`
+ * so far, which is GALLEY_URL. Empty when there is no file.
+ */
+export function readConfig(): { url?: string } {
+  const path = configFile();
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new ConfigError(`could not read ${path}: ${(e as Error).message}`);
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) throw new ConfigError(`${path} is not a JSON object`);
+  const { url } = config as { url?: unknown };
+  if (url === undefined) return {};
+  if (typeof url !== 'string' || !URL.canParse(url) || !/^https?:$/.test(new URL(url).protocol)) {
+    throw new ConfigError(`${path}: url is not an http or https URL: ${JSON.stringify(url)}`);
+  }
+  return { url };
 }
 
 /**

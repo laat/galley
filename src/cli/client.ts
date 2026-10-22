@@ -4,7 +4,7 @@ import http from 'node:http';
 import { hostname } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliActor, dataDir, DEFAULT_PORT, fromEnv, githubSlug, serverUrl } from '../config.ts';
+import { cliActor, configFile, dataDir, DEFAULT_PORT, fromEnv, githubSlug, serverUrl } from '../config.ts';
 
 export class CliError extends Error {
   code: number;
@@ -88,7 +88,7 @@ export const isLocal = (base: string) => ['localhost', '127.0.0.1', '[::1]'].inc
 
 /**
  * Whether a galley server has run on this machine: it leaves its database in the data directory.
- * Only then does the CLI start one. On another machine GALLEY_URL was likely forgotten, and a
+ * Only then does the CLI start one. On another machine the server's URL was likely forgotten, and a
  * galley of its own there would hold pull requests the user never sees.
  */
 export const ranHere = () => existsSync(join(dataDir(), 'galley.db'));
@@ -97,7 +97,7 @@ export const ranHere = () => existsSync(join(dataDir(), 'galley.db'));
 function away(base: string): string {
   if (!isLocal(base)) return `galley does not answer at ${base}. Is the server running there, and can this machine reach it (is it on the tailnet)?${sandboxed()}`;
   if (!fromEnv('NO_AUTOSTART') && !ranHere()) {
-    return `the galley server is not running at ${base}, and none was started: no galley server has run on this machine with its data in ${dataDir()}. Set GALLEY_URL to your galley server's URL, or run \`galley serve\` to start one here.${sandboxed()}`;
+    return `the galley server is not running at ${base}, and none was started: no galley server has run on this machine with its data in ${dataDir()}. Set your galley server's URL as url in ${configFile()} (or GALLEY_URL), or run \`galley serve\` to start one here.${sandboxed()}`;
   }
   return `the galley server is not running at ${base}, and it could not be started. Run \`galley serve\` to see why.${sandboxed()}`;
 }
@@ -107,7 +107,7 @@ const silent = (base: string, ms: number) =>
 const other = (base: string) =>
   isLocal(base)
     ? `something other than galley answers at ${base}. Stop it, or run galley on another port with GALLEY_PORT=<port>, and set GALLEY_PORT for your agents too.`
-    : `something other than galley answers at ${base}. Is GALLEY_URL right?`;
+    : `something other than galley answers at ${base}. Is ${fromEnv('URL') ? 'GALLEY_URL' : `the url in ${configFile()}`} right?`;
 
 /** What made a request fail, from the innermost cause: a proxy's refusal, say. */
 function reason(e: unknown): string {
