@@ -11,8 +11,8 @@
 
   // ------------------------------------------------------------------ API
 
-  async function api(method, url, body) {
-    const opts = { method, headers: {} };
+  async function api(method, url, body, extra) {
+    const opts = { method, ...extra, headers: { ...(extra && extra.headers) } };
     if (body !== undefined) {
       opts.headers['content-type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -547,6 +547,136 @@
       e.preventDefault();
       if (stillUploading(form)) return;
       submitNewComment(form, e.submitter);
+    }
+  });
+
+  // ------------------------------------------------------ autosave forms
+  // Settings save as they change: a box, a choice or a menu at once, a text field when it is left
+  // or Enter is pressed, and one still being typed in when the page goes away. Each save sends the
+  // fields that differ from what the form last saved, so a value the server refuses holds up no
+  // other field; a refused one goes back to what is saved, next to the server's reason. Changes
+  // made in one turn of the event loop (a tool that resets its model and effort) save together,
+  // one save at a time per form, and with keepalive, so a save started as a link is clicked is
+  // not cancelled by the page going away.
+
+  const autosaves = new WeakMap(); // form -> { saved, sending (the fields under way, or null), again, timer, id, count }
+  const KEEPALIVE_MAX = 60000; // the browser refuses keepalive bodies over 64 KiB
+
+  /** A form's values as the page has them from the server, as formJson reads them. */
+  function formDefaults(form) {
+    const body = {};
+    for (const el of form.elements) {
+      if (!el.name || el.disabled || el.tagName === 'BUTTON') continue;
+      if (el.type === 'checkbox') body[el.name] = el.defaultChecked;
+      else if (el.type === 'radio') {
+        if (el.defaultChecked) body[el.name] = el.value;
+      } else if (el.tagName === 'SELECT') {
+        const option = [...el.options].find((o) => o.defaultSelected) || el.options[0];
+        body[el.name] = option ? option.value : '';
+      } else body[el.name] = el.defaultValue;
+    }
+    return body;
+  }
+
+  function autosaveState(form) {
+    let state = autosaves.get(form);
+    if (!state) autosaves.set(form, (state = { saved: formDefaults(form), sending: null, again: false, timer: null, id: Math.random().toString(36).slice(2), count: 0 }));
+    return state;
+  }
+
+  function autosaveChanges(form) {
+    const saved = autosaveState(form).saved;
+    const changes = {};
+    for (const [name, value] of Object.entries(formJson(form))) if (value !== saved[name]) changes[name] = value;
+    return Object.keys(changes).length ? changes : null;
+  }
+
+  // Each save of a form counts up, and the server refuses one older than a save it made (docs/api.md).
+  function saveFields(form, changes) {
+    const state = autosaveState(form);
+    const headers = { 'x-galley-save': `${state.id} ${++state.count}` };
+    return api(form.dataset.method, form.dataset.api, changes, { headers, keepalive: JSON.stringify(changes).length < KEEPALIVE_MAX });
+  }
+
+  /** Put the fields refused back to what is saved, unless they were changed again meanwhile. */
+  function restoreFields(form, refused, saved) {
+    const now = formJson(form);
+    for (const el of form.elements) {
+      if (!(el.name in refused) || now[el.name] !== refused[el.name]) continue;
+      const value = saved[el.name];
+      if (el.type === 'checkbox') el.checked = value;
+      else if (el.type === 'radio') el.checked = el.value === value;
+      else el.value = value;
+      // The models follow the tool, and the efforts the model.
+      if (el.matches('.js-reviewer-engine, .js-reviewer-model')) el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  function autosave(form) {
+    const state = autosaveState(form);
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => sendAutosave(form));
+  }
+
+  async function sendAutosave(form) {
+    const state = autosaveState(form);
+    if (state.sending) {
+      state.again = true;
+      return;
+    }
+    const changes = autosaveChanges(form);
+    if (!changes) return;
+    state.sending = changes;
+    try {
+      await saveFields(form, changes);
+      Object.assign(state.saved, changes);
+      formError(form, null);
+      if (!state.again && form.dataset.toast) toast(form.dataset.toast);
+    } catch (err) {
+      // A value the server refused goes back; one that did not reach it stays, to be sent again.
+      if (err.status) restoreFields(form, changes, state.saved);
+      formError(form, err);
+      toast(`Not saved: ${err.message}`);
+    } finally {
+      state.sending = null;
+      if (state.again) {
+        state.again = false;
+        sendAutosave(form);
+      }
+    }
+  }
+
+  const autosaveForm = (el) => el.closest && el.closest('form.js-autosave-form');
+
+  document.addEventListener('change', (e) => {
+    const form = autosaveForm(e.target);
+    if (form) autosave(form);
+  });
+  // Enter in a field, or ⌘/Ctrl+Enter in a text area, saves now.
+  document.addEventListener('keydown', (e) => {
+    const form = autosaveForm(e.target);
+    if (form && e.key === 'Enter' && e.target.matches('input')) {
+      e.preventDefault();
+      autosave(form);
+    }
+  });
+  document.addEventListener('submit', (e) => {
+    const form = e.target;
+    if (!form.matches('.js-autosave-form')) return;
+    e.preventDefault();
+    autosave(form);
+  });
+  // Leaving the page: what is not saved yet goes now. With a save still under way, this one has its
+  // fields too, as they are now: should it arrive first, the server refuses the earlier one.
+  window.addEventListener('pagehide', () => {
+    for (const form of $$('form.js-autosave-form')) {
+      const state = autosaveState(form);
+      const now = formJson(form);
+      const changes = { ...autosaveChanges(form) };
+      for (const name of Object.keys(state.sending || {})) changes[name] = now[name];
+      if (!Object.keys(changes).length) continue;
+      clearTimeout(state.timer);
+      saveFields(form, changes).catch(() => {});
     }
   });
 

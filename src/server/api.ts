@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { GitError } from './git.ts';
 import { HttpError, type Ctx, type ReviewEvent, type Service } from './service.ts';
+import type { SaveOrder } from './reviewers/custom.ts';
 import { now, type Actor, type ActorType, type PullRow, type RepoRow } from './db.ts';
 import {
   autoMergeResult,
@@ -73,6 +74,27 @@ export function api(s: Service): Hono {
     if (pull.repo_id !== repo.id || comment.kind !== kind || !s.canSee(comment, actor(c))) throw new HttpError(404, `comment ${comment.id} not found`);
     return { repo, pull, comment };
   };
+  // Extension: a settings page saves as it is edited, and the save it sends as it is left may go
+  // out while an earlier one of the same form is on its way. Each save names its form and counts
+  // up (`X-Galley-Save: <form> <n>`); one older than a save of that form already made is refused,
+  // so the edit made last stays. `check` goes right before the write, after the request's awaits,
+  // and `made` right after it: a save that is refused (a name in use) holds up no earlier one.
+  const savesMade = new Map<string, number>();
+  const inOrder = (c: Context): SaveOrder => {
+    const [form, n] = (c.req.header('x-galley-save') ?? '').split(' ');
+    const seq = Number(n);
+    if (!form || !Number.isInteger(seq)) return { check: () => {}, made: () => {} };
+    return {
+      check: () => {
+        if (seq <= (savesMade.get(form) ?? 0)) throw new HttpError(409, 'a later save of this form was made first');
+      },
+      made: () => {
+        savesMade.delete(form);
+        savesMade.set(form, seq);
+        if (savesMade.size > 1000) savesMade.delete(savesMade.keys().next().value!);
+      },
+    };
+  };
   const fields = (c: Context) => (c.req.query('fields') ?? '').split(',').map((f) => f.trim()).filter(Boolean);
 
   // ------------------------------------------------- settings (extension)
@@ -104,12 +126,15 @@ export function api(s: Service): Hono {
       throw new HttpError(422, `${reviewer.label}'s sandbox can not let its tests listen on localhost without letting them connect to other hosts`);
     }
     await reviewer.models(); // so efforts can be checked against the model
+    const order = inOrder(c);
+    order.check();
     const settings = nextSettings(s.db, { [engine]: b }, (_, model) => reviewer.efforts(model));
     // Renaming is the one step that can still fail (the name may be taken), so it goes before saving.
     if (b.name !== undefined && settings[engine].name !== reviewer.actor().login) reviewer.rename(settings[engine].name);
     // The reviewer's actual name is the truth (it may have had to take another one).
     settings[engine].name = reviewer.actor().login;
     saveSettings(s.db, settings);
+    order.made();
     // Turning reviews on or raising the limit should not wait for the author's next `pr wait`
     // cycle. Pull requests can turn reviews on for themselves, so each waiting one decides.
     for (const id of s.waitingPulls()) reviewer.consider(id);
@@ -135,7 +160,7 @@ export function api(s: Service): Hono {
   // Fields left out stay as they are; a reviewer keeps its name.
   app.patch('/settings/reviewers/:name', async (c) => {
     human(c);
-    return c.json(custom().json(await custom().update(c.req.param('name'), await body(c))));
+    return c.json(custom().json(await custom().update(c.req.param('name'), await body(c), inOrder(c))));
   });
   app.delete('/settings/reviewers/:name', (c) => {
     human(c);
@@ -145,8 +170,12 @@ export function api(s: Service): Hono {
 
   app.put('/settings/publish', async (c) => {
     human(c);
-    const settings = nextSettings(s.db, { publish: await body(c) });
+    const b = await body(c);
+    const order = inOrder(c);
+    order.check();
+    const settings = nextSettings(s.db, { publish: b });
     saveSettings(s.db, settings);
+    order.made();
     // Open pull request pages show the merge method next to the auto-merge option.
     s.emitSystem(null, 'settings', 'settings');
     return c.json(settings);

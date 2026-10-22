@@ -278,7 +278,7 @@ too. **Stop iterating** in the merge box ends the automatic reviews. You can
 also name reviewers when you ask an agent to stage; `galley reviewers` lists those that review a repository.
 
 You can add reviewer agents of your own, each with its own instructions, in
-`~/.config/galley/reviewers/<name>.md` or under **Settings** → Custom reviewers (saving there
+`~/.config/galley/reviewers/<name>.md` or under **Settings** → Custom reviewers (a change there
 rewrites the file without its comments). The front matter holds the settings, the body the
 instructions:
 
@@ -318,7 +318,7 @@ Your avatar in the header. Per reviewer agent: whether it reviews automatically,
 reasoning effort, limit of automatic reviews, whether it may install dependencies and run the
 tests, whether it skips pull requests by its own kind of agent, and for Claude, whether those
 tests may listen on localhost. Under Publishing: the merge method for auto-merge, and how many
-times to try signing again.
+times to try signing again. Changes save as you make them, a text field when you leave it.
 
 | Variable | Default | |
 |---|---|---|
