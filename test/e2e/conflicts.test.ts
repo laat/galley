@@ -216,8 +216,9 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
       assert.deepEqual(server.service.autoPublishChecklist(retried.row()).filter((i) => !i.ok).map((i) => i.key), ['conflicts']);
       assert.equal(server.service.autoPublishReady(retried.row()), false);
       const box = await retried.page();
-      assert.match(box, /<pre class="merge-error">git merge-tree failed: error: unknown style /);
-      assert.match(box, /Could not check for conflicts with origin\/main: git merge-tree failed: error: unknown style /);
+      // git 2.43 (Ubuntu 24.04's) says fatal:, newer versions error:.
+      assert.match(box, /<pre class="merge-error">git merge-tree failed: (error|fatal): unknown style /);
+      assert.match(box, /Could not check for conflicts with origin\/main: git merge-tree failed: (error|fatal): unknown style /);
       assert.deepEqual(await retried.published(), []);
       // Fixed, the next poll tries again, finds nothing in the way, and auto-publish publishes.
       clone('config', '--unset', 'merge.conflictStyle');

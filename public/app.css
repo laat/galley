@@ -1,6 +1,7 @@
 /* galley: GitHub's look, using Primer's colour tokens, with the neutrals and the header
    tinted blue (OKLCH hue 255) so a galley tab is not mistaken for a GitHub one. Merged keeps
-   GitHub's purple. */
+   GitHub's purple. The dark theme takes its neutrals, buttons and selection from T3 Code's dark
+   theme, and keeps Primer's colours for states, diffs and syntax. */
 
 :root {
   color-scheme: light;
@@ -66,20 +67,20 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --fg: #f0f6fc;
-    --fg-muted: #9198a1;
-    --fg-subtle: #848d97;
-    --bg: #09121d;
-    --bg-subtle: #111b28;
-    --bg-overlay: #111b28;
-    --header-bg: #172a41;
-    --tint: #5788c7;
-    --border: #3a4553;
-    --border-muted: #3a4553b3;
-    --accent: #4493f8;
-    --accent-emphasis: #1f6feb;
-    --accent-subtle: #388bfd1a;
-    --accent-muted: #4493f866;
+    --fg: #e4e4ea;
+    --fg-muted: #a0a5b0;
+    --fg-subtle: #7c838d;
+    --bg: #17212b;
+    --bg-subtle: #1e2a35;
+    --bg-overlay: #202f3d;
+    --header-bg: #202f3d;
+    --tint: #3f5466;
+    --border: #2e3e4c;
+    --border-muted: #2e3e4cb3;
+    --accent: #7fb4e0;
+    --accent-emphasis: #4f7ea6;
+    --accent-subtle: #253b4d;
+    --accent-muted: #385871;
     --success: #3fb950;
     --success-emphasis: #238636;
     --danger: #f85149;
@@ -95,9 +96,9 @@
     --neutral-emphasis: #656c76;
     --neutral-muted: #656c7633;
     --neutral-subtle: #656c761a;
-    --btn-bg: #1e2836;
-    --btn-hover: #222d3b;
-    --btn-border: #3a4553;
+    --btn-bg: #233444;
+    --btn-hover: #2a3d4f;
+    --btn-border: #2e4051;
     --btn-primary-bg: #238636;
     --btn-primary-hover: #29903b;
     --diff-add-bg: #2ea04326;
@@ -107,9 +108,9 @@
     --diff-hunk-bg: #388bfd1a;
     --diff-hunk-num: #388bfd40;
     --diff-selected: #bb800926;
-    --diff-empty: #111b28;
+    --diff-empty: #1e2a35;
     --shadow: none;
-    --shadow-overlay: 0 0 0 1px #3a4553, 0 8px 24px #01040b;
+    --shadow-overlay: 0 0 0 1px #2e3e4c, 0 8px 24px #0b1118;
     --hl-keyword: #ff7b72;
     --hl-title: #d2a8ff;
     --hl-constant: #79c0ff;
