@@ -105,12 +105,15 @@ export function nextSettings(
     next.publish.mergeMethod = method;
   }
   if (p.signingRetries !== undefined) {
-    const n = Number(p.signingRetries);
+    const n = wholeNumber(p.signingRetries);
     if (!Number.isInteger(n) || n < 0 || n > MAX_SIGNING_RETRIES) throw new HttpError(422, `signing retries must be a whole number from 0 to ${MAX_SIGNING_RETRIES}`);
     next.publish.signingRetries = n;
   }
   return next;
 }
+
+/** A number from a form or JSON, NaN for an empty field, which Number() would read as 0. */
+const wholeNumber = (v: unknown): number => (typeof v === 'string' && v.trim() === '' ? NaN : Number(v));
 
 /** Apply a partial update to a reviewer's settings, checking each value. */
 function nextReviewer(next: ReviewerSettings, c: Record<string, unknown>, efforts?: (model: string) => string[] | null): void {
@@ -128,7 +131,7 @@ function nextReviewer(next: ReviewerSettings, c: Record<string, unknown>, effort
     next.effort = effort;
   }
   if (c.maxIterations !== undefined) {
-    const n = Number(c.maxIterations);
+    const n = wholeNumber(c.maxIterations);
     if (!Number.isInteger(n) || n < 0 || n > MAX_ITERATIONS_LIMIT) throw new HttpError(422, `max iterations must be a whole number from 0 to ${MAX_ITERATIONS_LIMIT}`);
     next.maxIterations = n;
   }

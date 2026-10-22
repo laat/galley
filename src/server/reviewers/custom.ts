@@ -35,6 +35,9 @@ function settable(fields: Record<string, unknown>): Record<string, unknown> {
   return rest;
 }
 
+/** Whether a save of a settings form came in order, checked right before its write, and noted as made right after it. */
+export type SaveOrder = { check(): void; made(): void };
+
 export class CustomReviewer extends Reviewer {
   definition: Definition;
 
@@ -322,6 +325,7 @@ export class CustomReviewers {
 
   /** Define a reviewer, from the API. */
   async create(fields: Record<string, unknown>): Promise<DefinitionFile> {
+    await this.catalogs();
     const name = String(fields.name ?? '').trim();
     const d = checkDefinition(name, settable(fields));
     // As the files are now, so one written by hand a moment ago is not written over.
@@ -329,12 +333,13 @@ export class CustomReviewers {
     if (this.files.some((f) => f.name.toLowerCase() === d.name.toLowerCase())) throw new HttpError(422, `there is a reviewer called ${d.name} already`);
     const taken = this.builtInName(d.name) ?? new CustomReviewer(this.s, this.engines[d.engine], d).nameTaken();
     if (taken) throw new HttpError(422, taken);
-    await this.checkEffort(d);
+    this.checkEffort(d);
     return this.save(d);
   }
 
-  /** Change a reviewer's definition, from the API. It keeps its name. */
-  async update(name: string, fields: Record<string, unknown>): Promise<DefinitionFile> {
+  /** Change a reviewer's definition, from the API. It keeps its name. `order` may refuse a save that came out of order (src/server/api.ts). */
+  async update(name: string, fields: Record<string, unknown>, order?: SaveOrder): Promise<DefinitionFile> {
+    await this.catalogs();
     // A change by hand a moment ago is what this one changes.
     this.load();
     const file = this.entry(name);
@@ -342,8 +347,11 @@ export class CustomReviewers {
     if (fields.name !== undefined && fields.name !== name) throw new HttpError(422, 'a reviewer keeps its name; define one by the new name and delete this one');
     // One whose file can not be read is written whole.
     const d = checkDefinition(name, settable(fields), file.definition ?? undefined);
-    await this.checkEffort(d);
-    return this.save(d);
+    this.checkEffort(d);
+    order?.check();
+    const saved = this.save(d);
+    order?.made();
+    return saved;
   }
 
   /** Delete a reviewer's file. Its reviews stay, and come back with it if it is defined again. */
@@ -361,12 +369,19 @@ export class CustomReviewers {
     return this.entry(d.name)!;
   }
 
+  /**
+   * The engines' model catalogs (cached), read before a change, so that nothing waits between
+   * reading the files and writing one: of two changes at once (the settings page saving as it is
+   * edited), the later one changes what the earlier one wrote, and neither loses the other's fields.
+   */
+  private async catalogs(): Promise<void> {
+    await Promise.all(Object.values(this.engines).map((e) => e.models()));
+  }
+
   /** A model's catalog entry lists the efforts it accepts; one it does not know would fail every run. */
-  private async checkEffort(d: Definition): Promise<void> {
+  private checkEffort(d: Definition): void {
     if (!d.effort) return;
-    const engine = this.engines[d.engine];
-    await engine.models();
-    const allowed = engine.efforts(d.model);
+    const allowed = this.engines[d.engine].efforts(d.model);
     if (allowed && !allowed.includes(d.effort)) throw new HttpError(422, `${d.model || 'the default model'} does not support effort "${d.effort}" (it supports ${allowed.join(', ')})`);
   }
 

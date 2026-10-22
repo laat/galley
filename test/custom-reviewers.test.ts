@@ -697,6 +697,9 @@ test('a reviewer keeps its name, which nobody else may have, and comes back with
   assert.match((await human('PUT', '/api/settings/claude', { name: 'house-rules' }, 422)).message, /"house-rules" is already used by someone else/);
   // Nor the name of one that does not run, which would be in its way.
   assert.match((await human('PUT', '/api/settings/claude', { name: 'broken' }, 422)).message, /"broken" is the name of a custom reviewer/);
+  // An emptied number field is refused, not read as 0.
+  await human('PUT', '/api/settings/claude', { maxIterations: '' }, 422);
+  await human('PUT', '/api/settings/publish', { signingRetries: ' ' }, 422);
   await human('PATCH', '/api/settings/reviewers/house-rules', { effort: 'extreme' }, 422);
   // One written by hand a moment ago, before anything read it, is there all the same.
   const hand = '---\nengine: codex\n---\nMine.\n';
@@ -707,7 +710,38 @@ test('a reviewer keeps its name, which nobody else may have, and comes back with
   // A reviewer may be called "new": its page is its own, not the form for a new one.
   await human('POST', '/api/settings/reviewers', { name: 'new', engine: 'codex' });
   const named = await page('/settings/reviewers/new');
-  assert.match(named, /Save reviewer/);
+  assert.match(named, /js-autosave-form/);
+  // Two changes at once, as the page saves them while it is left, keep each other's fields.
+  await Promise.all([
+    server.service.custom!.update('new', { effort: 'high', max_iterations: 4 }),
+    server.service.custom!.update('new', { effort: 'high', verdict: 'approve' }),
+  ]);
+  const both = await human('GET', '/api/settings/reviewers/new');
+  assert.deepEqual([both.max_iterations, both.verdict], [4, 'approve']);
+  // A form's later save arriving first wins: the earlier one is refused, for each form on its own.
+  const save = (path: string, method: string, form: string, n: number, fields: object) =>
+    fetch(`${server.url}${path}`, { method, headers: { 'content-type': 'application/json', 'x-galley-save': `${form} ${n}` }, body: JSON.stringify(fields) });
+  assert.equal((await save('/api/settings/reviewers/new', 'PATCH', 'f1', 2, { enabled: false })).status, 200);
+  assert.equal((await save('/api/settings/reviewers/new', 'PATCH', 'f1', 1, { enabled: true })).status, 409);
+  assert.equal((await human('GET', '/api/settings/reviewers/new')).enabled, false);
+  assert.equal((await save('/api/settings/codex', 'PUT', 'f2', 3, { maxIterations: 2 })).status, 200);
+  assert.equal((await save('/api/settings/codex', 'PUT', 'f2', 1, { maxIterations: 5 })).status, 409);
+  assert.equal((await save('/api/settings/publish', 'PUT', 'f3', 1, { signingRetries: 2 })).status, 200);
+  assert.equal((await human('GET', '/api/settings')).codex.maxIterations, 2);
+  // A later save that is refused holds up no earlier one.
+  assert.equal((await save('/api/settings/codex', 'PUT', 'f4', 2, { name: 'house-rules', maxIterations: 4 })).status, 422);
+  assert.equal((await save('/api/settings/codex', 'PUT', 'f4', 1, { maxIterations: 4 })).status, 200);
+  assert.equal((await save('/api/settings/publish', 'PUT', 'f5', 2, { signingRetries: '' })).status, 422);
+  assert.equal((await save('/api/settings/publish', 'PUT', 'f5', 1, { signingRetries: 1 })).status, 200);
+  assert.equal((await save('/api/settings/reviewers/new', 'PATCH', 'f6', 2, { max_iterations: '' })).status, 422);
+  assert.equal((await save('/api/settings/reviewers/new', 'PATCH', 'f6', 1, { enabled: true })).status, 200);
+  const after = await human('GET', '/api/settings');
+  assert.deepEqual([after.codex.maxIterations, after.publish.signingRetries, (await human('GET', '/api/settings/reviewers/new')).enabled], [4, 1, true]);
+  // A reviewer's changes save as they are made; a new one waits for its button, once it has a name.
+  const blank = await page('/settings/new-reviewer');
+  assert.match(blank, /Create reviewer/);
+  assert.doesNotMatch(blank, /js-autosave-form/);
+  for (const path of ['/settings', '/settings/publishing']) assert.doesNotMatch(await page(path), /Save settings/, path);
   assert.match(named, /new\.md/);
   await human('DELETE', '/api/settings/reviewers/new');
   // Agents can not define reviewers.

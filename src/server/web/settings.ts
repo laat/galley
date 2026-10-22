@@ -69,7 +69,7 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
         ? html`<div class="flash flash-warn">${icon('alert')} Could not read the model list from <code>${reviewer.catalogSource}</code>. Check that ${label} is installed and logged in on the machine running galley.</div>`
         : ''
     }
-    <form class="settings-form js-api-form" data-api="/api/settings/${engine}" data-method="PUT" data-toast="Settings saved">
+    <form class="settings-form js-autosave-form" data-api="/api/settings/${engine}" data-method="PUT" data-toast="Settings saved">
       <div class="form-checkbox">
         <label><input type="checkbox" name="enabled"${settings.enabled ? raw(' checked') : ''}> Review automatically</label>
         <p class="note">When the author agent runs <code>galley pr wait</code>, ${label} reviews the new commits first. Its review wakes the agent, which addresses the comments before you look. Each commit is reviewed once.</p>
@@ -113,7 +113,6 @@ async function reviewerSection(reviewer: Reviewer): Promise<Safe> {
         <p class="note">Leave pull requests that an agent running in ${reviewer.authorTool} wrote to the other reviewers, so authors get a second opinion. Staging with <code>--reviewer ${engine}</code>, or turning it on in a pull request's sidebar, still has ${label} review it.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
-      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
     </form>`;
 }
 
@@ -168,7 +167,8 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
   const checked = (on: boolean) => (on ? raw(' checked') : '');
   const radio = (field: string, value: string, label: string, note: string, cls = '') =>
     html`<div class="form-checkbox"><label><input type="radio" name="${field}" value="${value}"${cls ? raw(` class="${cls}"`) : ''}${checked((d as Record<string, unknown>)[field] === value)}> ${label}</label><p class="note">${note}</p></div>`;
-  const form = html`<form class="settings-form js-api-form" data-api="${file ? `/api/settings/reviewers/${file.name}` : '/api/settings/reviewers'}" data-method="${file ? 'PATCH' : 'POST'}"${file ? raw(' data-toast="Reviewer saved"') : raw(' data-next="/settings/reviewers"')}>
+  // A reviewer's changes save as they are made; a new one is created by its button, once it has a name.
+  const form = html`<form class="settings-form ${file ? 'js-autosave-form' : 'js-api-form'}" data-api="${file ? `/api/settings/reviewers/${file.name}` : '/api/settings/reviewers'}" data-method="${file ? 'PATCH' : 'POST'}"${file ? raw(' data-toast="Reviewer saved"') : raw(' data-next="/settings/reviewers"')}>
       ${
         file
           ? ''
@@ -226,7 +226,7 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
         <p class="note">As for Codex and Claude: galley installs the dependencies from the lockfile without their install scripts, and the reviewer may run the typecheck, tests or build without network access.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
-      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">${file ? 'Save reviewer' : 'Create reviewer'}</button> ${remove}</div>
+      <div class="form-actions form-actions-left">${file ? remove : html`<button type="submit" class="btn btn-primary">Create reviewer</button>`}</div>
     </form>`;
   return settingsLayout(s, '/settings/reviewers', html`${head}${form}`);
 }
@@ -298,7 +298,7 @@ export function publishingSettingsPage(s: Service): string {
       <h2 class="Subhead-heading">Auto-merge</h2>
       <p class="Subhead-description">Publishing can enable auto-merge on the pull request on GitHub, which then merges it once its requirements are met, such as required checks. The option shows for repositories that allow auto-merge, and the repository must allow the merge method too.</p>
     </div>
-    <form class="settings-form js-api-form" data-api="/api/settings/publish" data-method="PUT" data-toast="Settings saved">
+    <form class="settings-form js-autosave-form" data-api="/api/settings/publish" data-method="PUT" data-toast="Settings saved">
       <div class="form-group">
         <label class="form-label" for="merge-method">Merge method</label>
         <select class="form-select" id="merge-method" name="mergeMethod">
@@ -307,20 +307,18 @@ export function publishingSettingsPage(s: Service): string {
         <p class="note">How GitHub merges a pull request that galley enabled auto-merge for.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
-      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
     </form>
     <div class="Subhead">
       <h2 class="Subhead-heading">Signing</h2>
       <p class="Subhead-description">Auto-publish and the pushes after publishing sign with your key while nobody may be there to answer a prompt. When signing fails in a way that may pass, such as a 1Password prompt nobody answered or declined, or an agent that is locked or not running, they try again later instead of giving up: after 5 minutes, then 15, then 45, each wait three times the last. Each try may show the prompt again.</p>
     </div>
-    <form class="settings-form js-api-form" data-api="/api/settings/publish" data-method="PUT" data-toast="Settings saved">
+    <form class="settings-form js-autosave-form" data-api="/api/settings/publish" data-method="PUT" data-toast="Settings saved">
       <div class="form-group">
         <label class="form-label" for="signing-retries">Signing retries</label>
         <input class="form-control input-narrow" type="number" id="signing-retries" name="signingRetries" min="0" max="${MAX_SIGNING_RETRIES}" value="${settings.signingRetries}">
         <p class="note">After this many, auto-publish turns off and a push is not tried again, as for a signing failure that can not pass, such as a missing key. 0 gives up at once.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
-      <div class="form-actions form-actions-left"><button type="submit" class="btn btn-primary">Save settings</button></div>
     </form>`,
   );
 }
