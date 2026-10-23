@@ -225,7 +225,7 @@ console.log(JSON.stringify({ state: 'OPEN', title: read(${JSON.stringify(join(di
   );
 
   // A stand-in for the Codex CLI: a model catalog, `sandbox` standing in for the package manager
-  // it runs (failing with FAKE_INSTALL_FAIL), and `exec` answering with FAKE_CODEX_REVIEW (or
+  // it runs (failing with FAKE_INSTALL_FAIL; it logs XDG_RUNTIME_DIR's mode, which pnpm checks), and `exec` answering with FAKE_CODEX_REVIEW (or
   // failing, with FAKE_CODEX_FAIL), after FAKE_CODEX_SLEEP milliseconds or once the file
   // FAKE_CODEX_GATE exists. Where it may run the
   // tests, it leaves a read-only directory behind, as Go's module cache does. With --json it
@@ -248,7 +248,7 @@ if (args[0] === 'debug' && args[1] === 'models') {
   process.exit(0);
 }
 if (args[0] === 'sandbox') {
-  fs.appendFileSync(process.env.FAKE_CODEX_SANDBOX_LOG, JSON.stringify({ args, cwd: process.cwd(), store: process.env.npm_config_store_dir }) + '\\n');
+  fs.appendFileSync(process.env.FAKE_CODEX_SANDBOX_LOG, JSON.stringify({ args, cwd: process.cwd(), store: process.env.npm_config_store_dir, runtimeDirMode: process.env.XDG_RUNTIME_DIR && fs.statSync(process.env.XDG_RUNTIME_DIR).mode & 0o777 }) + '\\n');
   if (process.env.FAKE_INSTALL_FAIL) { console.error('ERR_PNPM_OUTDATED_LOCKFILE'); process.exit(1); }
   console.log('Packages: +3\\nDone in 1s');
   process.exit(0);

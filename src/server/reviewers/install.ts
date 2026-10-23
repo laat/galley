@@ -68,7 +68,8 @@ export async function installCommand(git: Repo, sha: string, tmp: string): Promi
   const [lockfile, manager] = found.find(([, m]) => m === named) ?? found[0];
   switch (manager) {
     case 'pnpm':
-      // pnpm 12 locks its store in $XDG_RUNTIME_DIR, which the sandbox keeps read-only.
+      // pnpm 12 locks its store in $XDG_RUNTIME_DIR, or in /tmp when that is unset or others may
+      // write to it; the sandbox keeps both read-only. tmp is the user's own (Reviewer.review).
       return { lockfile, command: ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile', '--config.manage-package-manager-versions=false'], env: { XDG_RUNTIME_DIR: tmp } };
     case 'bun':
       return { lockfile, command: ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'], env: { BUN_INSTALL_CACHE_DIR: join(tmp, 'bun') } };
