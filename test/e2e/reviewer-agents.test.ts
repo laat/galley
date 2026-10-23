@@ -58,6 +58,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
     assert.ok(call.args.includes('model_reasoning_effort="high"'));
     assert.match(call.prompt, /Title: Add the answer/);
     assert.equal(call.sawFile, true, 'codex runs in a checkout of the head commit');
+    assert.equal(call.cleaned, false, 'its git status hashes no file through a clean filter, which Git LFS runs in galley\'s clone');
     // By default galley installs the dependencies from the lockfile first, in Codex's sandbox with
     // network and without the repository's scripts. Then Codex may run the tests, without network,
     // writing only to the checkout and a temporary directory beside it, whatever the user's
@@ -147,6 +148,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
       await server.service.codex!.settle(pull.id);
     });
     const readOnly = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+    assert.equal(readOnly.cleaned, false, 'nor without the tests');
     assert.deepEqual(readOnly.args.slice(readOnly.args.indexOf('-s'), readOnly.args.indexOf('-C')), [
       '-s',
       'read-only',
@@ -271,8 +273,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     // Commands run in Claude Code's sandbox, never outside it: no network (not even localhost, by
     // default), writes to the checkout, Claude Code's own temporary directory and the review's, and
     // not to the user's repository (nor to /tmp/claude-<uid>, where the user's own Claude Code
-    // sessions keep theirs). Of the home directory and the temporary directories, it reads the
-    // review's directory, the git directory, its own temporary directory and the toolchains only.
+    // sessions keep theirs). Of the home directory and the temporary directories, it reads what it
+    // writes to, the git directory, the settings in its own temporary directory and the toolchains only.
     const checkout = call.cwd;
     const tmp = join(dirname(checkout), 'tmp');
     const uid = process.getuid!();
@@ -293,15 +295,19 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
       },
     });
     // Its own temporary directory as the sandbox resolves it (/tmp is /private/tmp on macOS); gone by now.
-    assert.deepEqual(allowRead.slice(0, 3), [dirname(checkout), git_dir, join(realpathSync(dirname(call.claudeTmpdir)), basename(call.claudeTmpdir))]);
+    const claudeTmpdir = join(realpathSync(dirname(call.claudeTmpdir)), basename(call.claudeTmpdir));
+    assert.deepEqual(allowRead.slice(0, 2), [git_dir, join(claudeTmpdir, 'home')]);
+    // Nothing it reads holds what it writes to: bwrap would mount that read-only over them.
+    const holds = (outer: string, inner: string) => inner === outer || inner.startsWith(outer + '/');
+    for (const path of allowRead) for (const written of [checkout, tmp, claudeTmpdir]) assert.ok(!holds(path, written), `${path} holds ${written}`);
     for (const toolchain of ['.volta', '.nvm', 'go', '.rustup', '.dotnet', '.local/share/mise']) assert.ok(allowRead.includes(join(homedir(), toolchain)), toolchain);
     for (const tokens of ['.npmrc', '.cargo', '.m2', '.ssh', '.config/gh']) assert.ok(!allowRead.includes(join(homedir(), tokens)), tokens);
     // Its git, npm and dotnet read nothing in the home directory: git has the user's name for
     // commits, and npm no token.
-    assert.equal(call.gitConfigGlobal, join(call.claudeTmpdir, 'gitconfig'));
+    assert.equal(call.gitConfigGlobal, join(call.claudeTmpdir, 'home', 'gitconfig'));
     assert.equal(call.gitconfig, '[user]\n\tname = Reviewer\n\temail = reviewer@example.com\n');
-    assert.equal(call.npmUserconfig, join(call.claudeTmpdir, 'npmrc'));
-    assert.equal(call.dotnetCliHome, call.claudeTmpdir);
+    assert.equal(call.npmUserconfig, join(call.claudeTmpdir, 'home', 'npmrc'));
+    assert.equal(call.dotnetCliHome, join(call.claudeTmpdir, 'home'));
     assert.equal(call.tmpdir, tmp);
     // Short, or Claude Code falls back to /tmp/claude-<uid>. Where /tmp is not writable, it is under
     // $TMPDIR, which may be longer.
@@ -357,8 +363,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     // The first step was galley's: installing the dependencies.
     assert.match(transcript, /<code class="run-command">pnpm install --frozen-lockfile [^<]*<\/code><\/span> <svg[^>]*octicon-check[^]*?Packages: \+1/);
 
-    // Without running the tests, it reads: Read, Grep, Glob and read-only git, with the checkout
-    // read-only too, and nothing installed. Nothing listens on localhost, whatever that setting says.
+    // Without running the tests, it reads: Read, Grep, Glob and read-only git, and nothing is
+    // installed. The checkout stays writable: bwrap mounts over files in it that are not there. Nothing listens on localhost, whatever that setting says.
     // A failed run keeps Claude Code's error. With npm settings for reviews (GALLEY_NPMRC), its
     // commands read those, also through a symlink into a directory the sandbox denies.
     const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
@@ -386,7 +392,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     const { sandbox } = JSON.parse(readOnlyFlag('--settings'));
     assert.equal(sandbox.autoAllowBashIfSandboxed, false);
     assert.deepEqual(sandbox.filesystem.allowWrite, []);
-    assert.ok(sandbox.filesystem.denyWrite.includes(readOnly.cwd));
+    assert.ok(!sandbox.filesystem.denyWrite.includes(readOnly.cwd));
+    assert.ok(sandbox.filesystem.denyWrite.includes(join(readOnly.cwd, '.git')));
     assert.ok(sandbox.filesystem.denyRead.includes(homedir()));
     assert.ok(sandbox.filesystem.allowRead.includes(git_dir), 'git reads its objects');
     assert.deepEqual(sandbox.filesystem.allowRead.slice(-2), [npmrc, realpathSync(npmrcTarget)]);

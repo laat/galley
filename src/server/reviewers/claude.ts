@@ -2,7 +2,7 @@
 // the user's own login, answering in the reviewer's JSON schema. Its bot is named
 // "claude-review" unless renamed in settings, since the CLI calls author agents in Claude Code
 // "claude".
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reviewNpmrc } from '../../config.ts';
@@ -104,22 +104,33 @@ function realOr(path: string): string {
 }
 
 /**
+ * The directory in `own` with what the commands Claude runs read in place of the user's settings
+ * in the home directory (homeless). Not `own` itself: Claude Code's sandbox lets them write in
+ * there (claude-<uid>), and a directory it lets them read is mounted read-only over what is in it.
+ */
+function ownHome(own: string): string {
+  return join(own, 'home');
+}
+
+/**
  * What the commands Claude runs read in place of the user's settings in the home directory, which
- * the sandbox hides: git a configuration of its own in `own`, with the user's name and email for
- * commits the tests make and nothing else (git refuses to run when it can not read its global
+ * the sandbox hides: git a configuration of its own in `ownHome`, with the user's name and email
+ * for commits the tests make and nothing else (git refuses to run when it can not read its global
  * configuration), npm and pnpm the user's settings for reviews (reviewNpmrc) or none, and dotnet
- * `own` as its home.
+ * `ownHome` as its home.
  */
 async function homeless(own: string, cwd: string): Promise<NodeJS.ProcessEnv> {
-  const gitconfig = join(own, 'gitconfig');
+  const home = ownHome(own);
+  mkdirSync(home);
+  const gitconfig = join(home, 'gitconfig');
   writeFileSync(gitconfig, '');
   for (const key of ['user.name', 'user.email']) {
     const value = (await run('git', ['config', '--get', key], { cwd, allowFail: true })).stdout.trim();
     if (value) await run('git', ['config', '--file', gitconfig, key, value], { cwd });
   }
   let npmrc = reviewNpmrc();
-  if (!npmrc) writeFileSync((npmrc = join(own, 'npmrc')), '');
-  return { GIT_CONFIG_GLOBAL: gitconfig, npm_config_userconfig: npmrc, DOTNET_CLI_HOME: own };
+  if (!npmrc) writeFileSync((npmrc = join(home, 'npmrc')), '');
+  return { GIT_CONFIG_GLOBAL: gitconfig, npm_config_userconfig: npmrc, DOTNET_CLI_HOME: home };
 }
 
 export class ClaudeEngine implements Engine {
@@ -152,6 +163,8 @@ export class ClaudeEngine implements Engine {
     const { checkout, settings, timeoutMs } = job;
     const own = ownTmp();
     try {
+      const env: NodeJS.ProcessEnv = { ...job.env, CLAUDE_CODE_TMPDIR: own, DISABLE_AUTOUPDATER: '1', ...(await homeless(own, checkout)) };
+      for (const name of SESSION_VARIABLES) env[name] = undefined;
       const args = [
         '-p',
         // Every message as it comes, the result last; stream-json needs --verbose.
@@ -186,8 +199,6 @@ export class ClaudeEngine implements Engine {
       ];
       if (settings.model) args.push('--model', settings.model);
       if (settings.effort) args.push('--effort', settings.effort);
-      const env: NodeJS.ProcessEnv = { ...job.env, CLAUDE_CODE_TMPDIR: own, DISABLE_AUTOUPDATER: '1', ...(await homeless(own, checkout)) };
-      for (const name of SESSION_VARIABLES) env[name] = undefined;
       const events = new ClaudeEvents(checkout);
       const stdout = jsonLines((e) => {
         for (const u of events.read(e)) job.onUpdate(u);
@@ -218,13 +229,23 @@ export class ClaudeEngine implements Engine {
    * pull request can not reach galley's API on localhost, which takes any local caller for the
    * user, unless the user lets the tests listen and connect on localhost (the localhost setting),
    * which opens every port there, galley's too, and lets them listen on every interface. It
-   * writes to the checkout (when it runs the tests), its own temporary directory (`own`) and the
-   * review's, and nowhere else: not to the git directory the checkout points into, which Claude
-   * Code would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude Code
-   * fall back to it. Of the home directory and the temporary directories it reads only what it
-   * needs: the review's directory, the git directory, its own temporary directory and the
-   * toolchains (TOOLCHAINS); not the user's keys, tokens and logins, other projects, or other
-   * reviews' checkouts. It may not leave the sandbox.
+   * writes to the checkout, its own temporary directory (`own`) and the review's (when it runs the
+   * tests), and nowhere else: not to the git directory the checkout points into, which Claude Code
+   * would let it write to for a worktree, and not to /tmp/claude-<uid>, should Claude Code fall
+   * back to it. Of the home directory and the temporary directories it reads only what it
+   * needs: what it may write to, the git directory, the settings in its own temporary directory
+   * (ownHome) and the toolchains (TOOLCHAINS); not the user's keys, tokens and logins, other
+   * projects, or other reviews' checkouts. It may not leave the sandbox.
+   *
+   * On Linux, bwrap mounts /dev/null over the settings files Claude Code keeps commands from
+   * writing in the checkout (.claude/settings.json, .bashrc, .mcp.json and the like), and fails
+   * every command when it can not create one of them that is not there. So the checkout stays
+   * writable, also for a review that only reads. Its git commands may write there then (git diff
+   * --output, git grep -O runs a program), but only there: the network is off, the git directory
+   * and galley's clone stay read-only, and the checkout is removed after the review. And what it
+   * may write to it reads without allowRead: a directory in allowRead is mounted read-only after
+   * those it may write to, so one that holds them (the review's directory, `own`) would make them
+   * read-only too.
    */
   private sandbox(job: EngineJob, own: string) {
     const uid = process.getuid?.();
@@ -243,12 +264,11 @@ export class ClaudeEngine implements Engine {
       network: { allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true, allowLocalBinding: job.settings.runTests && job.settings.localhost },
       filesystem: {
         denyRead: [...new Set([home, realpathSync(tmpdir()), realpathSync('/tmp')])],
-        allowRead: [job.dir, ...(job.gitDir ? [job.gitDir] : []), realpathSync(own), ...TOOLCHAINS.map((p) => join(home, p)), ...npmrcPaths],
+        allowRead: [...(job.gitDir ? [job.gitDir] : []), realpathSync(ownHome(own)), ...TOOLCHAINS.map((p) => join(home, p)), ...npmrcPaths],
         allowWrite: job.tmp ? [job.tmp] : [],
         denyWrite: [
           join(job.checkout, '.git'),
           ...(job.gitDir ? [job.gitDir] : []),
-          ...(job.settings.runTests ? [] : [job.checkout]),
           ...(uid === undefined ? [] : [`/tmp/claude-${uid}`, `/private/tmp/claude-${uid}`]),
         ],
       },
