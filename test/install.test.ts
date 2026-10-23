@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,11 +73,38 @@ test("the install reads the user's npm settings for reviews (GALLEY_NPMRC) in pl
   const before = process.env.GALLEY_NPMRC;
   try {
     delete process.env.GALLEY_NPMRC;
-    assert.deepEqual(cacheEnv('/review/tmp'), { TMPDIR: '/review/tmp', XDG_CACHE_HOME: '/review/tmp/cache', npm_config_cache: '/review/tmp/npm', npm_config_store_dir: '/review/tmp/pnpm-store', pnpm_config_store_dir: '/review/tmp/pnpm-store' });
+    assert.deepEqual(cacheEnv('/review/tmp'), {
+      TMPDIR: '/review/tmp',
+      XDG_CACHE_HOME: '/review/tmp/cache',
+      npm_config_cache: '/review/tmp/npm',
+      npm_config_store_dir: '/review/tmp/pnpm-store',
+      pnpm_config_store_dir: '/review/tmp/pnpm-store',
+      npm_config_manage_package_manager_versions: 'false',
+      pnpm_config_manage_package_manager_versions: 'false',
+      pnpm_config_pm_on_fail: 'ignore',
+    });
     process.env.GALLEY_NPMRC = '/home/u/.config/agents/npmrc';
     assert.equal(cacheEnv('/review/tmp').npm_config_userconfig, '/home/u/.config/agents/npmrc');
   } finally {
     if (before === undefined) delete process.env.GALLEY_NPMRC;
     else process.env.GALLEY_NPMRC = before;
+  }
+});
+
+test('pnpm commands in the review run the installed pnpm, not the one package.json names', (t) => {
+  if (spawnSync('pnpm', ['--version']).status !== 0) return t.skip('no pnpm');
+  const dir = mkdtempSync(join(tmpdir(), 'galley-pnpm-'));
+  // A fetch of pnpm 1.0.0 fails at once, as one in the sandbox does.
+  const offline = { HTTPS_PROXY: 'http://127.0.0.1:1', https_proxy: 'http://127.0.0.1:1', pnpm_config_fetch_retries: '0', npm_config_fetch_retries: '0' };
+  const pins = [{ packageManager: 'pnpm@1.0.0' }, { devEngines: { packageManager: { name: 'pnpm', version: '1.0.0', onFail: 'download' } } }];
+  try {
+    for (const pin of pins) {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ private: true, ...pin, scripts: { check: 'echo checked' } }));
+      const r = spawnSync('pnpm', ['run', 'check'], { cwd: dir, encoding: 'utf8', env: { ...process.env, ...cacheEnv(join(dir, 'tmp')), ...offline } });
+      assert.equal(r.status, 0, `${JSON.stringify(pin)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /checked/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -32,6 +32,14 @@ const GREP_TIMEOUT_MS = 30_000;
  * read-only, and npm fails there), and npm's settings for reviews when the user has some
  * (reviewNpmrc), so that the install reads those and not ~/.npmrc. pnpm 12 reads a
  * setting of pnpm's own, such as its store, from pnpm_config_ and no longer from npm_config_.
+ *
+ * Every pnpm command the reviewer agent runs uses the pnpm that is installed, as the install
+ * does (installCommand), and not the version package.json names in packageManager or
+ * devEngines.packageManager. pnpm would otherwise fetch that version when another is installed,
+ * and lock its store of pnpm versions for it, which the sandbox keeps read-only: the command
+ * fails with ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK. pnpm 12 skips the switch for either field
+ * with pmOnFail, which pnpm 10 does not have; it reads manage-package-manager-versions from
+ * npm_config_.
  */
 export function cacheEnv(tmp: string): Record<string, string> {
   const npmrc = reviewNpmrc();
@@ -42,6 +50,9 @@ export function cacheEnv(tmp: string): Record<string, string> {
     npm_config_cache: join(tmp, 'npm'),
     npm_config_store_dir: store,
     pnpm_config_store_dir: store,
+    npm_config_manage_package_manager_versions: 'false',
+    pnpm_config_manage_package_manager_versions: 'false',
+    pnpm_config_pm_on_fail: 'ignore',
     ...(npmrc ? { npm_config_userconfig: npmrc } : {}),
   };
 }
