@@ -93,6 +93,8 @@ test('codex-review reviews when the author waits, within the limits in settings'
         ],
         cwd: checkout,
         store: join(dirname(checkout), 'tmp', 'pnpm-store'),
+        // Only the user may write to it, or pnpm locks its store in /tmp instead, whatever the umask.
+        runtimeDirMode: 0o700,
       },
     ]);
     assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-C')), ['-s', 'workspace-write', ...workspaceWrite(false), ...untrusted]);

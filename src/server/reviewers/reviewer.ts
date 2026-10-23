@@ -956,7 +956,9 @@ export class Reviewer {
       let env: NodeJS.ProcessEnv | undefined;
       let installed: Installed | null = null;
       if (settings.runTests) {
-        mkdirSync(tmp);
+        // Only the user may write to it, whatever the umask: pnpm 12 locks its store in
+        // XDG_RUNTIME_DIR only when it is, and otherwise in /tmp, which the sandbox keeps read-only.
+        mkdirSync(tmp, { mode: 0o700 });
         env = cacheEnv(tmp);
         installed = await this.install(plan.engine, git, pull.head_sha, checkout, tmp, env, signal, log);
         signal.throwIfAborted();
