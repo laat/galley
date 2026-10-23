@@ -231,8 +231,9 @@ console.log(JSON.stringify({ state: 'OPEN', title: read(${JSON.stringify(join(di
   // tests, it leaves a read-only directory behind, as Go's module cache does. With --json it
   // prints what it does as `codex exec --json` does: it thinks, says something, reads math.js and
   // starts a git diff before it waits, and the diff ends when it answers. FAKE_CODEX_BIG makes the
-  // read print 100 kB.
+  // read print 100 kB. It logs whether git status ran a clean filter (cleaned).
   const codex = join(dir, 'codex');
+  writeFileSync(join(dir, 'clean-attributes'), '* filter=probe\n');
   process.env.FAKE_CODEX_LOG = join(dir, 'codex.log');
   process.env.FAKE_CODEX_SANDBOX_LOG = join(dir, 'codex-sandbox.log');
   writeFileSync(
@@ -255,7 +256,11 @@ if (args[0] === 'sandbox') {
 }
 if (args[0] !== 'exec') process.exit(2);
 const prompt = fs.readFileSync(0, 'utf8');
-fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args, prompt, sawFile: fs.existsSync('codex.js'), tmpdir: process.env.TMPDIR, npmCache: process.env.npm_config_cache }) + '\\n');
+// Whether git status hashes the checkout's files again, through a clean filter as Git LFS's.
+const cleaned = '${join(dir, 'cleaned')}';
+fs.rmSync(cleaned, { force: true });
+require('child_process').spawnSync('git', ['-c', 'core.attributesFile=${join(dir, 'clean-attributes')}', '-c', 'filter.probe.clean=sh -c "touch ' + cleaned + '; cat"', 'status', '--porcelain']);
+fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args, prompt, sawFile: fs.existsSync('codex.js'), cleaned: fs.existsSync(cleaned), tmpdir: process.env.TMPDIR, npmCache: process.env.npm_config_cache }) + '\\n');
 if (args.includes('workspace-write')) {
   fs.mkdirSync('.cache/mod', { recursive: true });
   fs.chmodSync('.cache/mod', 0o555);

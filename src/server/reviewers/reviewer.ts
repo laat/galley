@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { run, type Repo, type RunResult } from '../git.ts';
 import { lineInDiff } from '../diff.ts';
 import { now, type Actor, type CancelReason, type Db, type Priority, type PullRow, type RepoRow, type ReviewRow, type ReviewRunRow, type Side } from '../db.ts';
@@ -963,6 +964,7 @@ export class Reviewer {
         installed = await this.install(plan.engine, git, pull.head_sha, checkout, tmp, env, signal, log);
         signal.throwIfAborted();
       }
+      if (reads === 'code') await settleIndex(checkout);
       const prompt = reads === 'description' ? await this.descriptionPrompt(ctx, trigger, plan) : await this.prompt(ctx, trigger, plan, installed);
       log.update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: prompt } });
       const onUpdate = (u: SessionUpdate) => log.update(u);
@@ -1396,6 +1398,19 @@ function testInstructions(installed: Installed | null, localServers: boolean): s
     `${checks}: a check that fails for lack of network, a missing dependency or tool, or the sandbox is not a finding. You can write only to this checkout and $TMPDIR (point caches there). The checkout is thrown away after the review, so changes you make to it are lost: report findings only in your answer.`,
   );
   return out;
+}
+
+/**
+ * Refreshes the checkout's index before the review, outside the reviewer's sandbox, so that git
+ * status and git diff in there do not hash its files again. git does for a file written in the
+ * same second as the index (racily clean), as every file of a fresh checkout is, and hashes it
+ * through the repository's clean filter: Git LFS's writes its temporary files in galley's clone,
+ * which the sandbox keeps read-only, and the command fails. Hence the wait for the next second,
+ * after which the index is newer than every file.
+ */
+async function settleIndex(checkout: string): Promise<void> {
+  await sleep(1000 - (Date.now() % 1000) + 20);
+  await run('git', ['update-index', '-q', '--refresh'], { cwd: checkout, allowFail: true });
 }
 
 /** Some tools leave read-only directories (Go's module cache), which neither git nor rmSync can remove. */

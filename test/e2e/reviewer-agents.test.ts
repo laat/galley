@@ -58,6 +58,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
     assert.ok(call.args.includes('model_reasoning_effort="high"'));
     assert.match(call.prompt, /Title: Add the answer/);
     assert.equal(call.sawFile, true, 'codex runs in a checkout of the head commit');
+    assert.equal(call.cleaned, false, 'its git status hashes no file through a clean filter, which Git LFS runs in galley\'s clone');
     // By default galley installs the dependencies from the lockfile first, in Codex's sandbox with
     // network and without the repository's scripts. Then Codex may run the tests, without network,
     // writing only to the checkout and a temporary directory beside it, whatever the user's
@@ -147,6 +148,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
       await server.service.codex!.settle(pull.id);
     });
     const readOnly = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
+    assert.equal(readOnly.cleaned, false, 'nor without the tests');
     assert.deepEqual(readOnly.args.slice(readOnly.args.indexOf('-s'), readOnly.args.indexOf('-C')), [
       '-s',
       'read-only',
