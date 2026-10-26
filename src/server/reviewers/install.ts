@@ -32,6 +32,9 @@ const GREP_TIMEOUT_MS = 30_000;
  * read-only, and npm fails there), and npm's settings for reviews when the user has some
  * (reviewNpmrc), so that the install reads those and not ~/.npmrc. pnpm 12 reads a
  * setting of pnpm's own, such as its store, from pnpm_config_ and no longer from npm_config_.
+ * Turborepo caches in the main worktree's .turbo when it runs in a linked worktree, as the
+ * review's checkout is; for galley's bare clone (repos/<id>.git) that is repos/.turbo, which the
+ * sandbox keeps read-only. A cache directory of its own turns that off.
  *
  * Every pnpm command the reviewer agent runs uses the pnpm that is installed, as the install
  * does (installCommand), and not the version package.json names in packageManager or
@@ -48,6 +51,7 @@ export function cacheEnv(tmp: string): Record<string, string> {
     TMPDIR: tmp,
     XDG_CACHE_HOME: join(tmp, 'cache'),
     npm_config_cache: join(tmp, 'npm'),
+    TURBO_CACHE_DIR: join(tmp, 'turbo'),
     npm_config_store_dir: store,
     pnpm_config_store_dir: store,
     npm_config_manage_package_manager_versions: 'false',

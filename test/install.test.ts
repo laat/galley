@@ -77,6 +77,7 @@ test("the install reads the user's npm settings for reviews (GALLEY_NPMRC) in pl
       TMPDIR: '/review/tmp',
       XDG_CACHE_HOME: '/review/tmp/cache',
       npm_config_cache: '/review/tmp/npm',
+      TURBO_CACHE_DIR: '/review/tmp/turbo',
       npm_config_store_dir: '/review/tmp/pnpm-store',
       pnpm_config_store_dir: '/review/tmp/pnpm-store',
       npm_config_manage_package_manager_versions: 'false',
