@@ -294,7 +294,9 @@ if (gate) {
   // A stand-in for Claude Code: `claude -p` answering with FAKE_CLAUDE_REVIEW and what the run
   // cost, after FAKE_CLAUDE_SLEEP milliseconds or once the file FAKE_CLAUDE_GATE exists; with
   // FAKE_CLAUDE_FAIL, the error result Claude Code gives; with FAKE_CLAUDE_LINGER, it does not
-  // exit after either result, as Claude Code does not while a command it ran still runs. Every
+  // exit after either result, as Claude Code does not while a command it ran still runs; with
+  // FAKE_CLAUDE_LEAVE, it starts a process in a session of its own, as Claude Code starts each
+  // command, and writes its pid to that file. Every
   // server the tests start uses it. As `--output-format stream-json` does, it prints its messages
   // first: it reads math.js (by its full path) and says something before it waits, and gives its
   // answer with StructuredOutput.
@@ -321,6 +323,7 @@ say({ type: 'system', subtype: 'init', cwd: process.cwd(), tools: ['Bash', 'Glob
 say({ type: 'assistant', message: { id: 'msg_1', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: process.cwd() + '/math.js', offset: 2 } }], usage: usage(20) } });
 say({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '2\\t  return a + b;' }] } });
 say({ type: 'assistant', message: { id: 'msg_2', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'text', text: 'The answer is off by one.' }], usage: usage(10) } });
+if (env.FAKE_CLAUDE_LEAVE) fs.writeFileSync(env.FAKE_CLAUDE_LEAVE, String(require('child_process').spawn('sleep', ['300'], { detached: true, stdio: 'ignore' }).pid));
 if (env.FAKE_CLAUDE_FAIL) {
   console.log(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded', num_turns: 2, total_cost_usd: 0.004, usage: { input_tokens: 5, output_tokens: 300 } }));
   if (!env.FAKE_CLAUDE_LINGER) process.exit(1);

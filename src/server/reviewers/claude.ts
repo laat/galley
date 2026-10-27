@@ -9,6 +9,7 @@ import { reviewNpmrc } from '../../config.ts';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
 import { EngineError, lastLines, makeWritable, removeDir, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
+import { reap, REVIEW_MARK } from './reap.ts';
 import { noSandbox, sandboxed } from './sandbox.ts';
 import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCall } from './transcript.ts';
 
@@ -233,6 +234,10 @@ export class ClaudeEngine implements Engine {
       }
       return { answer: out.structured_output, usage: cost };
     } finally {
+      // Claude Code gives its commands a $TMPDIR in `own`: what they left running (reap.ts) goes
+      // first, or it may write there while it is removed. The review reaps again after.
+      const mark = job.env[REVIEW_MARK];
+      if (mark) await reap(mark).catch((e: Error) => console.error('claude: killing what its review left running:', e));
       // The tests Claude ran may have left read-only directories in its $TMPDIR.
       await makeWritable(own);
       removeDir(own);

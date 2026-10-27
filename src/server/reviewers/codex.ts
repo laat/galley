@@ -6,6 +6,7 @@ import { homedir, userInfo } from 'node:os';
 import { basename, join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
+import { REVIEW_MARK } from './reap.ts';
 import { EngineError, lastLines, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
 import { commandKind, inCheckout, jsonLines, type SessionUpdate, type ToolCallLocation, type ToolCallStatus, type ToolKind } from './transcript.ts';
 
@@ -40,6 +41,16 @@ function workspaceWrite(network: boolean): string[] {
  */
 function untrusted(checkout: string): string[] {
   return ['-c', `projects={${JSON.stringify(checkout)}={trust_level="untrusted"}}`];
+}
+
+/**
+ * The review's mark (reap.ts) for the commands Codex runs, also when the user's
+ * shell_environment_policy leaves it out of what they inherit (`inherit = "core"`, `exclude`);
+ * not with `include_only`, which Codex applies after `set`.
+ */
+function marked(env: NodeJS.ProcessEnv | undefined): string[] {
+  const mark = env?.[REVIEW_MARK];
+  return mark ? ['-c', `shell_environment_policy.set.${REVIEW_MARK}=${JSON.stringify(mark)}`] : [];
 }
 
 /** What the CLI calls an author agent running in Codex (see cliActor in src/config.ts). */
@@ -79,7 +90,7 @@ export class CodexEngine implements Engine {
   }
 
   install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {
-    const args = ['sandbox', '-c', 'sandbox_mode="workspace-write"', ...workspaceWrite(true), ...untrusted(o.checkout), '--', ...command];
+    const args = ['sandbox', '-c', 'sandbox_mode="workspace-write"', ...workspaceWrite(true), ...untrusted(o.checkout), ...marked(o.env), '--', ...command];
     return run(this.bin, args, { cwd: o.checkout, env: o.env, allowFail: true, timeoutMs: o.timeoutMs, signal: o.signal });
   }
 
@@ -91,7 +102,7 @@ export class CodexEngine implements Engine {
     // A review of the description runs read-only in an empty directory: it has nothing to read but the prompt.
     const sandbox = settings.runTests ? ['-s', 'workspace-write', ...workspaceWrite(false)] : ['-s', 'read-only'];
     // --json prints what Codex does as it goes; the answer still goes to the -o file.
-    const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), '-C', checkout, '--color', 'never', '--json', '--output-schema', schemaFile, '-o', outFile];
+    const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), ...marked(job.env), '-C', checkout, '--color', 'never', '--json', '--output-schema', schemaFile, '-o', outFile];
     if (settings.model) args.push('-m', settings.model);
     if (settings.effort) args.push('-c', `model_reasoning_effort="${settings.effort}"`);
     args.push('-');
