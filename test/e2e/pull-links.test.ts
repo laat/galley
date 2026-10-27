@@ -38,8 +38,12 @@ test("the author's link to its session is on the pull request's pages, and is ne
 
   await t.test('pr edit --link changes it, a web page opens in a new tab, and one that would run script is refused', async () => {
     const web = 'https://example.com/session/1';
+    const before = (await human('GET', api)).updated_at;
     assert.equal((await cli(['pr', 'edit', n, '--link', web])).code, 0);
-    assert.equal((await human('GET', api)).link, web);
+    const after = await human('GET', api);
+    assert.equal(after.link, web);
+    // Not activity: the pull request keeps its place in the lists.
+    assert.equal(after.updated_at, before);
     assert.ok((await page()).includes(`<a class="btn btn-sm" href="${web}" title="${web}" target="_blank" rel="noopener">`));
     assert.match(await page(), /<\/svg> example\.com<\/a>/);
     for (const bad of ['javascript:alert(1)', ' JavaScript:alert(1)', 'data:text/html,<b>x</b>', 'not a url']) {

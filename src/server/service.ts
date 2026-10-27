@@ -1839,7 +1839,8 @@ export class Service {
         this.addEvent(pull, actor, 'reopened', {}, ts);
       }
       if (Object.keys(changes).length) {
-        changes.updated_at = ts;
+        // The link is not activity either: updated_at stays, as for pinning.
+        if (Object.keys(changes).some((k) => k !== 'link')) changes.updated_at = ts;
         this.db.update('pulls', pull.id, changes);
       }
     });
@@ -4369,7 +4370,6 @@ function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, aut
   }
 }
 
-/** The commit messages of a pull request, oldest first, hashed (PullRow.messages_sha). */
 /** A pull request's link as galley keeps it (pullLink), or a 422 saying why it can not be one. */
 function checkedLink(link: string): string {
   const checked = pullLink(link.trim());
@@ -4377,6 +4377,7 @@ function checkedLink(link: string): string {
   return checked.href;
 }
 
+/** The commit messages of a pull request, oldest first, hashed (PullRow.messages_sha). */
 function messagesSha(commits: Commit[]): string {
   return createHash('sha256').update(commits.map((c) => c.message).join('\0')).digest('hex');
 }
