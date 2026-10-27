@@ -63,7 +63,19 @@ description: Stage a pull request in galley, the user's local review server, ins
 2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
 
-   - Claude Code, main session: with `run_in_background`, so you are woken when it returns.
+   - Claude Code, main session: in the background, so you are woken when it returns. Choose the
+     tool by who has the next move, because T3 Code shows the thread by it:
+     - While the reviewer agents review (steps 2 to 5, and with auto-publish until it is
+       published): the Monitor tool, with `galley pr wait --timeout 29m 2>&1` and
+       `timeout_ms: 1800000`. T3 Code keeps a thread with a running monitor in Working. A
+       background Bash command does not count: T3 Code moves the thread to Active, and it looks
+       done. A monitor stops after 30 minutes; on exit code 124, start it again, without a
+       message.
+     - While you wait for the user (step 6 on): Bash with `run_in_background`, so T3 Code moves
+       the thread to Active, where the user sees your request.
+
+     Stop a running monitor with `TaskStop` before you hand the work to the user or ask them
+     something; otherwise the thread stays in Working.
    - Claude Code, subagent (a session another agent started): in the foreground with
      `--timeout 270` and a Bash timeout above it, such as 600000, because a background command
      that finishes does not wake an idle subagent. On exit code 124, run it again.
