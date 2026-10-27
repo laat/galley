@@ -47,6 +47,11 @@ description: Stage a pull request in galley, the user's local review server, ins
    user said how to review it, add the flag from [Reviewer agents](#reviewer-agents). If the user
    asked you to publish or merge it, turn on auto-publish now ([Publishing](#publishing)).
 
+   In T3 Code (the `t3-code` MCP tools are present), give the user a way from galley to your
+   thread: add `--link t3code://threads/<environmentId>/<threadId>`, with `environmentId` from
+   `t3_environment_read` and `threadId` the `currentThreadId` of `t3_thread_list`. galley never
+   publishes it; `galley pr edit --link` changes it.
+
 2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
 

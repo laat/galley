@@ -122,6 +122,7 @@ export function viewPlain(pr: GhPull, images?: ImageRef): string {
     `unresolved threads:\t${pr.reviewThreads.filter((t: any) => !t.isResolved).length}`,
   ];
   if (pr.publishedUrl) lines.push(`published:\t${pr.publishedUrl}`);
+  if (pr.link) lines.push(`link:\t${pr.link}`);
   // A server older than the CLI has neither field.
   if (pr.unpublishedChanges?.length) lines.push(`unpublished:\t${unpublished(pr)}`);
   if (pr.turn) lines.push(`turn:\t${pr.turn.whose.toLowerCase()}\t${pr.turn.reasons.join('; ')}`);
@@ -175,6 +176,7 @@ export function viewTTY(pr: GhPull, images?: ImageRef): string {
   if (pr.publishedUrl) out.push(`Published: ${pr.publishedUrl}${pr.unpublishedChanges?.length ? c.yellow(` (update not published: ${unpublished(pr)})`) : ''}`);
   if (pr.mergedAt) out.push(`Merged on GitHub ${mergedText(pr)}`);
   if (pr.githubStatus) out.push(`On GitHub: ${githubSummary(pr)}`);
+  if (pr.link) out.push(`Link: ${pr.link}`);
   out.push(c.gray(`View this pull request in galley: ${pr.url}`));
   return out.join('\n') + '\n';
 }

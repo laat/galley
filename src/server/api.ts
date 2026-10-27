@@ -301,7 +301,9 @@ export function api(s: Service): Hono {
     const review = s.reviewRequest(repo, b.reviewers, b.automatic_reviews);
     // galley extension: X-Galley-Client says where the CLI that stages it runs.
     const client = c.req.header('x-galley-client')?.trim().slice(0, 1000) || null;
-    const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns, client }, actor(c));
+    // galley extension: `link`, for the user to get back to the author's session; never published.
+    const link = b.link == null ? null : String(b.link);
+    const pull = await s.createPull(repo, { title: b.title, body: b.body, head: b.head, base: b.base, draft: !!b.draft, fill: b.fill, reviews: review.columns, client, link }, actor(c));
     // And the reviewer agents that review it, so the author can say who does.
     const agents = s.reviewersFor(pull).map((r) => reviewerAgentJson(r, r.enabled(pull), r.limit(pull)));
     return c.json({ ...pullJson(s, repo, pull), ...(review.ignored.length ? { ignored_reviewers: review.ignored } : {}), reviewer_agents: agents }, 201);
@@ -340,7 +342,8 @@ export function api(s: Service): Hono {
   app.patch('/repos/:owner/:repo/pulls/:n', async (c) => {
     const x = await ctx(c);
     const b = await body(c);
-    const pull = await s.updatePull(x, { title: b.title, body: b.body, base: b.base, state: b.state, draft: b.draft }, actor(c));
+    const link = b.link === undefined ? undefined : b.link === null ? null : String(b.link);
+    const pull = await s.updatePull(x, { title: b.title, body: b.body, base: b.base, state: b.state, draft: b.draft, link }, actor(c));
     return c.json(pullJson(s, x.repo, pull));
   });
 

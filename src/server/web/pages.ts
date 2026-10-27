@@ -10,6 +10,7 @@ import { lastEvent, readEvent } from '../events.ts';
 import { avatarUrl, commentUrl, reasonText } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
+import { isWebLink, linkLabel } from '../../pull-link.ts';
 import { avatar, clockTime, fileAnchor, html, icon, plural, raw, relTime, shortSha, since, type Safe } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
 import { closingIssues, pullReferences, type ReferenceContext } from './references.ts';
@@ -79,7 +80,7 @@ export function pullList(s: Service, opts: { repo: RepoRow | null; state: string
         ? html`<a class="pr-row-title" href="${p.published_url}" target="_blank" rel="noopener">${p.title}</a>`
         : html`<a class="pr-row-title" href="${href(p)}">${p.title}</a>`;
     return html`${opts.repo ? '' : html`<a class="pr-row-repo" href="/${repo.owner}/${repo.name}">${repo.owner}/${repo.name}</a>`}
-    ${title} ${checksIndicator(p)}${p.pinned_at && opts.repo ? pinMark : ''}`;
+    ${title} ${checksIndicator(p)}${p.link ? pullLinkTo(p.link, 'pr-row-link link-muted', icon('link', { label: linkLabel(p.link) })) : ''}${p.pinned_at && opts.repo ? pinMark : ''}`;
   };
   const published = (p: PullRow) =>
     p.published_url ? html`<a href="${p.published_url}" target="_blank" rel="noopener">${icon('mark-github')} ${p.published_url.replace('https://github.com/', '').replace('/pull/', '#')}</a>` : '';
@@ -514,6 +515,7 @@ function pullLayout(p: PullPage, tab: 'conversation' | 'commits' | 'files' | nul
       <div class="gh-header-actions">
         ${pinButton(p)}
         <button type="button" class="btn btn-sm js-title-edit">Edit</button>
+        ${pull.link ? pullLinkTo(pull.link, 'btn btn-sm', html`${icon('link')} ${linkLabel(pull.link)}`) : ''}
         ${pull.published_url ? html`<a class="btn btn-sm" href="${pull.published_url}" target="_blank" rel="noopener">${icon('mark-github')} View on GitHub</a>` : ''}
       </div>
     </div>
@@ -589,6 +591,16 @@ function commitList(p: PullPage, commits: Commit[]): Safe {
     <a class="timeline-commit-sha" href="${p.htmlBase}/files?commit=${c.sha}"><code>${shortSha(c.sha)}</code></a>
   </div>`,
   )}</div>`;
+}
+
+/**
+ * A pull request's link back to the author's session (src/pull-link.ts): a web page opens in a new
+ * tab, an app's link (t3code://…) in its app, without a blank tab.
+ */
+function pullLinkTo(link: string, cls: string, content: Safe): Safe {
+  return isWebLink(link)
+    ? html`<a class="${cls}" href="${link}" title="${link}" target="_blank" rel="noopener">${content}</a>`
+    : html`<a class="${cls}" href="${link}" title="${link}">${content}</a>`;
 }
 
 /** A pull request on GitHub, as owner/repo#7. */

@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { APP_SCHEME, appLinkPath } from '../src/app-link.ts';
+import { isKnownAppLink } from '../src/pull-link.ts';
 import { ConfigError, serverUrl } from '../src/config.ts';
 import { follow, type Follower } from './live.ts';
 import { githubTarget, trayMenu, trayTitle, trayToolTip } from './menu.ts';
@@ -212,7 +213,8 @@ function ours(url: string): boolean {
 }
 
 function openOutside(url: string): void {
-  if (/^(https?|mailto):/i.test(url)) void shell.openExternal(url);
+  // And a pull request's link to an app galley knows, such as its T3 Code thread.
+  if (/^(https?|mailto):/i.test(url) || isKnownAppLink(url)) void shell.openExternal(url);
 }
 
 /** A window's options; `noHeader` for an uploaded image or a raw file, which keeps macOS's title bar. */
