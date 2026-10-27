@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Repo } from '../src/server/git.ts';
@@ -99,6 +99,9 @@ test('pnpm commands in the review run the installed pnpm, not the one package.js
   // A fetch of pnpm 1.0.0 fails at once, as one in the sandbox does.
   const offline = { HTTPS_PROXY: 'http://127.0.0.1:1', https_proxy: 'http://127.0.0.1:1', pnpm_config_fetch_retries: '0', npm_config_fetch_retries: '0' };
   const pins = [{ packageManager: 'pnpm@1.0.0' }, { devEngines: { packageManager: { name: 'pnpm', version: '1.0.0', onFail: 'download' } } }];
+  // The review's temporary directory exists, as the reviewer makes it. pnpm fails on one that
+  // does not, unless its own compile cache there made it, which NODE_COMPILE_CACHE moves elsewhere.
+  mkdirSync(join(dir, 'tmp'));
   try {
     for (const pin of pins) {
       writeFileSync(join(dir, 'package.json'), JSON.stringify({ private: true, ...pin, scripts: { check: 'echo checked' } }));

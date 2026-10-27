@@ -38,7 +38,7 @@
     "start": "node bin/galley.ts serve",
     "dev": "node --watch bin/galley.ts serve",
     "build": "node --disable-warning=ExperimentalWarning scripts/build.ts",
-    "test": "node --test --test-timeout=120000 'test/**/*.test.ts' 'desktop/test/*.test.ts'",
+    "test": "NODE_COMPILE_CACHE=\"$PWD/node_modules/.cache/node-compile-cache\" node --test --test-timeout=120000 'test/**/*.test.ts' 'desktop/test/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

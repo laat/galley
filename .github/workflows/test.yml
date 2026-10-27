@@ -17,11 +17,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # The required check for auto-merge: keep the job name.
-  test:
-    name: test
+  typecheck:
+    name: typecheck
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -38,6 +37,33 @@ jobs:
           version: 10.34.5
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+
+  # The suite is bound by CPU: its servers, git and the CLI keep a runner's cores busy. Each shard
+  # runs every fourth test file on a runner of its own. A shard that fails leaves the others
+  # running, so one run shows every failure.
+  shard:
+    name: test ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # package.json has no packageManager; this is the pnpm that wrote pnpm-lock.yaml.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.5
+      - run: pnpm install --frozen-lockfile
       # The install sandbox's tests run bubblewrap, which needs unprivileged user namespaces;
       # Ubuntu restricts them with AppArmor. The last command fails the job when bwrap still can
       # not make a sandbox, rather than let those tests skip.
@@ -47,5 +73,29 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --unshare-all --share-net --ro-bind / / --dev /dev --proc /proc true
       # The tests run git, ssh-keygen and jq, which the runner image has. They bring their
-      # own git config, gh, codex and claude.
+      # own git config, gh, codex and claude. The shard goes in NODE_OPTIONS because node reads no
+      # options after the test script's globs; the test files and what they start ignore it.
       - run: pnpm test
+        env:
+          NODE_OPTIONS: --test-shard=${{ matrix.shard }}/4
+
+  # The required check for auto-merge: keep the job name. It fails unless the typecheck and every
+  # shard passed, also when one of them was skipped or cancelled. It runs on a cancelled run too:
+  # a skipped job counts as passing, even when it is a required check.
+  test:
+    name: test
+    needs: [typecheck, shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "::error::The typecheck or a test shard did not pass: $RESULTS"
+              exit 1
+            fi
+          done
