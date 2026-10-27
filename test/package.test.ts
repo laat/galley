@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 const root = join(import.meta.dirname, '..');
 const exec = promisify(execFile);
 
-test('the npm package is galley in JavaScript with public/ and the skill, and galley runs from it', async (t) => {
+test('the npm package is galley in JavaScript with public/, and galley runs from it', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'galley-package-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const pkg = join(dir, 'package');
@@ -26,8 +26,8 @@ test('the npm package is galley in JavaScript with public/ and the skill, and ga
   const manifest = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8'));
   const checkout = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   assert.equal(packed.id, `galley-proof@${checkout.version}`);
-  assert.deepEqual(files.filter((f) => !/^(bin|src)\/.*\.js$|^public\/|^skills\/galley\//.test(f)).sort(), ['LICENSE', 'README.md', 'package.json']);
-  for (const f of ['bin/galley.js', 'src/server/server.js', 'src/server/receive-hook.js', 'public/app.js', 'skills/galley/SKILL.md']) assert.ok(files.includes(f), `${f} is packed`);
+  assert.deepEqual(files.filter((f) => !/^(bin|src)\/.*\.js$|^public\//.test(f)).sort(), ['LICENSE', 'README.md', 'package.json']);
+  for (const f of ['bin/galley.js', 'src/server/server.js', 'src/server/receive-hook.js', 'public/app.js']) assert.ok(files.includes(f), `${f} is packed`);
   assert.deepEqual(manifest.bin, { galley: 'bin/galley.js' });
   assert.deepEqual(manifest.dependencies, checkout.dependencies);
   assert.deepEqual(manifest.engines, checkout.engines);

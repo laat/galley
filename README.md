@@ -24,7 +24,6 @@ From npm, where the package is called galley-proof and the command it installs `
 
 ```sh
 npm install --global galley-proof
-skill="$(npm root --global)/galley-proof/skills/galley"
 ```
 
 Or from a checkout, which follows `git pull`:
@@ -33,20 +32,10 @@ Or from a checkout, which follows `git pull`:
 git clone https://github.com/laat/galley && cd galley
 pnpm install
 ln -s "$PWD/bin/galley.ts" ~/.local/bin/galley   # or: npm link
-skill="$PWD/skills/galley"
 ```
 
-Give your agents the `galley` skill, which tells them how to stage, wait and answer feedback. It
-is in `skills/galley`, in the global install or the checkout (`$skill` above). Codex and opencode
-read skills from `~/.agents/skills`, Claude Code from `~/.claude/skills`:
-
-```sh
-mkdir -p ~/.agents/skills ~/.claude/skills
-ln -s "$skill" ~/.agents/skills/galley                   # Codex, opencode
-ln -s ~/.agents/skills/galley ~/.claude/skills/galley    # Claude Code
-```
-
-Then ask an agent to "stage a PR", or run `/galley` in Claude Code.
+Then ask an agent to stage its pull request with `galley pr create` instead of `gh pr create`.
+`galley --help` lists the commands, which take the same subcommands and flags as `gh`.
 
 To use it as a gh extension too (`gh galley pr create …`):
 
@@ -111,7 +100,7 @@ git clone https://github.com/laat/galley && cd galley
 ln -s "$PWD/bin/galley.ts" ~/.local/bin/galley
 ```
 
-and the skill, as in [Install](#install). The desktop app there opens that galley and starts none.
+The desktop app there opens that galley and starts none.
 
 An agent's sandbox must let the CLI read `~/.config/galley/config.json`, and let it and the git
 it runs reach that address. When it does not, the agent tells you that it cannot reach galley.
@@ -367,6 +356,5 @@ times to try signing again. Changes save as you make them, a text field when you
 
 ## More
 
-- [`skills/galley/SKILL.md`](skills/galley/SKILL.md): the CLI and the loop, for agents.
 - [`docs/api.md`](docs/api.md): the REST API under `/api`, GitHub's with galley's extensions.
 - `galley --help`: the CLI, which takes the same subcommands and flags as `gh`.

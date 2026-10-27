@@ -30,7 +30,7 @@ for (const dir of ['bin', 'src']) {
     writeFileSync(to, js);
   }
 }
-for (const path of ['public', 'skills/galley', 'README.md', 'LICENSE']) cpSync(join(root, path), join(out, path), { recursive: true });
+for (const path of ['public', 'README.md', 'LICENSE']) cpSync(join(root, path), join(out, path), { recursive: true });
 
 // package.json with the built bin, and what the package needs at run time; package.json,
 // README.md and LICENSE go in regardless. The checkout's is private, so that npm publishes
@@ -40,5 +40,5 @@ delete pkg.private;
 delete pkg.scripts;
 delete pkg.devDependencies;
 pkg.bin = { galley: 'bin/galley.js' };
-pkg.files = ['bin', 'src', 'public', 'skills'];
+pkg.files = ['bin', 'src', 'public'];
 writeFileSync(join(out, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
