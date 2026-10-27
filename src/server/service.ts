@@ -14,6 +14,7 @@ import { agentReviews, askedAt, unansweredThreads, unseenFeedback, type Feedback
 import { addEvent, eventsAfter, eventsSince, lastEvent, type EventData, type EventType, type TimelineEvent } from './events.ts';
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
+import { pullLink } from '../pull-link.ts';
 import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
 import {
   Db,
@@ -1313,10 +1314,11 @@ export class Service {
 
   async createPull(
     repo: RepoRow,
-    input: { title?: string; body?: string; head?: string; base?: string; draft?: boolean; fill?: 'default' | 'first' | 'verbose'; reviews?: ReviewColumns; client?: string | null },
+    input: { title?: string; body?: string; head?: string; base?: string; draft?: boolean; fill?: 'default' | 'first' | 'verbose'; reviews?: ReviewColumns; client?: string | null; link?: string | null },
     actor: Actor,
   ): Promise<PullRow> {
     this.ownClone(repo);
+    const link = input.link ? checkedLink(input.link) : null;
     const git = this.git(repo);
     const head = input.head?.replace(/^[^:]+:/, '');
     if (!head) throw new HttpError(422, 'head branch is required');
@@ -1369,6 +1371,7 @@ export class Service {
         author_seen_at: ts,
         messages_sha: messagesSha(commits),
         client: input.client ?? null,
+        link,
         ...input.reviews,
       });
       this.db.insert('revisions', { pull_id: id, seq: 1, head_sha: headSha, base_sha: mergeBase, before_sha: null, forced: 0, actor_id: actor.id, created_at: ts });
@@ -1795,12 +1798,15 @@ export class Service {
 
   async updatePull(
     ctx: Ctx,
-    input: { title?: string; body?: string; base?: string; state?: string; draft?: boolean },
+    input: { title?: string; body?: string; base?: string; state?: string; draft?: boolean; link?: string | null },
     actor: Actor,
   ): Promise<PullRow> {
     const { pull, repo } = ctx;
     const ts = now();
     const changes: Record<string, string | number | null> = {};
+    // An empty one removes it. No event: the link is for the user to get to the author, not part of the pull request.
+    const link = input.link === undefined ? undefined : input.link ? checkedLink(input.link) : null;
+    if (link !== undefined && link !== pull.link) changes.link = link;
     if (input.base !== undefined && input.base !== pull.base_ref) {
       if (!(await this.newBaseTip(repo, input.base))) throw new HttpError(422, `base branch "${input.base}" does not exist`);
     }
@@ -4364,6 +4370,13 @@ function reviewerAgentText(login: string, status: HeadStatus, pull: PullRow, aut
 }
 
 /** The commit messages of a pull request, oldest first, hashed (PullRow.messages_sha). */
+/** A pull request's link as galley keeps it (pullLink), or a 422 saying why it can not be one. */
+function checkedLink(link: string): string {
+  const checked = pullLink(link.trim());
+  if ('error' in checked) throw new HttpError(422, checked.error);
+  return checked.href;
+}
+
 function messagesSha(commits: Commit[]): string {
   return createHash('sha256').update(commits.map((c) => c.message).join('\0')).digest('hex');
 }

@@ -12,7 +12,7 @@ type Options = NonNullable<ParseArgsConfig['options']>;
 
 const GH_FIELDS = [
   'additions', 'author', 'autoMergeRequest', 'autoPublishRequest', 'baseConflicts', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'client', 'closed', 'closedAt', 'comments',
-  'commits', 'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'isPinned', 'latestReviews', 'mergeCommit',
+  'commits', 'createdAt', 'deletions', 'files', 'githubStatus', 'headRefName', 'headRefOid', 'id', 'isDraft', 'isPinned', 'latestReviews', 'link', 'mergeCommit',
   'mergeStateStatus', 'mergeable', 'mergedAt', 'mergedBy', 'number', 'publishedUrl', 'ref', 'reviewDecision', 'reviewRequests', 'reviewThreads', 'reviews', 'state',
   'statusCheckRollup', 'title', 'turn', 'unpublishedChanges', 'updatedAt', 'url', 'waiting',
 ];
@@ -175,6 +175,8 @@ FLAGS
   -r, --reviewer <name>[:<n>]   Have this reviewer agent review it, at most n times (codex:3).
                                 Repeat for more. \`galley reviewers\` lists them
       --no-review               Have no reviewer agent review it
+      --link <url>              A link for the user to get back to your session, such as a
+                                T3 Code thread. galley shows it, and never publishes it
       --dry-run                 Say what would be staged, and stage nothing
   -w, --web                     Open it in the browser
 
@@ -201,6 +203,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
     recover: { type: 'string' },
     reviewer: { ...multi, short: 'r' },
     'no-review': { type: 'boolean' },
+    link: { type: 'string' },
   });
   if (v.editor) throw new CliError('--editor is not supported; pass --title and --body or --body-file');
   const reviewers = v.reviewer ? parseReviewers(v.reviewer as string[]) : undefined;
@@ -229,6 +232,7 @@ async function create(client: Client, cwd: string, args: string[]): Promise<numb
     fill,
     reviewers,
     automatic_reviews: v['no-review'] ? false : undefined,
+    link: v.link || undefined,
   });
   await setPushRemote(client, cwd, repo, head.replace(/^[^:]+:/, ''));
   for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this repository.`);
@@ -403,7 +407,7 @@ async function diff(client: Client, cwd: string, args: string[]): Promise<number
 
 // --------------------------------------------------------------------- edit
 
-const EDIT_USAGE = `Change the title, description or base of a staged pull request. Mirrors \`gh pr edit\`.
+const EDIT_USAGE = `Change the title, description, base or link of a staged pull request. Mirrors \`gh pr edit\`.
 
 USAGE
   galley pr edit ${PULL} [flags]
@@ -413,6 +417,8 @@ FLAGS
   -b, --body <text>        The new description
   -F, --body-file <file>   Read the new description from a file ("-" for stdin)
   -B, --base <branch>      The new base branch
+      --link <url>         The new link back to your session ("" removes it), which galley
+                           shows and never publishes
 
 Accepted for gh, with no effect: the flags for assignees, labels, projects, milestones and
 reviewers.
@@ -425,10 +431,12 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
     body: { type: 'string', short: 'b' },
     'body-file': { type: 'string', short: 'F' },
     base: { type: 'string', short: 'B' },
+    link: { type: 'string' },
   });
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   await sendPull(client, cwd, t.repo, t.number);
   const patch: Record<string, unknown> = {};
+  if (v.link !== undefined) patch.link = v.link;
   if (v.title !== undefined) patch.title = v.title;
   const body = readBody(v as any);
   if (body !== undefined) patch.body = body;
@@ -438,7 +446,7 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
       err('assignees, labels, reviewers, projects and milestones do not exist in galley; nothing to change');
       return 0;
     }
-    throw new CliError('specify at least one of --title, --body, --body-file or --base');
+    throw new CliError('specify at least one of --title, --body, --body-file, --base or --link');
   }
   const pr = await client.json('PATCH', pullPath(t), patch);
   out(pr.html_url);

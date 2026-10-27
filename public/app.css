@@ -823,6 +823,8 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
 .github-checks { margin-top: 4px; font-size: 13px; }
 .checks-indicator { margin-left: 2px; }
 .checks-indicator .octicon { vertical-align: text-bottom; }
+.pr-row-link { margin-left: 2px; }
+.pr-row-link .octicon { vertical-align: text-bottom; }
 .merge-error { margin: 8px 0 0; max-height: 200px; overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; }
 /* What the last review round found, beside Stop iterating: each reviewer's part wraps as one. */
 .iterations-found { margin: 2px 0 4px; }

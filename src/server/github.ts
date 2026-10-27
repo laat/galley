@@ -138,6 +138,8 @@ export function pullJson(s: Service, repo: RepoRow, pull: PullRow, extra: { file
     unpublished_changes: s.unpublishedChanges(pull),
     // When the reviewer pinned it to the top of the front page; null when it is not pinned.
     pinned_at: pull.pinned_at,
+    // A link the author gave for the user to get back to its session, such as its T3 Code thread; never published.
+    link: pull.link,
   };
   if (extra.files) {
     json.additions = extra.files.reduce((n, f) => n + f.additions, 0);
@@ -355,6 +357,7 @@ export const GH_FIELDS = [
   'isPinned',
   'githubStatus',
   'latestReviews',
+  'link',
   'mergeCommit',
   'mergeStateStatus',
   'mergeable',
@@ -449,6 +452,8 @@ export async function ghPullJson(s: Service, ctx: Ctx, viewer: Actor, fields: st
   set('waiting', () => s.authorWaiting(pull.id));
   // galley extension: where the CLI that staged it ran, as its X-Galley-Client header said; null when it said nothing.
   set('client', () => pull.client);
+  // galley extension: the link the author gave for the user to get back to its session; null without.
+  set('link', () => pull.link);
   // Auto-merge on the published pull request, as galley last turned it on there.
   set('autoMergeRequest', () => {
     const merge = s.autoMerge(pull);

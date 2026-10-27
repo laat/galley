@@ -88,6 +88,8 @@ export interface PullRow {
   pinned_at: string | null;
   /** Where the CLI that staged it ran, as its X-Galley-Client header said; null when it said nothing. */
   client: string | null;
+  /** A link the author gave for the user to get back to its session, such as its T3 Code thread (src/pull-link.ts); never published. */
+  link: string | null;
 }
 
 export type GithubState = 'open' | 'merged' | 'closed';
@@ -360,6 +362,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['pulls', 'messages_sha', 'TEXT'],
   ['review_runs', 'subject', 'TEXT'],
   ['pulls', 'client', 'TEXT'],
+  ['pulls', 'link', 'TEXT'],
 ];
 
 export class Db {

@@ -253,6 +253,10 @@ GitHub's #1, #2. `s#4` in a comment or description links to it here; `#4` is Git
 **Copy link** in a comment's **…** menu gives a link to it, and agents print one for each
 thread. Opening it unfolds the thread or file the comment is in and scrolls to it.
 
+An agent can give a link back to its session, such as its T3 Code thread, with `--link` on
+`galley pr create` or `galley pr edit`. It is a button in the pull request's header and an icon
+in its row on the front page, and it is never published to GitHub.
+
 The front page lists the pull requests waiting for you first, each with the reason, then those
 the agents are working on. A published pull request is your turn once GitHub can merge it and
 auto-merge is off, and its title opens it on GitHub; its s#N opens it here, and **Update not
