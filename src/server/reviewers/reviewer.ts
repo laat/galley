@@ -205,6 +205,8 @@ export interface Engine {
   readonly authorTool: string;
   /** Whether its sandbox can let the tests listen on localhost without letting them connect to other hosts (the localhost setting). */
   readonly localServers: boolean;
+  /** The shell its commands run in (`zsh`), when the tool runs them in the user's login shell and not one it chooses. */
+  readonly shell?: string | null;
   /**
    * Run an install command in the checkout, in a sandbox with network that writes only to the
    * checkout and `tmp`, the TMPDIR in `env`.
@@ -1115,6 +1117,7 @@ export class Reviewer {
       `Run \`git diff ${pull.base_sha} HEAD\` to see the changes and read the surrounding code as needed.${settings.runTests ? '' : ' Do not modify any files.'}`,
       '',
       ...(settings.runTests ? [...testInstructions(installed, settings.localhost && plan.engine.localServers), ''] : []),
+      ...shellText(plan.engine.shell),
       ...focus,
       '',
       'Give each comment a priority: high for bugs, security problems and anything that must be fixed before merging; medium for what should be fixed; low for minor improvements. Do not write the priority into the comment text.',
@@ -1380,6 +1383,20 @@ function threadPlace(t: Thread): string {
 function oneLine(text: string, max = 120): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * What the reviewer is told of the shell its commands run in. The models write bash, and zsh
+ * breaks it: `path` is PATH as an array, so `for path in …` loses every command; a glob that
+ * matches nothing fails the command; a heredoc or here-string needs a temporary file, which the
+ * read-only sandbox refuses (cacheEnv puts zsh's in a review that runs the tests).
+ */
+export function shellText(shell: string | null | undefined): string[] {
+  if (shell !== 'zsh') return [];
+  return [
+    'Your shell commands run in zsh, not bash. In zsh `path` is PATH as an array: assigning to it, as in `for path in …`, loses every command after it, so name the variable something else. A glob that matches nothing fails the whole command, so list what is there first. A heredoc needs a temporary file, and so does a here-string (`<<<`), which the sandbox may refuse: pipe input in with printf instead.',
+    '',
+  ];
 }
 
 /** What the reviewer is told about the installed dependencies and running the tests. */
