@@ -47,10 +47,17 @@ description: Stage a pull request in galley, the user's local review server, ins
    user said how to review it, add the flag from [Reviewer agents](#reviewer-agents). If the user
    asked you to publish or merge it, turn on auto-publish now ([Publishing](#publishing)).
 
-   In T3 Code (the `t3-code` MCP tools are present), give the user a way from galley to your
-   thread: add `--link t3code://threads/<environmentId>/<threadId>`, with `environmentId` from
-   `t3_environment_read` and `threadId` the `currentThreadId` of `t3_thread_list`. galley never
-   publishes it; `galley pr edit --link` changes it.
+   In T3 Code (the `t3-code` MCP tools are present), link both ways:
+
+   - From galley to your thread: add `--link t3code://threads/<environmentId>/<threadId>` to
+     `galley pr create`, with `environmentId` from `t3_environment_read` and `threadId` the
+     `currentThreadId` of `t3_thread_list`. galley never publishes it; `galley pr edit --link`
+     changes it.
+   - From your thread to galley: call `link_pull_request` with `repository`, `number` and `host`
+     from the URL `galley pr create` printed (`https://<host>/<repository>/pull/<number>`; a
+     port stays in `host`). Do not pass `url`; T3 rejects galley's. T3 shows the link, but not
+     the pull request's state. Skip it when the URL is not `https`: T3 makes the link `https://`
+     whatever you pass.
 
 2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
@@ -134,10 +141,15 @@ description: Stage a pull request in galley, the user's local review server, ins
    agents are done with it. If auto-publish is on, address the feedback and wait; galley
    publishes. With auto-merge, GitHub merges it, not you.
 
-8. After `Published to GitHub: <url>`, tell the user the GitHub URL and wait again. From now on
-   no reviewer agent reviews your commits, and each commit you wait with is pushed to GitHub. Your
-   edits of the title and description (`galley pr edit`) are published at your next wait too,
-   like commits, unless the user edited them since publishing:
+8. After `Published to GitHub: <url>`, tell the user the GitHub URL. In T3 Code, call
+   `link_pull_request` with the GitHub URL, which T3 follows to the merge, and, if you linked the
+   staged pull request in step 1, `unlink_pull_request` with its `repository`, `number` and
+   `host`: T3 never learns that one's state, and it would sit with no status next to the GitHub
+   link.
+
+   Then wait again. From now on no reviewer agent reviews your commits, and each commit you wait
+   with is pushed to GitHub. Your edits of the title and description (`galley pr edit`) are
+   published at your next wait too, like commits, unless the user edited them since publishing:
 
    - `Merged on GitHub as e468a4e by laat: <url>`: clean up as in [After the merge](#after-the-merge).
    - `Closed on GitHub without merging`: you are done. Leave the branch and worktree unless the
