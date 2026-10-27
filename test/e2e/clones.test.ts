@@ -367,7 +367,9 @@ test('when the head conflicts with the base galley fetched, pr wait fetches that
   writeFileSync(join(repo, 'math.js'), 'export const add = (a, b) => b + a; // moved\n');
   git('commit', '-qam', 'Move the base again');
   const moved = git('rev-parse', 'HEAD');
-  git('push', '-q', remote, `${moved}:refs/heads/main`);
+  // GitHub fetches it rather than the checkout pushing it: git 2.56 moves origin/main on a push to
+  // its push URL, which the bare repository is (pushInsteadOf), and origin/main is to stay older.
+  execFileSync('git', ['--git-dir', remote, 'fetch', '-q', repo, 'HEAD:refs/heads/main']);
   git('checkout', '-q', 'feature/clash');
   const older = git('rev-parse', 'refs/remotes/origin/main');
   assert.notEqual(older, moved);
