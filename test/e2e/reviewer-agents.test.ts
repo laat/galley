@@ -376,7 +376,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     symlinkSync(npmrcTarget, npmrc);
     process.env.GALLEY_NPMRC = npmrc;
     try {
-      await withFakes({ FAKE_CLAUDE_FAIL: '1' }, async () => {
+      // It lingers after its error as well: the run says why it failed, not that galley killed it.
+      await withFakes({ FAKE_CLAUDE_FAIL: '1', FAKE_CLAUDE_LINGER: '1' }, async () => {
         await human('POST', `${base}/reviewers/claude`);
         await server.service.claude!.settle(pull.id);
       });
@@ -410,9 +411,15 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     assert.match(await page(), /<span title="2 runs: \$0\.02\nLast run: \$0\.0040 · 5 tokens in, 300 out · 2 turns\n[^"]*">\$0\.02<\/span>/);
 
     // With the tests and localhost on, the tests may start servers there, and Claude is told so.
-    // They still can not connect to other hosts.
-    await human('POST', `${base}/reviewers/claude`);
-    await server.service.claude!.settle(pull.id);
+    // They still can not connect to other hosts. Claude Code does not exit while a command it left
+    // running still runs (a server that never stops): once it has answered, galley stops it, and
+    // the answer counts.
+    await withFakes({ FAKE_CLAUDE_LINGER: '1' }, async () => {
+      await human('POST', `${base}/reviewers/claude`);
+      await server.service.claude!.settle(pull.id);
+    });
+    const lingered = (await human('GET', `${base}/reviewers/claude`)).runs.at(-1);
+    assert.equal(lingered.status, 'done', lingered.error);
     const serving = lastCall();
     assert.deepEqual(JSON.parse(serving.args[serving.args.indexOf('--settings') + 1]).sandbox.network, {
       allowedDomains: [],

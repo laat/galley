@@ -293,9 +293,11 @@ if (gate) {
 
   // A stand-in for Claude Code: `claude -p` answering with FAKE_CLAUDE_REVIEW and what the run
   // cost, after FAKE_CLAUDE_SLEEP milliseconds or once the file FAKE_CLAUDE_GATE exists; with
-  // FAKE_CLAUDE_FAIL, the error result Claude Code gives. Every server the tests start uses it. As
-  // `--output-format stream-json` does, it prints its messages first: it reads math.js (by its
-  // full path) and says something before it waits, and gives its answer with StructuredOutput.
+  // FAKE_CLAUDE_FAIL, the error result Claude Code gives; with FAKE_CLAUDE_LINGER, it does not
+  // exit after either result, as Claude Code does not while a command it ran still runs. Every
+  // server the tests start uses it. As `--output-format stream-json` does, it prints its messages
+  // first: it reads math.js (by its full path) and says something before it waits, and gives its
+  // answer with StructuredOutput.
   const claude = join(dir, 'claude');
   process.env.GALLEY_CLAUDE = claude;
   process.env.FAKE_CLAUDE_LOG = join(dir, 'claude.log');
@@ -321,7 +323,10 @@ say({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', to
 say({ type: 'assistant', message: { id: 'msg_2', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'text', text: 'The answer is off by one.' }], usage: usage(10) } });
 if (env.FAKE_CLAUDE_FAIL) {
   console.log(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded', num_turns: 2, total_cost_usd: 0.004, usage: { input_tokens: 5, output_tokens: 300 } }));
-  process.exit(1);
+  if (!env.FAKE_CLAUDE_LINGER) process.exit(1);
+  process.exitCode = 1;
+  setInterval(() => {}, 1000);
+  return;
 }
 const answer = () => console.log(
   JSON.stringify({ type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_3', model: 'claude-haiku-5-5', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_2', name: 'StructuredOutput', input: JSON.parse(env.FAKE_CLAUDE_REVIEW) }], usage: usage(200) } }) + '\\n' +
@@ -332,6 +337,7 @@ const answer = () => console.log(
   modelUsage: { 'claude-haiku-5-5': { costUSD: 0.0123 } },
   structured_output: JSON.parse(env.FAKE_CLAUDE_REVIEW),
 }));
+if (env.FAKE_CLAUDE_LINGER) setInterval(() => {}, 1000);
 const gate = env.FAKE_CLAUDE_GATE;
 if (gate) {
   const t = setInterval(() => fs.existsSync(gate) && (clearInterval(t), answer()), 20);
