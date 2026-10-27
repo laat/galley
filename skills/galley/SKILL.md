@@ -34,18 +34,8 @@ description: Stage a pull request in galley, the user's local review server, ins
 
 ## The loop
 
-1. Stage the branch you are on:
-
-   ```sh
-   galley pr create --title "Add retry to the uploader" --body-file - <<'EOF'
-   Why the change is needed, and what it does.
-   EOF
-   ```
-
-   Tell the user the URL it prints, that you staged it, and that the reviewer agents review it
-   first; do not ask for the user's review yet. Say so if the CLI started the server. If the
-   user said how to review it, add the flag from [Reviewer agents](#reviewer-agents). If the user
-   asked you to publish or merge it, turn on auto-publish now ([Publishing](#publishing)).
+1. Stage the branch you are on. If the user said how to review it, add the flag from
+   [Reviewer agents](#reviewer-agents).
 
    In T3 Code (the `t3-code` MCP tools are present), link both ways:
 
@@ -53,11 +43,22 @@ description: Stage a pull request in galley, the user's local review server, ins
      `galley pr create`, with `environmentId` from `t3_environment_read` and `threadId` the
      `currentThreadId` of `t3_thread_list`. galley never publishes it; `galley pr edit --link`
      changes it.
-   - From your thread to galley: call `link_pull_request` with `repository`, `number` and `host`
-     from the URL `galley pr create` printed (`https://<host>/<repository>/pull/<number>`; a
-     port stays in `host`). Do not pass `url`; T3 rejects galley's. T3 shows the link, but not
-     the pull request's state. Skip it when the URL is not `https`: T3 makes the link `https://`
-     whatever you pass.
+   - From your thread to galley: as soon as `galley pr create` prints the URL, before anything
+     else, call `link_pull_request` with `repository`, `number` and `host` from it
+     (`https://<host>/<repository>/pull/<number>`; a port stays in `host`). Do not pass `url`;
+     T3 rejects galley's. T3 shows the link, but not the pull request's state. Skip it when the
+     URL is not `https`: T3 makes the link `https://` whatever you pass.
+
+   ```sh
+   galley pr create --title "Add retry to the uploader" --body-file - <<'EOF'
+   Why the change is needed, and what it does.
+   EOF
+   ```
+
+   Tell the user the URL `galley pr create` printed, that you staged it, and that the reviewer
+   agents review it first; do not ask for the user's review yet. Say so if the CLI started the
+   server. If the user asked you to publish or merge it, turn on auto-publish now
+   ([Publishing](#publishing)).
 
 2. Run `galley pr wait`. It can block for hours. Tell the user you are waiting, and run it the
    way your agent allows:
