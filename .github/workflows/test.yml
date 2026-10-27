@@ -80,11 +80,12 @@ jobs:
           NODE_OPTIONS: --test-shard=${{ matrix.shard }}/4
 
   # The required check for auto-merge: keep the job name. It fails unless the typecheck and every
-  # shard passed, also when one of them was skipped.
+  # shard passed, also when one of them was skipped or cancelled. It runs on a cancelled run too:
+  # a skipped job counts as passing, even when it is a required check.
   test:
     name: test
     needs: [typecheck, shard]
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
