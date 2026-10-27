@@ -2,8 +2,8 @@
 // answering in the reviewer's JSON schema. Its bot is named "codex-review" unless renamed in
 // settings; `--reviewer codex` finds it by its engine whatever its name.
 import { readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, userInfo } from 'node:os';
+import { basename, join } from 'node:path';
 import { run, type RunResult } from '../git.ts';
 import type { Service } from '../service.ts';
 import { EngineError, lastLines, Reviewer, type Engine, type EngineJob, type EngineResult, type ModelInfo, type RunUsage } from './reviewer.ts';
@@ -57,12 +57,25 @@ export class CodexEngine implements Engine {
    * them reach port 53 on any host: a way out.
    */
   readonly localServers = false;
+  private loginShell: string | null | undefined;
   readonly catalogSource = 'codex debug models';
   private bin: string;
   private catalog: { at: number; models: ModelInfo[] } | null = null;
 
   constructor(bin = 'codex') {
     this.bin = bin;
+  }
+
+  /** Codex runs commands in the user's login shell from the password database, whatever $SHELL says. */
+  get shell(): string | null {
+    if (this.loginShell === undefined) {
+      try {
+        this.loginShell = basename(userInfo().shell ?? '') || null;
+      } catch {
+        this.loginShell = null;
+      }
+    }
+    return this.loginShell;
   }
 
   install(command: string[], o: { checkout: string; tmp: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal }): Promise<RunResult> {

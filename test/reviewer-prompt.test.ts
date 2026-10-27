@@ -1,7 +1,7 @@
-// What a reviewer agent is told of its earlier reviews of a pull request (earlierText).
+// What a reviewer agent is told of its earlier reviews of a pull request (earlierText), and of its shell (shellText).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { earlierText, ON_THE_DESCRIPTION, OUTSIDE_THE_DIFF, type EarlierReview } from '../src/server/reviewers/reviewer.ts';
+import { earlierText, ON_THE_DESCRIPTION, OUTSIDE_THE_DIFF, shellText, type EarlierReview } from '../src/server/reviewers/reviewer.ts';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -69,4 +69,13 @@ test('reviews before the last one are a line a comment, at most twenty', () => {
   assert.doesNotMatch(text, /Done\./);
   // Nothing found at all: nothing to check.
   assert.doesNotMatch(earlierText([clean], null).join('\n'), /Check that/);
+});
+
+test('a reviewer whose commands run in zsh is told what zsh does differently from bash; others are told nothing', () => {
+  const text = shellText('zsh').join('\n');
+  assert.match(text, /run in zsh, not bash/);
+  assert.match(text, /`path` is PATH as an array/);
+  assert.match(text, /A glob that matches nothing fails the whole command/);
+  assert.match(text, /A heredoc needs a temporary file, and so does a here-string/);
+  for (const shell of ['bash', 'sh', null, undefined]) assert.deepEqual(shellText(shell), []);
 });

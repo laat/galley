@@ -34,7 +34,8 @@ const GREP_TIMEOUT_MS = 30_000;
  * setting of pnpm's own, such as its store, from pnpm_config_ and no longer from npm_config_.
  * Turborepo caches in the main worktree's .turbo when it runs in a linked worktree, as the
  * review's checkout is; for galley's bare clone (repos/<id>.git) that is repos/.turbo, which the
- * sandbox keeps read-only. A cache directory of its own turns that off.
+ * sandbox keeps read-only. A cache directory of its own turns that off. zsh writes heredocs to
+ * $TMPPREFIX, /tmp/zsh unless set, and not to $TMPDIR.
  *
  * Every pnpm command the reviewer agent runs uses the pnpm that is installed, as the install
  * does (installCommand), and not the version package.json names in packageManager or
@@ -52,6 +53,7 @@ export function cacheEnv(tmp: string): Record<string, string> {
     XDG_CACHE_HOME: join(tmp, 'cache'),
     npm_config_cache: join(tmp, 'npm'),
     TURBO_CACHE_DIR: join(tmp, 'turbo'),
+    TMPPREFIX: join(tmp, 'zsh'),
     npm_config_store_dir: store,
     pnpm_config_store_dir: store,
     npm_config_manage_package_manager_versions: 'false',
