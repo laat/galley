@@ -28,6 +28,9 @@ const MODELS: ModelInfo[] = [
  */
 const READ_ONLY_GIT = ['diff', 'log', 'show', 'status', 'blame', 'grep', 'ls-files', 'ls-tree', 'rev-parse', 'cat-file', 'merge-base', 'describe', 'shortlog'];
 
+/** How long Claude Code gets to exit once it has given its result (see review). */
+const EXIT_GRACE_MS = 2000;
+
 /**
  * What the commands Claude runs may read in the home directory, which they can not read otherwise
  * (sandbox): toolchains and the packages they keep there, after agent-safehouse's toolchain rules,
@@ -200,17 +203,29 @@ export class ClaudeEngine implements Engine {
       if (settings.model) args.push('--model', settings.model);
       if (settings.effort) args.push('--effort', settings.effort);
       const events = new ClaudeEvents(checkout);
+      // Claude Code does not exit while a command it sent to the background still runs, and one
+      // that never ends (a test that hangs, a process that spins) would hold the review, and a
+      // stopping server with it, until the timeout. Once the result is in, the answer is too:
+      // Claude gets a moment to exit, then it and what it started are killed.
+      const answered = new AbortController();
+      let lingering: ReturnType<typeof setTimeout> | undefined;
       const stdout = jsonLines((e) => {
         for (const u of events.read(e)) job.onUpdate(u);
+        if (events.result && !lingering) lingering = setTimeout(() => answered.abort(), EXIT_GRACE_MS);
       });
-      const r = await run(this.bin, args, { cwd: checkout, env, input: job.prompt, allowFail: true, timeoutMs, signal: job.signal, onLine: stdout.onLine }).catch((e: Error) => {
-        throw new Error(`could not run ${this.bin}: ${e.message}`);
-      });
+      const signal = AbortSignal.any([job.signal, answered.signal]);
+      const r = await run(this.bin, args, { cwd: checkout, env, input: job.prompt, allowFail: true, timeoutMs, signal, onLine: stdout.onLine })
+        .catch((e: Error) => {
+          throw new Error(`could not run ${this.bin}: ${e.message}`);
+        })
+        .finally(() => clearTimeout(lingering));
       const out = events.result;
       // A run that fails after some turns (error_max_structured_output_retries, an API error) has cost something too.
       const cost = out && (typeof out.total_cost_usd === 'number' || out.usage) ? usage(out) : null;
-      if (r.code !== 0 || !out || out.is_error) {
-        const why = r.timedOut ? `timed out after ${timeoutMs / 60000} minutes` : r.code === null ? 'was killed' : out?.subtype && out.subtype !== 'success' ? `stopped (${out.subtype})` : `exited with ${r.code}`;
+      // Killed for lingering after its result, Claude had finished.
+      const lingered = answered.signal.aborted && !job.signal.aborted && !r.timedOut;
+      if ((r.code !== 0 && !lingered) || !out || out.is_error) {
+        const why = r.timedOut ? `timed out after ${timeoutMs / 60000} minutes` : out?.subtype && out.subtype !== 'success' ? `stopped (${out.subtype})` : lingered ? 'failed' : r.code === null ? 'was killed' : `exited with ${r.code}`;
         throw new EngineError(`claude ${why}:\n${lastLines(String(out?.result ?? '') || r.stderr || stdout.other.join('\n'), 15)}`, cost);
       }
       if (!out.structured_output || typeof out.structured_output !== 'object') {
