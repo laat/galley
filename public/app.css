@@ -19,6 +19,8 @@
   --border-muted: #cdd9e8b3;
   --accent: #0969da;
   --accent-emphasis: #0969da;
+  /* --accent on a fill: --accent-subtle or a button. */
+  --accent-fg: #0969da;
   --accent-subtle: #ddf4ff;
   --accent-muted: #54aeff66;
   --success: #1a7f37;
@@ -67,20 +69,22 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --fg: #e4e4ea;
-    --fg-muted: #a0a5b0;
-    --fg-subtle: #7c838d;
+    --fg: #f4f5f7;
+    --fg-muted: #b8bdc1;
+    --fg-subtle: #79828b;
     --bg: #17212b;
-    --bg-subtle: #1e2a35;
-    --bg-overlay: #202f3d;
+    --bg-subtle: #2b3642;
+    --bg-overlay: #353c46;
     --header-bg: #202f3d;
-    --tint: #3f5466;
-    --border: #2e3e4c;
-    --border-muted: #2e3e4cb3;
-    --accent: #7fb4e0;
-    --accent-emphasis: #4f7ea6;
-    --accent-subtle: #253b4d;
-    --accent-muted: #385871;
+    --tint: #586471;
+    --border: #485360;
+    --border-muted: #3f4a57;
+    --accent: #51a0fc;
+    --accent-emphasis: #297fba;
+    /* Lighter than --accent, which is under 4.5:1 on these fills. */
+    --accent-fg: #8cc4ff;
+    --accent-subtle: #2f4a5f;
+    --accent-muted: #3f5b70;
     --success: #3fb950;
     --success-emphasis: #238636;
     --danger: #f85149;
@@ -96,9 +100,10 @@
     --neutral-emphasis: #656c76;
     --neutral-muted: #656c7633;
     --neutral-subtle: #656c761a;
-    --btn-bg: #233444;
-    --btn-hover: #2a3d4f;
-    --btn-border: #2e4051;
+    /* Lighter than --bg-subtle, the headers most buttons sit in. */
+    --btn-bg: #33404e;
+    --btn-hover: #3b4a59;
+    --btn-border: #596877;
     --btn-primary-bg: #238636;
     --btn-primary-hover: #29903b;
     --diff-add-bg: #2ea04326;
@@ -108,9 +113,9 @@
     --diff-hunk-bg: #388bfd1a;
     --diff-hunk-num: #388bfd40;
     --diff-selected: #bb800926;
-    --diff-empty: #1e2a35;
+    --diff-empty: #2b3642;
     --shadow: none;
-    --shadow-overlay: 0 0 0 1px #2e3e4c, 0 8px 24px #0b1118;
+    --shadow-overlay: 0 0 0 1px #454d56, 0 8px 24px #0b1118;
     --hl-keyword: #ff7b72;
     --hl-title: #d2a8ff;
     --hl-constant: #79c0ff;
@@ -337,7 +342,7 @@ a.Label:hover { text-decoration: none; border-color: currentColor; }
   font-family: var(--mono);
   font-size: 12px;
   line-height: 20px;
-  color: var(--accent);
+  color: var(--accent-fg);
   background: var(--accent-subtle);
   border-radius: 6px;
   word-break: break-all;
@@ -517,7 +522,7 @@ kbd {
 .pin-mark { color: var(--fg-muted); margin-left: 2px; }
 .pin-mark .octicon { width: 12px; height: 12px; vertical-align: -1px; }
 .notify-toggle { margin-left: auto; }
-.notify-toggle.selected { color: var(--accent); border-color: var(--accent); }
+.notify-toggle.selected { color: var(--accent-fg); border-color: var(--accent); }
 
 /* Whose turn: groups on the front page, and each row's reasons. */
 .turn-group { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--bg-subtle); color: var(--fg-muted); }
@@ -589,7 +594,8 @@ kbd {
 .runs-indicator { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px; font-size: 12px; font-weight: 600; color: var(--fg-muted); border: 1px solid transparent; border-radius: 2em; }
 .runs-indicator:hover { color: var(--accent); text-decoration: none; }
 .runs-indicator:focus-visible { outline: 2px solid var(--accent-emphasis); outline-offset: 2px; }
-.runs-indicator--running { padding: 0 10px; color: var(--accent); background: var(--accent-subtle); border-color: var(--accent-muted); }
+.runs-indicator--running { padding: 0 10px; color: var(--accent-fg); background: var(--accent-subtle); border-color: var(--accent-muted); }
+.runs-indicator--running:hover { color: var(--accent-fg); }
 .runs-indicator--running > .octicon { animation: pulse 1.6s ease-in-out infinite; }
 .run-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 @media (max-width: 767px) {
@@ -727,6 +733,7 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
   border-radius: 6px 6px 0 0;
 }
 .timeline-comment--viewer .timeline-comment-header { background: var(--accent-subtle); border-bottom-color: var(--accent-muted); }
+.timeline-comment--viewer .timeline-comment-header .link-muted:hover { color: var(--accent-fg); }
 .timeline-comment-header-text { flex: 1; margin: 0; font-size: 14px; font-weight: 400; min-width: 0; }
 .timeline-comment-header-text .author { color: var(--fg); }
 .timeline-comment-actions { display: flex; align-items: center; gap: 4px; }
