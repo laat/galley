@@ -1,6 +1,6 @@
 {
   "name": "galley-proof",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Stage your coding agents' pull requests locally: they stage with a gh-compatible CLI, Codex and Claude reviewer agents review, you review in a GitHub-like UI, then publish to GitHub.",
   "keywords": [
