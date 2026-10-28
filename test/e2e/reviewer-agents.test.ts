@@ -75,6 +75,10 @@ test('codex-review reviews when the author waits, within the limits in settings'
       'sandbox_workspace_write.exclude_tmpdir_env_var=false',
     ];
     const untrusted = ['-c', `projects={${JSON.stringify(checkout)}={trust_level="untrusted"}}`];
+    // The review's mark for what it leaves running (reap.ts), whatever the user's shell_environment_policy.
+    const mark = call.args.find((a: string) => a.startsWith('shell_environment_policy.set.'));
+    assert.match(mark, /^shell_environment_policy\.set\.GALLEY_REVIEW_MARK="[0-9a-f-]{36}"$/);
+    const marked = ['-c', mark];
     const installs = () => readFileSync(process.env.FAKE_CODEX_SANDBOX_LOG!, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     assert.deepEqual(installs(), [
       {
@@ -84,6 +88,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
           'sandbox_mode="workspace-write"',
           ...workspaceWrite(true),
           ...untrusted,
+          ...marked,
           '--',
           'pnpm',
           'install',
@@ -98,7 +103,7 @@ test('codex-review reviews when the author waits, within the limits in settings'
         runtimeDirMode: 0o700,
       },
     ]);
-    assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-C')), ['-s', 'workspace-write', ...workspaceWrite(false), ...untrusted]);
+    assert.deepEqual(call.args.slice(call.args.indexOf('-s'), call.args.indexOf('-C')), ['-s', 'workspace-write', ...workspaceWrite(false), ...untrusted, ...marked]);
     assert.equal(call.tmpdir, join(dirname(checkout), 'tmp'));
     assert.equal(call.npmCache, join(call.tmpdir, 'npm'));
     assert.match(call.prompt, /galley installed the dependencies with `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile [^`]*`, which runs no install scripts/);
@@ -143,6 +148,8 @@ test('codex-review reviews when the author waits, within the limits in settings'
     // In the Codex section, which comes before Claude's.
     assert.doesNotMatch((await (await fetch(`${server.url}/settings`)).text()).split('id="claude"')[0], /name="runTests" checked/);
     const pull = await human('GET', base);
+    // The wait returned with the review; the run ends after it, once what it left running is gone (reap.ts).
+    await server.service.codex!.settle(pull.id);
     await withFakes({ FAKE_CODEX_FAIL: '1' }, async () => {
       await human('POST', `${base}/reviewers/codex`);
       await server.service.codex!.settle(pull.id);
@@ -154,7 +161,10 @@ test('codex-review reviews when the author waits, within the limits in settings'
       'read-only',
       '-c',
       `projects={${JSON.stringify(readOnly.args[readOnly.args.indexOf('-C') + 1])}={trust_level="untrusted"}}`,
+      '-c',
+      readOnly.args.find((a: string) => a.startsWith('shell_environment_policy.set.')),
     ]);
+    assert.notEqual(readOnly.args.find((a: string) => a.startsWith('shell_environment_policy.set.')), mark, 'each review has a mark of its own');
     assert.equal(installs().length, 2, 'nothing is installed for a read-only review');
     assert.equal(readOnly.tmpdir, process.env.TMPDIR);
     assert.match(readOnly.prompt, /Do not modify any files\./);
@@ -370,6 +380,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
     await human('PUT', '/api/settings/claude', { runTests: false, localhost: true });
     const pull = await human('GET', base);
+    // The wait returned with the review; the run ends after it, once what it left running is gone (reap.ts).
+    await server.service.claude!.settle(pull.id);
     const npmrcTarget = join(dir, 'agents-npmrc');
     writeFileSync(npmrcTarget, '');
     const npmrc = join(dir, 'npmrc-link');
@@ -413,13 +425,24 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     // With the tests and localhost on, the tests may start servers there, and Claude is told so.
     // They still can not connect to other hosts. Claude Code does not exit while a command it left
     // running still runs (a server that never stops): once it has answered, galley stops it, and
-    // the answer counts.
-    await withFakes({ FAKE_CLAUDE_LINGER: '1' }, async () => {
+    // the answer counts. The server, in a session of its own, does not go with Claude: galley
+    // kills it after the review.
+    const left = join(dir, 'left.pid');
+    await withFakes({ FAKE_CLAUDE_LINGER: '1', FAKE_CLAUDE_LEAVE: left }, async () => {
       await human('POST', `${base}/reviewers/claude`);
       await server.service.claude!.settle(pull.id);
     });
     const lingered = (await human('GET', `${base}/reviewers/claude`)).runs.at(-1);
     assert.equal(lingered.status, 'done', lingered.error);
+    const leftPid = Number(readFileSync(left, 'utf8'));
+    await until(() => {
+      try {
+        process.kill(leftPid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    }, 'what the review left running is gone');
     const serving = lastCall();
     assert.deepEqual(JSON.parse(serving.args[serving.args.indexOf('--settings') + 1]).sandbox.network, {
       allowedDomains: [],

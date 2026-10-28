@@ -19,6 +19,7 @@ import { unansweredThreads } from '../feedback.ts';
 import { checkReviewerName, ENGINE_IDS, MAX_ITERATIONS_LIMIT, readSettings, type EngineId, type ReviewerSettings } from '../settings.ts';
 import type { Reviews, Verdict } from './definition.ts';
 import { cacheEnv, installCommand } from './install.ts';
+import { newMark, reap, REVIEW_MARK } from './reap.ts';
 import { RunLog, type Progress, type ProgressEvent, type SessionUpdate } from './transcript.ts';
 
 export interface ModelInfo {
@@ -151,8 +152,8 @@ export interface EngineJob {
   gitDir: string | null;
   /** The review's TMPDIR, beside the checkout, when it may run the tests; null when it only reads. */
   tmp: string | null;
-  /** The environment to run in: caches and TMPDIR in `tmp` when it runs the tests. */
-  env: NodeJS.ProcessEnv | undefined;
+  /** The environment to run in: the review's mark (reap.ts), and caches and TMPDIR in `tmp` when it runs the tests. */
+  env: NodeJS.ProcessEnv;
   prompt: string;
   /** The JSON schema of the answer (answerSchema). */
   schema: object;
@@ -950,19 +951,21 @@ export class Reviewer {
     // The one place besides the checkout that the tool may write to when it runs the tests.
     const tmp = join(dir, 'tmp');
     const timeoutMs = reads === 'description' ? DESCRIPTION_TIMEOUT_MS : settings.runTests ? TEST_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS;
+    // What the install and the tool start carries it, so that what they leave running is killed after (reap.ts).
+    const mark = newMark();
     try {
       // A review of the description reads no code: it runs in an empty directory. The code, in a
       // worktree of galley's clone, never of a repository registered by path (Service.ownClone).
       if (reads === 'description') mkdirSync(checkout);
       else if (!this.s.isClone(ctx.repo)) throw new Error(`galley keeps no clone of ${ctx.repo.owner}/${ctx.repo.name} to review it in`);
       else await git.run(['worktree', 'add', '--detach', checkout, pull.head_sha]);
-      let env: NodeJS.ProcessEnv | undefined;
+      let env: NodeJS.ProcessEnv = { [REVIEW_MARK]: mark };
       let installed: Installed | null = null;
       if (settings.runTests) {
         // Only the user may write to it, whatever the umask: pnpm 12 locks its store in
         // XDG_RUNTIME_DIR only when it is, and otherwise in /tmp, which the sandbox keeps read-only.
         mkdirSync(tmp, { mode: 0o700 });
-        env = cacheEnv(tmp);
+        env = { ...env, ...cacheEnv(tmp) };
         installed = await this.install(plan.engine, git, pull.head_sha, checkout, tmp, env, signal, log);
         signal.throwIfAborted();
       }
@@ -980,6 +983,9 @@ export class Reviewer {
       if (result.usage) this.s.db.update('review_runs', runId, { usage: JSON.stringify(result.usage) });
       await this.post(ctx, runId, result.answer, plan, trigger, signal);
     } finally {
+      // Before the checkout goes: what is left may still write to it.
+      const left = await reap(mark, [dir]).catch((e: Error) => (console.error(`${this.key}: killing what its review left running:`, e), []));
+      if (left.length) console.log(`${this.key}: killed what its review left running (pid ${left.join(', ')})`);
       if (settings.runTests) await makeWritable(dir);
       if (reads === 'code') await git.run(['worktree', 'remove', '--force', checkout], { allowFail: true });
       removeDir(dir);
