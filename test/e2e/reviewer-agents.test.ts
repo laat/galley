@@ -148,6 +148,8 @@ test('codex-review reviews when the author waits, within the limits in settings'
     // In the Codex section, which comes before Claude's.
     assert.doesNotMatch((await (await fetch(`${server.url}/settings`)).text()).split('id="claude"')[0], /name="runTests" checked/);
     const pull = await human('GET', base);
+    // The wait returned with the review; the run ends after it, once what it left running is gone (reap.ts).
+    await server.service.codex!.settle(pull.id);
     await withFakes({ FAKE_CODEX_FAIL: '1' }, async () => {
       await human('POST', `${base}/reviewers/codex`);
       await server.service.codex!.settle(pull.id);
@@ -378,6 +380,8 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     const installs = readFileSync(process.env.FAKE_SANDBOX_LOG!, 'utf8').trim().split('\n').length;
     await human('PUT', '/api/settings/claude', { runTests: false, localhost: true });
     const pull = await human('GET', base);
+    // The wait returned with the review; the run ends after it, once what it left running is gone (reap.ts).
+    await server.service.claude!.settle(pull.id);
     const npmrcTarget = join(dir, 'agents-npmrc');
     writeFileSync(npmrcTarget, '');
     const npmrc = join(dir, 'npmrc-link');

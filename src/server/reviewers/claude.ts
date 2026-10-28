@@ -237,7 +237,7 @@ export class ClaudeEngine implements Engine {
       // Claude Code gives its commands a $TMPDIR in `own`: what they left running (reap.ts) goes
       // first, or it may write there while it is removed. The review reaps again after.
       const mark = job.env[REVIEW_MARK];
-      if (mark) await reap(mark).catch((e: Error) => console.error('claude: killing what its review left running:', e));
+      if (mark) await reap(mark, [job.dir, own]).catch((e: Error) => console.error('claude: killing what its review left running:', e));
       // The tests Claude ran may have left read-only directories in its $TMPDIR.
       await makeWritable(own);
       removeDir(own);

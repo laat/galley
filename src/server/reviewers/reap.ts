@@ -5,8 +5,10 @@
 // reach it either: Claude Code starts each command in a session of its own, and a command may do
 // the same (setsid, a daemon). So a review's processes carry a variable of their own, which what
 // they start inherits, and once the review is over galley kills every process that still has it.
+// macOS shows no one the environment of its own programs (/bin/sleep, sh, zsh), so there galley
+// also kills the processes whose working directory is in the review's directories.
 import { randomUUID } from 'node:crypto';
-import { readdirSync } from 'node:fs';
+import { readdirSync, realpathSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { run } from '../git.ts';
 
@@ -23,9 +25,11 @@ export function newMark(): string {
  * not other users', whose environment neither way below reads. On Linux, grep reads it whole
  * from /proc (`ps e` cuts a process's arguments and environment off at 128 KiB). A process stuck
  * in the kernel can hold that read up, so it runs in a command with a timeout, not in the server.
- * On macOS, `ps -E` prints it after the command, separated by spaces as the arguments are.
+ * On macOS, `ps -E` prints it after the command, separated by spaces as the arguments are, but
+ * not for Apple's own programs, whose environment it leaves out: there the processes whose
+ * working directory is in `dirs` count too (inDirs).
  */
-export async function marked(mark: string, platform = process.platform): Promise<number[]> {
+export async function marked(mark: string, dirs: string[] = [], platform = process.platform): Promise<number[]> {
   const entry = `${REVIEW_MARK}=${mark}`;
   let pids: number[];
   if (platform === 'linux') {
@@ -45,18 +49,45 @@ export async function marked(mark: string, platform = process.platform): Promise
       .map((line) => line.trim().split(/\s+/))
       .filter(([, ...words]) => words.includes(entry))
       .map(([pid]) => Number(pid));
+    pids = [...new Set([...pids, ...(await inDirs(dirs))])];
   } else return [];
   return pids.filter((pid) => pid !== process.pid);
 }
 
 /**
- * Kill what a review left running, until nothing with its mark is left, since a process may
- * start another while the others are killed. Gives the processes it killed.
+ * The user's processes whose working directory is in one of `dirs`, as lsof reads it on macOS,
+ * also for Apple's programs. lsof prints the real path (/private/var, not /var).
  */
-export async function reap(mark: string, platform = process.platform): Promise<number[]> {
+async function inDirs(dirs: string[]): Promise<number[]> {
+  const real = dirs.flatMap((dir) => {
+    try {
+      return [realpathSync(dir)];
+    } catch {
+      return [];
+    }
+  });
+  if (!real.length) return [];
+  // -F: one field a line, `p<pid>` and then `n<path>` for its working directory (-d cwd).
+  const r = await run('/usr/sbin/lsof', ['-nPw', '-a', '-u', String(process.getuid!()), '-d', 'cwd', '-Fn'], { allowFail: true, timeoutMs: 30_000 });
+  if (r.code !== 0 && !r.stdout) throw new Error(`lsof ${r.timedOut ? 'timed out' : `exited with ${r.code}`}: ${r.stderr.trim()}`);
+  const pids: number[] = [];
+  let pid = 0;
+  for (const line of r.stdout.split('\n')) {
+    if (line.startsWith('p')) pid = Number(line.slice(1));
+    else if (line.startsWith('n') && real.some((dir) => line.slice(1) === dir || line.slice(1).startsWith(`${dir}/`))) pids.push(pid);
+  }
+  return pids;
+}
+
+/**
+ * Kill what a review left running, until nothing with its mark (or, on macOS, in its `dirs`) is
+ * left, since a process may start another while the others are killed. Gives the processes it
+ * killed.
+ */
+export async function reap(mark: string, dirs: string[] = [], platform = process.platform): Promise<number[]> {
   const killed = new Set<number>();
   for (let round = 0; round < 10; round++) {
-    const pids = (await marked(mark, platform)).filter((pid) => {
+    const pids = (await marked(mark, dirs, platform)).filter((pid) => {
       try {
         process.kill(pid, 'SIGKILL');
         return true;

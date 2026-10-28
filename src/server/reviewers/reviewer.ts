@@ -984,7 +984,7 @@ export class Reviewer {
       await this.post(ctx, runId, result.answer, plan, trigger, signal);
     } finally {
       // Before the checkout goes: what is left may still write to it.
-      const left = await reap(mark).catch((e: Error) => (console.error(`${this.key}: killing what its review left running:`, e), []));
+      const left = await reap(mark, [dir]).catch((e: Error) => (console.error(`${this.key}: killing what its review left running:`, e), []));
       if (left.length) console.log(`${this.key}: killed what its review left running (pid ${left.join(', ')})`);
       if (settings.runTests) await makeWritable(dir);
       if (reads === 'code') await git.run(['worktree', 'remove', '--force', checkout], { allowFail: true });
