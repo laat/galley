@@ -177,7 +177,8 @@ export class ClaudeEngine implements Engine {
         '--verbose',
         '--json-schema',
         JSON.stringify(job.schema),
-        '--no-session-persistence',
+        // Not --no-session-persistence: Claude Code keeps the session in ~/.claude/projects, where
+        // tools that count the user's tokens (T3 Code's usage) read them.
         // The checkout is untrusted: without its settings files and the user's (hooks,
         // permissions, plugins), its .mcp.json, CLAUDE.md, skills and agents, and with Read, Grep
         // and Glob kept to the checkout. Claude Code would run its hooks and MCP servers otherwise.
