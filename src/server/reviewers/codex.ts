@@ -101,11 +101,8 @@ export class CodexEngine implements Engine {
     writeFileSync(schemaFile, JSON.stringify(job.schema));
     // A review of the description runs read-only in an empty directory: it has nothing to read but the prompt.
     const sandbox = settings.runTests ? ['-s', 'workspace-write', ...workspaceWrite(false)] : ['-s', 'read-only'];
-    // --json prints what Codex does as it goes; the answer still goes to the -o file. Not
-    // --ephemeral: Codex keeps the session in ~/.codex/sessions, where tools that count the user's
-    // tokens (T3 Code's usage) read them. But not for its memories, which the user's own sessions
-    // read: the session holds the pull request, which is untrusted.
-    const args = ['exec', '--skip-git-repo-check', '-c', 'memories.generate_memories=false', ...sandbox, ...untrusted(checkout), ...marked(job.env), '-C', checkout, '--color', 'never', '--json', '--output-schema', schemaFile, '-o', outFile];
+    // --json prints what Codex does as it goes; the answer still goes to the -o file.
+    const args = ['exec', '--ephemeral', '--skip-git-repo-check', ...sandbox, ...untrusted(checkout), ...marked(job.env), '-C', checkout, '--color', 'never', '--json', '--output-schema', schemaFile, '-o', outFile];
     if (settings.model) args.push('-m', settings.model);
     if (settings.effort) args.push('-c', `model_reasoning_effort="${settings.effort}"`);
     args.push('-');

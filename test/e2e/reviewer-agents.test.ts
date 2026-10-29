@@ -56,10 +56,6 @@ test('codex-review reviews when the author waits, within the limits in settings'
     const call = JSON.parse(readFileSync(process.env.FAKE_CODEX_LOG!, 'utf8').trim().split('\n').at(-1)!);
     assert.equal(call.args[call.args.indexOf('-m') + 1], 'gpt-test');
     assert.ok(call.args.includes('model_reasoning_effort="high"'));
-    // It keeps its session, for tools that count the user's tokens from them, but not for Codex's
-    // memories, which the user's own sessions read.
-    assert.ok(!call.args.includes('--ephemeral'));
-    assert.equal(call.args[call.args.indexOf('memories.generate_memories=false') - 1], '-c');
     assert.match(call.prompt, /Title: Add the answer/);
     assert.equal(call.sawFile, true, 'codex runs in a checkout of the head commit');
     assert.equal(call.cleaned, false, 'its git status hashes no file through a clean filter, which Git LFS runs in galley\'s clone');
@@ -275,9 +271,7 @@ test('claude reviews when the author waits, in its own sandbox, and says what it
     assert.ok(call.args.includes('--verbose'), 'stream-json needs --verbose');
     assert.deepEqual(JSON.parse(flag('--json-schema')).required, ['summary', 'comments']);
     // The checkout is untrusted: none of its settings (hooks), MCP servers, CLAUDE.md, skills or agents.
-    for (const f of ['--restricted', '--safe-mode', '--strict-mcp-config', '--disable-slash-commands']) assert.ok(call.args.includes(f), f);
-    // It keeps its session, for tools that count the user's tokens from them.
-    assert.ok(!call.args.includes('--no-session-persistence'));
+    for (const f of ['--restricted', '--safe-mode', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) assert.ok(call.args.includes(f), f);
     assert.equal(flag('--disallowedTools'), 'mcp__*');
     assert.ok(!call.args.includes('--bare'));
     // Tools for reading and for running commands, with nobody to ask: what is not allowed is denied.
