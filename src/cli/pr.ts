@@ -4,7 +4,7 @@ import { basename, resolve } from 'node:path';
 import { ApiError, CliError, Client, GATEWAY_DOWN, Help, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, stagedNumber } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
-import { whoReviews } from './reviewers.ts';
+import { whoReviews, whoReviewsAgain } from './reviewers.ts';
 import { openPage } from './open.ts';
 import { clearPushRemote, fetchBack, fetchHead, hasBranch, sendBase, sendHead, sendPull, setPushRemote } from './send.ts';
 
@@ -407,21 +407,27 @@ async function diff(client: Client, cwd: string, args: string[]): Promise<number
 
 // --------------------------------------------------------------------- edit
 
-const EDIT_USAGE = `Change the title, description, base or link of a staged pull request. Mirrors \`gh pr edit\`.
+const EDIT_USAGE = `Change the title, description, base or link of a staged pull request, or have the reviewer
+agents review it again. Mirrors \`gh pr edit\`.
 
 USAGE
   galley pr edit ${PULL} [flags]
 
 FLAGS
-  -t, --title <title>      The new title
-  -b, --body <text>        The new description
-  -F, --body-file <file>   Read the new description from a file ("-" for stdin)
-  -B, --base <branch>      The new base branch
-      --link <url>         The new link back to your session ("" removes it), which galley
-                           shows and never publishes
+  -t, --title <title>               The new title
+  -b, --body <text>                 The new description
+  -F, --body-file <file>            Read the new description from a file ("-" for stdin)
+  -B, --base <branch>               The new base branch
+      --link <url>                  The new link back to your session ("" removes it), which
+                                    galley shows and never publishes
+      --add-reviewer <name>[:<n>]   Have this reviewer agent review it again in a new review
+                                    loop, from its head, at most n times (codex:3). Published,
+                                    galley pushes your commits to GitHub only once it is done
+                                    with one. Repeat for more; \`galley reviewers\` lists them.
+                                    Only when the user asks for another review
 
-Accepted for gh, with no effect: the flags for assignees, labels, projects, milestones and
-reviewers.
+Accepted for gh, with no effect: the flags for assignees, labels, projects, milestones, and
+--remove-reviewer.
 `;
 
 async function edit(client: Client, cwd: string, args: string[]): Promise<number> {
@@ -433,7 +439,9 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
     base: { type: 'string', short: 'B' },
     link: { type: 'string' },
   });
+  const reviewers = parseReviewers((v['add-reviewer'] as string[] | undefined) ?? []);
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  // Before asking for reviews too: they review what the checkout has.
   await sendPull(client, cwd, t.repo, t.number);
   const patch: Record<string, unknown> = {};
   if (v.link !== undefined) patch.link = v.link;
@@ -441,14 +449,25 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
   const body = readBody(v as any);
   if (body !== undefined) patch.body = body;
   if (v.base !== undefined) patch.base = v.base;
-  if (Object.keys(patch).length === 0) {
-    if (Object.keys(v).some((k) => k in IGNORED)) {
-      err('assignees, labels, reviewers, projects and milestones do not exist in galley; nothing to change');
+  if (Object.keys(patch).length === 0 && !reviewers.length) {
+    if (Object.keys(v).some((k) => k in IGNORED && k !== 'add-reviewer')) {
+      err('assignees, labels, projects and milestones do not exist in galley, and --remove-reviewer removes no reviewer agent; nothing to change');
       return 0;
     }
-    throw new CliError('specify at least one of --title, --body, --body-file, --base or --link');
+    throw new CliError('specify at least one of --title, --body, --body-file, --base, --link or --add-reviewer');
   }
-  const pr = await client.json('PATCH', pullPath(t), patch);
+  const edited = Object.keys(patch);
+  let pr = edited.length ? await client.json('PATCH', pullPath(t), patch) : null;
+  if (reviewers.length) {
+    pr = await client.json('POST', `${pullPath(t)}/requested_reviewers`, { reviewers }).catch((e: unknown) => {
+      // So that the edit is not made again: it was.
+      if (edited.length) err(`Changed the ${edited.join(', ')} of ${stagedRef(t.number)}, but could not ask the reviewer agents to review it again:`);
+      throw e;
+    });
+    for (const login of pr.ignored_reviewers ?? []) err(`Ignored reviewer ${login}: galley has no reviewer agent by that name for this pull request.`);
+    err(whoReviewsAgain(pr.reviewer_agents, pr.staging_state === 'published'));
+    err(c.gray(`Run \`galley pr wait s${t.number}\` for their reviews.`));
+  }
   out(pr.html_url);
   return 0;
 }
@@ -931,8 +950,14 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'agents_done') {
       const { sha, reviewers } = r.agents_done;
       const done = reviewers.length ? `The reviewer agents are done with ${sha.slice(0, 7)} (${reviewers.join('; ')})` : `No reviewer agent reviews ${sha.slice(0, 7)}`;
-      out(`${done}; ask the user to review it: ${url}`);
-      out(c.gray(`Then run \`galley pr wait ${all}\` to wait for the review.`));
+      // Published, in a review loop asked for again: GitHub has the commit already, so no push says so.
+      if (pr.state === 'PUBLISHED') {
+        out(`${done}, which GitHub has already: ${r.published_url}`);
+        out(c.gray(`Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
+      } else {
+        out(`${done}; ask the user to review it: ${url}`);
+        out(c.gray(`Then run \`galley pr wait ${all}\` to wait for the review.`));
+      }
     }
     // Before the confirmation below, like the feedback: once confirmed, no wait says it again.
     if (r.status === 'published') out(`Published to GitHub: ${r.published_url}`);
@@ -1150,7 +1175,8 @@ COMMANDS (same flags as gh)
   view:        Show a pull request (--comments for reviews and review threads,
                --download-images <dir> to save the images in them as files)
   diff:        Show the diff
-  edit:        Change title, body or base
+  edit:        Change title, body or base, or have the reviewer agents review it again
+               (--add-reviewer), also after publishing
   comment:     Comment, or reply to a review thread with --reply-to <id> [--resolve]
   review:      Approve, comment or request changes
   close:       Close a pull request

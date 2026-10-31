@@ -196,6 +196,11 @@ export interface GithubPush {
   signed: number;
   force: boolean;
   result: 'pushed' | 'failed';
+  /**
+   * The pull request's latest event when galley last checked, right before the push, that it may
+   * push (mayPush): a review loop asked for after it goes on after the push (Service.reviewLoop).
+   */
+  checked_upto?: number;
   /** Why nothing was pushed. */
   error?: string;
   /**
@@ -1288,17 +1293,20 @@ export class Service {
    * when one is given; `automatic_reviews` turns all of them on or off. Logins that no reviewer
    * agent answers to are ignored, like gh's other reviewers, and returned so the caller can say so.
    */
-  reviewRequest(repo: RepoRow, reviewers: unknown, automatic: unknown): { columns: ReviewColumns; ignored: string[] } {
+  reviewRequest(repo: RepoRow, reviewers: unknown, automatic: unknown, pull?: PullRow): { columns: ReviewColumns; ignored: string[]; asked: Reviewer[] } {
     if (automatic !== undefined && typeof automatic !== 'boolean') throw new HttpError(422, 'automatic_reviews must be true or false');
     if (reviewers !== undefined && !Array.isArray(reviewers)) throw new HttpError(422, 'reviewers must be an array');
-    // Those that review the repository; a custom reviewer of other repositories is no reviewer here.
-    const agents = this.reviewerAgents().filter((a) => a.appliesTo(repo));
-    const columns: ReviewColumns = {};
+    // Those that review the repository (and the pull request, given one); a custom reviewer of other repositories is no reviewer here.
+    const agents = pull ? this.reviewersFor(pull) : this.reviewerAgents().filter((a) => a.appliesTo(repo));
+    // Merged into the pull request's own, given one: a custom reviewer's are JSON together with the others'.
+    const columns: ReviewColumns = pull ? { reviewer_overrides: pull.reviewer_overrides } : {};
     if (automatic !== undefined) for (const agent of agents) Object.assign(columns, agent.columns({ enabled: automatic }, columns));
     const ignored: string[] = [];
+    const asked: Reviewer[] = [];
     for (const r of reviewers ?? []) {
       // A login, as in GitHub's requested reviewers, or { login, max_iterations }.
-      const { login, max_iterations = null } = typeof r === 'string' ? { login: r } : (r ?? {});
+      // Without a number, the limit stays: the setting's, or the one the pull request has.
+      const { login, max_iterations } = typeof r === 'string' ? { login: r } : (r ?? {});
       const name = String(login ?? '').trim();
       if (!name) throw new HttpError(422, 'each reviewer needs a login');
       const agent = agents.find((a) => a.answersTo(name));
@@ -1308,8 +1316,81 @@ export class Service {
       }
       if (automatic === false) throw new HttpError(422, `${name} was asked to review, but automatic reviews are turned off`);
       Object.assign(columns, agent.columns({ enabled: true, max_iterations }, columns));
+      if (!asked.includes(agent)) asked.push(agent);
     }
-    return { columns, ignored };
+    return { columns, ignored, asked };
+  }
+
+  /**
+   * Start a new review loop with these reviewer agents (logins, or `{ login, max_iterations }`, as
+   * when staging: reviewRequest), when the user asks for one, or asks the author to. Each is turned
+   * on for the pull request, and its reviews so far count for nothing in the loop: neither against
+   * its limit, nor as its one review of the head (Reviewer.since), so it reviews the head again
+   * when the author waits. Published, they review each commit the author waits with as before
+   * publishing, and galley pushes it only once they are done with it (mayPush); that push ends the
+   * loop (reviewLoop). Automatic reviews the user stopped before go on again for them, and only for
+   * them (Reviewer.iterationsStopped). Refused for anyone but the user and the author: more reviews
+   * ask nothing of the author that its reviewers did not.
+   */
+  requestReviews(ctx: Ctx, reviewers: unknown, actor: Actor): { asked: Reviewer[]; ignored: string[] } {
+    this.requireUserOrAuthor(actor, ctx.pull, 'ask the reviewer agents to review it again');
+    const { asked, ignored } = this.db.transaction(() => {
+      // Read here, not from ctx: a change of a custom reviewer's own settings since is kept (reviewer_overrides).
+      const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!;
+      if (pull.state === 'closed') throw new HttpError(422, 'reopen the pull request first');
+      if (pull.github_state === 'merged') throw new HttpError(422, 'this pull request was merged on GitHub; stage a new pull request for further changes');
+      if (pull.github_state === 'closed') throw new HttpError(422, 'this pull request was closed on GitHub; reopen it there first');
+      if (!Array.isArray(reviewers) || !reviewers.length) throw new HttpError(422, 'reviewers must be an array of the reviewer agents to ask');
+      const { columns, ignored, asked } = this.reviewRequest(ctx.repo, reviewers, undefined, pull);
+      if (!asked.length) throw new HttpError(422, `no reviewer agent reviews this pull request by the name ${andList(ignored.map((n) => `"${n}"`))}; \`galley reviewers\` lists them`);
+      // Each one's latest run that has ended: one running now counts in the loop, so the head it reviews is not reviewed twice.
+      const after = (r: Reviewer) =>
+        this.db.get<{ id: number | null }>("SELECT MAX(id) AS id FROM review_runs WHERE pull_id = ? AND reviewer = ? AND status != 'running'", pull.id, r.key)!.id ?? 0;
+      // The author's next wait says again when they are done with the head (agentsDone).
+      this.db.update('pulls', pull.id, { ...columns, agents_done_sha: null });
+      this.addEvent(pull, actor, 'review_requested', { reviewers: asked.map((r) => ({ reviewer: r.key, after: after(r) })) });
+      return { asked, ignored };
+    });
+    this.emit(ctx.pull.id, 'review_requested', actor);
+    this.reconsider(ctx.pull, (r) => asked.includes(r));
+    return { asked, ignored };
+  }
+
+  /**
+   * The review loop a reviewer agent was last asked for (requestReviews), while it lasts: until a
+   * publish, or a push of a commit to the published pull request, ends it. Only one that began
+   * after the request (`began_upto`), or a push checked after it (GithubPush.checked_upto): one
+   * already under way then went ahead without the reviewers, and the loop goes on. `id`: the request's event;
+   * `after`: the reviewer's last run before it. Null without one.
+   */
+  reviewLoop(pull: PullRow, reviewer: string): { id: number; after: number } | null {
+    const asked = this.db.get<{ id: number; after: number }>(
+      `SELECT e.id, json_extract(r.value, '$.after') AS after FROM events e, json_each(e.data, '$.reviewers') r
+       WHERE e.pull_id = ? AND e.type = 'review_requested' AND json_extract(r.value, '$.reviewer') = ? ORDER BY e.id DESC LIMIT 1`,
+      pull.id,
+      reviewer,
+    );
+    if (!asked) return null;
+    const ended = this.db.get(
+      `SELECT 1 FROM events WHERE pull_id = ?1 AND id > ?2 AND (
+         (type = 'published' AND COALESCE(json_extract(data, '$.began_upto'), json_extract(data, '$.read_upto'), id) >= ?2)
+         OR (type = 'github_push' AND json_extract(data, '$.result') = 'pushed' AND COALESCE(json_extract(data, '$.checked_upto'), id) >= ?2)
+       ) LIMIT 1`,
+      pull.id,
+      asked.id,
+    );
+    return ended ? null : asked;
+  }
+
+  /**
+   * Whether the published pull request's update waits for reviewer agents in a review loop
+   * (requestReviews): one of them is not done with the head, as `pr wait` would hand it over
+   * before publishing (doneForHandover). A failed review holds nothing up, as there: nothing
+   * more comes of it unless someone asks again, and the author would wait for it forever.
+   */
+  private loopHolds(pull: PullRow): boolean {
+    if (stagingState(pull) !== 'published') return false;
+    return this.reviewersFor(pull).some((r) => this.reviewLoop(pull, r.key) !== null && !doneForHandover(r.headStatus(pull).state));
   }
 
   async createPull(
@@ -2290,6 +2371,10 @@ export class Service {
       // Only forward: a late confirmation must not bring back feedback seen since, nor take back
       // that the reviewer agents are done with a later commit.
       if (before >= at) return false;
+      // Nor say they are done with the commit in a review loop asked for since (requestReviews),
+      // in the same millisecond included.
+      const since = agentsDone && this.db.get("SELECT 1 FROM events WHERE pull_id = ? AND type = 'review_requested' AND created_at >= ? LIMIT 1", pull.id, at);
+      const done = since ? undefined : agentsDone;
       // Among it, feedback that asks something of the author, or a conflict it was told of for
       // the first time: from now, its turn (see turn).
       const asked = askedAt(this.db, pull, at);
@@ -2297,7 +2382,7 @@ export class Service {
       this.db.update('pulls', pull.id, {
         author_seen_at: at,
         ...(handed ? { author_handed_at: at } : {}),
-        ...(agentsDone ? { agents_done_sha: agentsDone } : {}),
+        ...(done ? { agents_done_sha: done } : {}),
         ...(conflicts ? { conflicts_told_sha: conflicts } : {}),
       });
       return true;
@@ -2548,17 +2633,19 @@ export class Service {
    * say (the author answered their findings without a new commit, or a review failed). `pr wait`
    * says so once per commit, so the author asks the reviewer to review it. Not under
    * auto-publish, which publishes then instead, nor once it is published (its wait pushes each
-   * commit then: pushUpdate), nor before it is known whether the commit conflicts with its base,
-   * which the author hears of first.
+   * commit then: pushUpdate), except in a review loop asked for again with a head GitHub has,
+   * where no push would tell the author, nor before it is known whether the commit conflicts with
+   * its base, which the author hears of first.
    */
   private agentsDone(pull: PullRow): AgentsDone | null {
-    if (pull.state !== 'staged' || pull.auto_publish || pull.agents_done_sha === pull.head_sha || this.conflictsPending(pull)) return null;
+    const looped = stagingState(pull) === 'published' && !this.headUnpublished(pull) && this.reviewersFor(pull).some((r) => this.reviewLoop(pull, r.key));
+    if ((pull.state !== 'staged' && !looped) || pull.auto_publish || pull.agents_done_sha === pull.head_sha || this.conflictsPending(pull)) return null;
     const author = this.db.actorById(pull.author_id).login;
-    const reviewers = this.reviewersFor(pull).map((r) => ({ login: r.actor().login, status: r.headStatus(pull) }));
+    const reviewers = this.reviewersFor(pull).map((r) => ({ key: r.key, login: r.actor().login, status: r.headStatus(pull) }));
     // Findings the author has not answered hold them up too (Reviewer.answered); a failed review does not.
     if (!reviewers.every((r) => doneForHandover(r.status.state))) return null;
-    const stopped = this.stoppedText(pull);
-    const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, !!stopped) ?? []);
+    const { text: stopped, held } = this.stopHolds(pull);
+    const texts = reviewers.flatMap((r) => reviewerAgentText(r.login, r.status, pull, author, true, held.has(r.key)) ?? []);
     // Once, whatever each reviewer agent made of the commit.
     return { sha: pull.head_sha, reviewers: stopped ? [...texts, stopped] : texts };
   }
@@ -2646,6 +2733,8 @@ export class Service {
     const unpushed = published && this.headUnpublished(pull);
     const pushFailed = unpushed ? this.pushFailed(pull) : null;
     const signingAgain = !!pushFailed?.retry && !!pushFailed.signing?.next_at && (waiting || this.waitedSinceHanded(pull)) && r.unseen === 0;
+    // Nor while the reviewer agents of a review loop are not done with it (loopHolds): a wait does not push it then.
+    const held = this.loopHolds(pull);
     // A head that conflicts with its base as galley worked it out, published or not: the author's to
     // rebase once `pr wait` tells it (markSeen), and until then, or if it does not, the reviewer's.
     const found = this.baseConflicts(pull);
@@ -2712,9 +2801,9 @@ export class Service {
     // its reason says it, with the files.
     const github = githubAsks(onGithub && { ...onGithub, ...(conflicting ? { conflicting: false } : {}), ...(merging ? { autoMerge: true } : {}) }, pull.base_ref, unpushed || pushedOver);
     // Published, what GitHub does not have is the reviewer's to publish, except commits about to be
-    // pushed and edits about to be published: the author waits with them, and that has not failed,
-    // or the commits' signing is tried again.
-    const toPublish = unpublished.filter((c) => (c === 'commits' ? !signingAgain && (!waiting || !!pushFailed) : !waiting || !toEdit.includes(c)));
+    // pushed and edits about to be published: the author waits with them, that has not failed, and
+    // no review loop holds them, or the commits' signing is tried again.
+    const toPublish = unpublished.filter((c) => (c === 'commits' ? !signingAgain && (!waiting || !!pushFailed || held) : !waiting || held || !toEdit.includes(c)));
     // Feedback being handed over (the author waits) makes it the author's turn; feedback it is not
     // waiting for is the reviewer's to pass on, published or not, and so is a stalled author.
     const whose: Whose = atWork
@@ -2738,10 +2827,9 @@ export class Service {
     if (whose === 'reviewer' && checklist && !userHolds && !unseen && !stalled) return { whose: 'none', reasons: [autoPublishNext(checklist, pull, author)] };
 
     if (whose === 'reviewer') reasons.push(...this.sinceReview(pull, author));
-    // Automatic reviews end at the first publish: once published, there are none to stop.
-    const stopped = pull.state === 'staged' ? this.stoppedText(pull) : null;
+    const { text: stopped, held: heldByStop } = this.stopHolds(pull);
     for (const { login, engine, reviewer, status } of r.reviewers) {
-      const text = reviewerAgentText(login, status, pull, author, state === 'waiting', !!stopped);
+      const text = reviewerAgentText(login, status, pull, author, state === 'waiting', heldByStop.has(reviewer));
       const flags = { ...(status.description ? { description: true } : {}), ...(status.unseen ? { unseen: true } : {}) };
       if (text) reasons.push({ kind: 'reviewer_agent', state: status.state, to_review: toReview(status.state), text, since: status.startedAt, engine, reviewer, ...flags });
     }
@@ -3253,9 +3341,12 @@ export class Service {
     const { pull } = ctx;
     this.requireHuman(actor, 'only the user can stop automatic reviews');
     const stop: IterationsStopped = { by: actor.id, at: now(), round: this.automaticRound(pull) };
-    // Decided in the database, not on ctx, which may be from before another stop: the first one stays.
+    // Decided in the database, not on ctx, which may be from before another stop: the first one
+    // stays, unless a review loop asked for since got a reviewer agent past it: this one stops it too.
     const stopped = this.db.transaction(() => {
-      if (this.db.run('UPDATE pulls SET iterations_stopped = ? WHERE id = ? AND iterations_stopped IS NULL', JSON.stringify(stop), pull.id).changes === 0) return false;
+      const fresh = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
+      if (fresh.iterations_stopped && this.reviewersFor(fresh).every((r) => r.iterationsStopped(fresh))) return false;
+      this.db.update('pulls', pull.id, { iterations_stopped: JSON.stringify(stop) });
       this.addEvent(pull, actor, 'iterations_stopped', { round: stop.round }, stop.at);
       return true;
     });
@@ -3284,6 +3375,17 @@ export class Service {
   private stoppedText(pull: PullRow): string | null {
     const stop = this.iterationsStopped(pull);
     return stop && `${this.db.actorById(stop.by).login} stopped automatic reviews ${afterRound(stop.round)}`;
+  }
+
+  /**
+   * The reviewer agents the user's stop holds (by key), of those turned on that review on their own now:
+   * before publishing, those not in a review loop asked for since the stop, and after it, those in
+   * a loop that the stop came after (Reviewer.iterationsStopped). `text`: stoppedText, while it holds one.
+   */
+  private stopHolds(pull: PullRow): { text: string | null; held: Set<string> } {
+    const staged = pull.state === 'staged';
+    const held = new Set(this.reviewersFor(pull).filter((r) => r.enabled(pull) && r.iterationsStopped(pull) && (staged || this.reviewLoop(pull, r.key))).map((r) => r.key));
+    return { text: held.size ? this.stoppedText(pull) : null, held };
   }
 
   // ---------------------------------------------------- publishing and signing
@@ -3664,11 +3766,13 @@ export class Service {
     opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod; bringBack?: string[]; page?: boolean },
     actor: Actor,
   ): Promise<PullRow> {
-    // A review submitted while it publishes counts over it (withPublishes).
+    // A review submitted while it publishes counts over it (withPublishes), and a review loop asked
+    // for after the events so far goes on after it (reviewLoop).
     const began = now();
+    const beganUpto = this.snapshot(ctx.pull.id).upto;
     const release = await this.pushLock(ctx.pull.id);
     try {
-      return await this.publishNow(ctx, opts, actor, began);
+      return await this.publishNow(ctx, opts, actor, began, beganUpto);
     } finally {
       release();
     }
@@ -3679,6 +3783,7 @@ export class Service {
     opts: { draft?: boolean; force?: boolean; expected?: string; sign?: boolean; duringReview?: boolean; duringConflict?: boolean; approval?: string; autoMerge?: MergeMethod; bringBack?: string[]; page?: boolean },
     actor: Actor,
     began: string,
+    beganUpto: number,
   ): Promise<PullRow> {
     const { repo } = ctx;
     this.requireUserOrAuthor(actor, ctx.pull, 'publish it');
@@ -3770,10 +3875,12 @@ export class Service {
         ...(pull.github_state === 'closed' ? { github_state: null } : {}),
       });
       // `sign`, whether it signed: what the pushes after it do (signsUpdates).
-      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto, began, ...(rewritten ? { rewritten } : {}), ...(broughtBack ? { brought_back: broughtBack } : {}), read_upto: upto }, ts);
+      this.addEvent(pull, actor, 'published', { url, head: pushed, source: pull.head_sha, signed, sign, first, force, auto, began, began_upto: beganUpto, ...(rewritten ? { rewritten } : {}), ...(broughtBack ? { brought_back: broughtBack } : {}), read_upto: upto }, ts);
     });
-    // Published during a review (a second click): its findings would come too late.
-    this.cancelReviews(this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!, 'published');
+    // Published during a review (a second click): its findings would come too late. Not one in a
+    // review loop asked for while it was publishing, which goes on after it (reviewLoop).
+    const published = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pull.id)!;
+    for (const r of this.reviewerAgents()) if (!this.reviewLoop(published, r.key)) r.cancel(published, 'published');
     // Auto-publish's publish is galley's doing: an author that turned it on hears of it in its wait.
     if (auto) this.emitSystem(pull.id, 'auto_published', 'galley');
     else this.emit(pull.id, 'published', actor);
@@ -3864,13 +3971,13 @@ export class Service {
 
   /**
    * Whether to publish the author's edits of the published pull request's title and description
-   * now (publishEdits): it has some to try (editsToTry), and it waits with all feedback seen, as
-   * for a push (mayPush).
+   * now (publishEdits): it has some to try (editsToTry), and it waits with all feedback seen and
+   * no review loop holding it up, as for a push (mayPush).
    */
   editsReady(pull: PullRow): boolean {
     if (!this.authorWaiting(pull.id) || !this.editsToTry(pull).length) return false;
     const fb = unseenFeedback(this.db, pull);
-    return !fb.reviews.length && !fb.comments.length;
+    return !fb.reviews.length && !fb.comments.length && !this.loopHolds(pull);
   }
 
   /**
@@ -3925,8 +4032,8 @@ export class Service {
 
   /**
    * Whether the published pull request's head may be pushed: GitHub does not have it, the pull
-   * request is open there as far as galley knows, the author waits with all feedback seen, and
-   * GitHub has not refused this head before. After signing it failed for now, the retry must be
+   * request is open there as far as galley knows, the author waits with all feedback seen, the
+   * reviewer agents of a review loop are done with it (loopHolds), and GitHub has not refused this head before. After signing it failed for now, the retry must be
    * due, and the author need not wait: it waited with this head when it failed, and agents often
    * stop waiting once their work is done. Not once it was handed feedback since, until it waits again.
    */
@@ -3938,7 +4045,7 @@ export class Service {
     const waiting = this.authorWaiting(pull.id);
     if (again ? Date.parse(again) > Date.now() || !(waiting || this.waitedSinceHanded(pull)) : !waiting) return false;
     const fb = unseenFeedback(this.db, pull);
-    return !fb.reviews.length && !fb.comments.length;
+    return !fb.reviews.length && !fb.comments.length && !this.loopHolds(pull);
   }
 
   /**
@@ -4092,17 +4199,20 @@ export class Service {
   private async pushNow(ctx: Ctx): Promise<boolean> {
     const pull = await this.sync(ctx.pull);
     if (!this.pushReady(pull)) return false;
+    // What that check saw, and each check after it.
+    let checked = this.snapshot(pull.id).upto;
     this.pushTries.set(pull.id, this.pushTry(pull));
     const url = pull.published_url!;
     const viewer = this.viewer();
     const timeoutMs = UNATTENDED_TIMEOUT_MS;
     const sign = await this.signsUpdates(ctx);
     // After every await before the push: open on GitHub, and nothing changed here (a commit,
-    // feedback, the author no longer waiting).
+    // feedback, the author no longer waiting, a review loop asked for).
     const ready = async () => {
       if (!(await this.openOnGithub(ctx, url))) throw new HttpError(412, 'merged or closed on GitHub');
       const latest = await this.sync(pull);
       if (latest.head_sha !== pull.head_sha || !this.mayPush(latest)) throw new HttpError(412, 'the pull request changed before the push');
+      checked = this.snapshot(pull.id).upto;
     };
     let plan: PushPlan | null = null;
     try {
@@ -4158,6 +4268,7 @@ export class Service {
       signed: plan.signed,
       force: plan.force,
       result: 'pushed',
+      checked_upto: checked,
       ...(plan.rewritten ? { rewritten: plan.rewritten } : {}),
     };
     this.db.transaction(() => {

@@ -235,6 +235,9 @@ this off.
    the agent next waits; one whose signing prompt nobody answered is tried again a few times
    over the next hour, whether the agent waits or not. When the branch conflicts with its base,
    galley tells the agent to rebase it, as before publishing, and pushes the rebase.
+   For an update you want the reviewer agents to see first, ask the agent for another review
+   loop: they review its commits as before publishing. galley pushes the first commit they are
+   done with, and later ones without review.
 
 The conversation stays in galley; GitHub gets the branch, title and description.
 
@@ -271,6 +274,9 @@ are running, opens a page of the reviews running on every pull request, each wit
 doing and a Stop button, and the latest finished ones. A running review's transcript has Stop
 too. **Stop iterating** in the merge box ends the automatic reviews. You can
 also name reviewers when you ask an agent to stage; `galley reviewers` lists those that review a repository.
+When you ask the agent for another review loop, before or after publishing, it starts one with
+`galley pr edit --add-reviewer`: the reviewers it names review the head again, with their limit
+counted afresh.
 
 You can add reviewer agents of your own, each with its own instructions, in
 `~/.config/galley/reviewers/<name>.md` or under **Settings** → Custom reviewers (a change there

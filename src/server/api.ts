@@ -471,6 +471,18 @@ export function api(s: Service): Hono {
     return c.body(null, 204);
   });
 
+  // Request reviewers, as on GitHub: the reviewer agents named (`reviewers`, as when staging) start
+  // a new review loop, before or after publishing. The user's, or the author's when the user asks it.
+  app.post('/repos/:owner/:repo/pulls/:n/requested_reviewers', async (c) => {
+    const x = await ctx(c);
+    const b = await body(c);
+    const { asked, ignored } = s.requestReviews(x, b.reviewers, actor(c));
+    const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id)!;
+    // galley extensions, as for a new pull request: the logins it ignored, and the reviewer agents asked.
+    const agents = asked.map((r) => reviewerAgentJson(r, r.enabled(pull), r.limit(pull)));
+    return c.json({ ...pullJson(s, x.repo, pull), ...(ignored.length ? { ignored_reviewers: ignored } : {}), reviewer_agents: agents }, 201);
+  });
+
   // galley extension: ask a reviewer agent (`codex`, `claude`, or a custom reviewer by name) to review now, and list its runs.
   app.post('/repos/:owner/:repo/pulls/:n/reviewers/:reviewer', async (c) => {
     const who = human(c);

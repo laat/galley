@@ -3,8 +3,9 @@
 // failed push is tried again (Service.pushFailed), whose edits of the title and description a wait
 // publishes (Service.authorEdits, Service.editsLeft), when auto-publish tries signing again
 // (Service.autoPublishRetry), whether a push goes on top of a branch rewritten on GitHub
-// (Service.fetchedRewritten), which merge method auto-merge asks for again after a push, and whether
-// the user's turn is dismissed (Service.dismissal). So events are written and read back here, typed by their type, and
+// (Service.fetchedRewritten), which merge method auto-merge asks for again after a push, whether
+// the user's turn is dismissed (Service.dismissal), and which review loop a reviewer agent is in
+// (Service.reviewLoop). So events are written and read back here, typed by their type, and
 // reshaping one for the timeline fails typecheck where it is read.
 import { now, type Actor, type CancelReason, type Db, type EventRow, type PullRow } from './db.ts';
 import type { AutoPublishOff, GithubEdit, GithubPush, SigningFailure } from './service.ts';
@@ -26,9 +27,10 @@ export interface EventData {
    * what the pushes after it do. `rewritten`: on top of the branch as rewritten on GitHub (GithubPush).
    * `brought_back`: commits that rewrite removed, which the user confirmed bringing back.
    * `read_upto`: the edits the title and description it published include (GithubEdit.read_upto).
-   * `began`: when publishing was asked for, where the review decision places it (Service.withPublishes).
+   * `began`: when publishing was asked for, where the review decision places it (Service.withPublishes);
+   * `began_upto`: the pull request's latest event then, after which a review loop asked for goes on after it (Service.reviewLoop).
    */
-  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; began?: string; rewritten?: { from: string; to: string }; brought_back?: string[]; read_upto?: number };
+  published: { url: string; head: string; source?: string; signed?: number; sign?: boolean; first: boolean; force: boolean; auto?: boolean; began?: string; began_upto?: number; rewritten?: { from: string; to: string }; brought_back?: string[]; read_upto?: number };
   /** A push when the author waited (Service.pushUpdate). */
   github_push: Omit<GithubPush, 'at'>;
   /** The author's edits of the title and description, published when it waited (Service.publishEdits). */
@@ -52,6 +54,12 @@ export interface EventData {
   auto_publish_retry: { error: string; head: string; approval: string; signing: SigningFailure };
   iterations_stopped: { round: number };
   iterations_resumed: Record<string, never>;
+  /**
+   * The author or the user asked these reviewer agents (by key) for a new review loop
+   * (Service.requestReviews). `after`: each one's latest run that had ended then; its runs up to
+   * it count for nothing in the loop (Service.reviewLoop).
+   */
+  review_requested: { reviewers: { reviewer: string; after: number }[] };
   review_cancelled: { head: string; reason: CancelReason };
   /**
    * The user dismissed their turn until something new happens (Service.dismissal). `github`: how

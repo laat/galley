@@ -16,6 +16,7 @@ import { now, type Actor, type CancelReason, type Db, type Priority, type PullRo
 import { checkPriority, HttpError, splitPriorityPrefix, stagingState, type CommentInput, type Ctx, type ReviewColumns, type Service, type Thread } from '../service.ts';
 import type { HeadStatus } from './head-status.ts';
 import { unansweredThreads } from '../feedback.ts';
+import { lastEvent } from '../events.ts';
 import { checkReviewerName, ENGINE_IDS, MAX_ITERATIONS_LIMIT, readSettings, type EngineId, type ReviewerSettings } from '../settings.ts';
 import type { Reviews, Verdict } from './definition.ts';
 import { cacheEnv, installCommand } from './install.ts';
@@ -649,7 +650,8 @@ export class Reviewer {
    * (or the reviewer stopped them), or it is off for the pull request, as every one is once it is
    * published. A failed review of the commit holds up auto-publish until someone asks for another
    * one, unless automatic reviews are stopped: then only a running review does, or one asked for
-   * by hand that a stop interrupted, until it has run again.
+   * by hand that a stop interrupted, until it has run again. In a review loop asked for again
+   * (Service.requestReviews), only its runs since count (since), and it is not off once published.
    * For a reviewer of the description, it is about the version of the title, description and
    * commit messages the head has (see subject).
    */
@@ -663,20 +665,20 @@ export class Reviewer {
     if (work) return { state: work.status === 'QUEUED' ? 'queued' : 'reviewing', commit: work.head_sha, startedAt: work.started_at };
     const commit = pull.head_sha;
     // It runs again when the server starts (see resume); an interrupted automatic review is just not an attempt.
-    const latest = this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? ORDER BY id DESC', pull.id, this.key);
+    const latest = this.s.db.get<ReviewRunRow>('SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? AND id > ? ORDER BY id DESC', pull.id, this.key, this.since(pull));
     if (latest?.status === 'interrupted' && latest.trigger === 'manual' && runSubject(latest) === this.subject(pull)) return { state: 'interrupted', commit };
     const last = this.attempt(pull);
-    if (last?.status === 'failed' && !pull.iterations_stopped) return { state: 'failed', commit, failedAt: last.finished_at };
+    if (last?.status === 'failed' && !this.iterationsStopped(pull)) return { state: 'failed', commit, failedAt: last.finished_at };
     if (last?.status === 'cancelled') return { state: 'cancelled', commit, cancelled: last.reason };
     if (last?.status === 'done' && last.findings === 0) {
       const approved = this.s.db.get<{ state: string }>('SELECT state FROM reviews WHERE id = ?', last.review_id)?.state === 'APPROVED';
       return { state: approved ? 'approved' : 'clean', commit };
     }
-    // Published, GitHub's reviews take over: none reviews it on its own (wouldReview).
-    if (!this.enabled(pull) || pull.published_url) return { state: 'off', commit };
+    // Published, GitHub's reviews take over: none reviews it on its own (wouldReview), outside a review loop asked for again.
+    if (!this.enabled(pull) || (pull.published_url && !this.s.reviewLoop(pull, this.key))) return { state: 'off', commit };
     const automatic = { used: this.automaticReviews(pull), limit: this.limit(pull) };
     // Stopped (Service.stopIterating), it has no automatic review left, whatever the counts say.
-    if (automatic.used >= automatic.limit || pull.iterations_stopped) return { state: 'capped', commit, automatic };
+    if (automatic.used >= automatic.limit || this.iterationsStopped(pull)) return { state: 'capped', commit, automatic };
     // It reviews this commit when the author waits.
     if (!last) return { state: 'unreviewed', commit, automatic };
     // It found something in this commit and reviews the author's next one, unless the author answers it without one.
@@ -808,13 +810,47 @@ export class Reviewer {
     return this.config(this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', ctx.pull.id)!);
   }
 
+  /** Automatic reviews done, since the review loop it was asked for (since). */
   automaticReviews(pull: PullRow): number {
-    return this.s.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND trigger = 'auto' AND status = 'done'", pull.id, this.key)!.n;
+    return this.s.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND id > ? AND trigger = 'auto' AND status = 'done'", pull.id, this.key, this.since(pull))!.n;
   }
 
   /** Automatic reviews done or running: the round the pull request is in, as far as this reviewer goes (Service.automaticRound). */
   automaticReviewsStarted(pull: PullRow): number {
-    return this.s.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND trigger = 'auto' AND status IN ('done', 'running')", pull.id, this.key)!.n;
+    return this.s.db.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM review_runs WHERE pull_id = ? AND reviewer = ? AND id > ? AND trigger = 'auto' AND status IN ('done', 'running')",
+      pull.id,
+      this.key,
+      this.since(pull),
+    )!.n;
+  }
+
+  /**
+   * The last of its runs that count for nothing now: those before the review loop it was asked for
+   * (Service.reviewLoop), while that lasts. 0 outside one.
+   */
+  private since(pull: PullRow): number {
+    return this.s.reviewLoop(pull, this.key)?.after ?? 0;
+  }
+
+  /**
+   * Whether the user's stop of automatic reviews (Service.stopIterating) holds it: one before the
+   * review loop it was asked for since (Service.reviewLoop) does not, one during it does. In the
+   * order of their events, which a clock set back does not change.
+   */
+  iterationsStopped(pull: PullRow): boolean {
+    if (!pull.iterations_stopped) return false;
+    const loop = this.s.reviewLoop(pull, this.key);
+    return !loop || (lastEvent(this.s.db, pull, 'iterations_stopped')?.id ?? 0) > loop.id;
+  }
+
+  /**
+   * Whether it may review the pull request's commits on its own: until the first publish, and after
+   * it in a review loop asked for again (Service.reviewLoop), until a push ends that.
+   */
+  private reviewsOnItsOwn(pull: PullRow): boolean {
+    const state = stagingState(pull);
+    return state === 'staged' || (state === 'published' && this.s.reviewLoop(pull, this.key) !== null);
   }
 
   /** Decide in the background whether to review automatically (see maybeReview). */
@@ -834,7 +870,7 @@ export class Reviewer {
     await ending?.done;
     if (this.stopped || this.jobs.has(pullId)) return;
     const stale = this.s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
-    if (!stale || stagingState(stale) !== 'staged' || !this.enabled(stale) || !this.appliesToPull(stale)) return;
+    if (!stale || !this.reviewsOnItsOwn(stale) || !this.enabled(stale) || !this.appliesToPull(stale)) return;
     if (stale.author_id === this.actor().id) return;
     const repo = this.s.repoById(stale.repo_id);
     const ctx = await this.s.ctx(repo.owner, repo.name, stale.number);
@@ -844,13 +880,13 @@ export class Reviewer {
 
   /**
    * Whether an automatic review of the pull request's head would start now: not once it is
-   * published (GitHub's reviews take over; asking by hand still works), nor once it is closed, here
-   * or on GitHub, or merged.
+   * published (GitHub's reviews take over; asking by hand still works), outside a review loop asked
+   * for again, nor once it is closed, here or on GitHub, or merged.
    */
   private wouldReview(pull: PullRow): boolean {
-    if (this.stopped || !this.enabled(pull) || stagingState(pull) !== 'staged' || pull.author_id === this.actor().id || !this.appliesToPull(pull)) return false;
+    if (this.stopped || !this.enabled(pull) || !this.reviewsOnItsOwn(pull) || pull.author_id === this.actor().id || !this.appliesToPull(pull)) return false;
     // The reviewer stopped automatic reviews (Service.stopIterating); asking by hand still works.
-    if (pull.iterations_stopped) return false;
+    if (this.iterationsStopped(pull)) return false;
     // One attempt per head (or version of the description), failed and cancelled ones too: a failure is retried by asking from the page. An interrupted one runs again.
     if (this.attempt(pull)) return false;
     return this.automaticReviews(pull) < this.limit(pull);
@@ -858,13 +894,14 @@ export class Reviewer {
 
   /**
    * The latest review of what the reviewer reads now (subject), running, done, failed or
-   * cancelled. One the server stopped under does not count.
+   * cancelled, since the review loop it was asked for (since). One the server stopped under does not count.
    */
   private attempt(pull: PullRow): ReviewRunRow | undefined {
     return this.s.db.get<ReviewRunRow>(
-      "SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? AND COALESCE(subject, head_sha) = ? AND status != 'interrupted' ORDER BY id DESC",
+      "SELECT * FROM review_runs WHERE pull_id = ? AND reviewer = ? AND id > ? AND COALESCE(subject, head_sha) = ? AND status != 'interrupted' ORDER BY id DESC",
       pull.id,
       this.key,
+      this.since(pull),
       this.subject(pull),
     );
   }

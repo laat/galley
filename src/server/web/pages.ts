@@ -6,7 +6,7 @@ import type { HeadStatus } from '../reviewers/head-status.ts';
 import { customActorKey, onTheDescription, outsideTheDiff, runSubject, type LiveRun, type OwnSettings, type Reviewer, type RunUsage } from '../reviewers/reviewer.ts';
 import { hasTranscript, transcript } from '../reviewers/transcript.ts';
 import { checkName, checksSummary, type GithubCheck } from '../github-follow.ts';
-import { lastEvent, readEvent } from '../events.ts';
+import { eventsSince, lastEvent, readEvent } from '../events.ts';
 import { avatarUrl, commentUrl, reasonText } from '../github.ts';
 import { MAX_ITERATIONS_LIMIT } from '../settings.ts';
 import { uploadsIn } from '../uploads.ts';
@@ -752,6 +752,11 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
       return timelineBadge('circle-slash', html`${who} stopped automatic reviews ${afterRound(data.round)} ${when}`);
     case 'iterations_resumed':
       return timelineBadge('iterations', html`${who} resumed automatic reviews ${when}`);
+    case 'review_requested': {
+      // Each by its login, or its key when it is gone (a custom reviewer's file deleted).
+      const names = data.reviewers.map(({ reviewer }) => p.s.reviewerAgents().find((r) => r.key === reviewer)?.actor().login ?? reviewer);
+      return timelineBadge('iterations', html`${who} asked ${andList(names)} to review it again ${when}`);
+    }
     case 'turn_dismissed':
       return timelineBadge('bell-slash', html`${who} dismissed this until something new happens ${when}`);
     case 'turn_undismissed':
@@ -994,24 +999,30 @@ function turnRow(p: PullPage): Safe | null {
 /** Stop iterating, while a reviewer agent may still review on its own; Resume once stopped. Both say what the last round found. */
 function iterationsRows(p: PullPage): Safe[] {
   const { s, pull, author } = p;
-  // Automatic reviews end at the first publish: there is nothing to stop or resume.
-  if (pull.published_url) return [];
+  // Automatic reviews end at the first publish, except in a review loop asked for again (Service.reviewLoop): otherwise there is nothing to stop or resume.
+  const reviewers = s.reviewersFor(pull).filter((r) => !pull.published_url || s.reviewLoop(pull, r.key));
+  if (!reviewers.length) return [];
   const api = `${p.apiBase}/stop-iterating`;
+  const rows: Safe[] = [];
   const stop = s.iterationsStopped(pull);
-  if (stop) {
-    return [
-      html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>Automatic reviews stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>${lastRound(p)}
-        <div class="color-fg-muted">No reviewer agent starts another automatic review, so ${author.login} hands its next commit to you. Asking one to review still works, and Resume lets them go on up to their limits.</div></div>
-        <button type="button" class="btn btn-sm js-iterations" data-method="DELETE" data-api="${api}">Resume</button></div>`,
-    ];
+  // A review loop asked for since the stop gets the reviewers it names past it (Reviewer.iterationsStopped): Resume while it holds any that is on.
+  const on = reviewers.filter((r) => r.enabled(pull));
+  const held = stop ? on.filter((r) => r.iterationsStopped(pull)) : [];
+  if (stop && held.length) {
+    const all = held.length === on.length;
+    const what = all ? 'Automatic reviews' : `Automatic reviews by ${andList(held.map((r) => r.actor().login))}`;
+    const why = all ? `No reviewer agent starts another automatic review, so ${author.login} hands its next commit to you.` : `They start no other automatic review.`;
+    rows.push(html`<div class="merge-row">${icon('circle-slash', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${what} stopped by ${s.db.actorById(stop.by).login} ${afterRound(stop.round)}</strong>${lastRound(p)}
+        <div class="color-fg-muted">${why} Asking one to review still works, and Resume lets them go on up to their limits.</div></div>
+        <button type="button" class="btn btn-sm js-iterations" data-method="DELETE" data-api="${api}">Resume</button></div>`);
   }
   // Shown while a reviewer agent may still review on its own; the round is the one stopping records.
-  if (!s.reviewersFor(pull).some((r) => r.enabled(pull) && r.automaticReviews(pull) < r.limit(pull))) return [];
-  return [
-    html`<div class="merge-row">${icon('iterations', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${plural(s.automaticRound(pull), 'automatic review round')} so far</strong>${lastRound(p)}
+  if (reviewers.some((r) => r.enabled(pull) && !r.iterationsStopped(pull) && r.automaticReviews(pull) < r.limit(pull))) {
+    rows.push(html`<div class="merge-row">${icon('iterations', { cls: 'color-fg-muted' })}<div class="flex-auto"><strong>${plural(s.automaticRound(pull), 'automatic review round')} so far</strong>${rows.length ? '' : lastRound(p)}
       <div class="color-fg-muted">The reviewer agents review each commit ${author.login} waits with. Good enough, or going in circles? Stop iterating: a review in progress still finishes, and no new one starts.</div></div>
-      <button type="button" class="btn btn-sm js-iterations" data-method="PUT" data-api="${api}">Stop iterating</button></div>`,
-  ];
+      <button type="button" class="btn btn-sm js-iterations" data-method="PUT" data-api="${api}">Stop iterating</button></div>`);
+  }
+  return rows;
 }
 
 /**
@@ -1322,7 +1333,10 @@ function reviewerText(login: string, status: HeadStatus, pull: PullRow, author: 
     case 'approved':
       return html`${login} approved ${what}`;
     case 'capped':
-      return pull.iterations_stopped ? html`Automatic reviews are stopped, so ${login} starts no more` : html`${login} has used up its automatic reviews`;
+      // With reviews left, it is the stop; a review loop asked for since the stop gets past it (Reviewer.iterationsStopped).
+      return pull.iterations_stopped && status.automatic && status.automatic.used < status.automatic.limit
+        ? html`Automatic reviews are stopped, so ${login} starts no more`
+        : html`${login} has used up its automatic reviews`;
     case 'off':
       return html`${login} does not review this pull request automatically`;
   }
@@ -1456,8 +1470,12 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
   }
   const used = reviewer.automaticReviews(pull);
   const limit = reviewer.limit(pull);
-  // Automatic reviews end at the first publish.
-  if (enabled) meta.push(pull.published_url ? html`Automatic: ${used} before publishing` : html`Automatic: ${pull.iterations_stopped ? 'stopped at ' : ''}${used} of ${limit}`);
+  // Automatic reviews end at the first publish, except in a review loop asked for again, which the next push ends (Service.reviewLoop).
+  const loop = !!pull.published_url && s.reviewLoop(pull, reviewer.key) !== null;
+  const published = pull.published_url ? eventsSince(s.db, pull, 'published', '')[0]?.created_at : undefined;
+  const before = published && runs.filter((r) => r.trigger === 'auto' && r.status === 'done' && r.started_at < published).length;
+  if (enabled && loop) meta.push(html`Automatic: ${used} of ${limit} since asked again`);
+  else if (enabled) meta.push(pull.published_url ? html`Automatic: ${before ?? used} before publishing` : html`Automatic: ${reviewer.iterationsStopped(pull) ? 'stopped at ' : ''}${used} of ${limit}`);
   // Only automatic ones: a review asked for by hand runs all the same.
   else if (runs.length || work) meta.push(html`Automatic: off ${offWhere}`);
   const usage = runUsage(runs);
