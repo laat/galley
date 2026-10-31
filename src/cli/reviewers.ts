@@ -92,3 +92,15 @@ export function whoReviews(agents: ReviewerAgent[]): string {
   if (description.length) return `When you wait, ${review(description)} ${messages}.`;
   return 'No reviewer agent reviews it.';
 }
+
+/**
+ * Who reviews a pull request again, from POST …/requested_reviewers's `reviewer_agents`: "When you
+ * wait, codex-review reviews it again, as before publishing, …". Published, galley holds the push
+ * of the author's commits until they are done with one, and pushes the later ones without review.
+ */
+export function whoReviewsAgain(agents: ReviewerAgent[], published: boolean): string {
+  const on = agents.filter((a) => a.automatic).map((a) => a.login);
+  if (!on.length) return 'No reviewer agent reviews it: their limit is 0.';
+  if (!published) return `When you wait, ${review(on)} it again, from its head, in a new review loop.`;
+  return `When you wait, ${review(on)} it again, as before publishing, until they are done with a commit. galley pushes that commit to GitHub, and the ones after it without review.`;
+}

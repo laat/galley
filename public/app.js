@@ -253,6 +253,7 @@
     reviewer_started: 'started reviewing',
     reviewer_failed: 'could not finish its review',
     reviewer_cancelled: 'stopped reviewing',
+    review_requested: 'asked the reviewer agents to review again',
   };
   // What galley did on its own on the viewer's behalf, or learned from GitHub: their page has not heard of it.
   const AUTOMATIC = {
