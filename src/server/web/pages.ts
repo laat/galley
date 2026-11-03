@@ -1,4 +1,4 @@
-import type { Commit } from '../git.ts';
+import type { Commit, Repo } from '../git.ts';
 import type { FileDiff } from '../diff.ts';
 import type { Actor, CancelReason, EventRow, Priority, PullRow, RepoRow, ReviewRow, ReviewRunRow } from '../db.ts';
 import { afterRound, andList, CANCELLED, githubStatus, HttpError, publishFingerprint, stagingState, type AutoMerge, type AutoPublish, type AutoPublishRetry, type BaseConflicts, type BringsBack, type Ctx, type EditField, type GithubEdit, type GithubPush, type Readiness, type Reviewed, type Service, type SigningFailure, type Thread, type Turn, type TurnReason } from '../service.ts';
@@ -622,7 +622,20 @@ const AUTO_PUBLISH_OFF: Record<string, string> = {
   pushed: ' by pushing after the approval that turned it on',
 };
 
-async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
+/**
+ * The commits from `from` to `to` that the author added, not the base's: none in a merge base galley
+ * recorded (`bases`, of every revision) that has not taken in `to`. A base galley fetched after
+ * staging, or after a merge of the base was sent, has commits that were not the author's. One that
+ * took in `to`, as a merge of the branch into the base does, which galley may see before it hears
+ * of the merge, has the author's commits.
+ */
+async function addedCommits(git: Repo, from: string, to: string, bases: string[]): Promise<Commit[]> {
+  if (from === to) return [];
+  const taken = await git.takenIn(to, bases);
+  return git.log(from, to, ...new Set(bases.filter((b) => !taken.has(b))));
+}
+
+async function eventItem(p: PullPage, e: EventRow, bases: string[]): Promise<Safe | null> {
   const actor = p.s.db.actorById(e.actor_id);
   const who = html`${avatar(avatarUrl(p.s, actor), actor.login, 20, actor.type === 'Bot' ? 'avatar-bot avatar-small' : 'avatar-circle avatar-small')} ${authorLink(p.s, actor)}`;
   const { type, data } = readEvent(e);
@@ -637,7 +650,10 @@ async function eventItem(p: PullPage, e: EventRow): Promise<Safe | null> {
           { id: `event-${e.id}` },
         );
       }
-      const commits = await p.ctx.git.log(data.before, data.after).catch(() => [] as Commit[]);
+      // Not those of a merge of the base, as on GitHub.
+      const commits = await addedCommits(p.ctx.git, data.before, data.after, bases).catch(() => [] as Commit[]);
+      // A move of the base alone, or a push of commits the base has.
+      if (!commits.length) return null;
       return html`${timelineBadge('repo-push', html`${who} added ${plural(commits.length, 'commit')} ${when}`, { id: `event-${e.id}` })}${commitList(p, commits)}`;
     }
     case 'renamed':
@@ -1733,15 +1749,16 @@ export async function conversationPage(p: PullPage): Promise<string> {
   const { s, pull, viewer } = p;
   const items: { at: string; order: number; html: Safe }[] = [];
   const revisions = s.revisions(pull);
+  const bases = revisions.map((r) => r.base_sha);
 
   if (revisions[0]) {
     const first = revisions[0];
-    const commits = await p.ctx.git.log(first.base_sha, first.head_sha).catch(() => [] as Commit[]);
+    const commits = await addedCommits(p.ctx.git, first.base_sha, first.head_sha, bases).catch(() => [] as Commit[]);
     const who = html`${avatar(avatarUrl(s, p.author), p.author.login, 20, 'avatar-bot avatar-small')} ${authorLink(s, p.author)}`;
     items.push({ at: first.created_at, order: 1, html: html`${timelineBadge('repo-push', html`${who} added ${plural(commits.length, 'commit')} ${relTime(first.created_at)}`)}${commitList(p, commits)}` });
   }
   for (const e of s.events(pull)) {
-    const h = await eventItem(p, e);
+    const h = await eventItem(p, e, bases);
     if (h) items.push({ at: e.created_at, order: 2, html: h });
   }
   for (const c of s.issueComments(pull)) {

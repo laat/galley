@@ -224,6 +224,64 @@ test('galley fetches base branches from GitHub into its clone, and checks the he
   assert.equal(server.service.fetchError(row, 'feature/on-develop'), null);
 });
 
+test('the timeline lists the author’s commits, not those of a base galley fetched after staging, nor of one merged in, also once the base took in the branch', async () => {
+  const { url, row, clone } = await widgets();
+  /** Each "added N commits" on the page, with the headlines it lists. */
+  const pushes = async (number: number) => {
+    const page = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
+    return [...page.matchAll(/added (\d+ commits?) [^]*?<div class="timeline-commits">([^]*?)<\/div>\s*(?=<\/div>|<div class="(?!timeline-commit\b))/g)].map(
+      (m) => [m[1], ...[...m[2].matchAll(/class="timeline-commit-title"[^>]*>([^<]*)</g)].map((t) => t[1])],
+    );
+  };
+  const moveMain = (file: string) => {
+    git('checkout', '-q', 'main');
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file} on main`);
+    git('push', '-q', 'origin', 'main');
+  };
+  // A fetch under way may have set out before main moved, and a sync under way before the fetch.
+  const fetchMain = (id?: number) =>
+    until(async () => {
+      await server.service.fetchBases(row, { base: 'main' });
+      if (clone('rev-parse', 'refs/remotes/origin/main') !== git('rev-parse', 'main')) return false;
+      if (id === undefined) return true;
+      const pull = await server.service.sync(server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!);
+      return pull.base_sha === git('merge-base', 'main', pull.head_sha);
+    }, 'galley fetched main');
+  await fetchMain();
+  // The branch is off a main galley has not fetched yet.
+  moveMain('unfetched.js');
+  git('checkout', '-qb', 'feature/off-new-main');
+  writeFileSync(join(repo, 'mine.js'), 'export {};\n');
+  git('add', 'mine.js');
+  git('commit', '-qm', 'Add mine.js');
+  assert.equal((await gitToGalley(['push', url, 'feature/off-new-main'])).code, 0);
+  const created = await asAgent('POST', `${API}/pulls`, { title: 'Add mine.js', head: 'feature/off-new-main', base: 'main', automatic_reviews: false });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  const { number, id } = created.json;
+  const pull = server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!;
+  assert.equal(server.service.revisions(pull)[0].base_sha, git('rev-parse', 'main~1'));
+  await fetchMain(id);
+  assert.deepEqual(await pushes(number), [['1 commit', 'Add mine.js']]);
+
+  // Main merged into the branch: the merge commit, not main's.
+  moveMain('merged-in.js');
+  git('checkout', '-q', 'feature/off-new-main');
+  git('merge', '-q', '-m', 'Merge main', 'main');
+  assert.equal((await gitToGalley(['push', url, 'feature/off-new-main'])).code, 0);
+  await fetchMain(id);
+  assert.deepEqual(await pushes(number), [['1 commit', 'Add mine.js'], ['1 commit', 'Merge main']]);
+
+  // The branch merged into main, and seen there before galley hears of the merge: its commits stay.
+  git('checkout', '-q', 'main');
+  git('merge', '-q', '--no-ff', '-m', 'Merge feature/off-new-main', 'feature/off-new-main');
+  git('push', '-q', 'origin', 'main');
+  await fetchMain(id);
+  assert.equal(server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!.base_sha, git('rev-parse', 'feature/off-new-main'));
+  assert.deepEqual(await pushes(number), [['1 commit', 'Add mine.js'], ['1 commit', 'Merge main']]);
+});
+
 test('commits GitHub did not merge are found in galley’s clone', async () => {
   const { url } = await widgets();
   const pr = await stage('feature/left-out', 'left-out.js');

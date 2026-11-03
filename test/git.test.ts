@@ -104,3 +104,31 @@ test('notPushed: commits the remote was never given, copies a rebase made includ
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('takenIn: the commits that are a commit or have it as an ancestor, in one call', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'galley-git-'));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Dev', GIT_AUTHOR_EMAIL: 'dev@example.com', GIT_COMMITTER_NAME: 'Dev', GIT_COMMITTER_EMAIL: 'dev@example.com' };
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env }).trim();
+  const commit = (message: string) => {
+    git('commit', '-q', '--allow-empty', '-m', message);
+    return git('rev-parse', 'HEAD');
+  };
+  try {
+    git('init', '-q', '-b', 'main');
+    const start = commit('Start');
+    git('checkout', '-qb', 'feature');
+    const first = commit('First');
+    const second = commit('Second');
+    git('checkout', '-q', 'main');
+    const moved = commit('Move the base');
+    git('merge', '-q', '--no-ff', '-m', 'Merge feature', 'feature');
+    const merged = git('rev-parse', 'HEAD');
+    const repo = new Repo(join(dir, '.git'));
+    const all = [start, first, second, moved, merged];
+    assert.deepEqual([...(await repo.takenIn(first, all))].sort(), [first, second, merged].sort());
+    assert.deepEqual([...(await repo.takenIn(merged, all))], [merged]);
+    assert.deepEqual([...(await repo.takenIn(second, [start, moved]))], []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
