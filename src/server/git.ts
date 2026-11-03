@@ -320,14 +320,28 @@ export class Repo {
     return r.code === 0 ? r.stdout.trim() : null;
   }
 
+  /** Those of `commits` that have taken in `sha`: are it, or have it as an ancestor. In one git call. */
+  async takenIn(sha: string, commits: string[]): Promise<Set<string>> {
+    const others = [...new Set(commits)].filter((c) => c !== sha).sort();
+    const found = new Set(commits.includes(sha) ? [sha] : []);
+    if (!others.length) return found;
+    // The commits on a path from `sha` to any of them, so those of them it is an ancestor of.
+    const args = ['rev-list', '--ancestry-path', ...others, `^${sha}`];
+    const out = [sha, ...others].every((c) => SHA_RE.test(c)) ? await this.cached(args) : await this.out(args);
+    const wanted = new Set(others);
+    for (const line of out.split('\n')) if (wanted.has(line)) found.add(line);
+    return found;
+  }
+
   async isAncestor(a: string, b: string): Promise<boolean> {
     const r = await this.run(['merge-base', '--is-ancestor', a, b], { allowFail: true });
     return r.code === 0;
   }
 
-  async log(from: string, to: string): Promise<Commit[]> {
-    const args = ['log', '--reverse', `--format=${LOG_FORMAT}`, `${from}..${to}`];
-    return parseLog(SHA_RE.test(from) && SHA_RE.test(to) ? await this.cached(args) : await this.out(args));
+  /** The commits of `to` not in `from`, oldest first, nor in any of `not` (a base the branch took in). */
+  async log(from: string, to: string, ...not: string[]): Promise<Commit[]> {
+    const args = ['log', '--reverse', `--format=${LOG_FORMAT}`, `${from}..${to}`, ...not.map((n) => `^${n}`)];
+    return parseLog([from, to, ...not].every((r) => SHA_RE.test(r)) ? await this.cached(args) : await this.out(args));
   }
 
   /**
