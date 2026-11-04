@@ -624,6 +624,8 @@ export function api(s: Service): Hono {
       push: r.push ?? null,
       // With status edited or edit_failed, or with a push: the author's edits of the title and description, published.
       edit: r.edit ?? null,
+      // With status edited_on_github, and with whatever else comes: the title and description as someone edited them on GitHub (`field`, `text`, `by`).
+      edited_on_github: r.editedOnGithub ?? null,
       // Whether the author has anything to address once it has read this, and what the reviewer
       // agents still to review the head are at (WaitResult.asksAuthor), so the CLI need not work it out.
       asks_author: r.asksAuthor ?? null,

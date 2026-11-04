@@ -241,7 +241,7 @@ test("after publishing, the author's edits of the title and description are publ
     const calls = ghCalls().length;
     const r = await pr.wait();
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /^Could not publish the description to GitHub: someone edited the description on GitHub since galley published it\. Nothing on GitHub was overwritten\. The user has been told, and decides; do not edit it on GitHub yourself\.$/m);
+    assert.match(r.stdout, /^Could not publish the description to GitHub: someone edited the description on GitHub since galley published it\. Nothing on GitHub was overwritten\. galley takes GitHub's description in, and a wait tells you of it; do not edit it on GitHub yourself\.$/m);
     assert.ok(!ghCalls().slice(calls).some((c) => c.startsWith('pr edit ')));
     assert.equal(onGithub().body, '    x');
     assert.deepEqual((await edits(pr.n)).map((e) => [e.published, e.edited_on_github, e.failed]), [[[], ['description'], []]]);

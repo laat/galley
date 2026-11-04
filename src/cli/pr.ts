@@ -966,6 +966,8 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     if (r.status === 'push_failed') out(`Could not push ${r.push.source.slice(0, 7)} to GitHub: ${r.push.error}`);
     // And its edits of the title and description, which went first (a server older than the CLI does not say).
     if (r.edit) out(editLine(r.edit, r.published_url));
+    // What someone edited on GitHub instead, which galley took in.
+    for (const e of r.edited_on_github ?? []) out(editedOnGithubLine(e, t.number));
     const unresolved = pr.reviewThreads.filter((th: any) => !th.isResolved);
     // Reviewers still at work will be heard from: their review wakes the next wait.
     const atWork = reviewersAtWork(pr);
@@ -1066,7 +1068,7 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
         ),
       );
     }
-    if ((r.status === 'pushed' || r.status === 'push_failed' || r.status === 'edited' || r.status === 'edit_failed') && !text) {
+    if ((r.status === 'pushed' || r.status === 'push_failed' || r.status === 'edited' || r.status === 'edit_failed' || r.status === 'edited_on_github') && !text) {
       // A conflict told with it (it is marked as told above) is the author's to rebase.
       out(c.gray(rebase ?? `Run \`galley pr wait ${all}\` again to hear when it is merged or closed on GitHub, or gets new feedback.`));
       if (rebase && r.status === 'pushed') out(c.gray(PUSHES));
@@ -1134,7 +1136,17 @@ function editLine(e: { published: string[]; edited_on_github: string[]; failed: 
   const it = (fields: string[]) => (fields.length > 1 ? 'them' : 'it');
   const why = [e.edited_on_github.length ? `someone edited the ${and(e.edited_on_github)} on GitHub since galley published ${it(e.edited_on_github)}` : null, e.failed.length ? e.error : null];
   const what = e.published.length ? `Published the ${and(e.published)} to GitHub, but not the ${and(left)}` : `Could not publish the ${and(left)} to GitHub`;
-  return `${what}: ${why.filter(Boolean).join('; ')}. Nothing on GitHub was overwritten. The user has been told, and decides; do not edit ${it(left)} on GitHub yourself.`;
+  // What someone edited on GitHub, galley takes in (a server older than the CLI did not; its user decided).
+  const next = e.failed.length ? 'The user has been told, and decides' : `galley takes GitHub's ${and(e.edited_on_github)} in, and a wait tells you of ${it(e.edited_on_github)}`;
+  return `${what}: ${why.filter(Boolean).join('; ')}. Nothing on GitHub was overwritten. ${next}; do not edit ${it(left)} on GitHub yourself.`;
+}
+
+/** Someone edited the title or description on GitHub, and galley took it in. */
+function editedOnGithubLine(e: { field: string; text: string; by: string | null }, number: number): string {
+  const who = e.by ?? 'Someone';
+  return e.field === 'title'
+    ? `${who} edited the title on GitHub, and galley has it now: ${e.text}`
+    : `${who} edited the description on GitHub, and galley has it now. Read it with \`galley pr view s${number}\` before you edit it.`;
 }
 
 /** What the author does once its pull request is published. */

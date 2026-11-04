@@ -657,13 +657,17 @@ async function eventItem(p: PullPage, e: EventRow, bases: string[]): Promise<Saf
       return html`${timelineBadge('repo-push', html`${who} added ${plural(commits.length, 'commit')} ${when}`, { id: `event-${e.id}` })}${commitList(p, commits)}`;
     }
     case 'renamed':
-      return timelineBadge('pencil', html`${who} changed the title <del class="color-fg-muted">${data.from}</del> <ins class="title-ins">${data.to}</ins> ${when}`);
-    case 'body_edited':
+    case 'body_edited': {
+      // Edited on GitHub, by whoever GitHub says, and taken in when galley followed it.
+      const by = data.github ? githubUser(data.github.by, true) : who;
+      const where = data.github ? ' on GitHub' : '';
+      if (type === 'renamed') return timelineBadge('pencil', html`${by} changed the title <del class="color-fg-muted">${data.from}</del> <ins class="title-ins">${data.to}</ins>${where} ${when}`);
       return timelineBadge(
         'pencil',
-        html`${who} edited the description ${when}
+        html`${by} edited the description${where} ${when}
         <details class="body-diff"><summary class="btn-link">Show changes</summary>${lineDiff(data.from, data.to)}</details>`,
       );
+    }
     case 'base_changed':
       return timelineBadge('git-branch', html`${who} changed the base branch from <span class="branch-name branch-name-sm">${data.from}</span> to <span class="branch-name branch-name-sm">${data.to}</span> ${when}`);
     case 'closed':
@@ -1163,7 +1167,9 @@ function editsLeftRow(p: PullPage, left: Map<EditField, GithubEdit>): Safe {
     ? html`Could not publish the ${andList(failed.map(([f]) => f))} to GitHub ${relTime(at)}`
     : html`The ${andList(onGithub)} ${was(onGithub)} edited on GitHub`;
   const text = [
-    onGithub.length ? `Someone edited the ${andList(onGithub)} on GitHub since galley published ${onGithub.length > 1 ? 'them' : 'it'}, so ${author.login}'s ${onGithub.length > 1 ? 'edits were' : 'edit was'} not published over ${onGithub.length > 1 ? 'them' : 'it'}.` : null,
+    onGithub.length
+      ? `Someone edited the ${andList(onGithub)} on GitHub since galley published ${onGithub.length > 1 ? 'them' : 'it'}, so ${author.login}'s ${onGithub.length > 1 ? 'edits were' : 'edit was'} not published over ${onGithub.length > 1 ? 'them' : 'it'}. galley takes GitHub's in when it next asks GitHub.`
+      : null,
     failed.length && onGithub.length ? `Publishing the ${andList(failed.map(([f]) => f))} failed.` : null,
     tries.every(([f, e]) => e.retry && e.failed.includes(f))
       ? `It is tried again each time ${author.login} waits, every few minutes while it does. Publish the update yourself to publish ${tries.length > 1 ? 'them' : 'it'} now.`

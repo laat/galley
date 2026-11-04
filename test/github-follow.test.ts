@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checksSummary, earlierThreads, githubAsks, githubBusy, githubWaits, prependThreads, readGithub, type GithubPull } from '../src/server/github-follow.ts';
+import { checksSummary, earlierThreads, editsOnGithub, githubAsks, githubBusy, githubWaits, prependThreads, readGithub, type GithubPull } from '../src/server/github-follow.ts';
 
 const run = (name: string, status: string, conclusion: string | null = null, job = name.length) => ({
   __typename: 'CheckRun' as const,
@@ -176,4 +176,31 @@ test("more checks than one page: the result is GitHub's sum of all of them", () 
   assert.equal(checksSummary(running).result, 'pending');
   assert.equal(githubBusy(running), true);
   assert.deepEqual(githubAsks(running, 'main'), []);
+});
+
+test('editsOnGithub: the title and description GitHub has that galley did not publish, and who edited them there', () => {
+  const published = { title: 'Add widgets', body: 'What it does.\n\n    code' };
+  // As published, but for a browser's line ends and a title's ends.
+  assert.deepEqual(editsOnGithub(pull({ title: ' Add widgets ', body: 'What it does.\r\n\r\n    code', editor: { login: 'laat' } }), published), []);
+  // GitHub did not say, or says what it does not allow.
+  assert.deepEqual(editsOnGithub(pull(), published), []);
+  assert.deepEqual(editsOnGithub(pull({ title: '  ', body: published.body }), published), []);
+  const renamed = (login: string, currentTitle: string) => ({ __typename: 'RenamedTitleEvent', actor: { login }, currentTitle });
+  const node = pull({
+    title: 'Add more widgets',
+    body: 'What it does.\r\n\r\ncode',
+    editor: { login: 'laat' },
+    timelineItems: { nodes: [renamed('octocat', 'Add more widgets'), renamed('hubot', 'Add widgets, again'), { __typename: 'ClosedEvent', actor: { login: 'hubot' } }] },
+  });
+  assert.deepEqual(editsOnGithub(node, published), [
+    // Whoever last renamed it to the title it has.
+    { field: 'title', text: 'Add more widgets', by: 'octocat' },
+    // An indented line that is not is an edit.
+    { field: 'description', text: 'What it does.\n\ncode', by: 'laat' },
+  ]);
+  // A rename past the timeline items GitHub answered with, and a description nobody edited since it was opened.
+  assert.deepEqual(editsOnGithub(pull({ title: 'Add more widgets', body: '', editor: null }), published), [
+    { field: 'title', text: 'Add more widgets', by: null },
+    { field: 'description', text: '', by: null },
+  ]);
 });
