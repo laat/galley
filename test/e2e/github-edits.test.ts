@@ -115,6 +115,33 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal(readFileSync(join(dir, 'gh-title'), 'utf8'), "The agent's title");
   });
 
+  await t.test('a CLI from before galley took edits in, which confirms other news, leaves them for the next wait to tell', async () => {
+    const pr = await published('feature/gh-edit-old-cli');
+    await githubHas(pr, 'Retitled on GitHub', 'x', { title: 'octocat' });
+    await human('POST', `/api/repos/acme/widgets/issues/${pr.n}/comments`, { body: 'Looks fine.' });
+    // It hears of the comment, not of the edit, and confirms what it showed.
+    const old = JSON.parse((await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=5`])).stdout);
+    assert.deepEqual([old.status, old.edited_on_github], ['feedback', null]);
+    assert.equal((await cli(['api', '-X', 'PUT', `repos/acme/widgets/pulls/${pr.n}/seen`, '-f', `at=${old.seen_at}`])).code, 0);
+    const r = await pr.wait();
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^octocat edited the title on GitHub, and galley has it now: Retitled on GitHub$/m);
+    assert.doesNotMatch(r.stdout, /Looks fine/);
+    assert.equal((await pr.wait('1s')).code, 124);
+  });
+
+  await t.test("GitHub getting the user's text is nothing new for the user's dismissed turn", async () => {
+    const pr = await published('feature/gh-edit-dismissed');
+    await githubHas(pr, 'Add gh-edit-dismissed.js', 'x');
+    await human('PATCH', pr.base, { title: "The user's title" });
+    await human('PUT', `${pr.base}/dismissed`);
+    await githubHas(pr, "The user's title", 'x');
+    const pull = await human('GET', pr.base);
+    assert.deepEqual([pull.title, pull.unpublished_changes], ["The user's title", []]);
+    const timeline: any[] = await human('GET', `/api/repos/acme/widgets/issues/${pr.n}/timeline`);
+    assert.equal(timeline.findLast((e) => e.event === 'turn_dismissed').ended, undefined);
+  });
+
   await t.test("an edit the author's wait left because GitHub had another is not left once GitHub's is taken in", async () => {
     const pr = await published('feature/gh-edit-left');
     // Retitled on GitHub, before galley asks.

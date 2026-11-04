@@ -92,17 +92,17 @@ export function lastEvent<T extends EventType>(db: Db, pull: PullRow, type: T | 
   return row ? (readEvent(row) as TimelineEvent<T>) : null;
 }
 
-/** The events of the pull request of `type` after the event `id`, oldest first. */
-export function eventsAfter<T extends EventType>(db: Db, pull: PullRow, type: T, id: number): TimelineEvent<T>[] {
-  return db.all<EventRow>('SELECT * FROM events WHERE pull_id = ? AND type = ? AND id > ? ORDER BY id', pull.id, type, id).map((row) => readEvent(row) as TimelineEvent<T>);
-}
-
-/** The events of the pull request of `type` (or one of several) after `since`, oldest first. */
-export function eventsSince<T extends EventType>(db: Db, pull: PullRow, type: T | T[], since: string): TimelineEvent<T>[] {
+/** The events of the pull request of `type` (or one of several) after the event `id`, oldest first. */
+export function eventsAfter<T extends EventType>(db: Db, pull: PullRow, type: T | T[], id: number): TimelineEvent<T>[] {
   const types: string[] = Array.isArray(type) ? type : [type];
   return db
-    .all<EventRow>(`SELECT * FROM events WHERE pull_id = ? AND type IN (${types.map(() => '?').join(', ')}) AND created_at > ? ORDER BY id`, pull.id, ...types, since)
+    .all<EventRow>(`SELECT * FROM events WHERE pull_id = ? AND type IN (${types.map(() => '?').join(', ')}) AND id > ? ORDER BY id`, pull.id, ...types, id)
     .map((row) => readEvent(row) as TimelineEvent<T>);
+}
+
+/** The events of the pull request of `type` after `since`, oldest first. */
+export function eventsSince<T extends EventType>(db: Db, pull: PullRow, type: T, since: string): TimelineEvent<T>[] {
+  return db.all<EventRow>('SELECT * FROM events WHERE pull_id = ? AND type = ? AND created_at > ? ORDER BY id', pull.id, type, since).map((row) => readEvent(row) as TimelineEvent<T>);
 }
 
 /** The row with its data read. */

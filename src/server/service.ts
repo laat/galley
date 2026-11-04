@@ -169,8 +169,12 @@ export interface WaitResult {
   push?: GithubPush;
   /** With `edited` and `edit_failed`, and with a push it came with: the author's edits of the title and description, published. */
   edit?: GithubEdit;
-  /** With `edited_on_github`, and with whatever else comes: the title and description as someone edited them on GitHub, the latest edit of each. */
-  editedOnGithub?: EditOnGithub[];
+  /**
+   * With `edited_on_github`, and with whatever else comes: the title and description as someone
+   * edited them on GitHub, the latest edit of each, and its `event`, which the author confirms with
+   * markSeen once it has shown them.
+   */
+  editedOnGithub?: (EditOnGithub & { event: number })[];
   /**
    * Whether the author has anything to address once it has read this: feedback in it that asks
    * something of it (feedback.ts), a thread waiting for its answer, or a reviewer agent's findings
@@ -427,9 +431,13 @@ export interface Dismissal {
  */
 const NOT_NEWS: EventType[] = ['turn_dismissed', 'turn_undismissed', 'review_cancelled'];
 
-/** SQL: pull request ?1's events after the event ?2 that are something new for a dismissed turn, with NOT_NEWS's types from ?4. */
+/**
+ * SQL: pull request ?1's events after the event ?2 that are something new for a dismissed turn, with
+ * NOT_NEWS's types from ?4. Nor is GitHub getting the text galley has (Service.recordGithub).
+ */
 const NEWS_EVENTS = `FROM events WHERE pull_id = ?1 AND id > ?2 AND type NOT IN (${NOT_NEWS.map((_, i) => `?${i + 4}`).join(', ')})
-  AND NOT (type = 'pushed' AND json_extract(data, '$.before') = json_extract(data, '$.after'))`;
+  AND NOT (type = 'pushed' AND json_extract(data, '$.before') = json_extract(data, '$.after'))
+  AND NOT (type IN ('renamed', 'body_edited') AND json_extract(data, '$.github') IS NOT NULL AND json_extract(data, '$.from') = json_extract(data, '$.to'))`;
 
 /** SQL: when anyone said something on pull request ?1 (`at`): a review submitted, a comment posted or edited, not in a review still pending. */
 const SAID = `SELECT submitted_at AS at FROM reviews WHERE pull_id = ?1 AND state != 'PENDING'
@@ -2413,9 +2421,12 @@ export class Service {
    * feedback), that the reviewer agents are done with `agentsDone`, and that `conflicts`
    * conflicts with its base, when it was told so.
    */
-  markSeen(pull: PullRow, at: string, agentsDone?: string, conflicts?: string): void {
+  markSeen(pull: PullRow, at: string, agentsDone?: string, conflicts?: string, editsTold?: number): void {
     const moved = this.db.transaction(() => {
-      const { seen: before, told } = this.db.get<{ seen: string; told: string | null }>('SELECT author_seen_at AS seen, conflicts_told_sha AS told FROM pulls WHERE id = ?', pull.id)!;
+      const { seen: before, told, edits } = this.db.get<{ seen: string; told: string | null; edits: number | null }>(
+        'SELECT author_seen_at AS seen, conflicts_told_sha AS told, github_edits_told AS edits FROM pulls WHERE id = ?',
+        pull.id,
+      )!;
       // Only forward: a late confirmation must not bring back feedback seen since, nor take back
       // that the reviewer agents are done with a later commit.
       if (before >= at) return false;
@@ -2432,6 +2443,7 @@ export class Service {
         ...(handed ? { author_handed_at: at } : {}),
         ...(done ? { agents_done_sha: done } : {}),
         ...(conflicts ? { conflicts_told_sha: conflicts } : {}),
+        ...(editsTold && editsTold > (edits ?? 0) ? { github_edits_told: editsTold } : {}),
       });
       return true;
     });
@@ -2521,7 +2533,7 @@ export class Service {
     const latestEdit = this.lastEdit(pull, pull.author_seen_at);
     const edit = latestEdit && !(latestEdit.retry && !latestEdit.published.length && !latestEdit.edited_on_github.length) ? latestEdit : null;
     // And of the title and description someone edited on GitHub, which galley took in: the author's to read before it edits them.
-    const onGithub = opts.editedOnGithub ? this.editsTakenIn(pull, pull.author_seen_at) : [];
+    const onGithub = opts.editedOnGithub ? this.editsTakenIn(pull) : [];
     // Closed here, or merged or closed on GitHub: nothing more is coming, so every wait says so.
     const ended = pull.state === 'closed' ? 'closed' : pull.github_state === 'merged' ? 'merged' : pull.github_state === 'closed' ? 'closed_on_github' : null;
     const unseen = fb.reviews.length > 0 || fb.comments.length > 0;
@@ -2545,12 +2557,15 @@ export class Service {
     return { status, reviews: fb.reviews, comments: fb.comments, seenAt: checkedAt, conflicts, push: push ?? undefined, edit: edit ?? undefined, editedOnGithub, ...this.leftToAddress(pull, fb) };
   }
 
-  /** The title and description someone edited on GitHub after `since`, as galley took them in (recordGithub): the latest edit of each. */
-  private editsTakenIn(pull: PullRow, since: string): EditOnGithub[] {
-    const taken = eventsSince(this.db, pull, ['renamed', 'body_edited'], since).filter((e) => e.data.github && e.data.from !== e.data.to);
+  /**
+   * The title and description someone edited on GitHub that `pr wait` has not told the author of
+   * (github_edits_told), as galley took them in (recordGithub): the latest edit of each.
+   */
+  private editsTakenIn(pull: PullRow): (EditOnGithub & { event: number })[] {
+    const taken = eventsAfter(this.db, pull, ['renamed', 'body_edited'], pull.github_edits_told ?? 0).filter((e) => e.data.github && e.data.from !== e.data.to);
     return (['title', 'description'] as const).flatMap((field) => {
       const e = taken.findLast((e) => e.type === (field === 'title' ? 'renamed' : 'body_edited'));
-      return e ? [{ field, text: e.data.to, by: e.data.github!.by }] : [];
+      return e ? [{ field, text: e.data.to, by: e.data.github!.by, event: e.id }] : [];
     });
   }
 

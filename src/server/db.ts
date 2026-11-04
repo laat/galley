@@ -75,6 +75,8 @@ export interface PullRow {
   agents_done_sha: string | null;
   /** The head commit `pr wait` last told the author conflicts with its base, so it says so once per commit. */
   conflicts_told_sha: string | null;
+  /** The latest edit made on GitHub (an event) that `pr wait` told the author of, so it says so once, also to a CLI that marked other feedback seen before it knew of them. */
+  github_edits_told: number | null;
   /** The published pull request on GitHub, as last seen there; null until galley has asked. */
   github_state: GithubState | null;
   /** When it was merged or closed on GitHub, and by whom (a GitHub login). */
@@ -363,6 +365,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ['review_runs', 'subject', 'TEXT'],
   ['pulls', 'client', 'TEXT'],
   ['pulls', 'link', 'TEXT'],
+  ['pulls', 'github_edits_told', 'INTEGER'],
 ];
 
 export class Db {

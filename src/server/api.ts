@@ -626,7 +626,7 @@ export function api(s: Service): Hono {
       push: r.push ?? null,
       // With status edited or edit_failed, or with a push: the author's edits of the title and description, published.
       edit: r.edit ?? null,
-      // With status edited_on_github, and with whatever else comes: the title and description as someone edited them on GitHub (`field`, `text`, `by`).
+      // With status edited_on_github, and with whatever else comes: the title and description as someone edited them on GitHub (`field`, `text`, `by`, `event`).
       edited_on_github: r.editedOnGithub ?? null,
       // Whether the author has anything to address once it has read this, and what the reviewer
       // agents still to review the head are at (WaitResult.asksAuthor), so the CLI need not work it out.
@@ -651,7 +651,10 @@ export function api(s: Service): Hono {
       if (!/^[0-9a-f]{40}$/.test(String(b[key]))) throw new HttpError(422, `${key} must be the SHA of a wait response`);
       return String(b[key]);
     };
-    s.markSeen(x.pull, at, sha('agents_done'), sha('conflicts'));
+    // The latest edit made on GitHub that the wait told of (`edited_on_github`'s latest `event`).
+    const edits = b.edited_on_github === undefined ? undefined : Number(b.edited_on_github);
+    if (edits !== undefined && !Number.isSafeInteger(edits)) throw new HttpError(422, "edited_on_github must be the latest event of a wait response's edited_on_github");
+    s.markSeen(x.pull, at, sha('agents_done'), sha('conflicts'), edits);
     return c.body(null, 204);
   });
 

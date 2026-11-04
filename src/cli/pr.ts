@@ -979,7 +979,13 @@ async function wait(client: Client, cwd: string, args: string[]): Promise<number
     // Shown, so now it counts as seen. If this does not get through, the next wait shows it again.
     for (let attempt = 1; ; attempt++) {
       try {
-        await client.json('PUT', `${pullPath(t)}/seen`, { at: r.seen_at, agents_done: r.agents_done?.sha, conflicts: conflicts ? (r.conflicts ?? undefined) : undefined });
+        const edits: number[] = (r.edited_on_github ?? []).map((e: any) => e.event);
+        await client.json('PUT', `${pullPath(t)}/seen`, {
+          at: r.seen_at,
+          agents_done: r.agents_done?.sha,
+          conflicts: conflicts ? (r.conflicts ?? undefined) : undefined,
+          edited_on_github: edits.length ? Math.max(...edits) : undefined,
+        });
         break;
       } catch (e) {
         if (!transient(e) || attempt === 10) {
