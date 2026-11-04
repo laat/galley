@@ -2,10 +2,12 @@
 // reviewer how it stands there: whether it is merged or closed, its checks and the workflow runs
 // on its head, a pending Copilot review, the review decision and who is asked to review, how many
 // reviews and comments it has, unresolved review threads, whether it conflicts with its base, and
-// whether auto-merge is on. It
-// is information for the reviewer, not feedback for the author agent. One GraphQL query per
-// repository asks for all of the repository's followed pull requests (PULL_FIELDS, aliased by
-// staged pull id); one with more review threads than that holds gets earlier pages (earlierThreads).
+// whether auto-merge is on. It is information for the reviewer, not feedback for the author agent.
+// Its title and description are the exception: galley takes in an edit someone made there
+// (editsOnGithub), and the author agent hears of it. One GraphQL query per repository asks for all
+// of the repository's followed pull requests (PULL_FIELDS, aliased by staged pull id); one with
+// more review threads than that holds gets earlier pages (earlierThreads).
+import type { EditField } from './service.ts';
 
 const PAGE = 'pageInfo{hasPreviousPage startCursor}';
 const THREAD_FIELDS = 'id isResolved isOutdated path line originalLine startLine diffSide comments(last:20){nodes{databaseId author{login} body createdAt url diffHunk}}';
@@ -14,7 +16,7 @@ const THREAD_FIELDS = 'id isResolved isOutdated path line originalLine startLine
 const TEAM = ' ...on Team{combinedSlug}';
 
 /** What is asked about each followed pull request. Costs about one rate-limit point per pull request. */
-export const PULL_FIELDS = `state headRefOid mergeable mergeStateStatus reviewDecision mergedAt closedAt mergedBy{login} mergeCommit{oid} autoMergeRequest{enabledAt}
+export const PULL_FIELDS = `state headRefOid title body editor{login} mergeable mergeStateStatus reviewDecision mergedAt closedAt mergedBy{login} mergeCommit{oid} autoMergeRequest{enabledAt}
   reviewRequests(first:20){totalCount nodes{requestedReviewer{...on User{login} ...on Bot{login} ...on Mannequin{login}${TEAM}}}}
   reviews(states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]){totalCount} comments{totalCount}
   commits(last:1){nodes{commit{
@@ -23,8 +25,9 @@ export const PULL_FIELDS = `state headRefOid mergeable mergeStateStatus reviewDe
       ...on StatusContext{context state targetUrl}}}}
     checkSuites(first:50){nodes{status workflowRun{databaseId url workflow{name}}}}}}}
   reviewThreads(last:50){${PAGE} nodes{${THREAD_FIELDS}}}
-  timelineItems(last:30,itemTypes:[CLOSED_EVENT,REVIEW_REQUESTED_EVENT,PULL_REQUEST_REVIEW]){nodes{__typename
+  timelineItems(last:30,itemTypes:[CLOSED_EVENT,REVIEW_REQUESTED_EVENT,PULL_REQUEST_REVIEW,RENAMED_TITLE_EVENT]){nodes{__typename
     ...on ClosedEvent{actor{login}}
+    ...on RenamedTitleEvent{actor{login} currentTitle}
     ...on ReviewRequestedEvent{requestedReviewer{...on Bot{login} ...on User{login}}}
     ...on PullRequestReview{author{login}}}}`.replace(/\s+/g, ' ');
 
@@ -56,6 +59,10 @@ type RawThread = {
 export interface GithubPull {
   state: 'OPEN' | 'MERGED' | 'CLOSED';
   headRefOid?: string;
+  title?: string;
+  body?: string;
+  /** Who last edited the description; null when nobody has since it was opened. Title edits are RenamedTitleEvents. */
+  editor?: Login;
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   mergeStateStatus?: string;
   reviewDecision?: string | null;
@@ -79,7 +86,7 @@ export interface GithubPull {
     };
   }>;
   reviewThreads?: Nodes<RawThread>;
-  timelineItems?: Nodes<{ __typename: string; actor?: Login; requestedReviewer?: Login; author?: Login }>;
+  timelineItems?: Nodes<{ __typename: string; actor?: Login; requestedReviewer?: Login; author?: Login; currentTitle?: string }>;
 }
 
 type RawCheck =
@@ -234,6 +241,40 @@ export function readGithub(node: GithubPull, previous: GithubStatus | null, chec
   const before = previous?.changes === undefined && previous ? { ...previous, reviewsTotal: status.reviewsTotal, commentsTotal: status.commentsTotal } : previous;
   const changed = !before || githubNews(before) !== githubNews(status);
   return { ...status, changes: (previous?.changes ?? 0) + (changed ? 1 : 0) };
+}
+
+/**
+ * A title or description as galley compares it with GitHub's: a title without spaces at its ends,
+ * a description with a browser's line ends made plain. Other whitespace in a description can
+ * matter (an indented line is code).
+ */
+export function githubText(field: EditField, text: string | null | undefined): string {
+  return field === 'title' ? (text ?? '').trim() : (text ?? '').replace(/\r\n/g, '\n');
+}
+
+/** An edit of the title or the description someone made on GitHub: the text GitHub has (githubText), and who edited it, when GitHub says. */
+export interface EditOnGithub {
+  field: EditField;
+  text: string;
+  by: string | null;
+}
+
+/**
+ * The title and description GitHub has that are not what galley last published there
+ * (`published`), so someone edited them on GitHub. Not one GitHub did not answer with, nor an empty
+ * title, which GitHub does not allow. Whoever renamed it to its title last, of the timeline items
+ * GitHub answered with, edited the title.
+ */
+export function editsOnGithub(node: GithubPull, published: { title: string; body: string }): EditOnGithub[] {
+  const edits: EditOnGithub[] = [];
+  const title = githubText('title', node.title);
+  if (node.title != null && title && title !== githubText('title', published.title)) {
+    const rename = present(node.timelineItems).findLast((i) => i.__typename === 'RenamedTitleEvent' && githubText('title', i.currentTitle) === title);
+    edits.push({ field: 'title', text: title, by: rename?.actor?.login ?? null });
+  }
+  const body = githubText('description', node.body);
+  if (node.body != null && body !== githubText('description', published.body)) edits.push({ field: 'description', text: body, by: node.editor?.login ?? null });
+  return edits;
 }
 
 /** The cursor for the page of review threads before the ones `node` holds, while there are more. */

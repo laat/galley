@@ -15,8 +15,13 @@ import type { MergeMethod } from './settings.ts';
 export interface EventData {
   /** New commits on the branch, or a force-push: `commits` are the new ones, none when forced. */
   pushed: { before: string; after: string; forced: boolean; commits: string[]; base_before: string; base_after: string };
-  renamed: { from: string; to: string };
-  body_edited: { from: string; to: string };
+  /**
+   * `github`: edited on GitHub, by `by` when GitHub says, and taken in when galley followed it
+   * (Service.recordGithub). With `to` the same as `from`, GitHub got the text galley has: no edit,
+   * but it counts as published (Service.authorEdits).
+   */
+  renamed: { from: string; to: string; github?: { url: string; by: string | null } };
+  body_edited: { from: string; to: string; github?: { url: string; by: string | null } };
   base_changed: { from: string; to: string };
   convert_to_draft: Record<string, never>;
   ready_for_review: Record<string, never>;
@@ -87,9 +92,12 @@ export function lastEvent<T extends EventType>(db: Db, pull: PullRow, type: T | 
   return row ? (readEvent(row) as TimelineEvent<T>) : null;
 }
 
-/** The events of the pull request of `type` after the event `id`, oldest first. */
-export function eventsAfter<T extends EventType>(db: Db, pull: PullRow, type: T, id: number): TimelineEvent<T>[] {
-  return db.all<EventRow>('SELECT * FROM events WHERE pull_id = ? AND type = ? AND id > ? ORDER BY id', pull.id, type, id).map((row) => readEvent(row) as TimelineEvent<T>);
+/** The events of the pull request of `type` (or one of several) after the event `id`, oldest first. */
+export function eventsAfter<T extends EventType>(db: Db, pull: PullRow, type: T | T[], id: number): TimelineEvent<T>[] {
+  const types: string[] = Array.isArray(type) ? type : [type];
+  return db
+    .all<EventRow>(`SELECT * FROM events WHERE pull_id = ? AND type IN (${types.map(() => '?').join(', ')}) AND id > ? ORDER BY id`, pull.id, ...types, id)
+    .map((row) => readEvent(row) as TimelineEvent<T>);
 }
 
 /** The events of the pull request of `type` after `since`, oldest first. */

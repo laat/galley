@@ -15,7 +15,7 @@ import { addEvent, eventsAfter, eventsSince, lastEvent, type EventData, type Eve
 import { MERGE_METHODS, readSettings, type MergeMethod } from './settings.ts';
 import { reviewDecision } from './github.ts';
 import { pullLink } from '../pull-link.ts';
-import { earlierThreads, earlierThreadsQuery, githubAsks, githubBusy, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type GithubPull, type GithubStatus } from './github-follow.ts';
+import { earlierThreads, earlierThreadsQuery, editsOnGithub, githubAsks, githubBusy, githubText, githubWaits, prependThreads, present, readGithub, PULL_FIELDS, PULL_FIELDS_WITHOUT_TEAMS, type EditOnGithub, type GithubPull, type GithubStatus } from './github-follow.ts';
 import {
   Db,
   now,
@@ -153,9 +153,10 @@ export interface WaitResult {
    * see Service.agentsDone; `conflicts`, the head conflicts with its base (Service.baseConflicts);
    * `pushed` and `push_failed`, what came of pushing the head the author waited with once it is
    * published (Service.pushUpdate); `edited` and `edit_failed`, what came of publishing its edits of
-   * the title and description then, when it pushed nothing (Service.publishEdits).
+   * the title and description then, when it pushed nothing (Service.publishEdits); `edited_on_github`,
+   * someone edited the title or description on GitHub, and galley took it in (Service.recordGithub).
    */
-  status: 'feedback' | 'published' | 'pushed' | 'push_failed' | 'edited' | 'edit_failed' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'conflicts' | 'timeout';
+  status: 'feedback' | 'published' | 'pushed' | 'push_failed' | 'edited' | 'edit_failed' | 'edited_on_github' | 'closed' | 'merged' | 'closed_on_github' | 'agents_done' | 'conflicts' | 'timeout';
   reviews: ReviewRow[];
   comments: CommentRow[];
   /** What the author confirms with markSeen once it has shown this feedback. */
@@ -169,6 +170,12 @@ export interface WaitResult {
   /** With `edited` and `edit_failed`, and with a push it came with: the author's edits of the title and description, published. */
   edit?: GithubEdit;
   /**
+   * With `edited_on_github`, and with whatever else comes: the title and description as someone
+   * edited them on GitHub, the latest edit of each, and its `event`, which the author confirms with
+   * markSeen once it has shown them (editsTakenIn).
+   */
+  editedOnGithub?: EditTakenIn[];
+  /**
    * Whether the author has anything to address once it has read this: feedback in it that asks
    * something of it (feedback.ts), a thread waiting for its answer, or a reviewer agent's findings
    * in the head it has not answered (Reviewer.answered). Worked out before the feedback counts as
@@ -177,6 +184,17 @@ export interface WaitResult {
   asksAuthor?: boolean;
   /** What the reviewer agents that still have the head to review are at ("claude-review is about to review 8c64534"). */
   stillToReview?: string[];
+}
+
+/**
+ * An edit made on GitHub that galley took in (Service.editsTakenIn), with its event, and `here`:
+ * the text galley has, when someone edited it here since; null when it is GitHub's.
+ */
+export type EditTakenIn = EditOnGithub & { event: number; here: string | null };
+
+/** What the CLI waiting knows of (Service.wait): the status `edited_on_github`. */
+export interface WaitOptions {
+  editedOnGithub?: boolean;
 }
 
 /**
@@ -419,9 +437,13 @@ export interface Dismissal {
  */
 const NOT_NEWS: EventType[] = ['turn_dismissed', 'turn_undismissed', 'review_cancelled'];
 
-/** SQL: pull request ?1's events after the event ?2 that are something new for a dismissed turn, with NOT_NEWS's types from ?4. */
+/**
+ * SQL: pull request ?1's events after the event ?2 that are something new for a dismissed turn, with
+ * NOT_NEWS's types from ?4. Nor is GitHub getting the text galley has (Service.recordGithub).
+ */
 const NEWS_EVENTS = `FROM events WHERE pull_id = ?1 AND id > ?2 AND type NOT IN (${NOT_NEWS.map((_, i) => `?${i + 4}`).join(', ')})
-  AND NOT (type = 'pushed' AND json_extract(data, '$.before') = json_extract(data, '$.after'))`;
+  AND NOT (type = 'pushed' AND json_extract(data, '$.before') = json_extract(data, '$.after'))
+  AND NOT (type IN ('renamed', 'body_edited') AND json_extract(data, '$.github') IS NOT NULL AND json_extract(data, '$.from') = json_extract(data, '$.to'))`;
 
 /** SQL: when anyone said something on pull request ?1 (`at`): a review submitted, a comment posted or edited, not in a review still pending. */
 const SAID = `SELECT submitted_at AS at FROM reviews WHERE pull_id = ?1 AND state != 'PENDING'
@@ -907,11 +929,16 @@ export class Service {
     }
   }
 
-  /** Record what GitHub says about a published pull request, asked at `sentAt`: merged or closed there, or how it stands while open. */
+  /**
+   * Record what GitHub says about a published pull request, asked at `sentAt`: merged or closed
+   * there, or how it stands while open, and the title and description someone edited there
+   * (editedOnGithub), which galley takes in.
+   */
   async recordGithub(pullId: number, node: GithubPull, slug: string, number: number, sentAt: string): Promise<void> {
     if (node.state !== 'OPEN') return this.recordGithubEnd(pullId, node);
     const complete = await this.readEarlierThreads(slug, number, node);
-    const type = this.db.transaction(() => {
+    const viewer = this.viewer();
+    const recorded = this.db.transaction(() => {
       const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId);
       // Closed here, or merged or closed on GitHub, while gh answered: no longer followed.
       if (!pull || pull.state !== 'published' || (pull.github_state ?? 'open') !== 'open') return null;
@@ -919,17 +946,52 @@ export class Service {
       const previous = pull.github_status ? (JSON.parse(pull.github_status) as GithubStatus) : null;
       // Threads on pages it could not read stay as they were.
       const status = readGithub(node, previous, sentAt, complete);
-      this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status) });
+      const texts: Partial<Pick<PullRow, 'title' | 'body' | 'published_title' | 'published_body' | 'updated_at'>> = {};
+      const ts = now();
+      for (const { field, text, by } of this.editedOnGithub(pull, node, sentAt)) {
+        const [column, published, type] = field === 'title' ? (['title', 'published_title', 'renamed'] as const) : (['body', 'published_body', 'body_edited'] as const);
+        // galley has it already: GitHub got an edit made here that publishing did not get to record,
+        // or someone made the same one there. It counts as published all the same (authorEdits),
+        // with an event from the text to itself, which is no edit.
+        const same = githubText(field, pull[column]) === text;
+        if (same) texts[published] = pull[column];
+        else Object.assign(texts, { [column]: text, [published]: text, updated_at: ts });
+        // The author's wait hears of it (waitResult), and its edits after it are its waits' to publish (authorEdits).
+        this.addEvent(pull, viewer, type, { from: pull[column], to: same ? pull[column] : text, github: { url: pull.published_url!, by } }, ts);
+      }
+      this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status), ...texts });
       // Pages show the status; tell them when it changed, not each time galley asked. The first
       // answer since galley's latest push or publish, or since it turned on auto-merge, is news even
       // when GitHub says the same: what it said before may have been taken for news of a commit that
       // push replaced, or for auto-merge being on when it says it is off (turn).
       const since = [pull.published_at ?? '', this.autoMerge(pull)?.at ?? ''].reduce((a, b) => (a > b ? a : b));
       const same = previous && previous.checkedAt >= since && JSON.stringify({ ...previous, checkedAt: null }) === JSON.stringify({ ...status, checkedAt: null });
-      return pull.github_state === 'open' && same ? null : 'github_status';
+      return { status: pull.github_state === 'open' && same ? null : 'github_status', texts: Object.keys(texts).length > 0, edited: texts.updated_at !== undefined };
     });
-    // From GitHub, like what merging allows: pages refresh. It is for the reviewer; the author's `pr wait` hears only of a merge or close.
-    if (type) this.emitSystem(pullId, type, 'github');
+    if (!recorded) return;
+    if (recorded.edited) {
+      // A review of the title and description that were (Reviewer.cancel), and the reviewers of the description have a new version of it.
+      const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pullId)!;
+      this.cancelReviews(pull, 'edited');
+      this.reconsiderDescription(pull);
+    }
+    // The author's `pr wait` hears of an edit on GitHub, and of a merge or close (recordGithubEnd).
+    if (recorded.texts) this.emitSystem(pullId, 'edited_on_github', 'github');
+    // From GitHub, like what merging allows: pages refresh. It is for the reviewer.
+    if (recorded.status) this.emitSystem(pullId, recorded.status, 'github');
+  }
+
+  /**
+   * The title and description someone edited on GitHub (editsOnGithub), which galley takes in, also
+   * over an edit here that GitHub does not have yet: the timeline keeps the text it replaces, and
+   * the author hears of GitHub's. Not from an answer asked before galley last published there (by
+   * hand, with a push, or the author's edits: publishEdits), which may have the text galley
+   * replaced; nor while galley publishes, which may give GitHub its text before it records that.
+   */
+  private editedOnGithub(pull: PullRow, node: GithubPull, sentAt: string): EditOnGithub[] {
+    if (pull.published_title === null || pull.published_body === null || this.pushLocks.has(pull.id)) return [];
+    if (sentAt < (pull.published_at ?? '') || sentAt < (this.lastEdit(pull)?.at ?? '')) return [];
+    return editsOnGithub(node, { title: pull.published_title, body: pull.published_body });
   }
 
   /**
@@ -2365,12 +2427,19 @@ export class Service {
    * feedback), that the reviewer agents are done with `agentsDone`, and that `conflicts`
    * conflicts with its base, when it was told so.
    */
-  markSeen(pull: PullRow, at: string, agentsDone?: string, conflicts?: string): void {
+  markSeen(pull: PullRow, at: string, agentsDone?: string, conflicts?: string, editsTold?: number): void {
     const moved = this.db.transaction(() => {
-      const { seen: before, told } = this.db.get<{ seen: string; told: string | null }>('SELECT author_seen_at AS seen, conflicts_told_sha AS told FROM pulls WHERE id = ?', pull.id)!;
+      const { seen: before, conflictsTold, edits } = this.db.get<{ seen: string; conflictsTold: string | null; edits: number | null }>(
+        'SELECT author_seen_at AS seen, conflicts_told_sha AS conflictsTold, github_edits_told AS edits FROM pulls WHERE id = ?',
+        pull.id,
+      )!;
+      // The edits on GitHub it was told of go forward on their own: a confirmation of later news
+      // (`pr view --comments`, an older CLI's wait) may have come first.
+      const told = !!editsTold && editsTold > (edits ?? 0);
+      if (told) this.db.update('pulls', pull.id, { github_edits_told: editsTold });
       // Only forward: a late confirmation must not bring back feedback seen since, nor take back
       // that the reviewer agents are done with a later commit.
-      if (before >= at) return false;
+      if (before >= at) return told;
       // Nor say they are done with the commit in a review loop asked for since (requestReviews),
       // in the same millisecond included.
       const since = agentsDone && this.db.get("SELECT 1 FROM events WHERE pull_id = ? AND type = 'review_requested' AND created_at >= ? LIMIT 1", pull.id, at);
@@ -2378,7 +2447,7 @@ export class Service {
       // Among it, feedback that asks something of the author, or a conflict it was told of for
       // the first time: from now, its turn (see turn).
       const asked = askedAt(this.db, pull, at);
-      const handed = (asked !== null && asked > before) || (!!conflicts && conflicts !== told);
+      const handed = (asked !== null && asked > before) || (!!conflicts && conflicts !== conflictsTold);
       this.db.update('pulls', pull.id, {
         author_seen_at: at,
         ...(handed ? { author_handed_at: at } : {}),
@@ -2453,8 +2522,12 @@ export class Service {
     if (this.authorWaiting(pull.id)) for (const r of this.reviewersFor(pull)) if (filter(r)) r.consider(pull.id);
   }
 
-  /** What a `pr wait` on the pull request returns now, or null while there is nothing new. */
-  private waitResult(id: number): WaitResult | null {
+  /**
+   * What a `pr wait` on the pull request returns now, or null while there is nothing new. Edits
+   * made on GitHub only with `editedOnGithub`: a CLI older than them would take the status for
+   * feedback, and mark the edits as seen without saying what they were.
+   */
+  private waitResult(id: number, opts: WaitOptions = {}): WaitResult | null {
     const checkedAt = now();
     const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
     if (!pull) return { status: 'closed', reviews: [], comments: [] };
@@ -2468,6 +2541,8 @@ export class Service {
     // (pushUpdate). A failure that is tried again is the reviewer's to see; the author waits on.
     const latestEdit = this.lastEdit(pull, pull.author_seen_at);
     const edit = latestEdit && !(latestEdit.retry && !latestEdit.published.length && !latestEdit.edited_on_github.length) ? latestEdit : null;
+    // And of the title and description someone edited on GitHub, which galley took in: the author's to read before it edits them.
+    const onGithub = opts.editedOnGithub ? this.editsTakenIn(pull) : [];
     // Closed here, or merged or closed on GitHub: nothing more is coming, so every wait says so.
     const ended = pull.state === 'closed' ? 'closed' : pull.github_state === 'merged' ? 'merged' : pull.github_state === 'closed' ? 'closed_on_github' : null;
     const unseen = fb.reviews.length > 0 || fb.comments.length > 0;
@@ -2482,12 +2557,28 @@ export class Service {
     // While the head the author waits with is pushed and its edits published (pushUpdate), what came
     // of either so far waits for the rest. Not when something else comes meanwhile: it comes at once,
     // with what came of them so far, and the rest comes with the next wait.
-    const updating = this.updating.has(pull.id) && !unseen && !fresh;
-    const status = ended ?? (published ? 'published' : held || updating ? null : (pushed ?? edited ?? (unseen ? 'feedback' : fresh ? 'conflicts' : null)));
+    const updating = this.updating.has(pull.id) && !unseen && !fresh && !onGithub.length;
+    const status = ended ?? (published ? 'published' : held || updating ? null : (pushed ?? edited ?? (unseen ? 'feedback' : fresh ? 'conflicts' : onGithub.length ? 'edited_on_github' : null)));
     if (!status) return null;
     // Not marked as seen here: the author confirms once it has shown the feedback, so a
     // response lost on the way (a restart) delivers it again instead of losing it.
-    return { status, reviews: fb.reviews, comments: fb.comments, seenAt: checkedAt, conflicts, push: push ?? undefined, edit: edit ?? undefined, ...this.leftToAddress(pull, fb) };
+    const editedOnGithub = onGithub.length ? onGithub : undefined;
+    return { status, reviews: fb.reviews, comments: fb.comments, seenAt: checkedAt, conflicts, push: push ?? undefined, edit: edit ?? undefined, editedOnGithub, ...this.leftToAddress(pull, fb) };
+  }
+
+  /**
+   * The title and description someone edited on GitHub that `pr wait` has not told the author of
+   * (github_edits_told), as galley took them in (recordGithub): the latest edit of each, and the
+   * text galley has when someone edited it here since. Until the author is told, its edits of the
+   * field wait (editsToTry).
+   */
+  private editsTakenIn(pull: PullRow): EditTakenIn[] {
+    const taken = eventsAfter(this.db, pull, ['renamed', 'body_edited'], pull.github_edits_told ?? 0).filter((e) => e.data.github && e.data.from !== e.data.to);
+    return (['title', 'description'] as const).flatMap((field) => {
+      const e = taken.findLast((e) => e.type === (field === 'title' ? 'renamed' : 'body_edited'));
+      const here = field === 'title' ? pull.title : pull.body;
+      return e ? [{ field, text: e.data.to, by: e.data.github!.by, event: e.id, here: here === e.data.to ? null : here }] : [];
+    });
   }
 
   /** What is left for the author once it has read the feedback, and for the reviewer agents (WaitResult.asksAuthor, stillToReview). */
@@ -2500,7 +2591,7 @@ export class Service {
     };
   }
 
-  async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
+  async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal, opts: WaitOptions = {}): Promise<WaitResult> {
     const id = ctx.pull.id;
     const author = this.db.actorById(ctx.pull.author_id);
     // Waiting says the author is ready for review, which starts reviewer agents and lets auto-publish go ahead.
@@ -2508,14 +2599,14 @@ export class Service {
       throw new HttpError(403, `only the author of this pull request (${author.login}) can wait for its feedback, not ${actor.login}. An agent carrying on the author's work sets GALLEY_ACTOR=${author.login}.`);
     }
     // A pull request that is closed or merged is not ready for review: answer without saying the author waits.
-    const already = this.waitResult(id);
+    const already = this.waitResult(id, opts);
     if (already && ENDED.includes(already.status)) return already;
     this.setWaiting(id, 1, author);
     const deadline = Date.now() + timeoutMs;
     try {
       while (true) {
         const checkedAt = now();
-        const result = this.waitResult(id);
+        const result = this.waitResult(id, opts);
         if (result) {
           // What asks nothing of the author (an approval, a review that found nothing, a publish)
           // hands it no turn, so the wait that returns it is its latest action all the same. A
@@ -3044,7 +3135,8 @@ export class Service {
    * a wait never publishes over the user's text. Once the user publishes it, the author's later
    * edits are its waits' again. Which edits the text it published included goes by the events'
    * order, not their time: an edit made while it was being published, after the text was read,
-   * counts as one since, whenever its request began.
+   * counts as one since, whenever its request began. An edit made on GitHub that galley took in
+   * (recordGithub) makes GitHub's text the one published, as a publish does.
    */
   authorEdits(pull: PullRow): EditField[] {
     const fields = this.unpublishedChanges(pull).filter((c) => c !== 'commits');
@@ -3055,7 +3147,7 @@ export class Service {
     const publish = published?.data.read_upto ?? published?.id ?? 0;
     const edits = eventsAfter(this.db, pull, 'github_edit', published?.id ?? 0);
     return fields.filter((c) => {
-      const since = edits.findLast((e) => e.data.published.includes(c))?.data.read_upto ?? publish;
+      const since = Math.max(edits.findLast((e) => e.data.published.includes(c))?.data.read_upto ?? publish, this.takenIn(pull, c));
       const by = this.db.all<{ actor_id: number }>('SELECT actor_id FROM events WHERE pull_id = ? AND type = ? AND id > ?', pull.id, c === 'title' ? 'renamed' : 'body_edited', since);
       return by.length > 0 && by.every((e) => e.actor_id === pull.author_id);
     });
@@ -3072,12 +3164,21 @@ export class Service {
     if (!fields.length) return left;
     const edits = eventsAfter(this.db, pull, 'github_edit', lastEvent(this.db, pull, 'published')?.id ?? 0);
     for (const f of fields) {
-      // The latest try of this field.
-      const e = edits.findLast(({ data: d }) => [...d.published, ...d.edited_on_github, ...d.failed].includes(f));
+      // The latest try of this field since GitHub's text was last taken in, before which GitHub had another.
+      const taken = this.takenIn(pull, f);
+      const e = edits.findLast(({ id, data: d }) => id > taken && [...d.published, ...d.edited_on_github, ...d.failed].includes(f));
       if (!e || e.data.published.includes(f)) continue;
       if (f === 'title' ? e.data.title === pull.title : e.data.body === pull.body) left.set(f, { ...e.data, at: e.created_at });
     }
     return left;
+  }
+
+  /**
+   * The latest event that took in the field as GitHub has it (recordGithub), after which GitHub's
+   * text is the one published, as after a publish; 0 when there is none.
+   */
+  private takenIn(pull: PullRow, field: EditField): number {
+    return eventsAfter(this.db, pull, field === 'title' ? 'renamed' : 'body_edited', 0).findLast((e) => e.data.github)?.id ?? 0;
   }
 
   /**
@@ -3983,13 +4084,16 @@ export class Service {
   /**
    * The author's edits its wait publishes: those publishing has not left as they are (editsLeft),
    * and those a failure that is tried again left, once per wait, at least as often as `pr wait`
-   * asks again.
+   * asks again. Not one over an edit made on GitHub that no wait has told the author of
+   * (editsTakenIn): the wait that tells it goes first, and the next publishes it, as its edits
+   * are still the author's wait's to deliver (turn).
    */
   private editsToTry(pull: PullRow): EditField[] {
     const edits = this.authorEdits(pull);
     const left = this.editsLeft(pull, edits);
     const again = this.editTries.get(pull.id) !== this.editTry(pull);
-    return edits.filter((f) => !left.has(f) || (left.get(f)!.retry && left.get(f)!.failed.includes(f) && again));
+    const untold = new Set(this.editsTakenIn(pull).map((e) => e.field));
+    return edits.filter((f) => !untold.has(f) && (!left.has(f) || (left.get(f)!.retry && left.get(f)!.failed.includes(f) && again)));
   }
 
   /** The text and the wait each publishing of edits was last tried for (editsToTry). */
@@ -4129,10 +4233,11 @@ export class Service {
    * to the published pull request, as publishing sets them (`gh pr edit`), unattended. GitHub is
    * asked first, as before a push: nothing is published once the pull request is merged or closed
    * there, nor without an answer. A field someone edited on GitHub since galley last published it
-   * is left alone, for the reviewer to publish over or not. The timeline says what came of it, and
-   * the author's wait hears of it, but not of a failure that is tried again: GitHub could not be
-   * reached or asked, tried again when the author next waits. One left otherwise, or refused, is
-   * not tried again with the same text (editsLeft). Returns whether it recorded anything.
+   * is left alone: following GitHub takes GitHub's in (recordGithub), or the reviewer publishes
+   * over it. The timeline says what came of it, and the author's wait hears of it, but not of a
+   * failure that is tried again: GitHub could not be reached or asked, tried again when the author
+   * next waits. One left otherwise, or refused, is not tried again with the same text (editsLeft).
+   * Returns whether it recorded anything.
    */
   private async publishEdits(ctx: Ctx): Promise<boolean> {
     const { pull, upto: start } = this.snapshot(ctx.pull.id);
@@ -4169,10 +4274,8 @@ export class Service {
       this.editTries.delete(pull.id);
       return false;
     }
-    // As GitHub has it: someone edited it there since galley published it. Whitespace in a body can
-    // matter (an indented line is code), but not a browser's line ends, nor a title's ends.
-    const lines = (text: string | null | undefined) => (text ?? '').replace(/\r\n/g, '\n');
-    const onGithub = fields.filter((f) => (f === 'title' ? (github.title ?? '').trim() !== (pull.published_title ?? '').trim() : lines(github.body) !== lines(pull.published_body)));
+    // As GitHub has it: someone edited it there since galley published it, which following GitHub takes in (recordGithub).
+    const onGithub = fields.filter((f) => (f === 'title' ? githubText(f, github.title) !== githubText(f, pull.published_title) : githubText(f, github.body) !== githubText(f, pull.published_body)));
     const send = fields.filter((f) => !onGithub.includes(f));
     if (!send.length) return record({ read_upto: upto, published: [], edited_on_github: onGithub, failed: [] });
     const args = ['pr', 'edit', url, ...(send.includes('title') ? ['--title', pull.title] : []), ...(send.includes('description') ? ['--body-file', '-'] : [])];

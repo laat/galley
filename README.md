@@ -226,10 +226,11 @@ this off.
    galley pushes each commit it waits with, without reviews here: signed as you published,
    force-pushed only over what galley pushed last, and with auto-merge asked for again if it
    was on. Its edits of the title and description are published when it waits too, unless you
-   edited them since you published, or someone edited them on GitHub. A push GitHub refuses is
-   not tried again, and you and the agent hear why; when someone added commits to the branch on
-   GitHub, or rewrote it there, galley fetches it for the agent to rebase onto, and pushes the
-   agent's new commits on top of it. A commit that would
+   edited them since you published. An edit someone makes to them on GitHub comes back to
+   galley, over any edit here that GitHub does not have yet, and the agent hears of it. A push
+   GitHub refuses is not tried again, and you and the agent hear why; when someone added commits
+   to the branch on GitHub, or rewrote it there, galley fetches it for the agent to rebase onto,
+   and pushes the agent's new commits on top of it. A commit that would
    bring back what the rewrite removed is refused, unless you publish it yourself and choose to
    bring those commits back. One that fails otherwise (GitHub out of reach) is tried again when
    the agent next waits; one whose signing prompt nobody answered is tried again a few times
