@@ -1147,12 +1147,21 @@ function editLine(e: { published: string[]; edited_on_github: string[]; failed: 
   return `${what}: ${why.filter(Boolean).join('; ')}. Nothing on GitHub was overwritten. ${next}; do not edit ${it(left)} on GitHub yourself.`;
 }
 
-/** Someone edited the title or description on GitHub, and galley took it in. */
-function editedOnGithubLine(e: { field: string; text: string; by: string | null }, number: number): string {
+/**
+ * Someone edited the title or description on GitHub, and galley took it in. When it was edited
+ * here since (`here`), galley has that, and GitHub's text is shown in full, as no command shows it.
+ */
+function editedOnGithubLine(e: { field: string; text: string; by: string | null; here?: string | null }, number: number): string {
   const who = e.by ?? 'Someone';
+  if (e.here == null) {
+    return e.field === 'title'
+      ? `${who} edited the title on GitHub, and galley has it now: ${e.text}`
+      : `${who} edited the description on GitHub, and galley has it now. Read it with \`galley pr view s${number}\` before you edit it.`;
+  }
+  const since = `If you made that edit, your next wait publishes it over GitHub's; edit it again first to keep any of GitHub's.`;
   return e.field === 'title'
-    ? `${who} edited the title on GitHub, and galley has it now: ${e.text}`
-    : `${who} edited the description on GitHub, and galley has it now. Read it with \`galley pr view s${number}\` before you edit it.`;
+    ? `${who} edited the title on GitHub to: ${e.text}\nIt was edited here since, to: ${e.here}. ${since}`
+    : `${who} edited the description on GitHub to:\n${e.text.replace(/^/gm, '    ')}\nIt was edited here since (\`galley pr view s${number}\` shows it). ${since}`;
 }
 
 /** What the author does once its pull request is published. */

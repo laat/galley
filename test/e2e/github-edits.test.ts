@@ -130,6 +130,39 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal((await pr.wait('1s')).code, 124);
   });
 
+  await t.test("the author's edit after GitHub's, before a wait told it of GitHub's, is published only after one has", async () => {
+    const pr = await published('feature/gh-edit-unseen');
+    await githubHas(pr, 'Retitled on GitHub', 'Edited on GitHub', { title: 'octocat', body: 'laat' });
+    assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Retitled by the agent', '--body', "The agent's words."])).code, 0);
+    // A wait that is not told of GitHub's, as a CLI from before galley took edits in waits, publishes nothing over them.
+    const old = await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=3`]);
+    assert.equal(JSON.parse(old.stdout).status, 'timeout', old.stderr);
+    await server.autoPublisher.settle(pr.id);
+    assert.deepEqual([readFileSync(join(dir, 'gh-title'), 'utf8'), readFileSync(join(dir, 'gh-body'), 'utf8')], ['Retitled on GitHub', 'Edited on GitHub']);
+    const r = await pr.wait();
+    assert.equal(r.code, 0, r.stderr);
+    const since = "If you made that edit, your next wait publishes it over GitHub's; edit it again first to keep any of GitHub's\\.";
+    assert.match(r.stdout, new RegExp(`^octocat edited the title on GitHub to: Retitled on GitHub\nIt was edited here since, to: Retitled by the agent\\. ${since}$`, 'm'));
+    assert.match(r.stdout, new RegExp(`^laat edited the description on GitHub to:\n    Edited on GitHub\nIt was edited here since \\(\`galley pr view s${pr.n}\` shows it\\)\\. ${since}$`, 'm'));
+    assert.doesNotMatch(r.stdout, /Published/);
+    assert.deepEqual([readFileSync(join(dir, 'gh-title'), 'utf8'), readFileSync(join(dir, 'gh-body'), 'utf8')], ['Retitled on GitHub', 'Edited on GitHub']);
+    // Told, its next wait publishes them.
+    assert.match((await pr.wait()).stdout, /^Published the title and description to GitHub: /m);
+    assert.deepEqual([readFileSync(join(dir, 'gh-title'), 'utf8'), readFileSync(join(dir, 'gh-body'), 'utf8')], ['Retitled by the agent', "The agent's words."]);
+  });
+
+  await t.test('a confirmation of an edit told, which comes after one of later news, counts all the same', async () => {
+    const pr = await published('feature/gh-edit-seen-order');
+    await githubHas(pr, 'Retitled on GitHub', 'x', { title: 'octocat' });
+    const shown = JSON.parse((await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=5&knows=edited_on_github`])).stdout);
+    assert.equal(shown.status, 'edited_on_github');
+    // `pr view --comments` confirms what it showed, later, first.
+    assert.equal((await cli(['pr', 'view', pr.n, '--comments'])).code, 0);
+    const seen = await cli(['api', '-X', 'PUT', `repos/acme/widgets/pulls/${pr.n}/seen`, '-f', `at=${shown.seen_at}`, '-F', `edited_on_github=${shown.edited_on_github[0].event}`]);
+    assert.equal(seen.code, 0, seen.stderr);
+    assert.equal((await pr.wait('1s')).code, 124);
+  });
+
   await t.test("GitHub getting the user's text is nothing new for the user's dismissed turn", async () => {
     const pr = await published('feature/gh-edit-dismissed');
     await githubHas(pr, 'Add gh-edit-dismissed.js', 'x');
