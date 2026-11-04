@@ -2570,7 +2570,7 @@ export class Service {
    * The title and description someone edited on GitHub that `pr wait` has not told the author of
    * (github_edits_told), as galley took them in (recordGithub): the latest edit of each, and the
    * text galley has when someone edited it here since. Until the author is told, its edits of the
-   * field wait (authorEdits).
+   * field wait (editsToTry).
    */
   private editsTakenIn(pull: PullRow): EditTakenIn[] {
     const taken = eventsAfter(this.db, pull, ['renamed', 'body_edited'], pull.github_edits_told ?? 0).filter((e) => e.data.github && e.data.from !== e.data.to);
@@ -3136,14 +3136,10 @@ export class Service {
    * edits are its waits' again. Which edits the text it published included goes by the events'
    * order, not their time: an edit made while it was being published, after the text was read,
    * counts as one since, whenever its request began. An edit made on GitHub that galley took in
-   * (recordGithub) makes GitHub's text the one published, as a publish does; until a wait has
-   * told the author of it, the author's edits of the field are not published over it.
+   * (recordGithub) makes GitHub's text the one published, as a publish does.
    */
   authorEdits(pull: PullRow): EditField[] {
-    const untold = new Set(this.editsTakenIn(pull).map((e) => e.field));
-    const fields = this.unpublishedChanges(pull)
-      .filter((c) => c !== 'commits')
-      .filter((c) => !untold.has(c));
+    const fields = this.unpublishedChanges(pull).filter((c) => c !== 'commits');
     if (stagingState(pull) !== 'published' || !fields.length) return [];
     // Since it was last published, by the user or by a wait: the edits after those the text it
     // published included (read_upto; for a publish from before galley recorded that, after it).
@@ -4088,13 +4084,16 @@ export class Service {
   /**
    * The author's edits its wait publishes: those publishing has not left as they are (editsLeft),
    * and those a failure that is tried again left, once per wait, at least as often as `pr wait`
-   * asks again.
+   * asks again. Not one over an edit made on GitHub that no wait has told the author of
+   * (editsTakenIn): the wait that tells it goes first, and the next publishes it, as its edits
+   * are still the author's wait's to deliver (turn).
    */
   private editsToTry(pull: PullRow): EditField[] {
     const edits = this.authorEdits(pull);
     const left = this.editsLeft(pull, edits);
     const again = this.editTries.get(pull.id) !== this.editTry(pull);
-    return edits.filter((f) => !left.has(f) || (left.get(f)!.retry && left.get(f)!.failed.includes(f) && again));
+    const untold = new Set(this.editsTakenIn(pull).map((e) => e.field));
+    return edits.filter((f) => !untold.has(f) && (!left.has(f) || (left.get(f)!.retry && left.get(f)!.failed.includes(f) && again)));
   }
 
   /** The text and the wait each publishing of edits was last tried for (editsToTry). */

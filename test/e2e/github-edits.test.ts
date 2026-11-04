@@ -135,10 +135,20 @@ test('an edit of the title or description on GitHub comes back to galley', async
     await githubHas(pr, 'Retitled on GitHub', 'Edited on GitHub', { title: 'octocat', body: 'laat' });
     assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Retitled by the agent', '--body', "The agent's words."])).code, 0);
     // A wait that is not told of GitHub's, as a CLI from before galley took edits in waits, publishes nothing over them.
-    const old = await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=3`]);
-    assert.equal(JSON.parse(old.stdout).status, 'timeout', old.stderr);
-    await server.autoPublisher.settle(pr.id);
+    const grace = server.service.waitGraceMs;
+    server.service.waitGraceMs = 100;
+    try {
+      const old = await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=3`]);
+      assert.equal(JSON.parse(old.stdout).status, 'timeout', old.stderr);
+      await server.autoPublisher.settle(pr.id);
+      await until(() => !server.service.authorWaiting(pr.id, { grace: true }), 'the wait is over');
+    } finally {
+      server.service.waitGraceMs = grace;
+    }
     assert.deepEqual([readFileSync(join(dir, 'gh-title'), 'utf8'), readFileSync(join(dir, 'gh-body'), 'utf8')], ['Retitled on GitHub', 'Edited on GitHub']);
+    // Its edits are its waits' to deliver, not the user's to publish.
+    const { turn } = await human('GET', pr.base);
+    assert.equal(turn.whose, 'author', JSON.stringify(turn.reasons));
     const r = await pr.wait();
     assert.equal(r.code, 0, r.stderr);
     const since = "If you made that edit, your next wait publishes it over GitHub's; edit it again first to keep any of GitHub's\\.";
