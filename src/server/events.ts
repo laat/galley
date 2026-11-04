@@ -15,7 +15,11 @@ import type { MergeMethod } from './settings.ts';
 export interface EventData {
   /** New commits on the branch, or a force-push: `commits` are the new ones, none when forced. */
   pushed: { before: string; after: string; forced: boolean; commits: string[]; base_before: string; base_after: string };
-  /** `github`: edited on GitHub, by `by` when GitHub says, and taken in when galley followed it (Service.recordGithub). */
+  /**
+   * `github`: edited on GitHub, by `by` when GitHub says, and taken in when galley followed it
+   * (Service.recordGithub). With `to` the same as `from`, GitHub got the text galley has: no edit,
+   * but it counts as published (Service.authorEdits).
+   */
   renamed: { from: string; to: string; github?: { url: string; by: string | null } };
   body_edited: { from: string; to: string; github?: { url: string; by: string | null } };
   base_changed: { from: string; to: string };

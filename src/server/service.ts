@@ -182,6 +182,11 @@ export interface WaitResult {
   stillToReview?: string[];
 }
 
+/** What the CLI waiting knows of (Service.wait): the status `edited_on_github`. */
+export interface WaitOptions {
+  editedOnGithub?: boolean;
+}
+
 /**
  * A push of a published pull request's head to its branch on GitHub, made when the author waited
  * with it (Service.pushUpdate), as its `github_push` event in the timeline has it.
@@ -931,14 +936,14 @@ export class Service {
       const ts = now();
       for (const { field, text, by } of this.editedOnGithub(pull, node, sentAt)) {
         const [column, published, type] = field === 'title' ? (['title', 'published_title', 'renamed'] as const) : (['body', 'published_body', 'body_edited'] as const);
-        // galley has it already: GitHub got an edit made here that publishing did not get to record, or someone made the same one there.
-        if (githubText(field, pull[column]) === text) {
-          texts[published] = pull[column];
-          continue;
-        }
-        Object.assign(texts, { [column]: text, [published]: text, updated_at: ts });
+        // galley has it already: GitHub got an edit made here that publishing did not get to record,
+        // or someone made the same one there. It counts as published all the same (authorEdits),
+        // with an event from the text to itself, which is no edit.
+        const same = githubText(field, pull[column]) === text;
+        if (same) texts[published] = pull[column];
+        else Object.assign(texts, { [column]: text, [published]: text, updated_at: ts });
         // The author's wait hears of it (waitResult), and its edits after it are its waits' to publish (authorEdits).
-        this.addEvent(pull, viewer, type, { from: pull[column], to: text, github: { url: pull.published_url!, by } }, ts);
+        this.addEvent(pull, viewer, type, { from: pull[column], to: same ? pull[column] : text, github: { url: pull.published_url!, by } }, ts);
       }
       this.db.update('pulls', pull.id, { github_state: 'open', github_status: JSON.stringify(status), ...texts });
       // Pages show the status; tell them when it changed, not each time galley asked. The first
@@ -2496,8 +2501,12 @@ export class Service {
     if (this.authorWaiting(pull.id)) for (const r of this.reviewersFor(pull)) if (filter(r)) r.consider(pull.id);
   }
 
-  /** What a `pr wait` on the pull request returns now, or null while there is nothing new. */
-  private waitResult(id: number): WaitResult | null {
+  /**
+   * What a `pr wait` on the pull request returns now, or null while there is nothing new. Edits
+   * made on GitHub only with `editedOnGithub`: a CLI older than them would take the status for
+   * feedback, and mark the edits as seen without saying what they were.
+   */
+  private waitResult(id: number, opts: WaitOptions = {}): WaitResult | null {
     const checkedAt = now();
     const pull = this.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id);
     if (!pull) return { status: 'closed', reviews: [], comments: [] };
@@ -2512,7 +2521,7 @@ export class Service {
     const latestEdit = this.lastEdit(pull, pull.author_seen_at);
     const edit = latestEdit && !(latestEdit.retry && !latestEdit.published.length && !latestEdit.edited_on_github.length) ? latestEdit : null;
     // And of the title and description someone edited on GitHub, which galley took in: the author's to read before it edits them.
-    const onGithub = this.editsTakenIn(pull, pull.author_seen_at);
+    const onGithub = opts.editedOnGithub ? this.editsTakenIn(pull, pull.author_seen_at) : [];
     // Closed here, or merged or closed on GitHub: nothing more is coming, so every wait says so.
     const ended = pull.state === 'closed' ? 'closed' : pull.github_state === 'merged' ? 'merged' : pull.github_state === 'closed' ? 'closed_on_github' : null;
     const unseen = fb.reviews.length > 0 || fb.comments.length > 0;
@@ -2538,7 +2547,7 @@ export class Service {
 
   /** The title and description someone edited on GitHub after `since`, as galley took them in (recordGithub): the latest edit of each. */
   private editsTakenIn(pull: PullRow, since: string): EditOnGithub[] {
-    const taken = eventsSince(this.db, pull, ['renamed', 'body_edited'], since).filter((e) => e.data.github);
+    const taken = eventsSince(this.db, pull, ['renamed', 'body_edited'], since).filter((e) => e.data.github && e.data.from !== e.data.to);
     return (['title', 'description'] as const).flatMap((field) => {
       const e = taken.findLast((e) => e.type === (field === 'title' ? 'renamed' : 'body_edited'));
       return e ? [{ field, text: e.data.to, by: e.data.github!.by }] : [];
@@ -2555,7 +2564,7 @@ export class Service {
     };
   }
 
-  async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal): Promise<WaitResult> {
+  async wait(ctx: Ctx, actor: Actor, timeoutMs: number, signal?: AbortSignal, opts: WaitOptions = {}): Promise<WaitResult> {
     const id = ctx.pull.id;
     const author = this.db.actorById(ctx.pull.author_id);
     // Waiting says the author is ready for review, which starts reviewer agents and lets auto-publish go ahead.
@@ -2563,14 +2572,14 @@ export class Service {
       throw new HttpError(403, `only the author of this pull request (${author.login}) can wait for its feedback, not ${actor.login}. An agent carrying on the author's work sets GALLEY_ACTOR=${author.login}.`);
     }
     // A pull request that is closed or merged is not ready for review: answer without saying the author waits.
-    const already = this.waitResult(id);
+    const already = this.waitResult(id, opts);
     if (already && ENDED.includes(already.status)) return already;
     this.setWaiting(id, 1, author);
     const deadline = Date.now() + timeoutMs;
     try {
       while (true) {
         const checkedAt = now();
-        const result = this.waitResult(id);
+        const result = this.waitResult(id, opts);
         if (result) {
           // What asks nothing of the author (an approval, a review that found nothing, a publish)
           // hands it no turn, so the wait that returns it is its latest action all the same. A
@@ -3111,9 +3120,8 @@ export class Service {
     const publish = published?.data.read_upto ?? published?.id ?? 0;
     const edits = eventsAfter(this.db, pull, 'github_edit', published?.id ?? 0);
     return fields.filter((c) => {
-      const since = edits.findLast((e) => e.data.published.includes(c))?.data.read_upto ?? publish;
-      const after = eventsAfter(this.db, pull, c === 'title' ? 'renamed' : 'body_edited', since);
-      const by = after.slice(after.findLastIndex((e) => e.data.github) + 1);
+      const since = Math.max(edits.findLast((e) => e.data.published.includes(c))?.data.read_upto ?? publish, this.takenIn(pull, c));
+      const by = this.db.all<{ actor_id: number }>('SELECT actor_id FROM events WHERE pull_id = ? AND type = ? AND id > ?', pull.id, c === 'title' ? 'renamed' : 'body_edited', since);
       return by.length > 0 && by.every((e) => e.actor_id === pull.author_id);
     });
   }
@@ -3129,12 +3137,21 @@ export class Service {
     if (!fields.length) return left;
     const edits = eventsAfter(this.db, pull, 'github_edit', lastEvent(this.db, pull, 'published')?.id ?? 0);
     for (const f of fields) {
-      // The latest try of this field.
-      const e = edits.findLast(({ data: d }) => [...d.published, ...d.edited_on_github, ...d.failed].includes(f));
+      // The latest try of this field since GitHub's text was last taken in, before which GitHub had another.
+      const taken = this.takenIn(pull, f);
+      const e = edits.findLast(({ id, data: d }) => id > taken && [...d.published, ...d.edited_on_github, ...d.failed].includes(f));
       if (!e || e.data.published.includes(f)) continue;
       if (f === 'title' ? e.data.title === pull.title : e.data.body === pull.body) left.set(f, { ...e.data, at: e.created_at });
     }
     return left;
+  }
+
+  /**
+   * The latest event that took in the field as GitHub has it (recordGithub), after which GitHub's
+   * text is the one published, as after a publish; 0 when there is none.
+   */
+  private takenIn(pull: PullRow, field: EditField): number {
+    return eventsAfter(this.db, pull, field === 'title' ? 'renamed' : 'body_edited', 0).findLast((e) => e.data.github)?.id ?? 0;
   }
 
   /**

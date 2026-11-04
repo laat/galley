@@ -1163,7 +1163,7 @@ async function firstNews(client: Client, targets: Target[], seconds: number): Pr
     return await new Promise((resolve) => {
       let pending = targets.length;
       for (const t of targets) {
-        client.get(`${pullPath(t)}/wait?timeout=${seconds}`, stop.signal).then(
+        client.get(`${pullPath(t)}/wait?timeout=${seconds}&knows=edited_on_github`, stop.signal).then(
           (r) => (r.status !== 'timeout' ? resolve({ t, r }) : --pending === 0 && resolve(null)),
           (error) => resolve({ t, error }),
         );

@@ -97,12 +97,37 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.deepEqual(await pr.edits(), [
       ['renamed', 'Add gh-edit-over.js', "The user's title", undefined],
       ['body_edited', 'x', "The user's draft.", undefined],
+      // GitHub has the user's title: no edit, but published.
+      ['renamed', "The user's title", "The user's title", { url, by: 'octocat' }],
       ['body_edited', "The user's draft.", 'Edited on GitHub', { url, by: 'octocat' }],
     ]);
+    assert.doesNotMatch(await pr.page(), /changed the title <del class="color-fg-muted">The user&#39;s title<\/del>/);
+    // A CLI from before galley took edits in is not told of them, which it would take for feedback.
+    const old = await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=1`]);
+    assert.equal(JSON.parse(old.stdout).status, 'timeout', old.stderr);
     const r = await pr.wait();
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /^octocat edited the description on GitHub, and galley has it now\./m);
     assert.doesNotMatch(r.stdout, /edited the title/);
+    // The user's title counts as published: the author's edit of it is its wait's to publish.
+    assert.equal((await cli(['pr', 'edit', pr.n, '--title', "The agent's title"])).code, 0);
+    assert.match((await pr.wait()).stdout, /^Published the title to GitHub: /m);
+    assert.equal(readFileSync(join(dir, 'gh-title'), 'utf8'), "The agent's title");
+  });
+
+  await t.test("an edit the author's wait left because GitHub had another is not left once GitHub's is taken in", async () => {
+    const pr = await published('feature/gh-edit-left');
+    // Retitled on GitHub, before galley asks.
+    writeFileSync(join(dir, 'gh-title'), 'Retitled on GitHub');
+    assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Retitled by the agent'])).code, 0);
+    const left = await pr.wait();
+    assert.match(left.stdout, /^Could not publish the title to GitHub: someone edited the title on GitHub since galley published it\. Nothing on GitHub was overwritten\. galley takes GitHub's title in, and a wait tells you of it; do not edit it on GitHub yourself\.$/m);
+    await githubHas(pr, 'Retitled on GitHub', 'x', { title: 'octocat' });
+    assert.match((await pr.wait()).stdout, /^octocat edited the title on GitHub, and galley has it now: Retitled on GitHub$/m);
+    // The same text as the try that was left, which GitHub had another title for then.
+    assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Retitled by the agent'])).code, 0);
+    assert.match((await pr.wait()).stdout, /^Published the title to GitHub: /m);
+    assert.equal(readFileSync(join(dir, 'gh-title'), 'utf8'), 'Retitled by the agent');
   });
 
   await t.test('an answer GitHub gave about the text before galley published the author’s edit there does not take it back', async () => {

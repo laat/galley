@@ -658,6 +658,8 @@ async function eventItem(p: PullPage, e: EventRow, bases: string[]): Promise<Saf
     }
     case 'renamed':
     case 'body_edited': {
+      // GitHub got the text galley has: no edit (Service.recordGithub).
+      if (data.github && data.from === data.to) return null;
       // Edited on GitHub, by whoever GitHub says, and taken in when galley followed it.
       const by = data.github ? githubUser(data.github.by, true) : who;
       const where = data.github ? ' on GitHub' : '';

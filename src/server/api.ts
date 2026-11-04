@@ -603,7 +603,9 @@ export function api(s: Service): Hono {
     }
     const seconds = Number(c.req.query('timeout') ?? 240);
     const timeout = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 240, 3600) * 1000;
-    const r = await s.wait(x, actor(c), timeout, c.req.raw.signal);
+    // What the CLI knows of beyond what it always did: `knows=edited_on_github`.
+    const knows = (c.req.query('knows') ?? '').split(',');
+    const r = await s.wait(x, actor(c), timeout, c.req.raw.signal, { editedOnGithub: knows.includes('edited_on_github') });
     const pull = s.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', x.pull.id);
     const left = r.status === 'merged' && pull ? await s.leftOut(pull) : null;
     return c.json({
