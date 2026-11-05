@@ -16,10 +16,10 @@ test('reads the messages the server sends, and skips pings and comments', () => 
 
 /**
  * A stand-in for galley: what /api/meta says, and /events, which holds each stream open until the
- * test ends it. Starting, it answers 503 to both, as galley does; another program answers /events
- * with a page of its own.
+ * test ends it, answering after `openMs`. Starting, it answers 503 to both, as galley does; another
+ * program answers /events with a page of its own.
  */
-async function eventServer() {
+async function eventServer({ openMs = 0 } = {}) {
   const streams: { res: ServerResponse; closed: boolean; url: string }[] = [];
   let as: 'galley' | 'starting' | 'other' = 'galley';
   const server = createServer((req, res) => {
@@ -27,11 +27,14 @@ async function eventServer() {
     const status = as === 'starting' ? 503 : 200;
     if (req.url === '/api/meta') return void res.writeHead(status, { 'content-type': 'application/json' }).end('{"name":"galley","version":"0.1.0"}');
     if (!/^\/events(\?|$)/.test(req.url!) || status !== 200) return void res.writeHead(status).end('starting');
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    res.write(': hello\n\n');
     const stream = { res, closed: false, url: req.url! };
     res.on('close', () => (stream.closed = true));
     streams.push(stream);
+    setTimeout(() => {
+      if (stream.closed) return;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(': hello\n\n');
+    }, openMs);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -95,6 +98,20 @@ test('a stream that says nothing for too long counts as ended', async () => {
     await until(() => heard.filter((h) => h === 'up').length === 2, 'it opens a new stream');
     assert.deepEqual(heard.slice(0, 3), ['up', 'down', 'up']);
     assert.ok(events.streams.length >= 2);
+  } finally {
+    live.stop();
+    events.drop();
+    await events.close();
+  }
+});
+
+test('a stream slower to open than it may be silent is not given up on', async () => {
+  const events = await eventServer({ openMs: 400 });
+  const heard: string[] = [];
+  const live = follow(events.base, { up: () => heard.push('up'), down: () => heard.push('down'), change() {} }, { retryMs: 20, idleMs: 200 });
+  try {
+    await until(() => heard.length, 'the stream is open or given up on');
+    assert.equal(heard[0], 'up');
   } finally {
     live.stop();
     events.drop();
