@@ -21,6 +21,16 @@ const refs: ReferenceContext = {
   issue: (slug, n) => (slug === 'acme/widgets' && n === 12 ? { title: 'Widgets <wobble>', state: 'Open issue' } : null),
 };
 const md = (text: string, references: ReferenceContext | undefined = refs) => renderMarkdown(text, { references }).trim();
+/**
+ * What `fn` gives, and the milliseconds of CPU the process spent on it. Not wall-clock time, which on a
+ * loaded machine counts the wait for a CPU.
+ */
+function cpuTimed<T>(fn: () => T): { value: T; ms: number } {
+  const started = process.cpuUsage();
+  const value = fn();
+  const { user, system } = process.cpuUsage(started);
+  return { value, ms: (user + system) / 1000 };
+}
 const issueLink = (href: string, text: string, title = '') => `<a class="issue-link" href="${href}"${title ? ` title="${title}"` : ''} target="_blank" rel="noopener noreferrer">${text}</a>`;
 
 test('#N and GH-N link to the issue or pull request on GitHub, with its title when known', () => {
@@ -168,9 +178,7 @@ test('rendering stays linear: 20,000 characters of adversarial text take under 2
   renderMarkdown('warm up #1 @laat abc1234', { references: refs });
   for (const text of inputs) {
     for (const references of [undefined, refs]) {
-      const started = performance.now();
-      renderMarkdown(text, { references });
-      const ms = performance.now() - started;
+      const { ms } = cpuTimed(() => renderMarkdown(text, { references }));
       assert.ok(ms < 2000, `${ms.toFixed(0)} ms for ${JSON.stringify(text.slice(0, 24))}…${references ? ' with references' : ''}`);
     }
   }
@@ -234,10 +242,8 @@ test('Markdown full of emphasis markers is shown as plain text, well under a sec
   // marked takes "_" after a letter outside the Basic Multilingual Plane for one starting a word.
   for (const unit of ['*a ', '_a ', '~a ', '**a ', '*a\n', `${'*'.repeat(100)}a `, '𝒜_a ']) {
     const text = `Fixes #12 & <b>x</b>\n\n${fill(unit)}`;
-    const started = performance.now();
-    const rendered = renderMarkdown(text, { references: refs });
-    const closes = closingIssues(text, refs);
-    const ms = performance.now() - started;
+    const { value, ms } = cpuTimed(() => [renderMarkdown(text, { references: refs }), closingIssues(text, refs)] as const);
+    const [rendered, closes] = value;
     assert.ok(ms < 1000, `${ms.toFixed(0)} ms for ${JSON.stringify(unit)}`);
     assert.equal(rendered, `${PLAIN_NOTE}<pre class="markdown-text">Fixes #12 &amp; &lt;b&gt;x&lt;/b&gt;\n\n${fill(unit)}</pre>\n`);
     // Without marked, references in code can't be told from the rest: none is said to close.
@@ -250,9 +256,7 @@ test('the most emphasis markers still rendered as Markdown take well under a sec
   // 1,000 characters of them in one paragraph, in runs of one, two and a hundred. marked scans again for
   // each character of a run it finds no closer for.
   for (const text of ['*a '.repeat(1000), '_a '.repeat(1000), '~a '.repeat(1000), '**a '.repeat(500), `${'*'.repeat(100)}a `.repeat(10), '𝒜_a '.repeat(1000)]) {
-    const started = performance.now();
-    const rendered = renderMarkdown(text);
-    const ms = performance.now() - started;
+    const { value: rendered, ms } = cpuTimed(() => renderMarkdown(text));
     assert.ok(ms < 1000, `${ms.toFixed(0)} ms for ${JSON.stringify(text.slice(0, 12))}…`);
     assert.ok(!rendered.startsWith(PLAIN_NOTE), JSON.stringify(text.slice(0, 12)));
     assert.ok(renderMarkdown(`${text}*a`).startsWith(PLAIN_NOTE), JSON.stringify(text.slice(0, 12)));
