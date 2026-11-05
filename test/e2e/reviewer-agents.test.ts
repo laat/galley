@@ -1,10 +1,10 @@
 // Codex and Claude as reviewer agents: their settings, sandboxes, progress and names, two at once,
 // and stopping their iterations.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, reviewCheckouts, send, server, slashTmpWritable, startHarness } from '../helpers/harness.ts';
-import { withFakes } from '../helpers/fakes.ts';
+import { cli, describe, dir, git, handedOver, human, repo, reviewCheckouts, send, server, slashTmpWritable, startHarness } from '../helpers/harness.ts';
+import { setFakes, withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -598,62 +598,69 @@ test('a reviewer can not take a name that --reviewer would take for the other on
   assert.deepEqual([server.service.codex!.actor().login, server.service.claude!.actor().login], [codex, 'claude-review']);
 });
 
-test('a reviewer can leave pull requests by its own kind of agent to the other', async (t) => {
-  await withFakes({
-    FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Fine by Codex.', comments: [] }),
-    FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine by Claude.', comments: [] }),
-  }, async () => {
-    const stage = async (branch: string, file: string, actor: string, flags: string[] = []) => {
-      git('checkout', '-q', 'main');
-      git('checkout', '-qb', branch);
-      writeFileSync(join(repo, file), 'export {};\n');
-      git('add', file);
-      git('commit', '-qm', `Add ${file}`);
-      const r = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', ...flags], { actor });
-      assert.equal(r.code, 0, r.stderr);
-      return Number(r.stdout.trim().split('/').pop());
-    };
-    const config = async (n: number, kind: string) => {
-      const { enabled, runs } = await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/${kind}`);
-      return { enabled, runs: runs.length };
-    };
+describe('a reviewer can leave pull requests by its own kind of agent to the other', () => {
+  let restore: () => void;
+  before(() => {
+    restore = setFakes({
+      FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Fine by Codex.', comments: [] }),
+      FAKE_CLAUDE_REVIEW: JSON.stringify({ summary: 'Fine by Claude.', comments: [] }),
+    });
+  });
+  const stage = async (branch: string, file: string, actor: string, flags: string[] = []) => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', branch);
+    writeFileSync(join(repo, file), 'export {};\n');
+    git('add', file);
+    git('commit', '-qm', `Add ${file}`);
+    const r = await cli(['pr', 'create', '--title', `Add ${file}`, '--body', 'x', ...flags], { actor });
+    assert.equal(r.code, 0, r.stderr);
+    return Number(r.stdout.trim().split('/').pop());
+  };
+  const config = async (n: number, kind: string) => {
+    const { enabled, runs } = await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/${kind}`);
+    return { enabled, runs: runs.length };
+  };
+  before(async () => {
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1, skipOwnKind: true });
     await human('PUT', '/api/settings/claude', { enabled: true, maxIterations: 1, skipOwnKind: true });
+  });
+  test('Codex reviews what an agent in Claude Code wrote, and Claude does not', async () => {
+    const n = await stage('feature/by-claude', 'by-claude.js', 'claude');
+    const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
+    assert.equal(w.code, 0, w.stderr);
+    assert.match(w.stdout, /codex-review reviewed: commented/);
+    assert.doesNotMatch(w.stdout, /claude-review/);
+    assert.deepEqual(await config(n, 'claude'), { enabled: false, runs: 0 });
+    assert.deepEqual(await config(n, 'codex'), { enabled: true, runs: 1 });
+    const html = await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text();
+    assert.match(html, /Settings leave pull requests by agents in Claude Code to other reviewers/);
+  });
+  test('galley reviewers says which review the caller\'s pull requests on their own', async () => {
+    const list = async (actor: string) => JSON.parse((await cli(['reviewers', '--json', 'name,automatic'], { actor })).stdout);
+    assert.deepEqual(await list('claude'), [{ name: 'codex-review', automatic: true }, { name: 'claude-review', automatic: false }]);
+    assert.deepEqual(await list('codex-agent'), [{ name: 'codex-review', automatic: false }, { name: 'claude-review', automatic: true }]);
+  });
+  test('and the other way round', async () => {
+    const n = await stage('feature/by-codex-agent', 'by-codex-agent.js', 'codex-agent');
+    const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'codex-agent' });
+    assert.equal(w.code, 0, w.stderr);
+    assert.match(w.stdout, /claude-review reviewed: commented/);
+    assert.deepEqual(await config(n, 'codex'), { enabled: false, runs: 0 });
+  });
+  test('asked for when staging, it reviews all the same', async () => {
+    const n = await stage('feature/by-claude-asked', 'by-claude-asked.js', 'claude', ['--reviewer', 'claude:1']);
+    assert.deepEqual((await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/claude`)).overrides, { enabled: true, max_iterations: 1 });
+    await human('PATCH', `/api/repos/acme/widgets/pulls/${n}/reviewers/codex`, { enabled: false });
+    const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
+    assert.equal(w.code, 0, w.stderr);
+    assert.match(w.stdout, /claude-review reviewed: commented/);
+  });
+  after(async () => {
     try {
-      await t.test('Codex reviews what an agent in Claude Code wrote, and Claude does not', async () => {
-        const n = await stage('feature/by-claude', 'by-claude.js', 'claude');
-        const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
-        assert.equal(w.code, 0, w.stderr);
-        assert.match(w.stdout, /codex-review reviewed: commented/);
-        assert.doesNotMatch(w.stdout, /claude-review/);
-        assert.deepEqual(await config(n, 'claude'), { enabled: false, runs: 0 });
-        assert.deepEqual(await config(n, 'codex'), { enabled: true, runs: 1 });
-        const html = await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text();
-        assert.match(html, /Settings leave pull requests by agents in Claude Code to other reviewers/);
-      });
-      await t.test('galley reviewers says which review the caller\'s pull requests on their own', async () => {
-        const list = async (actor: string) => JSON.parse((await cli(['reviewers', '--json', 'name,automatic'], { actor })).stdout);
-        assert.deepEqual(await list('claude'), [{ name: 'codex-review', automatic: true }, { name: 'claude-review', automatic: false }]);
-        assert.deepEqual(await list('codex-agent'), [{ name: 'codex-review', automatic: false }, { name: 'claude-review', automatic: true }]);
-      });
-      await t.test('and the other way round', async () => {
-        const n = await stage('feature/by-codex-agent', 'by-codex-agent.js', 'codex-agent');
-        const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'codex-agent' });
-        assert.equal(w.code, 0, w.stderr);
-        assert.match(w.stdout, /claude-review reviewed: commented/);
-        assert.deepEqual(await config(n, 'codex'), { enabled: false, runs: 0 });
-      });
-      await t.test('asked for when staging, it reviews all the same', async () => {
-        const n = await stage('feature/by-claude-asked', 'by-claude-asked.js', 'claude', ['--reviewer', 'claude:1']);
-        assert.deepEqual((await human('GET', `/api/repos/acme/widgets/pulls/${n}/reviewers/claude`)).overrides, { enabled: true, max_iterations: 1 });
-        await human('PATCH', `/api/repos/acme/widgets/pulls/${n}/reviewers/codex`, { enabled: false });
-        const w = await cli(['pr', 'wait', String(n), '--timeout', '20s'], { actor: 'claude' });
-        assert.equal(w.code, 0, w.stderr);
-        assert.match(w.stdout, /claude-review reviewed: commented/);
-      });
-    } finally {
       await human('PUT', '/api/settings/codex', { enabled: false, maxIterations: 3, skipOwnKind: false });
       await human('PUT', '/api/settings/claude', { enabled: false, maxIterations: 3, skipOwnKind: false });
+    } finally {
+      restore();
     }
   });
 });

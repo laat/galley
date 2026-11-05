@@ -1,7 +1,7 @@
 // After publishing, the author's edits of the title and description are published when it waits,
 // as its commits are pushed (pushes.test.ts).
 import '../helpers/env.ts';
-import { cli, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, remote, repo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -12,7 +12,7 @@ import { join } from 'node:path';
 
 startHarness();
 
-test("after publishing, the author's edits of the title and description are published when it waits, unless they are the user's", async (t) => {
+describe("after publishing, the author's edits of the title and description are published when it waits, unless they are the user's", () => {
   /**
    * Stage a branch with one commit as the agent, publish it as the reviewer (with `publish`, given
    * the pull request's API path), and let the agent hear of the publish.
@@ -57,7 +57,7 @@ test("after publishing, the author's edits of the title and description are publ
     return { whose: turn.whose, reasons: turn.reasons.map((r: any) => r.text) };
   };
 
-  await t.test("the author's edits of the description and title are published when it waits, with its commits or without, and are not the user's turn meanwhile", async () => {
+  test("the author's edits of the description and title are published when it waits, with its commits or without, and are not the user's turn meanwhile", async () => {
     // A wait counts for a moment after it ends, not seconds, so the turn of an author not waiting shows soon.
     const grace = server.service.waitGraceMs;
     server.service.waitGraceMs = 100;
@@ -120,7 +120,7 @@ test("after publishing, the author's edits of the title and description are publ
     }
   });
 
-  await t.test('feedback that comes while the edits are published comes at once, and what came of them with the next wait', async () => {
+  test('feedback that comes while the edits are published comes at once, and what came of them with the next wait', async () => {
     const pr = await published('feature/edit-feedback');
     assert.equal((await cli(['pr', 'edit', pr.n, '--body', "The agent's words."])).code, 0);
     const gate = join(dir, 'edit-feedback-gate');
@@ -144,7 +144,7 @@ test("after publishing, the author's edits of the title and description are publ
     assert.match((await pr.wait()).stdout, /^Published the description to GitHub: /m);
   });
 
-  await t.test("an edit the user makes while publishing counts as one since: the author's later edit does not publish it", async () => {
+  test("an edit the user makes while publishing counts as one since: the author's later edit does not publish it", async () => {
     const gate = join(dir, 'edit-publish-gate');
     try {
       const pr = await published('feature/edit-during', (base) =>
@@ -167,7 +167,7 @@ test("after publishing, the author's edits of the title and description are publ
     }
   });
 
-  await t.test('an edit by the user while GitHub is asked, even one the author takes back, keeps the field from being published', async () => {
+  test('an edit by the user while GitHub is asked, even one the author takes back, keeps the field from being published', async () => {
     const pr = await published('feature/edit-race');
     assert.equal((await cli(['pr', 'edit', pr.n, '--body', "The agent's words."])).code, 0);
     const gate = join(dir, 'edit-view-gate');
@@ -190,7 +190,7 @@ test("after publishing, the author's edits of the title and description are publ
     assert.ok((await turn(pr.base)).reasons.includes('update not published: description'));
   });
 
-  await t.test('GitHub could not be asked: nothing is published, the author waits on, the user sees it, and the next wait tries again', async () => {
+  test('GitHub could not be asked: nothing is published, the author waits on, the user sees it, and the next wait tries again', async () => {
     const pr = await published('feature/edit-retry');
     assert.equal((await cli(['pr', 'edit', pr.n, '--body', "The agent's words."])).code, 0);
     await withFakes({ FAKE_GH_FAIL: 'HTTP 502: gh is down' }, async () => {
@@ -208,7 +208,7 @@ test("after publishing, the author's edits of the title and description are publ
     assert.equal(onGithub().body, "The agent's words.");
   });
 
-  await t.test("the user's edit is not published over: a field the user edited since publishing stays the user's, also when the author edits it after", async () => {
+  test("the user's edit is not published over: a field the user edited since publishing stays the user's, also when the author edits it after", async () => {
     const pr = await published('feature/edit-user');
     await human('PATCH', pr.base, { body: "The user's words." });
     assert.equal((await cli(['pr', 'edit', pr.n, '--body', "The agent's words.", '--title', 'Add edit-user.js, retitled'])).code, 0);
@@ -233,7 +233,7 @@ test("after publishing, the author's edits of the title and description are publ
     assert.equal(onGithub().body, "The agent's words, again.");
   });
 
-  await t.test('a description edited on GitHub since galley published it is not overwritten: the author and the user hear why, and it is not tried again', async () => {
+  test('a description edited on GitHub since galley published it is not overwritten: the author and the user hear why, and it is not tried again', async () => {
     const pr = await published('feature/edit-github');
     // Someone indents the description on github.com, which makes it a code block.
     writeFileSync(join(dir, 'gh-body'), '    x');
@@ -254,7 +254,7 @@ test("after publishing, the author's edits of the title and description are publ
     assert.equal((await pr.wait('1s')).code, 124);
   });
 
-  await t.test('a failure GitHub is to blame for is tried again at the next wait, but not a field edited on GitHub that the same try left', async () => {
+  test('a failure GitHub is to blame for is tried again at the next wait, but not a field edited on GitHub that the same try left', async () => {
     const pr = await published('feature/edit-500');
     writeFileSync(join(dir, 'gh-title'), 'Retitled on GitHub');
     assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Add edit-500.js, retitled', '--body', "The agent's words."])).code, 0);
@@ -273,7 +273,7 @@ test("after publishing, the author's edits of the title and description are publ
     assert.ok((await turn(pr.base)).reasons.includes('update not published: title; the title was edited on GitHub'));
   });
 
-  await t.test("a failure is told to the author and the user, and is not tried again until the author edits again", async () => {
+  test("a failure is told to the author and the user, and is not tried again until the author edits again", async () => {
     const pr = await published('feature/edit-fail');
     assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Add edit-fail.js, retitled'])).code, 0);
     await withFakes({ FAKE_GH_EDIT_FAIL: 'GraphQL: Title is too long (updatePullRequest)' }, async () => {

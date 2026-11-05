@@ -2,7 +2,7 @@
 // before publishing, the reviewer agents review the head again; after it, they review the author's
 // commits as before publishing, and galley pushes one only once they are done with it.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, handedOver, human, repo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { published } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
@@ -39,8 +39,8 @@ async function staged(branch: string, ...flags: string[]): Promise<string> {
   return created.stdout.trim().split('/').pop()!;
 }
 
-test('the author asks the reviewer agents for a new review loop', async (t) => {
-  await t.test('before publishing, they review the head again, with a limit of their own', async () => {
+describe('the author asks the reviewer agents for a new review loop', () => {
+  test('before publishing, they review the head again, with a limit of their own', async () => {
     git('checkout', '-q', 'main');
     git('checkout', '-qb', 'feature/again-staged');
     writeFileSync(join(repo, 'again-staged.js'), 'export {};\n');
@@ -72,7 +72,7 @@ test('the author asks the reviewer agents for a new review loop', async (t) => {
     assert.match(await (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text(), /asked codex-review to review it again/);
   });
 
-  await t.test('after publishing, they review its commits, and galley pushes the first one they are done with', async () => {
+  test('after publishing, they review its commits, and galley pushes the first one they are done with', async () => {
     const pr = await published('feature/again-published');
     const before = pr.tip().sha;
     pr.commit('export const value = 1;\n');
@@ -110,7 +110,7 @@ test('the author asks the reviewer agents for a new review loop', async (t) => {
     assert.match(await pr.page(), /<span class="agent-chunk">Automatic: 0 before publishing<\/span>/);
   });
 
-  await t.test('only the user and the author may ask, and only for reviewer agents of the pull request', async () => {
+  test('only the user and the author may ask, and only for reviewer agents of the pull request', async () => {
     const pr = await published('feature/again-refused');
     const other = await cli(['pr', 'edit', pr.n, '--add-reviewer', 'codex'], { actor: 'observer' });
     assert.equal(other.code, 1);
@@ -154,7 +154,7 @@ test('the author asks the reviewer agents for a new review loop', async (t) => {
     assert.equal(server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', pr.id)!.agents_done_sha, null);
   });
 
-  await t.test('after publishing, the wait says when they are done with a head GitHub has, also when a review failed', async () => {
+  test('after publishing, the wait says when they are done with a head GitHub has, also when a review failed', async () => {
     const pr = await published('feature/again-failed');
     const sha = git('rev-parse', '--short=7', 'HEAD');
     const agent = { 'x-galley-actor': 'agent' };
@@ -174,7 +174,7 @@ test('the author asks the reviewer agents for a new review loop', async (t) => {
     assert.equal((await pr.wait('2s')).code, 124);
   });
 
-  await t.test('a review in a loop asked for while a publish was under way is not cancelled by that publish', async () => {
+  test('a review in a loop asked for while a publish was under way is not cancelled by that publish', async () => {
     const n = await staged('feature/again-publishing', '--no-review');
     const base = `/api/repos/acme/widgets/pulls/${n}`;
     const ghCalls = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter(Boolean);
@@ -202,7 +202,7 @@ test('the author asks the reviewer agents for a new review loop', async (t) => {
     });
   });
 
-  await t.test('a stop holds no reviewer agent that is off for the pull request', async () => {
+  test('a stop holds no reviewer agent that is off for the pull request', async () => {
     const n = await staged('feature/again-off', '--reviewer', 'codex:3');
     const base = `/api/repos/acme/widgets/pulls/${n}`;
     await withFakes({ FAKE_CODEX_REVIEW: clean }, async () => {
@@ -220,7 +220,7 @@ test('the author asks the reviewer agents for a new review loop', async (t) => {
     });
   });
 
-  await t.test('a stop the user made before the loop holds the reviewers it does not name, and one during it those it names', async () => {
+  test('a stop the user made before the loop holds the reviewers it does not name, and one during it those it names', async () => {
     const n = await staged('feature/again-stopped', '--reviewer', 'codex:3', '--reviewer', 'claude:3');
     const base = `/api/repos/acme/widgets/pulls/${n}`;
     const runs = async (reviewer: string) => (await human('GET', `${base}/reviewers/${reviewer}`)).runs.length;

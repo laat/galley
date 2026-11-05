@@ -2,9 +2,9 @@
 // link give, and what a pull request's pages tell public/app.js about where a comment is shown.
 // Opening, scrolling to and flashing it, and going on to another tab, happen in the browser.
 import '../helpers/env.ts';
-import { cli, git, handedOver, human, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, git, handedOver, human, repo, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,30 +13,41 @@ startHarness();
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-test('a comment links to the Conversation tab at it, wherever its link is given', async (t) => {
-  // A second commit renames the function the first one added.
-  const first = git('rev-parse', 'HEAD');
-  writeFileSync(join(repo, 'math.js'), readFileSync(join(repo, 'math.js'), 'utf8').replace('function mul', 'function times'));
-  git('commit', '-qam', 'Rename mul');
-  const second = git('rev-parse', 'HEAD');
-  const created = await cli(['pr', 'create', '--title', 'Add multiplication', '--body', 'Adds `mul`.', '--no-review']);
-  assert.equal(created.code, 0, created.stderr);
-  const pull = `${server.url}/acme/widgets/pull/1`;
+describe('a comment links to the Conversation tab at it, wherever its link is given', () => {
   const api = '/api/repos/acme/widgets/pulls/1';
   const page = async (tab: string) => (await fetch(`${pull}${tab}`)).text();
-  await handedOver();
+  let pull: string;
+  let first: string;
+  let second: string;
+  let root: any;
+  let replyUrl: string;
+  let replyId: number;
+  let onCommit: any;
+  let issueUrl: string;
+  let issueId: number;
+  before(async () => {
+    // A second commit renames the function the first one added.
+    first = git('rev-parse', 'HEAD');
+    writeFileSync(join(repo, 'math.js'), readFileSync(join(repo, 'math.js'), 'utf8').replace('function mul', 'function times'));
+    git('commit', '-qam', 'Rename mul');
+    second = git('rev-parse', 'HEAD');
+    const created = await cli(['pr', 'create', '--title', 'Add multiplication', '--body', 'Adds `mul`.', '--no-review']);
+    assert.equal(created.code, 0, created.stderr);
+    pull = `${server.url}/acme/widgets/pull/1`;
+    await handedOver();
 
-  const root = await human('POST', `${api}/comments`, { path: 'math.js', line: 6, side: 'RIGHT', body: 'Add a doc comment.' });
-  const reply = await cli(['pr', 'comment', '--reply-to', String(root.id), '-b', 'Will do.']);
-  assert.equal(reply.code, 0, reply.stderr);
-  const replyUrl = reply.stdout.trim();
-  const replyId = Number(replyUrl.match(/#discussion_r(\d+)$/)![1]);
-  const onCommit = await human('POST', `${api}/comments`, { subject_type: 'commit', commit_id: first, body: 'Say why.' });
-  const issue = await cli(['pr', 'comment', '-b', 'Ready.']);
-  const issueUrl = issue.stdout.trim();
-  const issueId = Number(issueUrl.match(/#issuecomment-(\d+)$/)![1]);
+    root = await human('POST', `${api}/comments`, { path: 'math.js', line: 6, side: 'RIGHT', body: 'Add a doc comment.' });
+    const reply = await cli(['pr', 'comment', '--reply-to', String(root.id), '-b', 'Will do.']);
+    assert.equal(reply.code, 0, reply.stderr);
+    replyUrl = reply.stdout.trim();
+    replyId = Number(replyUrl.match(/#discussion_r(\d+)$/)![1]);
+    onCommit = await human('POST', `${api}/comments`, { subject_type: 'commit', commit_id: first, body: 'Say why.' });
+    const issue = await cli(['pr', 'comment', '-b', 'Ready.']);
+    issueUrl = issue.stdout.trim();
+    issueId = Number(issueUrl.match(/#issuecomment-(\d+)$/)![1]);
+  });
 
-  await t.test("the API's html_url and gh's url are the Conversation tab at the comment", async () => {
+  test("the API's html_url and gh's url are the Conversation tab at the comment", async () => {
     assert.equal(root.html_url, `${pull}#discussion_r${root.id}`);
     assert.equal(replyUrl, `${pull}#discussion_r${replyId}`);
     assert.equal(issueUrl, `${pull}#issuecomment-${issueId}`);
@@ -53,7 +64,7 @@ test('a comment links to the Conversation tab at it, wherever its link is given'
     assert.deepEqual(gh.comments.map((c: any) => c.url), [`${pull}#issuecomment-${issueId}`]);
   });
 
-  await t.test("every comment's menu has Copy link, which copies that URL, beside its timestamp's link", async () => {
+  test("every comment's menu has Copy link, which copies that URL, beside its timestamp's link", async () => {
     // The reviewer's own comments also have Edit and Delete; the agent's only Copy link.
     const comment = (text: string, anchor: string) => text.match(new RegExp(`<div class="review-comment" id="${anchor}">[^]*?<div class="review-comment-body">`))?.[0];
     for (const tab of ['', '/files']) {
@@ -72,7 +83,7 @@ test('a comment links to the Conversation tab at it, wherever its link is given'
     assert.match(conversation, new RegExp(`<div class="timeline-comment-group" id="pullrequest-description">[^]*?data-copy="${escape(`${pull}#pullrequest-description`)}">Copy link</button>\\s*<div class="dropdown-divider"></div>\\s*<button type="button" class="dropdown-item js-comment-edit">Edit</button>\\s*</div>`));
   });
 
-  await t.test("each tab tells the page where a comment it does not show is: a pending one's tab, else the Conversation tab", async () => {
+  test("each tab tells the page where a comment it does not show is: a pending one's tab, else the Conversation tab", async () => {
     const onLine = await human('POST', `${api}/pending-comments`, { path: 'math.js', line: 5, body: 'Draft.' });
     const onMessage = await human('POST', `${api}/pending-comments`, { subject_type: 'commit', commit_id: first, body: 'Draft about the message.' });
     // On the old side of the second commit's diff, on a line the first commit added, which the pull
@@ -95,7 +106,7 @@ test('a comment links to the Conversation tab at it, wherever its link is given'
     assert.match((await page('')).match(/<div id="main"[^>]*>/)![0], / data-comment-tabs="\{\}"/);
   });
 
-  await t.test("pr view --comments and pr wait print each thread's link after it", async () => {
+  test("pr view --comments and pr wait print each thread's link after it", async () => {
     const view = await cli(['pr', 'view', '--comments']);
     assert.equal(view.code, 0, view.stderr);
     assert.match(view.stdout, new RegExp(`^  thread ${root.id} on math\\.js:6 \\[unresolved\\] ${escape(root.html_url)}\\n`, 'm'));

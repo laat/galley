@@ -1,7 +1,7 @@
 // Signing that fails for now, as when nobody answers a 1Password prompt: auto-publish and the pushes
 // after publishing try again later, whether the agent still waits or not, up to the setting.
 import '../helpers/env.ts';
-import { cli, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,7 +13,7 @@ import { SIGNING_RETRY_MS, WAIT_GRACE_MS } from '../../src/server/service.ts';
 
 startHarness();
 
-test('a signing that fails for now is tried again later, up to the limit', async (t) => {
+describe('a signing that fails for now is tried again later, up to the limit', () => {
   /** Stage a branch with one commit, as the agent. */
   const stage = async (branch: string) => {
     const file = `${branch.split('/').pop()}.js`;
@@ -95,7 +95,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     await human('PUT', '/api/settings/publish', { signingRetries: 3 });
   };
 
-  await t.test('auto-publish stays on and tries again later, also once the agent stopped waiting, and publishes', async () => {
+  test('auto-publish stays on and tries again later, also once the agent stopped waiting, and publishes', async () => {
     const pr = await stage('feature/sign-later');
     const signer = failSigning(2);
     server.service.signingRetryMs = 60_000;
@@ -136,7 +136,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     }
   });
 
-  await t.test('after the last retry it turns itself off and says why, and the waiting agent asks the user', async () => {
+  test('after the last retry it turns itself off and says why, and the waiting agent asks the user', async () => {
     const pr = await stage('feature/sign-never');
     failSigning(1000);
     server.service.signingRetryMs = 20;
@@ -160,7 +160,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     }
   });
 
-  await t.test('a failure trying again can not get past turns it off at once', async () => {
+  test('a failure trying again can not get past turns it off at once', async () => {
     const pr = await stage('feature/sign-no-key');
     failSigning(1000, '1Password: No SSH private key found for the specified public key');
     try {
@@ -182,7 +182,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     ["ssh-agent's refusal", 'feature/sign-agent-refused', "Couldn't sign message (agent): agent refused operation", 'SSH agent refused to sign: locked, or a prompt not answered'],
     ['a cancelled pinentry', 'feature/sign-cancelled', 'gpg: signing failed: Operation cancelled', 'passphrase prompt dismissed'],
   ]) {
-    await t.test(`${what} is tried again too, and turns it off after the limit`, async () => {
+    test(`${what} is tried again too, and turns it off after the limit`, async () => {
       const pr = await stage(branch);
       const signer = failSigning(1000, message);
       server.service.signingRetryMs = 60_000;
@@ -210,7 +210,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     });
   }
 
-  await t.test('feedback handed to the agent after signing failed holds the retry until the agent waits again', async () => {
+  test('feedback handed to the agent after signing failed holds the retry until the agent waits again', async () => {
     const pr = await stage('feature/sign-feedback');
     const signer = failSigning(1);
     server.service.signingRetryMs = 60_000;
@@ -233,7 +233,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     }
   });
 
-  await t.test('a new commit, or turning auto-publish off and on, starts the count again', async () => {
+  test('a new commit, or turning auto-publish off and on, starts the count again', async () => {
     const pr = await stage('feature/sign-count');
     failSigning(1000);
     server.service.signingRetryMs = 60_000;
@@ -264,7 +264,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     }
   });
 
-  await t.test('a push after publishing follows the same rule: tried again later whether the agent waits or not, and final after the limit or at once', async () => {
+  test('a push after publishing follows the same rule: tried again later whether the agent waits or not, and final after the limit or at once', async () => {
     const pr = await stage('feature/sign-push');
     await human('POST', `${pr.base}/publish`, { sign: true });
     assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /^Published to GitHub: /m);
@@ -359,7 +359,7 @@ test('a signing that fails for now is tried again later, up to the limit', async
     }
   });
 
-  await t.test("a push's retry waits for the agent once it was handed feedback, and one that feedback stopped is tried again", async () => {
+  test("a push's retry waits for the agent once it was handed feedback, and one that feedback stopped is tried again", async () => {
     const pr = await stage('feature/sign-push-feedback');
     await human('POST', `${pr.base}/publish`, { sign: true });
     assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /^Published to GitHub: /m);

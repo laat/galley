@@ -1,6 +1,6 @@
 // Auto-publish: galley publishes a pull request once the agents are done with it.
 import '../helpers/env.ts';
-import { cli, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -14,7 +14,7 @@ import { AUTHOR_STALL_MS, type ChangeEvent } from '../../src/server/service.ts';
 
 startHarness();
 
-test('auto-publish publishes once the agents are done', async (t) => {
+describe('auto-publish publishes once the agents are done', () => {
   /** Stage a branch with one commit, as the agent. */
   const stage = async (branch: string, file: string, ...args: string[]) => {
     git('checkout', '-q', 'main');
@@ -65,7 +65,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     };
   };
 
-  await t.test('after the last automatic review is answered', async () => {
+  test('after the last automatic review is answered', async () => {
     const pr = await stage('feature/auto', 'auto.js');
     const review = {
       summary: 'Two things.',
@@ -132,7 +132,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     });
   });
 
-  await t.test('after the agent answers every thread without a new commit, which Codex would wait for', async () => {
+  test('after the agent answers every thread without a new commit, which Codex would wait for', async () => {
     const pr = await stage('feature/auto-answered', 'answered-auto.js');
     const review = {
       summary: 'Two things.',
@@ -170,7 +170,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     });
   });
 
-  await t.test('after the agent has seen findings that are all outside the diff, which have no thread to answer in', async () => {
+  test('after the agent has seen findings that are all outside the diff, which have no thread to answer in', async () => {
     const pr = await stage('feature/auto-outside', 'outside.js');
     const review = { summary: 'One thing.', comments: [{ path: 'math.js', line: 1, start_line: null, side: 'RIGHT', priority: 'low', body: 'Not in this diff.' }] };
     await withFakes({ FAKE_CODEX_REVIEW: JSON.stringify(review) }, async () => {
@@ -190,7 +190,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     });
   });
 
-  await t.test('not while Codex reviews, and after a review that finds nothing', async () => {
+  test('not while Codex reviews, and after a review that finds nothing', async () => {
     const pr = await stage('feature/auto-clean', 'clean.js');
     const gate = join(dir, 'auto-gate');
     await withFakes({ FAKE_CODEX_GATE: gate, FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Looks right.', comments: [] }) }, async () => {
@@ -221,7 +221,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     });
   });
 
-  await t.test("never the user's turn on its way from the reviewer agents to published", async () => {
+  test("never the user's turn on its way from the reviewer agents to published", async () => {
     const pr = await stage('feature/auto-turn', 'auto-turn.js');
     const { id } = await human('GET', pr.base);
     const row = () => server.service.db.get<PullRow>('SELECT * FROM pulls WHERE id = ?', id)!;
@@ -279,7 +279,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.equal(turns.at(-1), 'none: ', turns.join(' → '));
   });
 
-  await t.test("the author's turn when auto-publish waits for it to wait, and the user's once it stalls", async () => {
+  test("the author's turn when auto-publish waits for it to wait, and the user's once it stalls", async () => {
     const pr = await stage('feature/auto-stall', 'stall.js', '--no-review');
     await human('PUT', `${pr.base}/auto-publish`, {});
     const turn = async () => {
@@ -297,7 +297,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.match((await cli(['pr', 'wait', String(pr.number), '--timeout', '20s'])).stdout, /Published to GitHub/);
   });
 
-  await t.test('without waiting for Codex when the pull request was staged with --no-review', async () => {
+  test('without waiting for Codex when the pull request was staged with --no-review', async () => {
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
     try {
       const pr = await stage('feature/auto-no-review', 'no-review.js', '--no-review');
@@ -314,7 +314,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     }
   });
 
-  await t.test('held up by a failed review until it is cancelled, and turned off by a close, a change request or a new base', async () => {
+  test('held up by a failed review until it is cancelled, and turned off by a close, a change request or a new base', async () => {
     const pr = await stage('feature/auto-failed', 'failed.js');
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
     try {
@@ -359,7 +359,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.match(await pr.page(), /disabled auto-publish by closing the pull request/);
   });
 
-  await t.test('checks again after signing, which can wait for a prompt', async () => {
+  test('checks again after signing, which can wait for a prompt', async () => {
     const pr = await stage('feature/auto-sign', 'sign.js');
     const signing = gateSigning();
     const signedCopy = () => inClone('for-each-ref', '--format=%(objectname)', `refs/galley/${server.service.db.instance}/pull/${pr.number}/published`);
@@ -400,7 +400,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     }
   });
 
-  await t.test('an attempt stops when its approval is replaced, and the new approval publishes', async () => {
+  test('an attempt stops when its approval is replaced, and the new approval publishes', async () => {
     const pr = await stage('feature/auto-replace', 'replace.js');
     const signing = gateSigning();
     try {
@@ -423,7 +423,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     }
   });
 
-  await t.test("a stale attempt's failure leaves a newer approval on", async () => {
+  test("a stale attempt's failure leaves a newer approval on", async () => {
     const pr = await stage('feature/auto-stale', 'stale.js');
     const { id } = await human('GET', pr.base);
     const row = () => server.service.db.get<any>('SELECT * FROM pulls WHERE id = ?', id);
@@ -440,7 +440,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.equal((await pr.timeline()).findLast((e) => e.event === 'auto_publish_failed').error, 'from the second approval');
   });
 
-  await t.test('a cancel while the force-push lease is looked up stops the push', async () => {
+  test('a cancel while the force-push lease is looked up stops the push', async () => {
     const pr = await stage('feature/auto-lease', 'lease.js');
     // On GitHub before its first publish, then rewritten: publishing force-pushes with a lease.
     git('push', '-q', 'origin', 'feature/auto-lease');
@@ -478,7 +478,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     }
   });
 
-  await t.test('only the author waiting counts', async () => {
+  test('only the author waiting counts', async () => {
     // Should a review start, it waits for this gate and never finishes.
     const gate = join(dir, 'observer-gate');
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
@@ -512,7 +512,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     }
   });
 
-  await t.test('force-pushes over a branch already on GitHub when that was approved', async () => {
+  test('force-pushes over a branch already on GitHub when that was approved', async () => {
     const pr = await stage('feature/auto-force', 'force.js');
     // The branch reached GitHub before its first publish, and the agent then rewrote it.
     git('push', '-q', 'origin', 'feature/auto-force');
@@ -538,7 +538,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     return { sha, signed, tree: execFileSync('git', ['--git-dir', remote, 'rev-parse', `${sha}^{tree}`], { encoding: 'utf8' }).trim() };
   };
 
-  await t.test('force-pushes signed copies over the unsigned commits already on GitHub when that was approved', async () => {
+  test('force-pushes signed copies over the unsigned commits already on GitHub when that was approved', async () => {
     const pr = await stage('feature/auto-unsigned', 'unsigned.js');
     // The agent's unsigned commit reached GitHub before the first publish; signing replaces it with a copy.
     git('push', '-q', 'origin', 'feature/auto-unsigned');
@@ -554,7 +554,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.deepEqual([tip.signed, tip.tree], [true, git('rev-parse', 'HEAD^{tree}')]);
   });
 
-  await t.test('publishing by hand offers force when signing replaces unsigned commits on GitHub', async () => {
+  test('publishing by hand offers force when signing replaces unsigned commits on GitHub', async () => {
     const pr = await stage('feature/manual-unsigned', 'manual.js');
     git('push', '-q', 'origin', 'feature/manual-unsigned');
     const theirs = git('rev-parse', 'HEAD');
@@ -573,7 +573,7 @@ test('auto-publish publishes once the agents are done', async (t) => {
     assert.equal(remoteTip('feature/manual-unsigned').signed, true);
   });
 
-  await t.test('waits for your own threads, and a failure to publish turns it off', async () => {
+  test('waits for your own threads, and a failure to publish turns it off', async () => {
     const pr = await stage('feature/auto-gh', 'gh.js');
     const thread = await human('POST', `${pr.base}/comments`, { path: 'gh.js', line: 1, side: 'RIGHT', body: 'Is this needed?' });
     await human('PUT', `${pr.base}/auto-publish`, {});

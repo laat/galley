@@ -1,7 +1,7 @@
 // Published pull requests: an edit of the title or description someone makes on GitHub comes back
 // to galley when it follows them (following-github.test.ts), and the author hears of it.
 import '../helpers/env.ts';
-import { cli, dir, git, human, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, repo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 startHarness();
 
-test('an edit of the title or description on GitHub comes back to galley', async (t) => {
+describe('an edit of the title or description on GitHub comes back to galley', () => {
   const url = 'https://github.com/acme/widgets/pull/7';
   /** Stage a branch with one commit as the agent, publish it as the reviewer, and let the agent hear of the publish. */
   const published = async (branch: string) => {
@@ -51,7 +51,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     await server.service.followGithub();
   };
 
-  await t.test('galley takes it in, the author hears of it once, and its own edits after it are published when it waits', async () => {
+  test('galley takes it in, the author hears of it once, and its own edits after it are published when it waits', async () => {
     const pr = await published('feature/gh-edit');
     const waiting = pr.wait();
     await until(async () => (await human('GET', pr.base)).author_waiting, 'the author waits');
@@ -86,7 +86,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.deepEqual((await human('GET', pr.base)).unpublished_changes, []);
   });
 
-  await t.test("GitHub's edit replaces one here that GitHub does not have, which the timeline keeps; the same text there is no edit", async () => {
+  test("GitHub's edit replaces one here that GitHub does not have, which the timeline keeps; the same text there is no edit", async () => {
     const pr = await published('feature/gh-edit-over');
     await human('PATCH', pr.base, { title: "The user's title", body: "The user's draft." });
     assert.deepEqual((await human('GET', pr.base)).unpublished_changes, ['title', 'description']);
@@ -115,7 +115,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal(readFileSync(join(dir, 'gh-title'), 'utf8'), "The agent's title");
   });
 
-  await t.test('a CLI from before galley took edits in, which confirms other news, leaves them for the next wait to tell', async () => {
+  test('a CLI from before galley took edits in, which confirms other news, leaves them for the next wait to tell', async () => {
     const pr = await published('feature/gh-edit-old-cli');
     await githubHas(pr, 'Retitled on GitHub', 'x', { title: 'octocat' });
     await human('POST', `/api/repos/acme/widgets/issues/${pr.n}/comments`, { body: 'Looks fine.' });
@@ -130,7 +130,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal((await pr.wait('1s')).code, 124);
   });
 
-  await t.test("the author's edit after GitHub's, before a wait told it of GitHub's, is published only after one has", async () => {
+  test("the author's edit after GitHub's, before a wait told it of GitHub's, is published only after one has", async () => {
     const pr = await published('feature/gh-edit-unseen');
     await githubHas(pr, 'Retitled on GitHub', 'Edited on GitHub', { title: 'octocat', body: 'laat' });
     assert.equal((await cli(['pr', 'edit', pr.n, '--title', 'Retitled by the agent', '--body', "The agent's words."])).code, 0);
@@ -161,7 +161,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.deepEqual([readFileSync(join(dir, 'gh-title'), 'utf8'), readFileSync(join(dir, 'gh-body'), 'utf8')], ['Retitled by the agent', "The agent's words."]);
   });
 
-  await t.test('a confirmation of an edit told, which comes after one of later news, counts all the same', async () => {
+  test('a confirmation of an edit told, which comes after one of later news, counts all the same', async () => {
     const pr = await published('feature/gh-edit-seen-order');
     await githubHas(pr, 'Retitled on GitHub', 'x', { title: 'octocat' });
     const shown = JSON.parse((await cli(['api', `repos/acme/widgets/pulls/${pr.n}/wait?timeout=5&knows=edited_on_github`])).stdout);
@@ -173,7 +173,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal((await pr.wait('1s')).code, 124);
   });
 
-  await t.test("GitHub getting the user's text is nothing new for the user's dismissed turn", async () => {
+  test("GitHub getting the user's text is nothing new for the user's dismissed turn", async () => {
     const pr = await published('feature/gh-edit-dismissed');
     await githubHas(pr, 'Add gh-edit-dismissed.js', 'x');
     await human('PATCH', pr.base, { title: "The user's title" });
@@ -185,7 +185,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal(timeline.findLast((e) => e.event === 'turn_dismissed').ended, undefined);
   });
 
-  await t.test("an edit the author's wait left because GitHub had another is not left once GitHub's is taken in", async () => {
+  test("an edit the author's wait left because GitHub had another is not left once GitHub's is taken in", async () => {
     const pr = await published('feature/gh-edit-left');
     // Retitled on GitHub, before galley asks.
     writeFileSync(join(dir, 'gh-title'), 'Retitled on GitHub');
@@ -200,7 +200,7 @@ test('an edit of the title or description on GitHub comes back to galley', async
     assert.equal(readFileSync(join(dir, 'gh-title'), 'utf8'), 'Retitled by the agent');
   });
 
-  await t.test('an answer GitHub gave about the text before galley published the author’s edit there does not take it back', async () => {
+  test('an answer GitHub gave about the text before galley published the author’s edit there does not take it back', async () => {
     const pr = await published('feature/gh-edit-race');
     const gate = join(dir, 'gh-edit-follow-gate');
     try {

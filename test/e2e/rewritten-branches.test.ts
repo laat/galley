@@ -1,7 +1,7 @@
 // After publishing, a branch that moved or was rewritten on GitHub: the push is refused, galley
 // fetches the branch, and pushes what the author rebases onto it.
 import '../helpers/env.ts';
-import { git, human, remote, server, startHarness } from '../helpers/harness.ts';
+import { describe, git, human, remote, server, startHarness } from '../helpers/harness.ts';
 import { madeOnGithub, published } from '../helpers/pushes.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,8 +9,8 @@ import { execFileSync } from 'node:child_process';
 
 startHarness();
 
-test('a branch that moved or was rewritten on GitHub is not overwritten: galley fetches it, and pushes what the author rebases onto it', async (t) => {
-  await t.test('a branch that moved on GitHub is not overwritten: the author and the reviewer hear why, it is not tried again, and galley fetches the branch', async () => {
+describe('a branch that moved or was rewritten on GitHub is not overwritten: galley fetches it, and pushes what the author rebases onto it', () => {
+  test('a branch that moved on GitHub is not overwritten: the author and the reviewer hear why, it is not tried again, and galley fetches the branch', async () => {
     const pr = await published('feature/push-moved');
     // Someone pushes to the branch on GitHub ...
     const at = pr.tip().sha;
@@ -54,7 +54,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     assert.deepEqual([pr.tip().sha, pr.tip().parent], [git('rev-parse', 'HEAD'), theirs]);
   });
 
-  await t.test('a branch rewritten on GitHub is fetched, and the commits the author rebases onto it go on top of it, but not a merge of it, nor once it moved again', async () => {
+  test('a branch rewritten on GitHub is fetched, and the commits the author rebases onto it go on top of it, but not a merge of it, nor once it moved again', async () => {
     const pr = await published('feature/push-rewritten', { sign: true });
     // Where pr wait fetches it into the checkout, and where galley's clone has it (`fetched`).
     const [ref, there] = ['galley/feature/push-rewritten', 'origin/feature/push-rewritten'];
@@ -119,7 +119,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     assert.equal(pr.tip().parent, tip.sha);
   });
 
-  await t.test('rewritten again before galley could push: the author rebases what it made after the first rewrite, and a merge that brings that one back is refused', async () => {
+  test('rewritten again before galley could push: the author rebases what it made after the first rewrite, and a merge that brings that one back is refused', async () => {
     const pr = await published('feature/push-twice');
     const [ref, there] = ['galley/feature/push-twice', 'origin/feature/push-twice'];
     const at = pr.tip().sha;
@@ -155,7 +155,7 @@ test('a branch that moved or was rewritten on GitHub is not overwritten: galley 
     assert.deepEqual((await pr.pushes()).at(-1).rewritten, { from: at, to: second });
   });
 
-  await t.test('rewritten, and reset there to what galley pushed before galley could push: a merge that brings the rewrite back is refused', async () => {
+  test('rewritten, and reset there to what galley pushed before galley could push: a merge that brings the rewrite back is refused', async () => {
     const pr = await published('feature/push-reset');
     const [ref, there] = ['galley/feature/push-reset', 'origin/feature/push-reset'];
     const at = pr.tip().sha;
