@@ -300,6 +300,7 @@ test('a reviewer of the description reads no code, and approves what follows its
     assert.match(call.prompt, /Title: Add mul\n\nDescription:\nThe widgets multiply\./);
     assert.match(call.prompt, new RegExp(`commit ${sha(acme)}\n    Add mul\n    \n    Multiplication, for the widgets\\.`));
     assert.match(call.prompt, /Answer with the verdict approve when nothing needs to change/);
+    assert.match(call.prompt, /Keep each comment to one short paragraph that says what to change and why\./);
 
     const review = (await human('GET', `${base}/reviews`)).at(-1);
     assert.equal(review.state, 'APPROVED');
@@ -635,6 +636,8 @@ test('a reviewer of the code with its own instructions, run by Codex, staged for
     assert.deepEqual(call.schema.required, ['summary', 'comments']);
     assert.match(call.prompt, /\nCheck the error handling\.\n\nIf the pull request is fine, say so in the summary and leave no comments\./);
     assert.doesNotMatch(call.prompt, /Look for bugs/);
+    assert.doesNotMatch(call.prompt, /AGENTS\.md/, 'a custom reviewer looks for what it is told to');
+    assert.match(call.prompt, /No praise or thanks\./);
     assert.match((await human('GET', `${base}/reviews`)).find((r: any) => r.user.login === 'error-handling').body, /<sub>error-handling \(Codex, default model\) reviewed `[0-9a-f]{7}`, automatic review 1 of 1\.<\/sub>/);
 
     // Turned off for this pull request: the other reviewer's setting stays.

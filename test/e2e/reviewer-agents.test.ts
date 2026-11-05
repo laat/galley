@@ -57,6 +57,9 @@ test('codex-review reviews when the author waits, within the limits in settings'
     assert.equal(call.args[call.args.indexOf('-m') + 1], 'gpt-test');
     assert.ok(call.args.includes('model_reasoning_effort="high"'));
     assert.match(call.prompt, /Title: Add the answer/);
+    assert.match(call.prompt, /List every such problem, not just the first\./);
+    assert.match(call.prompt, /\(AGENTS\.md or CLAUDE\.md, at its root and in each directory between it and a changed file\)/);
+    assert.match(call.prompt, /No praise or thanks\./);
     assert.equal(call.sawFile, true, 'codex runs in a checkout of the head commit');
     assert.equal(call.cleaned, false, 'its git status hashes no file through a clean filter, which Git LFS runs in galley\'s clone');
     // By default galley installs the dependencies from the lockfile first, in Codex's sandbox with
