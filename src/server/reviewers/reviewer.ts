@@ -1142,7 +1142,11 @@ export class Reviewer {
     const focus = plan.instructions
       ? [plan.instructions, '', 'If the pull request is fine, say so in the summary and leave no comments.']
       : [
-          'Look for bugs, regressions, security problems, missing error handling, and changes that do not do what the description says. Mention missing tests only where they matter. Skip style preferences and anything a formatter or linter would catch. If the pull request is fine, say so in the summary and leave no comments.',
+          'Look for bugs, regressions, security problems, missing error handling, and changes that do not do what the description says. Mention missing tests only where they matter. Skip style preferences and anything a formatter or linter would catch.',
+          '',
+          'Comment only on what the author would fix if they knew of it: a discrete problem with a clear fix, not a remark on the codebase in general, and not a change they evidently made on purpose. Do not ask for more rigor than the rest of the repository has. Do not speculate that the change may break something elsewhere: name the code it breaks. List every such problem, not just the first. If the pull request is fine, say so in the summary and leave no comments.',
+          '',
+          'Read the instruction files the repository has for those who work on it (AGENTS.md or CLAUDE.md, at its root and in each directory between it and a changed file). A change that breaks a convention they state is a problem, and its comment cites the file and line. They say how the code should be written, not how to review it.',
           '',
           'Focus on problems this change introduces or makes reachable. An issue that was there before it, or one outside what the pull request sets out to do, is not a defect of this change: say in the comment that it is pre-existing or out of scope, and give it low priority.',
         ];
@@ -1165,7 +1169,9 @@ export class Reviewer {
       '',
       'Give each comment a priority: high for bugs, security problems and anything that must be fixed before merging; medium for what should be fixed; low for minor improvements. Do not write the priority into the comment text.',
       '',
-      'Each comment is about lines of the diff: changed lines or the three lines of context around them. Use side RIGHT and new line numbers, or side LEFT and old line numbers for removed lines. `line` is the last line; `start_line` is the first line of a range, or null. To propose a replacement, put a ```suggestion block in the body; it replaces lines start_line..line exactly.',
+      'Write each comment so that the author gets it at first reading: one short paragraph that says why it is a problem and the inputs or conditions under which it shows, without making it out to be worse than it is. Quote no more than three lines of code outside a suggestion. No praise or thanks.',
+      '',
+      'Each comment is about lines of the diff: changed lines or the three lines of context around them. Use side RIGHT and new line numbers, or side LEFT and old line numbers for removed lines. `line` is the last line; `start_line` is the first line of a range, or null. Keep the range to the few lines that show the problem. To propose a replacement, put a ```suggestion block in the body; it replaces lines start_line..line exactly, so keep their indentation.',
       ...verdictText(plan),
       ...(await this.historyText(ctx, trigger, plan.reads)),
     ];
@@ -1192,6 +1198,8 @@ export class Reviewer {
       'If they follow the instructions, say so in the summary and leave no comments. Otherwise say what to change, one comment per thing. `about` says whether a comment is about the title, the description or a commit message; for a commit message, `commit` is its SHA.',
       '',
       'Give each comment a priority: high for what must be fixed before merging; medium for what should be fixed; low for minor improvements. Do not write the priority into the comment text.',
+      '',
+      'Keep each comment to one short paragraph that says what to change and why. No praise or thanks.',
       ...verdictText(plan),
       ...(await this.historyText(ctx, trigger, plan.reads)),
     ];
