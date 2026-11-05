@@ -38,9 +38,19 @@ describe('after publishing, a commit is not pushed, or not yet, when GitHub decl
     const before = pr.tip().sha;
     const sha = pr.commit('export const retried = 1;\n');
     await withFakes({ FAKE_GH_FAIL: 'HTTP 502: gh is down' }, async () => {
-      // The author hears nothing of it, and one wait tries once.
-      assert.equal((await pr.wait('3s')).code, 124);
-      await server.autoPublisher.settle(pr.id);
+      // The author hears nothing of it, and one wait tries once. Not a wait that times out: on a loaded
+      // machine, sending the branch can take the whole timeout, and the server never hears it wait.
+      const stop = new AbortController();
+      const waiting = pr.wait('20s', stop.signal);
+      try {
+        await until(async () => (await pr.pushes()).length, 'the push is tried', 20_000);
+        await server.autoPublisher.settle(pr.id);
+        assert.equal(await Promise.race([waiting.then(() => 'answered'), new Promise((r) => setTimeout(r, 500, 'waiting'))]), 'waiting');
+      } finally {
+        stop.abort();
+      }
+      // pr wait prints nothing before it has an answer.
+      assert.equal((await waiting).stdout, '');
     });
     assert.equal(pr.tip().sha, before);
     const failed = await pr.pushes();
