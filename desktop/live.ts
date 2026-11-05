@@ -5,6 +5,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { identify } from '../src/cli/client.ts';
 import type { ChangeEvent } from '../src/server/service.ts';
 
+/** How long /events may take to answer, as long as identify waits for /api/meta. */
+const OPEN_MS = 5000;
+
 export interface Follower {
   stop(): void;
   /** End the stream and open it again at once, at the path `path` gives now, without a `down` in between. */
@@ -15,7 +18,7 @@ export interface Follower {
  * Follow the server's live updates at `base`: `up` once the stream is open, `change` for each
  * change to a pull request, and `down` when an attempt fails or the stream ends, after which it
  * tries again every `retryMs` until stopped. A stream that says nothing for `idleMs` (the server
- * pings every 20 seconds) counts as ended. Only galley's counts: another program on its port
+ * pings every 20 seconds) once it is open counts as ended. Only galley's counts: another program on its port
  * is an attempt that fails. `path` is the stream's path and query, asked again for each attempt.
  */
 export function follow(
@@ -40,16 +43,18 @@ export function follow(
       const abort = () => attempt.abort();
       stopping.signal.addEventListener('abort', abort);
       let idle: NodeJS.Timeout | undefined;
-      const alive = () => {
+      const alive = (ms = o.idleMs ?? 60_000) => {
         clearTimeout(idle);
-        idle = setTimeout(abort, o.idleMs ?? 60_000);
+        idle = setTimeout(abort, ms);
       };
       try {
-        alive();
-        // As the CLI makes sure before its first request (Client.check).
+        // As the CLI makes sure before its first request (Client.check). It gives up on its own.
         if ((await identify(base)) !== 'galley') throw new Error(`galley does not answer at ${base}`);
+        // Not idleMs: on a loaded machine, opening can take longer than an open stream's silence.
+        alive(OPEN_MS);
         const res = await fetch(base + (o.path?.() ?? '/events'), { headers: { accept: 'text/event-stream' }, signal: attempt.signal });
         if (!res.ok || !res.body) throw new Error(`/events answered ${res.status}`);
+        alive();
         call(on.up);
         let buffer = '';
         for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
