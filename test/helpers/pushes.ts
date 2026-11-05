@@ -36,7 +36,8 @@ export const published = async (branch: string, opts: { sign?: boolean } = {}) =
       git('commit', '-qam', `Change ${file}`);
       return git('rev-parse', '--short=7', 'HEAD');
     },
-    wait: (timeout = '20s') => cli(['pr', 'wait', n, '--timeout', timeout]),
+    /** `pr wait` as the agent; aborting `signal` ends it. */
+    wait: (timeout = '20s', signal?: AbortSignal) => cli(['pr', 'wait', n, '--timeout', timeout], { signal }),
     tip: () => tip(branch),
     pushes: async (): Promise<any[]> => (await human('GET', `/api/repos/acme/widgets/issues/${n}/timeline`)).filter((e: any) => e.event === 'github_push'),
     page: async () => (await fetch(`${server.url}/acme/widgets/pull/${n}`)).text(),
