@@ -1066,6 +1066,16 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
 .viewed-check:has(input:checked) { background: var(--accent-subtle); border-color: var(--accent-muted); }
 .file-note { padding: 16px; text-align: center; color: var(--fg-muted); font-size: 13px; }
 .file-body { overflow-x: auto; }
+.image-diff { display: flex; justify-content: center; align-items: flex-start; gap: 24px; padding: 24px; background: var(--bg-subtle); }
+.image-diff-side { flex: 1 1 0; margin: 0; min-width: 0; text-align: center; }
+.image-diff-side figcaption { margin-bottom: 8px; font-size: 12px; font-weight: 600; }
+.image-diff-del { color: var(--danger); }
+.image-diff-add { color: var(--success); }
+/* A checkerboard behind the image shows where it is transparent. */
+.image-diff-frame { display: inline-block; max-width: 100%; line-height: 0; border: 1px solid var(--border); background: repeating-conic-gradient(#0000000f 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+.image-diff-frame-del { border-color: var(--danger); }
+.image-diff-frame-add { border-color: var(--success); }
+.image-diff-frame img { max-width: 100%; }
 .file-menu > summary { display: inline-flex; }
 .file-menu .dropdown-menu { min-width: 220px; }
 .file-threads:not(:empty) { padding: 8px; border-top: 1px solid var(--border); background: var(--bg-subtle); border-radius: 0 0 6px 6px; }

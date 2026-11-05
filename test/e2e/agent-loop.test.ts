@@ -595,6 +595,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
   writeFileSync(join(repo, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>\n');
   writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
   writeFileSync(join(repo, 'data.bin'), Buffer.from([0, 1, 2, 0, 3]));
+  writeFileSync(join(repo, 'png'), 'not an image\n');
   writeFileSync(join(repo, 'doomed.txt'), 'gone soon\n');
   mkdirSync(join(repo, 'nested', 'deeper'), { recursive: true });
   writeFileSync(join(repo, 'nested', 'deeper', 'leaf.txt'), 'leaf\n');
@@ -606,7 +607,11 @@ test('browsing the repository at a commit of a pull request', async (t) => {
   // The pull request changes lines 10 and 50 of long.js; lines 14 to 46 stay unchanged, outside the diff.
   writeFileSync(join(repo, 'long.js'), numbered(60, (i) => (i === 10 || i === 50 ? `export const v${i} = -${i};` : null)));
   git('rm', '-q', 'doomed.txt');
-  git('commit', '-qam', 'Negate two values');
+  writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484453', 'hex'));
+  writeFileSync(join(repo, 'new.png'), Buffer.from('89504e470d0a1a0a0000000d49484454', 'hex'));
+  writeFileSync(join(repo, 'new.bin'), Buffer.from([0, 4, 5, 0]));
+  git('add', '-A');
+  git('commit', '-qm', 'Negate two values');
   const head = git('rev-parse', 'HEAD');
   const created = await cli(['pr', 'create', '--title', 'Negate', '--body', 'x', '--base', 'browse-base']);
   assert.equal(created.code, 0, created.stderr);
@@ -669,6 +674,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal(html.headers.get('cross-origin-resource-policy'), 'same-origin');
     assert.equal((await page(`/acme/widgets/raw/${head}/icon.svg`)).type, 'text/plain; charset=utf-8');
     assert.equal((await page(`/acme/widgets/raw/${head}/logo.png`)).type, 'image/png');
+    assert.equal((await page(`/acme/widgets/raw/${head}/png`)).type, 'text/plain; charset=utf-8');
     const bin = await page(`/acme/widgets/raw/${head}/data.bin`);
     assert.equal(bin.type, 'application/octet-stream');
     assert.equal(bin.headers.get('content-disposition'), "attachment; filename*=UTF-8''data.bin");
@@ -742,6 +748,13 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.match(files.text, /<tr class="hunk-row hunk-row-end" data-gap-from="54" data-gap-to="60" data-delta="0"/);
     assert.match(files.text, new RegExp(`href="/acme/widgets/blob/${head}/long\\.js">View file`));
     assert.match(files.text, new RegExp(`href="/acme/widgets/blob/${base}/doomed\\.txt">View old version`));
+    const body = (path: string) => files.text.match(new RegExp(`<div class="file" id="[^"]*" data-path="${path}"[^]*?<div class="file-body"[^>]*>([^]*?)</div>\\s*<div class="file-threads">`))?.[1] ?? '';
+    // Images show as on GitHub: the old one beside the new one, or the one side an added image has.
+    assert.deepEqual([...body('logo\\.png').matchAll(/<img src="([^"]+)"/g)].map((m) => m[1]), [`/acme/widgets/raw/${base}/logo.png`, `/acme/widgets/raw/${head}/logo.png`]);
+    assert.match(body('logo\\.png'), /Deleted<\/figcaption>[^]*Added<\/figcaption>/);
+    assert.deepEqual([...body('new\\.png').matchAll(/<img src="([^"]+)"/g)].map((m) => m[1]), [`/acme/widgets/raw/${head}/new.png`]);
+    assert.doesNotMatch(body('new\\.png'), /figcaption/);
+    assert.match(body('new\\.bin'), /Binary file not shown\./);
     const rows = await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=20&to=22&delta=2`);
     assert.equal(rows.status, 200);
     assert.deepEqual([...rows.text.matchAll(/<tr class="line context"><td class="blob-num blob-num-context" data-num="(\d+)"><\/td><td class="blob-num blob-num-context" data-num="(\d+)"><\/td><td class="blob-code blob-code-context " data-side="RIGHT" data-line="(\d+)"/g)].map((m) => m.slice(1).map(Number)), [[18, 20, 20], [19, 21, 21], [20, 22, 22]]);
