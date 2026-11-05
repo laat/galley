@@ -3,7 +3,7 @@
 // is an approval and nothing more. And the user's publish counts as their approval, and signs
 // what the agent did not.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, handedOver, human, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
@@ -124,8 +124,8 @@ test('auto-publish an approval turned on publishes the head approved only, and a
   assert.equal((await pr.pull()).staging_state, 'staged');
 });
 
-test('with something left, an approval only approves', async (t) => {
-  await t.test('the agent is working, not waiting', async () => {
+describe('with something left, an approval only approves', () => {
+  test('the agent is working, not waiting', async () => {
     const pr = await stage('feature/approve-working');
     await human('POST', `${pr.base}/reviews`, { event: 'APPROVE' });
     const pull = await pr.pull();
@@ -133,7 +133,7 @@ test('with something left, an approval only approves', async (t) => {
     assert.equal(pull.auto_publish, null);
   });
 
-  await t.test('the approval has a comment, which the agent is to address', async () => {
+  test('the approval has a comment, which the agent is to address', async () => {
     const pr = await stage('feature/approve-comment');
     const { waiting } = await pr.waits();
     await human('POST', `${pr.base}/reviews`, { event: 'APPROVE', comments: [{ path: 'approve-comment.js', line: 1, body: 'Nit: name it.' }] });
@@ -141,7 +141,7 @@ test('with something left, an approval only approves', async (t) => {
     assert.equal((await pr.pull()).auto_publish, null);
   });
 
-  await t.test('a conversation the user started is unresolved', async () => {
+  test('a conversation the user started is unresolved', async () => {
     const pr = await stage('feature/approve-thread');
     await human('POST', `${pr.base}/comments`, { path: 'approve-thread.js', line: 1, body: 'Why this name?' });
     await cli(['pr', 'view', pr.n, '--comments']);
@@ -151,7 +151,7 @@ test('with something left, an approval only approves', async (t) => {
     assert.equal((await pr.pull()).auto_publish, null);
   });
 
-  await t.test('an earlier commit is approved, in a new review or a pending one', async () => {
+  test('an earlier commit is approved, in a new review or a pending one', async () => {
     const pr = await stage('feature/approve-earlier');
     writeFileSync(join(repo, 'approve-earlier.js'), 'export const later = true;\n');
     git('commit', '-qam', 'Change approve-earlier.js');

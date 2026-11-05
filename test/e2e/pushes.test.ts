@@ -1,6 +1,6 @@
 // After publishing, the author waiting pushes each commit to GitHub.
 import '../helpers/env.ts';
-import { dir, git, human, inClone, remote, server, startHarness } from '../helpers/harness.ts';
+import { describe, dir, git, human, inClone, remote, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { published } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
@@ -14,10 +14,10 @@ import { githubStatus, Service, type ChangeEvent } from '../../src/server/servic
 
 startHarness();
 
-test('after publishing, the author waiting pushes each commit to GitHub, safely', async (t) => {
+describe('after publishing, the author waiting pushes each commit to GitHub, safely', () => {
   const ghCalls = () => readFileSync(join(dir, 'gh.log'), 'utf8').split('\n').filter(Boolean);
 
-  await t.test('a commit is pushed when the author waits, and no reviewer agent reviews it', async () => {
+  test('a commit is pushed when the author waits, and no reviewer agent reviews it', async () => {
     await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 3 });
     try {
       const pr = await published('feature/push-update');
@@ -54,7 +54,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     }
   });
 
-  await t.test('signed as the publish was: signed copies after a signed publish, the commits as they are after an unsigned one', async () => {
+  test('signed as the publish was: signed copies after a signed publish, the commits as they are after an unsigned one', async () => {
     const signed = await published('feature/push-signed', { sign: true });
     const first = signed.tip();
     assert.equal(first.signed, true);
@@ -82,7 +82,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.deepEqual(older.tip(), { sha: git('rev-parse', 'HEAD'), signed: false, parent: tip.sha });
   });
 
-  await t.test('signed, the commit added on GitHub that the author brought in is kept as it is, and its commit goes on top', async () => {
+  test('signed, the commit added on GitHub that the author brought in is kept as it is, and its commit goes on top', async () => {
     const pr = await published('feature/push-kept', { sign: true });
     // Someone pushes an unsigned commit to the branch on GitHub.
     const at = pr.tip().sha;
@@ -104,7 +104,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.deepEqual((await pr.pushes()).map((p) => [p.result, p.force, p.before]), [['pushed', false, theirs]]);
   });
 
-  await t.test('a publish by hand under way goes first: the push for the waiting author waits for it, and sees no refusal in it', async () => {
+  test('a publish by hand under way goes first: the push for the waiting author waits for it, and sees no refusal in it', async () => {
     const pr = await published('feature/push-race');
     pr.commit('export const raced = 1;\n');
     const gate = join(dir, 'push-race-gate');
@@ -134,7 +134,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     assert.deepEqual(await pr.pushes(), []);
   });
 
-  await t.test('while a commit is pushed, and until galley asks GitHub again, the merge GitHub offered for the commit before is nobody\'s turn', async () => {
+  test('while a commit is pushed, and until galley asks GitHub again, the merge GitHub offered for the commit before is nobody\'s turn', async () => {
     const pr = await published('feature/push-stale');
     /** GitHub would merge `head` now, and auto-merge is off; galley asks, as it does every minute. */
     const mergeable = async (head: string) => {
@@ -189,7 +189,7 @@ test('after publishing, the author waiting pushes each commit to GitHub, safely'
     }
   });
 
-  await t.test('GitHub\'s answer to a question galley asked before a push counts as being about the commit before it, also when it comes after the push', async () => {
+  test('GitHub\'s answer to a question galley asked before a push counts as being about the commit before it, also when it comes after the push', async () => {
     const pr = await published('feature/push-asked');
     const first = pr.tip().sha;
     // GitHub would merge the first commit, and auto-merge is off.

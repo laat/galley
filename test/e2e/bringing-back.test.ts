@@ -1,7 +1,7 @@
 // After publishing, a head that would bring back a commit a rewrite on GitHub removed: refused,
 // also in its signed copies, unless the user brings it back from the publish box.
 import '../helpers/env.ts';
-import { cli, dir, git, human, inClone, remote, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, inClone, remote, send, server, startHarness } from '../helpers/harness.ts';
 import { madeOnGithub, published } from '../helpers/pushes.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,8 +12,8 @@ import { HttpError } from '../../src/server/service.ts';
 
 startHarness();
 
-test('a head that would bring back what a rewrite on GitHub removed is refused, unless the user brings it back from the publish box', async (t) => {
-  await t.test('signed, a head whose signed copies would bring back a commit the rewrite removed is refused too', async () => {
+describe('a head that would bring back what a rewrite on GitHub removed is refused, unless the user brings it back from the publish box', () => {
+  test('signed, a head whose signed copies would bring back a commit the rewrite removed is refused too', async () => {
     const pr = await published('feature/push-recopied', { sign: true });
     // Where pr wait fetches it into the checkout.
     const ref = 'galley/feature/push-recopied';
@@ -36,7 +36,7 @@ test('a head that would bring back what a rewrite on GitHub removed is refused, 
     assert.ok((await pr.page()).includes(`would bring back a commit the rewrite removed: <code>${at.slice(0, 7)}</code>.`));
   });
 
-  await t.test('only the user, from the publish box, can publish a head that brings back what the rewrite removed: not an agent, a CLI caller claiming to be the user, nor auto-publish', async () => {
+  test('only the user, from the publish box, can publish a head that brings back what the rewrite removed: not an agent, a CLI caller claiming to be the user, nor auto-publish', async () => {
     const pr = await published('feature/push-back');
     // Where pr wait fetches it into the checkout, and where galley's clone has it.
     const [ref, there] = ['galley/feature/push-back', 'origin/feature/push-back'];
@@ -94,7 +94,7 @@ test('a head that would bring back what a rewrite on GitHub removed is refused, 
     assert.ok(!page.includes(note));
   });
 
-  await t.test('signed, a head that brought in the rewritten branch before galley fetched it is signed again on top of it when the user brings back what the rewrite removed', async () => {
+  test('signed, a head that brought in the rewritten branch before galley fetched it is signed again on top of it when the user brings back what the rewrite removed', async () => {
     const branch = 'feature/push-early';
     const pr = await published(branch, { sign: true });
     const ref = `origin/${branch}`;

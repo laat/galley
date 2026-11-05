@@ -1,9 +1,9 @@
 // Publishing with auto-merge on GitHub.
 import '../helpers/env.ts';
-import { cli, dir, git, human, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { until } from '../helpers/until.ts';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,7 +13,7 @@ import { Service, type ChangeEvent } from '../../src/server/service.ts';
 
 startHarness();
 
-test('publishing can enable auto-merge on GitHub', async (t) => {
+describe('publishing can enable auto-merge on GitHub', () => {
   const stage = async (branch: string, file: string) => {
     git('checkout', '-q', 'main');
     git('checkout', '-qb', branch);
@@ -43,9 +43,9 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
   /** Read the repository's settings from GitHub (the fake gh, with `env`) into galley's cache. */
   const refresh = (env: Record<string, string>) => withFakes(env, () => server.service.refreshGithubRepo('acme/widgets'));
   // The option shows once galley knows that the repository allows auto-merge.
-  await refresh({});
+  before(() => refresh({}));
 
-  await t.test('when publishing by hand, with the merge method from settings', async () => {
+  test('when publishing by hand, with the merge method from settings', async () => {
     const pr = await stage('feature/merge-manual', 'manual-merge.js');
     assert.match(await pr.page(), /<label><input type="checkbox" name="auto_merge"> <span>Enable auto-merge on GitHub \(squash\)<\/span><\/label>/);
     const calls = ghCalls();
@@ -111,7 +111,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     }
   });
 
-  await t.test('when auto-publish publishes, if it was chosen with it', async () => {
+  test('when auto-publish publishes, if it was chosen with it', async () => {
     const pr = await stage('feature/merge-auto', 'auto-merge.js');
     const on = await cli(['pr', 'publish', String(pr.number), '--auto', '--auto-merge'], { actor: 'reviewer' });
     assert.equal(on.code, 0, on.stderr);
@@ -132,7 +132,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     }
   });
 
-  await t.test('the publish form checks it when auto-publish includes it, with the same merge method', async () => {
+  test('the publish form checks it when auto-publish includes it, with the same merge method', async () => {
     const pr = await stage('feature/merge-form', 'form-merge.js');
     await human('PUT', `${pr.base}/auto-publish`, { auto_merge: true, merge_method: 'squash' });
     await human('PUT', '/api/settings/publish', { mergeMethod: 'rebase' });
@@ -155,7 +155,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     }
   });
 
-  await t.test("GitHub's answer from before galley turned auto-merge on does not make it the user's turn to merge", async () => {
+  test("GitHub's answer from before galley turned auto-merge on does not make it the user's turn to merge", async () => {
     const pr = await stage('feature/merge-turn', 'turn-merge.js');
     const pull = await human('POST', `${pr.base}/publish`, { auto_merge: true, merge_method: 'squash' });
     assert.deepEqual(pull.auto_merge_result, { state: 'enabled', merge_method: 'squash', error: null });
@@ -187,7 +187,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     }
   });
 
-  await t.test('a failure is recorded, and the pull request stays published', async () => {
+  test('a failure is recorded, and the pull request stays published', async () => {
     const pr = await stage('feature/merge-fail', 'fail-merge.js');
     writeFileSync(join(dir, 'gh-merge-fail'), 'GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)');
     const r = await cli(['pr', 'publish', String(pr.number), '--auto-merge'], { actor: 'reviewer' });
@@ -211,7 +211,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     await refresh({});
   });
 
-  await t.test('a merge gh accepted but galley could not check is not reported as auto-merge on', async () => {
+  test('a merge gh accepted but galley could not check is not reported as auto-merge on', async () => {
     const pr = await stage('feature/merge-unknown', 'unknown-merge.js');
     await withFakes({ FAKE_GH_VIEW: 'not JSON' }, async () => {
       const r = await cli(['pr', 'publish', String(pr.number), '--auto-merge'], { actor: 'reviewer' });
@@ -227,7 +227,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.match(page, /requested auto-merge \(squash\) on <a [^>]*>acme\/widgets#7<\/a> [^]*?; whether GitHub merged it at once could not be checked/);
   });
 
-  await t.test('the merge method checked when the request came in is the one used', async () => {
+  test('the merge method checked when the request came in is the one used', async () => {
     const pr = await stage('feature/merge-race', 'race-merge.js');
     const service = server.service;
     const publish = service.publish;
@@ -247,7 +247,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.ok(calls().includes(`pr merge ${url} --auto --squash --match-head-commit ${pr.pushed()}`), calls().join('\n'));
   });
 
-  await t.test('a lookup that cannot even start leaves the outcome unknown, not failed', async () => {
+  test('a lookup that cannot even start leaves the outcome unknown, not failed', async () => {
     const pr = await stage('feature/merge-lookup', 'lookup-merge.js');
     const service = server.service;
     const gh = service.ghBin;
@@ -264,7 +264,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.match(await pr.page(), /<strong>Auto-merge requested for <a [^>]*>acme\/widgets#7<\/a><\/strong>/);
   });
 
-  await t.test('asks GitHub before publishing, rather than trusting what it read earlier', async () => {
+  test('asks GitHub before publishing, rather than trusting what it read earlier', async () => {
     // Auto-publish was approved with auto-merge while GitHub allowed squash merges; then the
     // repository stopped allowing them, and galley's cache has not heard yet.
     const pr = await stage('feature/merge-stale', 'stale-merge.js');
@@ -296,7 +296,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.throws(() => execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '-q', 'feature/merge-stale'], { stdio: 'pipe' }));
   });
 
-  await t.test('GitHub merges at once when there is nothing to wait for', async () => {
+  test('GitHub merges at once when there is nothing to wait for', async () => {
     const pr = await stage('feature/merge-clean', 'clean-merge.js');
     // Right after creating the pull request, gh asks for auto-merge before GitHub knows it is
     // clean, and GitHub refuses. Asked again, gh merges it.
@@ -324,7 +324,7 @@ test('publishing can enable auto-merge on GitHub', async (t) => {
     assert.equal(pr.pushed(), pushed);
   });
 
-  await t.test('only where GitHub allows auto-merge, and with a merge method it allows', async () => {
+  test('only where GitHub allows auto-merge, and with a merge method it allows', async () => {
     const pr = await stage('feature/merge-allowed', 'allowed-merge.js');
     const checkbox = /<input type="checkbox" name="auto_merge">/;
     const calls = ghCalls();

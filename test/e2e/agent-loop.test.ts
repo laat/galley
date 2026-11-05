@@ -2,9 +2,9 @@
 // through the API (as the web UI does), the agent rewrites history, and the reviewer publishes.
 // And what pages show beside it: Markdown, pasted images, the repository at a commit, the file tree.
 import '../helpers/env.ts';
-import { BIN, cli, digitCommit, dir, exec, git, handedOver, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { BIN, cli, describe, digitCommit, dir, exec, git, handedOver, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
-import { mock, test } from 'node:test';
+import { before, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -13,8 +13,8 @@ import { join } from 'node:path';
 
 startHarness();
 
-test('the agent loop, from staging to publishing', async (t) => {
-  await t.test('pr create stages the current branch', async () => {
+describe('the agent loop, from staging to publishing', () => {
+  test('pr create stages the current branch', async () => {
     const r = await cli(['pr', 'create', '--title', 'Add multiplication', '--body-file', '-'], { input: 'Adds `mul`.' });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout.trim(), `${server.url}/acme/widgets/pull/1`);
@@ -23,13 +23,13 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(again.stderr, /already exists/);
   });
 
-  await t.test('pr create without a title fails like gh does when not interactive', async () => {
+  test('pr create without a title fails like gh does when not interactive', async () => {
     const r = await cli(['pr', 'create']);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /must provide `--title`/);
   });
 
-  await t.test('pr view --json and --jq', async () => {
+  test('pr view --json and --jq', async () => {
     const r = await cli(['pr', 'view', '--json', 'number,title,state,author,headRefName,isDraft']);
     assert.deepEqual(JSON.parse(r.stdout), { number: 1, title: 'Add multiplication', state: 'STAGED', author: { login: 'agent', is_bot: true }, headRefName: 'feature/mul', isDraft: false });
     const jq = await cli(['pr', 'view', '1', '--json', 'commits', '--jq', '.commits[].messageHeadline']);
@@ -39,7 +39,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(list.stdout, /^s#1\tAdd multiplication\tfeature\/mul\tSTAGED\t/);
   });
 
-  await t.test('a staged pull request is s#1: the CLI takes s1, s#1 and, as gh, 1 and #1, and its page is at /pull/s1 too', async () => {
+  test('a staged pull request is s#1: the CLI takes s1, s#1 and, as gh, 1 and #1, and its page is at /pull/s1 too', async () => {
     for (const arg of ['s1', 's#1', 'S1', '1', '#1', `${server.url}/acme/widgets/pull/s1`, `${server.url}/acme/widgets/pull/1/files`]) {
       const r = await cli(['pr', 'view', arg, '--json', 'number,ref']);
       assert.equal(r.code, 0, `${arg}: ${r.stderr}`);
@@ -54,7 +54,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(page, /<span class="gh-header-number">s#1<\/span>/);
   });
 
-  await t.test('pr wait says when the reviewer agents are done with a commit, once', async () => {
+  test('pr wait says when the reviewer agents are done with a commit, once', async () => {
     // Codex is off in settings, so no reviewer agent reviews it: the reviewer's turn at once. The
     // API tells it apart from feedback, and says it again until the author confirms it.
     const earlier: string[] = [];
@@ -80,7 +80,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal((await cli(['pr', 'wait', '--timeout', '1s'])).code, 124);
   });
 
-  await t.test('pr wait returns the review the reviewer submits', async () => {
+  test('pr wait returns the review the reviewer submits', async () => {
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
     // Wait until the server sees the agent waiting, as the UI would show it.
     await until(async () => (await human('GET', '/api/repos/acme/widgets/pulls/1')).author_waiting, 'the server sees the agent waiting');
@@ -103,7 +103,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(again.code, 124);
   });
 
-  await t.test('an approval without text still reaches the agent', async () => {
+  test('an approval without text still reaches the agent', async () => {
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
     await until(async () => (await human('GET', '/api/repos/acme/widgets/pulls/1')).author_waiting, 'the agent waits');
     const review = await human('POST', '/api/repos/acme/widgets/pulls/1/reviews', { event: 'APPROVE' });
@@ -115,7 +115,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.ok(review.id);
   });
 
-  await t.test('threads follow their lines when the agent rewrites history', async () => {
+  test('threads follow their lines when the agent rewrites history', async () => {
     writeFileSync(join(repo, 'math.js'), '// math\n\nexport function add(a, b) {\n  return a + b;\n}\n\n/** Multiply. */\nexport function mul(a, b) {\n  return a * b;\n}\n');
     git('commit', '-q', '--amend', '-am', 'Add mul');
     const r = await cli(['pr', 'view', '--json', 'reviewThreads,headRefOid']);
@@ -131,7 +131,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.ok(timeline.some((e: any) => e.event === 'pushed' && e.forced === true));
   });
 
-  await t.test('a range comment is outdated when a line inside it changes', async () => {
+  test('a range comment is outdated when a line inside it changes', async () => {
     const review = await human('POST', '/api/repos/acme/widgets/pulls/1/comments', { path: 'math.js', start_line: 8, line: 10, side: 'RIGHT', body: 'Range.' });
     writeFileSync(join(repo, 'math.js'), '// math\n\nexport function add(a, b) {\n  return a + b;\n}\n\n/** Multiply. */\nexport function mul(a, b) {\n  return b * a;\n}\n');
     git('commit', '-q', '--amend', '-am', 'Add mul');
@@ -144,7 +144,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     await cli(['pr', 'view', '--comments']);
   });
 
-  await t.test('pending review comments stay private', async () => {
+  test('pending review comments stay private', async () => {
     const pending = await human('POST', '/api/repos/acme/widgets/pulls/1/pending-comments', { path: 'math.js', line: 9, body: 'Draft thought.' });
     const asAgent = await cli(['api', `repos/{owner}/{repo}/pulls/comments/${pending.id}`]);
     assert.equal(asAgent.code, 1);
@@ -159,7 +159,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(await commits(), / data-pending-review=""/);
   });
 
-  await t.test('the agent replies to a thread and edits the pull request', async () => {
+  test('the agent replies to a thread and edits the pull request', async () => {
     const threads = JSON.parse((await cli(['pr', 'view', '--json', 'reviewThreads'])).stdout).reviewThreads;
     const id = threads[0].databaseId;
     const reply = await cli(['pr', 'comment', '--reply-to', String(id), '-b', 'Done.']);
@@ -174,7 +174,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(pr.title, 'Add multiplication helper');
   });
 
-  await t.test('api accepts gh-style fields', async () => {
+  test('api accepts gh-style fields', async () => {
     const r = await cli(['api', 'repos/{owner}/{repo}/issues/1/comments', '-f', 'body=From the API']);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(JSON.parse(r.stdout).user.login, 'agent');
@@ -193,12 +193,12 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(missing.stderr, /HTTP 404/);
   });
 
-  await t.test('the publish button offers to sign, checked when git signs by default', async () => {
+  test('the publish button offers to sign, checked when git signs by default', async () => {
     const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
     assert.match(page, /<input type="checkbox" name="sign" checked> Sign the commit as <strong>Reviewer<\/strong> &lt;reviewer@example\.com&gt;/);
   });
 
-  await t.test('the agent resolves a thread it fixed in the same command as its reply', async () => {
+  test('the agent resolves a thread it fixed in the same command as its reply', async () => {
     const r = await cli(['pr', 'comment', '--resolve', '-b', 'x']);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /--resolve needs --reply-to/);
@@ -217,7 +217,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.doesNotMatch(header, />Resolved</);
   });
 
-  await t.test('agents other than the author cannot publish, and stale pages cannot publish', async () => {
+  test('agents other than the author cannot publish, and stale pages cannot publish', async () => {
     const r = await cli(['pr', 'publish'], { actor: 'observer' });
     assert.equal(r.code, 1);
     assert.match(r.stderr, /only the user or the author of this pull request \(agent\) can publish it, not observer/);
@@ -229,7 +229,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(res.status, 412);
   });
 
-  await t.test('publishing pushes the reviewed commit and opens the pull request', async () => {
+  test('publishing pushes the reviewed commit and opens the pull request', async () => {
     await handedOver();
     const waiting = cli(['pr', 'wait', '--timeout', '20s']);
     await until(async () => (await human('GET', '/api/repos/acme/widgets/pulls/1')).author_waiting, 'the agent waits');
@@ -254,7 +254,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(r.stdout, /Published to GitHub: https:\/\/github\.com\/acme\/widgets\/pull\/7/);
   });
 
-  await t.test("the reviewer's publish approves what it published, over their earlier request for changes, and feedback after it is the agent's to address", async () => {
+  test("the reviewer's publish approves what it published, over their earlier request for changes, and feedback after it is the agent's to address", async () => {
     const decision = async () => JSON.parse((await cli(['pr', 'view', '--json', 'reviewDecision'])).stdout).reviewDecision;
     assert.equal(await decision(), 'APPROVED');
     const page = await (await fetch(`${server.url}/acme/widgets/pull/1`)).text();
@@ -277,7 +277,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     await cli(['pr', 'view', '--comments']);
   });
 
-  await t.test('publishing new commits signs only those and fast-forwards GitHub', async () => {
+  test('publishing new commits signs only those and fast-forwards GitHub', async () => {
     const before = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
     writeFileSync(join(repo, 'README.md'), '# widgets\n');
     git('add', 'README.md');
@@ -295,7 +295,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(page, /GitHub has the same commits, title and description/);
   });
 
-  await t.test('a rewritten branch needs force to publish again', async () => {
+  test('a rewritten branch needs force to publish again', async () => {
     git('commit', '-q', '--amend', '-m', 'Add mul', '-m', 'Reworded.');
     await send('feature/mul');
     await assert.rejects(human('POST', '/api/repos/acme/widgets/pulls/1/publish', {}), /409|rejected|git push failed/);
@@ -316,7 +316,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     inClone('update-ref', published, execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim());
   });
 
-  await t.test('force-publishing never overwrites commits added on GitHub', async () => {
+  test('force-publishing never overwrites commits added on GitHub', async () => {
     // Someone commits on the published branch on GitHub ...
     const tip = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim();
     const tree = execFileSync('git', ['--git-dir', remote, 'rev-parse', `${tip}^{tree}`], { encoding: 'utf8' }).trim();
@@ -332,7 +332,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'feature/mul'], { encoding: 'utf8' }).trim(), theirs);
   });
 
-  await t.test('pr wait reports feedback that comes with a close', async () => {
+  test('pr wait reports feedback that comes with a close', async () => {
     // The agent has seen everything so far (including the last publish).
     await cli(['pr', 'view', '--comments']);
     // Published, its wait pushes the rewritten history, which the commit added on GitHub refuses, once.
@@ -349,7 +349,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     await human('PATCH', '/api/repos/acme/widgets/pulls/1', { state: 'open' });
   });
 
-  await t.test('the repository page links to the repository on GitHub', async () => {
+  test('the repository page links to the repository on GitHub', async () => {
     await server.service.refreshGithubRepo('acme/widgets');
     // Owner and name go as strings (-f): -F would make a repository called "123" a number.
     assert.match(readFileSync(join(dir, 'gh.log'), 'utf8'), /^api graphql -f query=.* -f owner=acme -f name=widgets$/m);
@@ -374,7 +374,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.doesNotMatch(local, /page-title-github/);
   });
 
-  await t.test('web pages render', async () => {
+  test('web pages render', async () => {
     // Published by now, it is on the Published tab.
     for (const path of ['/?state=published', '/acme/widgets?state=published', '/acme/widgets/pull/1', '/acme/widgets/pull/1/commits', '/acme/widgets/pull/1/files', '/acme/widgets/pull/1/files?diff=split']) {
       const res = await fetch(server.url + path);
@@ -386,7 +386,7 @@ test('the agent loop, from staging to publishing', async (t) => {
     assert.match(page, /<span class="gh-header-number">s#1 → <a href="https:\/\/github\.com\/acme\/widgets\/pull\/7" target="_blank" rel="noopener">acme\/widgets#7<\/a><\/span>/);
   });
 
-  await t.test('cross-site writes and foreign Host headers are refused', async () => {
+  test('cross-site writes and foreign Host headers are refused', async () => {
     const cross = await fetch(server.url + '/api/repos/acme/widgets/pulls/1/publish', { method: 'POST', headers: { origin: 'https://evil.example' } });
     assert.equal(cross.status, 403);
   });
@@ -446,23 +446,27 @@ test('Markdown links issues, mentions and commits the way GitHub does', async ()
   assert.match(await preview(`Follows s#${number} and s#999`, api), new RegExp(`Follows <a class="issue-link" href="/acme/widgets/pull/${number}" title="Links · staged">s#${number}</a> and s#999`));
 });
 
-test('images pasted into comments are stored, shown to agents, and warned about before publishing', async (t) => {
-  git('checkout', '-q', 'main');
-  git('checkout', '-qb', 'feature/images');
-  writeFileSync(join(repo, 'images.js'), 'export {};\n');
-  git('add', 'images.js');
-  git('commit', '-qm', 'Add images.js');
-  const created = await cli(['pr', 'create', '--title', 'Show images', '--body', 'Nothing to see.']);
-  assert.equal(created.code, 0, created.stderr);
-  const number = Number(created.stdout.trim().split('/').pop());
-  const base = `/api/repos/acme/widgets/pulls/${number}`;
+describe('images pasted into comments are stored, shown to agents, and warned about before publishing', () => {
+  let number: number;
+  let base: string;
+  before(async () => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', 'feature/images');
+    writeFileSync(join(repo, 'images.js'), 'export {};\n');
+    git('add', 'images.js');
+    git('commit', '-qm', 'Add images.js');
+    const created = await cli(['pr', 'create', '--title', 'Show images', '--body', 'Nothing to see.']);
+    assert.equal(created.code, 0, created.stderr);
+    number = Number(created.stdout.trim().split('/').pop());
+    base = `/api/repos/acme/widgets/pulls/${number}`;
+  });
   // A 1x1 PNG.
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
   const hash = createHash('sha256').update(png).digest('hex');
   const path = `/uploads/${hash}.png`;
   const upload = (body: Buffer<ArrayBuffer> | string, headers: Record<string, string> = { 'content-type': 'image/png' }) => fetch(`${server.url}/api/uploads`, { method: 'POST', headers, body });
 
-  await t.test('an uploaded PNG is stored under its hash and served back as a PNG', async () => {
+  test('an uploaded PNG is stored under its hash and served back as a PNG', async () => {
     const res = await upload(png);
     assert.equal(res.status, 201);
     assert.deepEqual(await res.json(), { path, url: server.url + path, content_type: 'image/png', size: png.length });
@@ -478,7 +482,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     assert.equal((await fetch(`${server.url}/uploads/${'0'.repeat(64)}.png`)).status, 404);
   });
 
-  await t.test('only PNG, JPEG, GIF and WebP images of at most 10 MB are accepted', async () => {
+  test('only PNG, JPEG, GIF and WebP images of at most 10 MB are accepted', async () => {
     const kinds: [Buffer<ArrayBuffer>, string, string][] = [
       [Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), 'jpg', 'image/jpeg'],
       [Buffer.from('GIF89a\x01\x00\x01\x00', 'latin1'), 'gif', 'image/gif'],
@@ -523,12 +527,12 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     assert.equal(streamed.headers.get('connection'), 'keep-alive');
   });
 
-  await t.test('uploads from other sites are refused', async () => {
+  test('uploads from other sites are refused', async () => {
     const res = await fetch(`${server.url}/api/uploads`, { method: 'POST', headers: { 'content-type': 'image/png', origin: 'https://evil.example' }, body: png });
     assert.equal(res.status, 403);
   });
 
-  await t.test('rendered Markdown keeps uploaded images, and no other local ones', async () => {
+  test('rendered Markdown keeps uploaded images, and no other local ones', async () => {
     const render = async (text: string) => (await fetch(`${server.url}/api/markdown`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })).text();
     assert.match(await render(`![screenshot](${path})`), new RegExp(`<img src="${path}" alt="screenshot" />`));
     assert.match(await render(`<img src="${path}" width="200">`), new RegExp(`<img src="${path}" width="200" />`));
@@ -545,7 +549,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     }
   });
 
-  await t.test('pr wait and pr view --comments list the images, and --download-images saves them', async () => {
+  test('pr wait and pr view --comments list the images, and --download-images saves them', async () => {
     await handedOver(number);
     const waiting = cli(['pr', 'wait', String(number), '--timeout', '20s']);
     await until(async () => (await human('GET', base)).author_waiting, 'the author waits');
@@ -569,7 +573,7 @@ test('images pasted into comments are stored, shown to agents, and warned about 
     assert.deepEqual(readFileSync(join(saveTo, `${hash}.png`)), png);
   });
 
-  await t.test('the publish box warns about images in the description, not in comments', async () => {
+  test('the publish box warns about images in the description, not in comments', async () => {
     const page = async () => (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
     const before = await page();
     assert.match(before, /js-attach-image/);
@@ -579,49 +583,54 @@ test('images pasted into comments are stored, shown to agents, and warned about 
   });
 });
 
-test('browsing the repository at a commit of a pull request', async (t) => {
-  git('checkout', '-q', 'main');
-  git('checkout', '-qb', 'feature/browse');
+describe('browsing the repository at a commit of a pull request', () => {
   const numbered = (n: number, change: (i: number) => string | null = () => null) =>
     Array.from({ length: n }, (_, k) => change(k + 1) ?? `export const v${k + 1} = ${k + 1};`).join('\n') + '\n';
-  mkdirSync(join(repo, 'dir with space'));
-  writeFileSync(
-    join(repo, 'dir with space', 'notes.md'),
-    '# Notes\n\nSee [math](../math.js) and ![logo](../logo.png).\n\nFrom the root: [long](/long.js) ![root logo](/logo.png), [elsewhere](//example.com/x).\n\n![icon](../icon.svg) ![big](../big.svg) ![web](https://example.com/w.png) ![other](//example.com/o.png)\n\n[up](../) and [root](/)\n',
-  );
-  writeFileSync(join(repo, 'big.svg'), `<svg xmlns="http://www.w3.org/2000/svg"><!-- ${'x'.repeat(300_000)} --></svg>\n`);
-  writeFileSync(join(repo, 'long.js'), numbered(60));
-  writeFileSync(join(repo, 'page.html'), '<!doctype html><script>alert(document.cookie)</script>\n');
-  writeFileSync(join(repo, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>\n');
-  writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
-  writeFileSync(join(repo, 'data.bin'), Buffer.from([0, 1, 2, 0, 3]));
-  writeFileSync(join(repo, 'png'), 'not an image\n');
-  writeFileSync(join(repo, 'doomed.txt'), 'gone soon\n');
-  mkdirSync(join(repo, 'nested', 'deeper'), { recursive: true });
-  writeFileSync(join(repo, 'nested', 'deeper', 'leaf.txt'), 'leaf\n');
-  writeFileSync(join(repo, 'nested', 'top.txt'), 'top\n');
-  git('add', '-A');
-  git('commit', '-qm', 'Add files to browse');
-  const base = git('rev-parse', 'HEAD');
-  git('branch', 'browse-base');
-  // The pull request changes lines 10 and 50 of long.js; lines 14 to 46 stay unchanged, outside the diff.
-  writeFileSync(join(repo, 'long.js'), numbered(60, (i) => (i === 10 || i === 50 ? `export const v${i} = -${i};` : null)));
-  git('rm', '-q', 'doomed.txt');
-  writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484453', 'hex'));
-  writeFileSync(join(repo, 'new.png'), Buffer.from('89504e470d0a1a0a0000000d49484454', 'hex'));
-  writeFileSync(join(repo, 'new.bin'), Buffer.from([0, 4, 5, 0]));
-  git('add', '-A');
-  git('commit', '-qm', 'Negate two values');
-  const head = git('rev-parse', 'HEAD');
-  const created = await cli(['pr', 'create', '--title', 'Negate', '--body', 'x', '--base', 'browse-base']);
-  assert.equal(created.code, 0, created.stderr);
-  const n = Number(created.stdout.trim().split('/').pop());
+  let base: string;
+  let head: string;
+  let n: number;
+  before(async () => {
+    git('checkout', '-q', 'main');
+    git('checkout', '-qb', 'feature/browse');
+    mkdirSync(join(repo, 'dir with space'));
+    writeFileSync(
+      join(repo, 'dir with space', 'notes.md'),
+      '# Notes\n\nSee [math](../math.js) and ![logo](../logo.png).\n\nFrom the root: [long](/long.js) ![root logo](/logo.png), [elsewhere](//example.com/x).\n\n![icon](../icon.svg) ![big](../big.svg) ![web](https://example.com/w.png) ![other](//example.com/o.png)\n\n[up](../) and [root](/)\n',
+    );
+    writeFileSync(join(repo, 'big.svg'), `<svg xmlns="http://www.w3.org/2000/svg"><!-- ${'x'.repeat(300_000)} --></svg>\n`);
+    writeFileSync(join(repo, 'long.js'), numbered(60));
+    writeFileSync(join(repo, 'page.html'), '<!doctype html><script>alert(document.cookie)</script>\n');
+    writeFileSync(join(repo, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>\n');
+    writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
+    writeFileSync(join(repo, 'data.bin'), Buffer.from([0, 1, 2, 0, 3]));
+    writeFileSync(join(repo, 'png'), 'not an image\n');
+    writeFileSync(join(repo, 'doomed.txt'), 'gone soon\n');
+    mkdirSync(join(repo, 'nested', 'deeper'), { recursive: true });
+    writeFileSync(join(repo, 'nested', 'deeper', 'leaf.txt'), 'leaf\n');
+    writeFileSync(join(repo, 'nested', 'top.txt'), 'top\n');
+    git('add', '-A');
+    git('commit', '-qm', 'Add files to browse');
+    base = git('rev-parse', 'HEAD');
+    git('branch', 'browse-base');
+    // The pull request changes lines 10 and 50 of long.js; lines 14 to 46 stay unchanged, outside the diff.
+    writeFileSync(join(repo, 'long.js'), numbered(60, (i) => (i === 10 || i === 50 ? `export const v${i} = -${i};` : null)));
+    git('rm', '-q', 'doomed.txt');
+    writeFileSync(join(repo, 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484453', 'hex'));
+    writeFileSync(join(repo, 'new.png'), Buffer.from('89504e470d0a1a0a0000000d49484454', 'hex'));
+    writeFileSync(join(repo, 'new.bin'), Buffer.from([0, 4, 5, 0]));
+    git('add', '-A');
+    git('commit', '-qm', 'Negate two values');
+    head = git('rev-parse', 'HEAD');
+    const created = await cli(['pr', 'create', '--title', 'Negate', '--body', 'x', '--base', 'browse-base']);
+    assert.equal(created.code, 0, created.stderr);
+    n = Number(created.stdout.trim().split('/').pop());
+  });
   const page = async (path: string) => {
     const res = await fetch(server.url + path, { redirect: 'manual' });
     return { status: res.status, type: res.headers.get('content-type'), location: res.headers.get('location'), text: await res.text(), headers: res.headers };
   };
 
-  await t.test('tree and blob views, with a path that has a space', async () => {
+  test('tree and blob views, with a path that has a space', async () => {
     const root = await page(`/acme/widgets/tree/${head.slice(0, 7)}`);
     assert.equal(root.status, 200);
     assert.match(root.text, new RegExp(`<a href="/acme/widgets/tree/${head}/dir%20with%20space">dir with space</a>`));
@@ -664,7 +673,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal((await page(`/acme/widgets/tree/${head}/long.js`)).location, `/acme/widgets/blob/${head}/long.js`);
   });
 
-  await t.test('raw files never run as HTML on this origin', async () => {
+  test('raw files never run as HTML on this origin', async () => {
     const html = await page(`/acme/widgets/raw/${head}/page.html`);
     assert.equal(html.status, 200);
     assert.equal(html.type, 'text/plain; charset=utf-8');
@@ -682,7 +691,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.match(spaced.text, /^# Notes/);
   });
 
-  await t.test('unknown commits and paths are not found', async () => {
+  test('unknown commits and paths are not found', async () => {
     for (const path of [
       `/acme/widgets/tree/${'0'.repeat(40)}`,
       `/acme/widgets/tree/not-a-sha`,
@@ -698,7 +707,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal((await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=a&to=2&delta=0`)).status, 400);
   });
 
-  await t.test('a file tree beside the pages, open down to the page, its directories loading when opened', async () => {
+  test('a file tree beside the pages, open down to the page, its directories loading when opened', async () => {
     const at = (path: string) => `/acme/widgets/${path}`.replace('@', head);
     // A file: its directories open, the file highlighted, other directories closed and empty.
     const leaf = await page(at('blob/@/nested/deeper/leaf.txt'));
@@ -740,7 +749,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal((await page(`/acme/widgets/tree-list/${head.slice(0, 7)}`)).headers.get('cache-control'), null);
   });
 
-  await t.test('the unfold arrows load lines of the file as diff rows', async () => {
+  test('the unfold arrows load lines of the file as diff rows', async () => {
     const files = await page(`/acme/widgets/pull/${n}/files`);
     assert.match(files.text, new RegExp(`data-excerpt="/acme/widgets/blob_excerpt/${head}\\?path=long\\.js"`));
     // Lines 14 to 46 are folded between the hunks, and lines 54 to 60 after the last.
@@ -765,7 +774,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal((await page(`/acme/widgets/blob_excerpt/${head}?path=long.js&from=61&to=80&delta=0`)).text, '');
   });
 
-  await t.test('lines loaded by the arrows can carry comments, which follow them across pushes', async () => {
+  test('lines loaded by the arrows can carry comments, which follow them across pushes', async () => {
     const comment = await human('POST', `/api/repos/acme/widgets/pulls/${n}/comments`, { path: 'long.js', line: 30, side: 'RIGHT', body: 'Negate this one too.' });
     assert.equal(comment.line, 30);
     assert.equal(comment.diff_hunk, '@@ -27,4 +27,4 @@\n export const v27 = 27;\n export const v28 = 28;\n export const v29 = 29;\n export const v30 = 30;');
@@ -793,14 +802,14 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.deepEqual(threads.map((th: any) => th.isOutdated), [true, false]);
   });
 
-  await t.test('commits and revisions link to their tree', async () => {
+  test('commits and revisions link to their tree', async () => {
     const commits = await page(`/acme/widgets/pull/${n}/commits`);
     assert.match(commits.text, new RegExp(`href="/acme/widgets/tree/${head}" title="Browse the repository at this commit"`));
     const conversation = await page(`/acme/widgets/pull/${n}`);
     assert.match(conversation.text, new RegExp(`href="/acme/widgets/tree/${head}" title="Browse the repository at this revision"`));
   });
 
-  await t.test('galley browse prints the URL of a pull request, file or directory', async () => {
+  test('galley browse prints the URL of a pull request, file or directory', async () => {
     const browse = async (...args: string[]) => {
       const r = await cli(['browse', ...args]);
       assert.equal(r.code, 0, r.stderr);
@@ -832,7 +841,7 @@ test('browsing the repository at a commit of a pull request', async (t) => {
     assert.equal((await page(new URL(await browse('long.js:12', '--commit', head)).pathname)).status, 200);
   });
 
-  await t.test('galley browse --repo looks up commits and paths in that repository, through the server', async () => {
+  test('galley browse --repo looks up commits and paths in that repository, through the server', async () => {
     const other = join(dir, 'other');
     execFileSync('git', ['init', '-q', '-b', 'main', other]);
     execFileSync('git', ['-C', other, '-c', 'commit.gpgsign=false', '-c', 'user.name=Other', '-c', 'user.email=other@example.com', 'commit', '-q', '--allow-empty', '-m', 'Other']);

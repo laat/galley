@@ -1,7 +1,7 @@
 // After publishing, a commit the author waits with is not pushed, or not yet: GitHub declines it,
 // can not be asked or says it was merged, or the author has feedback to read first.
 import '../helpers/env.ts';
-import { dir, git, human, remote, send, server, startHarness } from '../helpers/harness.ts';
+import { describe, dir, git, human, remote, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { published } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
@@ -12,8 +12,8 @@ import { join } from 'node:path';
 
 startHarness();
 
-test('after publishing, a commit is not pushed, or not yet, when GitHub declines it, can not be asked or says it was merged, or the author has feedback to read', async (t) => {
-  await t.test('a push GitHub declines, for a secret say, is told to the author, and not tried again', async () => {
+describe('after publishing, a commit is not pushed, or not yet, when GitHub declines it, can not be asked or says it was merged, or the author has feedback to read', () => {
+  test('a push GitHub declines, for a secret say, is told to the author, and not tried again', async () => {
     const pr = await published('feature/push-declined');
     const before = pr.tip().sha;
     // GitHub's push protection, or a rule on the branch.
@@ -33,7 +33,7 @@ test('after publishing, a commit is not pushed, or not yet, when GitHub declines
     assert.equal(pr.tip().sha, before);
   });
 
-  await t.test('GitHub could not be asked: nothing is pushed, the author waits on, and its next wait tries again', async () => {
+  test('GitHub could not be asked: nothing is pushed, the author waits on, and its next wait tries again', async () => {
     const pr = await published('feature/push-retry');
     const before = pr.tip().sha;
     const sha = pr.commit('export const retried = 1;\n');
@@ -55,7 +55,7 @@ test('after publishing, a commit is not pushed, or not yet, when GitHub declines
     assert.equal(pr.tip().sha, git('rev-parse', 'HEAD'));
   });
 
-  await t.test('nothing is pushed once GitHub says it was merged, also before galley has heard', async () => {
+  test('nothing is pushed once GitHub says it was merged, also before galley has heard', async () => {
     const pr = await published('feature/push-merged');
     const before = pr.tip().sha;
     pr.commit('export const late = 1;\n');
@@ -68,7 +68,7 @@ test('after publishing, a commit is not pushed, or not yet, when GitHub declines
     assert.deepEqual(await pr.pushes(), []);
   });
 
-  await t.test('feedback the author has not seen holds the push until it has', async () => {
+  test('feedback the author has not seen holds the push until it has', async () => {
     const pr = await published('feature/push-held');
     const before = pr.tip().sha;
     const sha = pr.commit('export const held = 1;\n');

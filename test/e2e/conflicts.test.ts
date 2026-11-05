@@ -1,8 +1,8 @@
 // Conflicts with the base branch, and fetching the base branches from GitHub.
 import '../helpers/env.ts';
-import { cli, dir, gitToGalley, human, scratchRepo, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, gitToGalley, human, scratchRepo, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -19,6 +19,9 @@ function inClone(fullName: string) {
   return (...args: string[]) => execFileSync('git', ['--git-dir', gitDir, ...args], { encoding: 'utf8' }).trim();
 }
 
+/** A repository of its own (scratchRepo), which a describe() makes before its steps. */
+type Scratch = Awaited<ReturnType<typeof scratchRepo>>;
+
 /**
  * main as it is in the scratch repository at `g`, pushed to GitHub and fetched by galley, as it
  * fetches the base when a page opens: the base moved on GitHub.
@@ -30,8 +33,8 @@ async function baseMoved(fullName: string, g: (...args: string[]) => string): Pr
   await server.service.fetchBases(server.service.repo(owner, name), { base: 'main' });
 }
 
-test('a pull request that conflicts with its base: the reviewer sees it, the author is told to rebase, and auto-publish waits', async (t) => {
-  const { fullName, api, path, g, send } = await scratchRepo('conflicts');
+describe('a pull request that conflicts with its base: the reviewer sees it, the author is told to rebase, and auto-publish waits', () => {
+  let fullName: string, api: string, path: string, g: Scratch['g'], send: Scratch['send'];
   const moved = () => baseMoved(fullName, g);
   const agent = { 'content-type': 'application/json', 'x-galley-actor': 'agent' };
   /** Hold up the checks for conflicts, as a slow git would, until the function returned is called. */
@@ -61,9 +64,13 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
       wait: () => cli(['pr', 'wait', String(number), '--timeout', '20s'], { cwd: path }),
     };
   };
-  const pr = await stage('shared', 'main', 'export const a = 1;\n');
+  let pr: Awaited<ReturnType<typeof stage>>;
+  before(async () => {
+    ({ fullName, api, path, g, send } = await scratchRepo('conflicts'));
+    pr = await stage('shared', 'main', 'export const a = 1;\n');
+  });
 
-  await t.test('a head that merges cleanly says so', async () => {
+  test('a head that merges cleanly says so', async () => {
     await until(async () => (await pr.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
     assert.deepEqual(await pr.view(), { mergeable: 'MERGEABLE', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: g('rev-parse', 'main'), conflicting: false, files: [], messages: [], behindBy: 0 } });
     assert.match(await pr.page(), new RegExp(`<strong>This branch has no conflicts with <span class="branch-name branch-name-sm">origin/main</span></strong><div class="color-fg-muted">Checked against <code>${g('rev-parse', '--short=7', 'main')}</code>`));
@@ -73,7 +80,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.doesNotMatch(first.stdout, /This branch conflicts/);
   });
 
-  await t.test('the base moves while the author waits: the wait says the head conflicts', async () => {
+  test('the base moves while the author waits: the wait says the head conflicts', async () => {
     const waiting = pr.wait();
     await until(async () => (await pr.json()).author_waiting, 'the author waits');
     // Another pull request is merged, and fetched: main changes the same line.
@@ -89,7 +96,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.match((await cli(['pr', 'view', pr.n], { cwd: path })).stdout, /^conflicts:\twith origin\/main in a\.js; rebase onto origin\/main\.$/m);
   });
 
-  await t.test('the reviewer sees the conflict, and that the author is rebasing', async () => {
+  test('the reviewer sees the conflict, and that the author is rebasing', async () => {
     const { turn } = await pr.json();
     assert.equal(turn.whose, 'author');
     assert.equal(turn.reasons[0].text, 'agent is working on the feedback');
@@ -105,7 +112,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.equal((await again.json()).status, 'timeout');
   });
 
-  await t.test('a head that conflicts when staged: the first wait says so, before the reviewer agents are done', async () => {
+  test('a head that conflicts when staged: the first wait says so, before the reviewer agents are done', async () => {
     // Until it is known, the wait does not say the reviewer agents are done.
     const release = hold();
     let late: Awaited<ReturnType<typeof stage>>;
@@ -126,7 +133,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     await human('PATCH', `${api}/${late.n}`, { state: 'closed' });
   });
 
-  await t.test('auto-publish waits for the rebase', async () => {
+  test('auto-publish waits for the rebase', async () => {
     await human('PUT', `${api}/${pr.n}/auto-publish`, {});
     const publishing = pr.wait();
     await until(async () => (await pr.json()).author_waiting, 'the author waits');
@@ -147,7 +154,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     assert.deepEqual(await pr.published(), [g('rev-parse', 'shared')]);
   });
 
-  await t.test('auto-publish goes by the answer for the base as it is now, not as it was', async () => {
+  test('auto-publish goes by the answer for the base as it is now, not as it was', async () => {
     const moving = await stage('moving', 'main', 'export const a = 4;\n');
     await until(async () => (await moving.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
     const release = hold();
@@ -199,7 +206,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     await human('PATCH', `${api}/${moving.n}`, { state: 'closed' });
   });
 
-  await t.test('a check git could not do holds up auto-publish, says why, and is tried again', async () => {
+  test('a check git could not do holds up auto-publish, says why, and is tried again', async () => {
     const retried = await stage('retried', 'main', 'export const a = 5;\nexport const b = 1;\n');
     await until(async () => (await retried.view()).mergeable === 'MERGEABLE', 'the head merges cleanly into main');
     // A setting git merge-tree can not use makes it fail, in galley's clone; nothing else reads it.
@@ -233,7 +240,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     }
   });
 
-  await t.test('a commit sent that conflicts wakes the waiting author, with nothing else asking about the new head', async () => {
+  test('a commit sent that conflicts wakes the waiting author, with nothing else asking about the new head', async () => {
     // From before main set a to 5, with a file of its own: it merges cleanly.
     const pushed = await stage('pushed', 'main~1', 'export const c = 1;\n', 'c.js');
     const first = await pushed.wait();
@@ -251,7 +258,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     await human('PATCH', `${api}/${pushed.n}`, { state: 'closed' });
   });
 
-  await t.test('a conflict told along with an approval is the author\'s to rebase, and its turn', async () => {
+  test('a conflict told along with an approval is the author\'s to rebase, and its turn', async () => {
     const approved = await stage('approved', 'main', 'export const d = 1;\n', 'd.js');
     const first = await approved.wait();
     assert.match(first.stdout, /^No reviewer agent reviews [0-9a-f]{7}; ask the user to review it: /m);
@@ -278,7 +285,7 @@ test('a pull request that conflicts with its base: the reviewer sees it, the aut
     await human('PATCH', `${api}/${approved.n}`, { state: 'closed' });
   });
 
-  await t.test('a conflict in no file, such as a directory renamed two ways, is a conflict all the same', async () => {
+  test('a conflict in no file, such as a directory renamed two ways, is a conflict all the same', async () => {
     g('checkout', '-q', 'main');
     mkdirSync(join(path, 'old'));
     writeFileSync(join(path, 'old', 'a.js'), 'export {};\n');
@@ -343,10 +350,10 @@ function otherClone(bare: string, name: string) {
   };
 }
 
-test('the base branch is fetched when a page opens, at most once a minute per repository, and right before publishing', async (t) => {
-  const { fullName, api, path, g, send } = await scratchRepo('fetched');
-  const merge = otherClone(join(dir, 'fetched.git'), 'fetched-other');
-  const clone = inClone(fullName);
+describe('the base branch is fetched when a page opens, at most once a minute per repository, and right before publishing', () => {
+  let fullName: string, api: string, path: string, g: Scratch['g'], send: Scratch['send'];
+  let merge: ReturnType<typeof otherClone>;
+  let clone: ReturnType<typeof inClone>;
   const tracking = () => clone('rev-parse', 'refs/remotes/origin/main');
   const stage = async (branch: string, file: string, text: string) => {
     g('checkout', '-q', '-b', branch, 'main');
@@ -365,12 +372,20 @@ test('the base branch is fetched when a page opens, at most once a minute per re
     await until(async () => (await view()).mergeable === 'MERGEABLE', `${branch} merges cleanly into main`);
     return { n: number as number, view, page: async () => (await fetch(`${server.url}/${fullName}/pull/${number}`)).text(), json: () => human('GET', `${api}/${number}`) };
   };
-  const mine = await stage('mine', 'a.js', 'export const a = 1;\n');
-  const theirs = await stage('theirs', 'c.js', 'export const c = 1;\n');
-  const main = g('rev-parse', 'main');
+  let mine: Awaited<ReturnType<typeof stage>>;
+  let theirs: Awaited<ReturnType<typeof stage>>;
+  let main: string;
   let merged = '';
+  before(async () => {
+    ({ fullName, api, path, g, send } = await scratchRepo('fetched'));
+    merge = otherClone(join(dir, 'fetched.git'), 'fetched-other');
+    clone = inClone(fullName);
+    mine = await stage('mine', 'a.js', 'export const a = 1;\n');
+    theirs = await stage('theirs', 'c.js', 'export const c = 1;\n');
+    main = g('rev-parse', 'main');
+  });
 
-  await t.test('opening a pull request fetches its base, and the merge box says how far behind it is', async () => {
+  test('opening a pull request fetches its base, and the merge box says how far behind it is', async () => {
     merged = merge('b.js', 'export const b = 1;\n');
     assert.equal(tracking(), main);
     await mine.page();
@@ -395,7 +410,7 @@ test('the base branch is fetched when a page opens, at most once a minute per re
     assert.equal(g('rev-parse', 'refs/remotes/origin/main'), main);
   });
 
-  await t.test('pages opened again, of any pull request in the repository, wait a minute to fetch', async () => {
+  test('pages opened again, of any pull request in the repository, wait a minute to fetch', async () => {
     merge('a.js', 'export const a = 2;\n');
     for (const pr of [mine, theirs, mine]) await pr.page();
     // The poll would have seen a fetch by now.
@@ -404,7 +419,7 @@ test('the base branch is fetched when a page opens, at most once a minute per re
     assert.equal((await mine.view()).mergeable, 'MERGEABLE');
   });
 
-  await t.test('publishing fetches first, and a head that conflicts takes a second click', async () => {
+  test('publishing fetches first, and a head that conflicts takes a second click', async () => {
     const expected = (await mine.page()).match(/name="expected" value="([^"]+)"/)![1];
     const refused = await fetch(`${server.url}${api}/${mine.n}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected, sign: false }) });
     assert.equal(refused.status, 428);
@@ -703,22 +718,13 @@ test('the server fetches base branches on its timer, and a waiting author hears 
   }
 });
 
-test('a published pull request that comes to conflict with its base: the author is told, rebases, and its next wait force-pushes the rebase', async (t) => {
-  const { fullName, api, path, g, send } = await scratchRepo('republished');
-  const bare = join(dir, 'republished.git');
-  const merge = otherClone(bare, 'republished-other');
-  g('checkout', '-q', '-b', 'mine');
-  writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
-  g('commit', '-qam', 'Set a to 1');
-  await send('mine');
-  const res = await fetch(server.url + api, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
-    body: JSON.stringify({ title: 'Set a to 1', head: 'mine', base: 'main', automatic_reviews: false }),
-  });
-  assert.equal(res.status, 201);
-  const { id, number } = await res.json();
-  const url = `${server.url}/${fullName}/pull/${number}`;
+describe('a published pull request that comes to conflict with its base: the author is told, rebases, and its next wait force-pushes the rebase', () => {
+  let fullName: string, api: string, path: string, g: Scratch['g'], send: Scratch['send'];
+  let bare: string;
+  let merge: ReturnType<typeof otherClone>;
+  let id: number;
+  let number: number;
+  let url: string;
   // By its URL, which counts as the checkout's: its branch is sent from there.
   const wait = () => cli(['pr', 'wait', url, '--timeout', '20s'], { cwd: path });
   const json = () => human('GET', `${api}/${number}`);
@@ -735,12 +741,30 @@ test('a published pull request that comes to conflict with its base: the author 
       rmSync(join(dir, 'gh-pulls.json'), { force: true });
     }
   };
-  await human('POST', `${api}/${number}/publish`, { sign: false });
-  assert.match((await wait()).stdout, /^Published to GitHub: /m);
-  const published = g('rev-parse', 'mine');
-  assert.equal(onGithub(), published);
+  let published: string;
+  before(async () => {
+    ({ fullName, api, path, g, send } = await scratchRepo('republished'));
+    bare = join(dir, 'republished.git');
+    merge = otherClone(bare, 'republished-other');
+    g('checkout', '-q', '-b', 'mine');
+    writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
+    g('commit', '-qam', 'Set a to 1');
+    await send('mine');
+    const res = await fetch(server.url + api, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-galley-actor': 'agent' },
+      body: JSON.stringify({ title: 'Set a to 1', head: 'mine', base: 'main', automatic_reviews: false }),
+    });
+    assert.equal(res.status, 201);
+    ({ id, number } = await res.json());
+    url = `${server.url}/${fullName}/pull/${number}`;
+    await human('POST', `${api}/${number}/publish`, { sign: false });
+    assert.match((await wait()).stdout, /^Published to GitHub: /m);
+    published = g('rev-parse', 'mine');
+    assert.equal(onGithub(), published);
+  });
 
-  await t.test('another pull request is merged into main: the waiting author is told to rebase', async () => {
+  test('another pull request is merged into main: the waiting author is told to rebase', async () => {
     const waiting = wait();
     await until(async () => (await json()).author_waiting, 'the author waits');
     const merged = merge('a.js', 'export const a = 2;\n');
@@ -759,7 +783,7 @@ test('a published pull request that comes to conflict with its base: the author 
     assert.deepEqual(view, { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', baseConflicts: { ref: 'origin/main', oid: merged, conflicting: true, files: ['a.js'], messages: [], behindBy: 1 } });
   });
 
-  await t.test('it is the author\'s turn, and GitHub\'s word on the conflict gives way to galley\'s', async () => {
+  test('it is the author\'s turn, and GitHub\'s word on the conflict gives way to galley\'s', async () => {
     await githubSays(published, 'CONFLICTING');
     const { turn } = await json();
     assert.equal(turn.whose, 'author');
@@ -773,7 +797,7 @@ test('a published pull request that comes to conflict with its base: the author 
     assert.deepEqual(server.service.publishAsks(row()), []);
   });
 
-  await t.test('the author rebases, and its next wait force-pushes the rebase', async () => {
+  test('the author rebases, and its next wait force-pushes the rebase', async () => {
     g('reset', '-q', '--hard', 'galley/main');
     writeFileSync(join(path, 'a.js'), 'export const a = 1;\n');
     g('commit', '-qam', 'Set a to 1');
@@ -789,7 +813,7 @@ test('a published pull request that comes to conflict with its base: the author 
     assert.equal((await json()).turn.reasons.find((r: any) => r.kind === 'conflicts'), undefined);
   });
 
-  await t.test('once the branch moves on GitHub, a conflict resolved there say, galley\'s check of the head gives way to GitHub\'s', async () => {
+  test('once the branch moves on GitHub, a conflict resolved there say, galley\'s check of the head gives way to GitHub\'s', async () => {
     const rebased = row().published_head_sha;
     // A commit made on GitHub: a merge of main that resolves the conflict below there.
     await githubSays('f'.repeat(40), 'MERGEABLE');

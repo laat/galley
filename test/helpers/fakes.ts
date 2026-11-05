@@ -16,21 +16,30 @@ function restoreFakes(saved: Record<string, string>): void {
 }
 
 /**
+ * Sets these FAKE_* variables (undefined unsets one), and gives what puts every FAKE_* variable back
+ * as it was: for before() and after() around the steps of a describe().
+ */
+export function setFakes(vars: Record<string, string | undefined>): () => void {
+  const saved = fakes();
+  for (const [name, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  return () => restoreFakes(saved);
+}
+
+/**
  * Runs `fn` with these FAKE_* variables (undefined unsets one), then puts every FAKE_* variable
  * back as it was, also when `fn` fails, so a failing test leaves no fake failing or gated for the
  * tests after it. A fake keeps what it read when it started: what `fn` starts should be over by
  * the time it returns.
  */
 export async function withFakes<T>(vars: Record<string, string | undefined>, fn: () => T | Promise<T>): Promise<T> {
-  const saved = fakes();
-  for (const [name, value] of Object.entries(vars)) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
+  const restore = setFakes(vars);
   try {
     return await fn();
   } finally {
-    restoreFakes(saved);
+    restore();
   }
 }
 

@@ -6,7 +6,7 @@
 // branches reach them as the CLI sends them, or with send().
 import './env.ts';
 import { assertLeftAsFound, fakes } from './fakes.ts';
-import { after, afterEach, before } from 'node:test';
+import { after, afterEach, before, describe as suite } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -378,6 +378,19 @@ console.log('Packages: +1\\nDone in 1s');
 }
 
 /**
+ * A test whose steps are tests of their own, run in order, so that --test-timeout bounds each step,
+ * not all of them. Setup with side effects goes in before(): the body runs when the file loads,
+ * before the harness has set up. Like a test, its steps together leave no review running and the
+ * fakes as they found them.
+ */
+export function describe(name: string, fn: () => void): void {
+  suite(name, () => {
+    fn();
+    after(() => assertLeftAsFound([server.service], startingFakes));
+  });
+}
+
+/**
  * Sets up the file's repository, fakes and server before its tests, and removes them after. After
  * each test, checks that it left no review running and the fakes as it found them.
  */
@@ -386,7 +399,8 @@ export function startHarness(): void {
 
   // A test leaves no review running or about to start on the file's server, where it would answer
   // with the fakes of the tests after it, and leaves the fakes as it found them. Checked after each
-  // test, not each step: a step may leave a review or a fake to the next.
+  // test, not each step: a step may leave a review or a fake to the next. The steps of a describe()
+  // are checked when the last one is done.
   afterEach((t) => {
     if (t.fullName === t.name) assertLeftAsFound([server.service], startingFakes);
   });

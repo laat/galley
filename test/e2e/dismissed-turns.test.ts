@@ -1,9 +1,9 @@
 // Dismissing your turn until something new happens: then it is nobody's, not counted and not told,
 // until a commit, a review or comment, an edit, or a change on GitHub ends it by itself.
 import '../helpers/env.ts';
-import { cli, dir, git, handedOver, human, repo, send, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, handedOver, human, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { until } from '../helpers/until.ts';
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -148,16 +148,19 @@ test("dismissed: nobody's turn, under Dismissed and left out of the counts, unti
   assert.match(await closed.text(), /it is not your turn on s#\d+/);
 });
 
-test("the author's wait, galley's own bookkeeping and a base that moved are nothing new; a comment, a review, an edit or a push from anyone is", async (t) => {
-  const pr = await stage('feature/dismiss-news', 'news.js');
-  // The wait that hands the commit to the reviewer comes first.
-  await handedOver(pr.number);
-  await pr.dismiss();
-  // A wait that ended counts for a moment, not seconds.
-  server.service.waitGraceMs = 100;
-  t.after(() => (server.service.waitGraceMs = WAIT_GRACE_MS));
+describe("the author's wait, galley's own bookkeeping and a base that moved are nothing new; a comment, a review, an edit or a push from anyone is", () => {
+  let pr: Awaited<ReturnType<typeof stage>>;
+  before(async () => {
+    pr = await stage('feature/dismiss-news', 'news.js');
+    // The wait that hands the commit to the reviewer comes first.
+    await handedOver(pr.number);
+    await pr.dismiss();
+    // A wait that ended counts for a moment, not seconds.
+    server.service.waitGraceMs = 100;
+  });
+  after(() => (server.service.waitGraceMs = WAIT_GRACE_MS));
 
-  await t.test("the author's wait does not hear of it, and waiting is nothing new", async () => {
+  test("the author's wait does not hear of it, and waiting is nothing new", async () => {
     const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '2s']);
     await until(async () => (await human('GET', pr.base)).author_waiting, 'the author waits');
     assert.ok(await pr.dismissed());
@@ -170,7 +173,7 @@ test("the author's wait, galley's own bookkeeping and a base that moved are noth
     assert.ok(await pr.dismissed());
   });
 
-  await t.test('a base that moved on GitHub is nothing new', async () => {
+  test('a base that moved on GitHub is nothing new', async () => {
     git('checkout', '-q', 'main');
     writeFileSync(join(repo, 'elsewhere.js'), 'export {};\n');
     git('add', 'elsewhere.js');
@@ -183,7 +186,7 @@ test("the author's wait, galley's own bookkeeping and a base that moved are noth
     assert.ok(await pr.dismissed());
   });
 
-  await t.test("the author's comment ends it", async () => {
+  test("the author's comment ends it", async () => {
     const r = await cli(['pr', 'comment', String(pr.number), '--body', 'Nothing to add.']);
     assert.equal(r.code, 0, r.stderr);
     const { whose, dismissed } = await pr.turn();
@@ -191,13 +194,13 @@ test("the author's wait, galley's own bookkeeping and a base that moved are noth
     assert.equal(await group(pr.number), 'staged: Your turn');
   });
 
-  await t.test('your own comment ends it', async () => {
+  test('your own comment ends it', async () => {
     await pr.dismiss();
     await human('POST', `/api/repos/acme/widgets/issues/${pr.number}/comments`, { body: 'Waiting for the team.' });
     assert.equal(await pr.dismissed(), false);
   });
 
-  await t.test('a comment ends it for good: deleted again, it stays ended', async () => {
+  test('a comment ends it for good: deleted again, it stays ended', async () => {
     await pr.dismiss();
     const comment = await human('POST', `/api/repos/acme/widgets/issues/${pr.number}/comments`, { body: 'Never mind.' });
     assert.equal(await pr.dismissed(), false);
@@ -207,14 +210,14 @@ test("the author's wait, galley's own bookkeeping and a base that moved are noth
     assert.ok(dismissal.ended);
   });
 
-  await t.test('a comment edited ends it', async () => {
+  test('a comment edited ends it', async () => {
     const comment = (await human('GET', `/api/repos/acme/widgets/issues/${pr.number}/comments`)).find((c: any) => c.user.login === 'reviewer');
     await pr.dismiss();
     await human('PATCH', `/api/repos/acme/widgets/issues/comments/${comment.id}`, { body: 'Waiting for the team, still.' });
     assert.equal(await pr.dismissed(), false);
   });
 
-  await t.test('a review ends it once submitted, not while pending', async () => {
+  test('a review ends it once submitted, not while pending', async () => {
     await pr.dismiss();
     const pending = await human('POST', `${pr.base}/reviews`, { comments: [{ path: 'news.js', line: 1, side: 'RIGHT', body: 'Hm.' }] });
     assert.ok(await pr.dismissed());
@@ -222,7 +225,7 @@ test("the author's wait, galley's own bookkeeping and a base that moved are noth
     assert.equal(await pr.dismissed(), false);
   });
 
-  await t.test('an edit of the title ends it', async () => {
+  test('an edit of the title ends it', async () => {
     // Feedback the author does not wait for: the reviewer's to pass on.
     assert.equal((await pr.turn()).whose, 'reviewer');
     await pr.dismiss();
@@ -230,7 +233,7 @@ test("the author's wait, galley's own bookkeeping and a base that moved are noth
     assert.equal(await pr.dismissed(), false);
   });
 
-  await t.test("the author's push ends it", async () => {
+  test("the author's push ends it", async () => {
     await pr.dismiss();
     git('checkout', '-q', 'feature/dismiss-news');
     writeFileSync(join(repo, 'news.js'), 'export const news = 1;\n');

@@ -1,7 +1,7 @@
 // The author agent publishes when the user asks it to: now, or with auto-publish, which then
 // publishes as the agent. Other agents are refused, and the timeline names the agent.
 import '../helpers/env.ts';
-import { cli, dir, git, human, inClone, repo, server, startHarness } from '../helpers/harness.ts';
+import { cli, describe, dir, git, human, inClone, repo, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +11,7 @@ import { HttpError } from '../../src/server/service.ts';
 
 startHarness();
 
-test('the author agent publishes its own pull request', async (t) => {
+describe('the author agent publishes its own pull request', () => {
   /** Stage a branch with one commit, as the agent. */
   const stage = async (branch: string) => {
     const file = `${branch.split('/').pop()}.js`;
@@ -36,7 +36,7 @@ test('the author agent publishes its own pull request', async (t) => {
   /** The agent's name as the timeline shows it, before what it did. */
   const agent = '<a class="author" href="#" title="agent">agent</a><span class="Label Label--bot">bot</span>';
 
-  await t.test('now, and the timeline names it', async () => {
+  test('now, and the timeline names it', async () => {
     const pr = await stage('feature/agent-now');
     const r = await cli(['pr', 'publish', pr.n]);
     assert.equal(r.code, 0, r.stderr);
@@ -53,7 +53,7 @@ test('the author agent publishes its own pull request', async (t) => {
     assert.match(waited.stdout, /^Its review in galley is over\.$/m);
   });
 
-  await t.test('with auto-publish and auto-merge, which publish as it once the reviewer agents are done, with the merge method it named', async () => {
+  test('with auto-publish and auto-merge, which publish as it once the reviewer agents are done, with the merge method it named', async () => {
     const pr = await stage('feature/agent-auto');
     await withFakes({ FAKE_CODEX_REVIEW: JSON.stringify({ summary: 'Looks right.', comments: [] }) }, async () => {
       await human('PUT', '/api/settings/codex', { enabled: true, maxIterations: 1 });
@@ -97,7 +97,7 @@ test('the author agent publishes its own pull request', async (t) => {
     });
   });
 
-  await t.test('not by another agent, nor a reviewer agent', async () => {
+  test('not by another agent, nor a reviewer agent', async () => {
     const pr = await stage('feature/agent-other');
     for (const [args, what] of [
       [[], 'publish it'],
@@ -121,7 +121,7 @@ test('the author agent publishes its own pull request', async (t) => {
     assert.equal((await human('GET', pr.base)).auto_publish, null);
   });
 
-  await t.test('and hears what to do when signing fails', async () => {
+  test('and hears what to do when signing fails', async () => {
     const pr = await stage('feature/agent-signing');
     // Signing fails as 1Password's op-ssh-sign does: a prompt nobody answered, then a key it does not have.
     const program = join(dir, 'failing-ssh-keygen');
