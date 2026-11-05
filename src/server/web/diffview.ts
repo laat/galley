@@ -28,6 +28,25 @@ export function browseUrl(repo: string, kind: 'tree' | 'blob' | 'raw', sha: stri
   return `${repo}/${kind}/${sha}${path ? '/' + path.split('/').map(encodeURIComponent).join('/') : ''}`;
 }
 
+/** Served with their own type by /raw (browse.ts), and shown in diffs; everything else is text or a download. SVG is text: it can carry script. */
+const IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+};
+
+/** The image type of a path, by its file name's extension, or undefined. */
+export const imageType = (path: string): string | undefined => {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  return Object.hasOwn(IMAGE_TYPES, ext) ? IMAGE_TYPES[ext] : undefined;
+};
+
 export const threadKey = (path: string, side: Side, line: number) => `${path}\0${side}\0${line}`;
 
 const LOCKFILES = /(^|\/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock|uv\.lock|bun\.lockb?)$/;
@@ -167,6 +186,20 @@ function gapRow(mode: DiffMode, h: Hunk | null, gap: Gap | undefined): Safe {
     : html`<tr class="hunk-row${h ? '' : ' hunk-row-end'}"${attrs} data-section="${h?.section ?? ''}"><td class="blob-num blob-num-hunk" colspan="2">${buttons}</td><td class="blob-code blob-code-hunk">${text}</td></tr>`;
 }
 
+/**
+ * An image's diff, as GitHub's 2-up view: the old image beside the new one, or the one side an
+ * added or deleted image has. Null when either side is not an image galley serves (imageType).
+ */
+function imageDiff(f: FileDiff, b: NonNullable<DiffViewOpts['browse']>): Safe | null {
+  const before = f.oldPath && f.status !== 'added' ? { label: 'Deleted', cls: 'del', url: browseUrl(b.repo, 'raw', b.base, f.oldPath), path: f.oldPath } : null;
+  const after = f.newPath && f.status !== 'removed' ? { label: 'Added', cls: 'add', url: browseUrl(b.repo, 'raw', b.head, f.newPath), path: f.newPath } : null;
+  const sides = [before, after].filter((x) => x !== null);
+  if (sides.length === 0 || sides.some((x) => !imageType(x.path))) return null;
+  return html`<div class="image-diff">${sides.map(
+    (x) => html`<figure class="image-diff-side">${sides.length > 1 ? html`<figcaption class="image-diff-${x.cls}">${x.label}</figcaption>` : ''}<span class="image-diff-frame image-diff-frame-${x.cls}"><img src="${x.url}" alt="${x.path}" loading="lazy"></span></figure>`,
+  )}</div>`;
+}
+
 export function renderFile(f: FileDiff, o: DiffViewOpts): Safe {
   const lang = languageFor(f.path);
   const blob = fileBlob(f);
@@ -179,7 +212,9 @@ export function renderFile(f: FileDiff, o: DiffViewOpts): Safe {
   const maxLine = Math.max(1, o.totals?.get(f.path) ?? 0, ...f.hunks.map((h) => Math.max(h.oldStart + h.oldLines, h.newStart + h.newLines)));
   const numWidth = Math.max(3, String(maxLine).length) * 8 + 22;
   let body: Safe;
-  if (f.binary) body = html`<div class="file-note">Binary file not shown.</div>`;
+  const image = f.binary && o.browse ? imageDiff(f, o.browse) : null;
+  if (image) body = image;
+  else if (f.binary) body = html`<div class="file-note">Binary file not shown.</div>`;
   else if (f.hunks.length === 0) {
     body = html`<div class="file-note">${f.status === 'renamed' ? 'File renamed without changes.' : f.status === 'changed' ? `File mode changed from ${f.oldMode} to ${f.newMode}.` : 'Empty file.'}</div>`;
   } else {

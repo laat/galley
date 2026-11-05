@@ -9,7 +9,7 @@ import { rendersByDefault } from '../../rendered.ts';
 import { avatar, esc, html, icon, raw, relTime, shortSha, type Safe } from './html.ts';
 import { highlightLines, languageFor, renderMarkdown } from './markdown.ts';
 import { copyButton, layout, repoCrumbs } from './components.ts';
-import { browseUrl, lineRows, type DiffMode } from './diffview.ts';
+import { browseUrl, imageType, lineRows, type DiffMode } from './diffview.ts';
 
 /** A commit and a path in it, from a URL. */
 export interface Location {
@@ -36,18 +36,6 @@ export async function locate(s: Service, owner: string, name: string, ref: strin
 
 const MAX_SHOWN = 1024 * 1024;
 const MAX_HIGHLIGHTED = 256 * 1024;
-
-/** Served with their own type by /raw; everything else is text or a download. SVG is text: it can carry script. */
-const IMAGE_TYPES: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  avif: 'image/avif',
-  bmp: 'image/bmp',
-  ico: 'image/x-icon',
-};
 
 const extension = (path: string) => (path.includes('.') ? path.slice(path.lastIndexOf('.') + 1).toLowerCase() : '');
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
@@ -190,7 +178,7 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
   const binary = isBinary(bytes);
   // The raw URL of a binary file other than an image is a download (rawFile), and its links say so:
   // the app (desktop/) opens a window of its own for a raw file a link shows, and would leave it empty.
-  const download = binary && !IMAGE_TYPES[ext] ? raw(' download') : '';
+  const download = binary && !imageType(loc.path) ? raw(' download') : '';
   const text = binary || bytes.length > MAX_SHOWN ? '' : bytes.toString('utf8');
   const lines = text ? text.replace(/\n$/, '').split('\n') : [];
   // Markdown and SVG show rendered, with the source a click away, as on GitHub.
@@ -198,7 +186,7 @@ export async function blobPage(s: Service, loc: Location, entry: TreeEntry, opts
   const rendered = renderable && !opts.plain;
 
   let body: Safe;
-  if (IMAGE_TYPES[ext]) body = html`<div class="blob-image"><img src="${rawUrl}" alt="${baseName(loc.path)}"></div>`;
+  if (imageType(loc.path)) body = html`<div class="blob-image"><img src="${rawUrl}" alt="${baseName(loc.path)}"></div>`;
   else if (bytes.length > MAX_SHOWN) body = html`<div class="blob-note">This file is too big to show (${size(bytes.length)}). <a href="${rawUrl}"${download}>View raw</a></div>`;
   else if (binary) body = html`<div class="blob-note">Binary file not shown. <a href="${rawUrl}"${download}>Download</a></div>`;
   else if (bytes.length === 0) body = html`<div class="blob-note">This file is empty.</div>`;
@@ -284,7 +272,7 @@ export async function treeItemsHtml(loc: Location): Promise<string | null> {
 export async function rawFile(loc: Location): Promise<Response> {
   const bytes = await loc.git.blob(loc.sha, loc.path);
   if (!bytes) throw new HttpError(404, `No file ${loc.path} at ${shortSha(loc.sha)}`);
-  const image = IMAGE_TYPES[extension(loc.path)];
+  const image = imageType(loc.path);
   const headers: Record<string, string> = {
     'content-type': image ?? (isBinary(bytes) ? 'application/octet-stream' : 'text/plain; charset=utf-8'),
     'x-content-type-options': 'nosniff',
