@@ -6,9 +6,9 @@
 // published, with no approval and no review here (Service.pushUpdate): GitHub's reviews and
 // checks take over. A signing that failed
 // for now is tried again later, on the server's poll, whether the author still waits or not
-// (Service.autoPublishSigningFailed, Service.pushReady).
+// (Service.autoPublishRetryLater, Service.pushReady), and so is a first push GitHub failed to take.
 import type { PullRow } from './db.ts';
-import { HttpError, publishFingerprint, SigningError, type ChangeEvent, type Service } from './service.ts';
+import { GithubPushError, HttpError, publishFingerprint, SigningError, type ChangeEvent, type Service } from './service.ts';
 
 export class AutoPublisher {
   private s: Service;
@@ -101,7 +101,7 @@ export class AutoPublisher {
     } catch (e) {
       // Changed since the check (a push, an edit, new feedback, a review starting, a new approval): the change brings another check.
       if (e instanceof HttpError && (e.status === 412 || e.status === 428)) return;
-      if (e instanceof SigningError) return this.s.autoPublishSigningFailed(pull, by, e, approval);
+      if (e instanceof SigningError || e instanceof GithubPushError) return this.s.autoPublishRetryLater(pull, by, e, approval);
       this.s.autoPublishFailed(pull, by, (e as Error).message, approval);
     }
   }

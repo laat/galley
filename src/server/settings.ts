@@ -38,7 +38,7 @@ export interface PublishSettings {
   mergeMethod: MergeMethod;
   /**
    * How many times auto-publish and pushes after publishing try again when signing failed in a
-   * way trying again may get past, such as a 1Password prompt nobody answered (Service.signingFailure).
+   * way trying again may get past, such as a 1Password prompt nobody answered (Service.retrySchedule).
    */
   signingRetries: number;
 }
