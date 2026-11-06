@@ -2,6 +2,7 @@
 import '../helpers/env.ts';
 import { cli, describe, dir, git, human, inClone, remote, repo, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
+import { failPushes } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +11,7 @@ import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import type { PullRow } from '../../src/server/db.ts';
 import { Repo } from '../../src/server/git.ts';
-import { AUTHOR_STALL_MS, type ChangeEvent } from '../../src/server/service.ts';
+import { AUTHOR_STALL_MS, SIGNING_RETRY_MS, type ChangeEvent } from '../../src/server/service.ts';
 
 startHarness();
 
@@ -571,6 +572,41 @@ describe('auto-publish publishes once the agents are done', () => {
     assert.equal(pull.staging_state, 'published');
     assert.equal((await pr.timeline()).findLast((e) => e.event === 'published').force, true);
     assert.equal(remoteTip('feature/manual-unsigned').signed, true);
+  });
+
+  test('a push GitHub fails to take on its side leaves it on, and it tries again later', async () => {
+    const pr = await stage('feature/auto-push-failure', 'push-failure.js');
+    const restore = failPushes('feature/auto-push-failure');
+    server.service.signingRetryMs = 60_000;
+    try {
+      await human('PUT', `${pr.base}/auto-publish`, {});
+      const waiting = cli(['pr', 'wait', String(pr.number), '--timeout', '20s']);
+      await until(async () => (await pr.timeline()).some((e) => e.event === 'auto_publish_retry'), 'the push fails');
+      await pr.settle();
+      const retry = (await pr.timeline()).find((e) => e.event === 'auto_publish_retry');
+      assert.equal(retry.signing, undefined);
+      assert.deepEqual({ ...retry.push, next_at: undefined }, { why: 'GitHub failed on its side', failures: 1, retries: 3, next_at: undefined });
+      assert.match(retry.error, /^git push failed \(GitHub failed on its side; pushing again usually gets past it\):\n[^]*fatal error in commit_refs/);
+      // Still on, and nothing for the user to do meanwhile.
+      const pull = await human('GET', pr.base);
+      assert.ok(pull.auto_publish);
+      assert.deepEqual([pull.turn.whose, pull.turn.reasons.map((r: any) => r.text)], ['none', ['auto-publish waits to try pushing again']]);
+      const page = await pr.page();
+      assert.match(page, /Pushing failed <relative-time [^>]*>[^<]*<\/relative-time> \(GitHub failed on its side\); trying again at <time [^>]*>[^<]*<\/time>, retry 1 of 3/);
+      assert.match(page, /Auto-publish could not push <code>[0-9a-f]{7}<\/code> \(GitHub failed on its side\) <relative-time [^]*?<\/relative-time>; it stays on and tries again at <time [^>]*>[^<]*<\/time>, retry 1 of 3/);
+      assert.equal(pr.created(), false);
+
+      // GitHub takes pushes again, and the retry's time comes: it publishes.
+      restore();
+      const { id } = await human('GET', pr.base);
+      server.service.db.run("UPDATE events SET data = json_set(data, '$.push.next_at', ?) WHERE pull_id = ? AND type = 'auto_publish_retry'", new Date().toISOString(), id);
+      const r = await waiting;
+      assert.match(r.stdout, /Published to GitHub/);
+      assert.equal((await pr.timeline()).findLast((e) => e.event === 'published').auto, true);
+    } finally {
+      restore();
+      server.service.signingRetryMs = SIGNING_RETRY_MS;
+    }
   });
 
   test('waits for your own threads, and a failure to publish turns it off', async () => {

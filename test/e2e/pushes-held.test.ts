@@ -1,9 +1,9 @@
 // After publishing, a commit the author waits with is not pushed, or not yet: GitHub declines it,
-// can not be asked or says it was merged, or the author has feedback to read first.
+// fails to take it, can not be asked or says it was merged, or the author has feedback to read first.
 import '../helpers/env.ts';
 import { describe, dir, git, human, remote, send, server, startHarness } from '../helpers/harness.ts';
 import { withFakes } from '../helpers/fakes.ts';
-import { published } from '../helpers/pushes.ts';
+import { failPushes, published } from '../helpers/pushes.ts';
 import { until } from '../helpers/until.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import { join } from 'node:path';
 
 startHarness();
 
-describe('after publishing, a commit is not pushed, or not yet, when GitHub declines it, can not be asked or says it was merged, or the author has feedback to read', () => {
+describe('after publishing, a commit is not pushed, or not yet, when GitHub declines it, fails to take it, can not be asked or says it was merged, or the author has feedback to read', () => {
   test('a push GitHub declines, for a secret say, is told to the author, and not tried again', async () => {
     const pr = await published('feature/push-declined');
     const before = pr.tip().sha;
@@ -61,6 +61,33 @@ describe('after publishing, a commit is not pushed, or not yet, when GitHub decl
     assert.equal(turn.whose, 'reviewer');
     assert.ok(turn.reasons.some((x: any) => x.text === `update not published: commits; pushing ${sha} failed`), JSON.stringify(turn.reasons));
     // GitHub answers again: the next wait pushes it.
+    assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
+    assert.equal(pr.tip().sha, git('rev-parse', 'HEAD'));
+  });
+
+  test('a push GitHub fails to take on its side is not told to the author, and its next wait tries again', async () => {
+    const pr = await published('feature/push-failure');
+    const before = pr.tip().sha;
+    const sha = pr.commit('export const again = 1;\n');
+    const restore = failPushes('feature/push-failure');
+    try {
+      const stop = new AbortController();
+      const waiting = pr.wait('20s', stop.signal);
+      try {
+        await until(async () => (await pr.pushes()).length, 'the push is tried', 20_000);
+        await server.autoPublisher.settle(pr.id);
+        assert.equal(await Promise.race([waiting.then(() => 'answered'), new Promise((r) => setTimeout(r, 500, 'waiting'))]), 'waiting');
+      } finally {
+        stop.abort();
+      }
+      assert.equal((await waiting).stdout, '');
+    } finally {
+      restore();
+    }
+    assert.equal(pr.tip().sha, before);
+    const [failed] = await pr.pushes();
+    assert.deepEqual([failed.result, failed.retry], ['failed', true]);
+    assert.match(failed.error, /^git push failed \(GitHub failed on its side; pushing again usually gets past it\):\n[^]*fatal error in commit_refs[^]*\[remote rejected\] .* \(failure\)/);
     assert.match((await pr.wait()).stdout, new RegExp(`^Pushed ${sha} to GitHub`, 'm'));
     assert.equal(pr.tip().sha, git('rev-parse', 'HEAD'));
   });

@@ -763,13 +763,15 @@ async function eventItem(p: PullPage, e: EventRow, bases: string[]): Promise<Saf
         <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
-    case 'auto_publish_retry':
+    case 'auto_publish_retry': {
+      const retry = (data.signing ?? data.push)!;
       return timelineBadge(
         'x',
-        html`Auto-publish could not sign <code>${shortSha(data.head)}</code>${signingWhy(data.signing)} ${when}; it stays on and tries again ${signingRetry(data.signing, data.signing.next_at ?? e.created_at)}
+        html`Auto-publish could not ${data.push ? 'push' : 'sign'} <code>${shortSha(data.head)}</code>${signingWhy(retry)} ${when}; it stays on and tries again ${signingRetry(retry, retry.next_at ?? e.created_at)}
         <details class="error-details"><summary class="btn-link">Show error</summary><pre>${data.error}</pre></details>`,
         { cls: 'timeline-badge--danger' },
       );
+    }
     case 'iterations_stopped':
       return timelineBadge('circle-slash', html`${who} stopped automatic reviews ${afterRound(data.round)} ${when}`);
     case 'iterations_resumed':
@@ -1109,10 +1111,10 @@ function onRewritten(rewritten: GithubPush['rewritten']): Safe | '' {
 }
 
 /**
- * After "signing failed": why, " (1Password prompt not answered)", and once it is not tried again,
- * how that ended: " after 3 retries", or ", in a way trying again can not get past". An older one
- * final at once with a why, from when galley took a declined prompt for final, is only why:
- * " (1Password prompt denied)".
+ * After "signing failed" (or "pushing failed"): why, " (1Password prompt not answered)", and once
+ * it is not tried again, how that ended: " after 3 retries", or ", in a way trying again can not
+ * get past". An older one final at once with a why, from when galley took a declined prompt for
+ * final, is only why: " (1Password prompt denied)".
  */
 function signingWhy(f: SigningFailure): Safe {
   if (!f.why) return html`, in a way trying again can not get past`;
@@ -1121,9 +1123,9 @@ function signingWhy(f: SigningFailure): Safe {
 }
 
 /**
- * When a signing that failed is tried again, `at`, and which retry that is: "at 12:40, retry 1 of
- * 3". `now`: what the pull request waits for now, which says "now, …" once it is due; the timeline
- * keeps the time.
+ * When a signing (or a push) that failed is tried again, `at`, and which retry that is: "at
+ * 12:40, retry 1 of 3". `now`: what the pull request waits for now, which says "now, …" once it is
+ * due; the timeline keeps the time.
  */
 function signingRetry(f: SigningFailure, at: string, now = false): Safe {
   return html`${now && Date.parse(at) <= Date.now() ? 'now' : html`at ${clockTime(at)}`}, retry ${f.failures} of ${f.retries}`;
@@ -1323,9 +1325,9 @@ function autoPublishRow(p: PullPage, auto: AutoPublish): Safe {
   <button type="button" class="btn btn-sm js-auto-publish-cancel" data-api="${p.apiBase}/auto-publish">Cancel auto-publish</button></div>`;
 }
 
-/** The signing auto-publish tries again, for its checklist. */
+/** The signing or push auto-publish tries again, for its checklist. */
 function signingRetryText(retry: AutoPublishRetry): Safe {
-  return html`Signing failed ${relTime(retry.at)}${signingWhy(retry)}; trying again ${signingRetry(retry, retry.next_at, true)}`;
+  return html`${retry.push ? 'Pushing' : 'Signing'} failed ${relTime(retry.at)}${signingWhy(retry)}; trying again ${signingRetry(retry, retry.next_at, true)}`;
 }
 
 /** A reviewer agent's progress with the head, for the auto-publish checklist. */
