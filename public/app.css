@@ -212,9 +212,15 @@ html { scroll-padding-top: var(--header-stuck); }
 .layout { display: flex; gap: 24px; margin-top: 24px; align-items: flex-start; }
 .layout-main { flex: 1 1 auto; min-width: 0; }
 .layout-sidebar { width: 296px; flex-shrink: 0; font-size: 12px; }
+/* Narrow, the sidebar goes under the conversation, and both take the page's width: at their content's
+   width, a long line of code would widen the page past the screen. */
 @media (max-width: 1011px) {
-  .layout { flex-direction: column-reverse; }
-  .layout-sidebar { width: 100%; }
+  .layout { flex-direction: column; align-items: stretch; }
+  .layout-sidebar { width: auto; }
+}
+@media (max-width: 767px) {
+  .container { padding: 0 16px; }
+  .app-header { padding-left: max(16px, env(titlebar-area-x, 0px)); padding-right: 16px; }
 }
 
 /* ------------------------------------------------------------ buttons */
@@ -580,6 +586,14 @@ kbd {
 .tabnav-tab:hover { color: var(--fg); text-decoration: none; }
 .tabnav-tab.selected { color: var(--fg); background: var(--bg); border-color: var(--border); }
 .tabnav-extra { margin-left: auto; padding: 8px 0; font-size: 12px; font-weight: 600; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+/* On a phone the title gets the width, under its buttons, and the tabs leave out their icons and the diffstat to fit. */
+@media (max-width: 767px) {
+  .gh-header-title-row { flex-direction: column-reverse; gap: 8px; }
+  .gh-header-title { align-self: stretch; font-size: 24px; }
+  .gh-header-actions { align-self: flex-end; padding-top: 0; }
+  .tabnav-tab { padding: 8px 12px; }
+  .tabnav-tab > .octicon, .tabnav-extra { display: none; }
+}
 .diffstat-blocks { display: inline-flex; gap: 1px; margin-left: 4px; vertical-align: middle; }
 .diffstat-blocks span { display: inline-block; width: 8px; height: 8px; border-radius: 1px; }
 .diffstat-block-add { background: var(--success-emphasis); }
@@ -795,6 +809,13 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
 .body-diff > summary::-webkit-details-marker { display: none; }
 .body-diff .diff-table { margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .diff-text .blob-code { font-family: var(--font); font-size: 13px; }
+/* On a phone comments take the width, without avatars, and what hangs off the timeline's line moves in. */
+@media (max-width: 767px) {
+  .timeline-comment-group > .timeline-avatar { display: none; }
+  .timeline-comment::before { content: none; }
+  .timeline-item, .timeline-commits { margin-left: 8px; }
+  .timeline-review-body { margin-left: 8px; padding-left: 32px; }
+}
 
 /* ----------------------------------------------------------- merge box */
 
@@ -822,9 +843,19 @@ details[open] > summary > .run-chevron { transform: rotate(90deg); }
 .merge-row strong { display: block; }
 .merge-actions { align-items: center; background: var(--bg-subtle); }
 .merge-options { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 13px; }
-.merge-options label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+/* Blocks, not flex, so that an option's words and the name in it wrap as one text. */
+.merge-options label { display: block; cursor: pointer; }
+.merge-options input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: -2px; }
+.merge-options strong { display: inline; }
 .merge-buttons { display: flex; flex-direction: column; gap: 8px; }
 .merge-buttons .btn { justify-content: center; }
+@media (max-width: 767px) {
+  .merge-box-icon { display: none; }
+  .merge-actions { flex-wrap: wrap; }
+  /* The text keeps the rest of its icon's line, which wrapping would otherwise give the icon alone. */
+  .merge-actions > div:not(.merge-buttons) { flex: 1 1 calc(100% - 28px); }
+  .merge-buttons { flex: 1 0 100%; }
+}
 .merge-checks { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; }
 .merge-checks li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .github-checks { margin-top: 4px; font-size: 13px; }
@@ -1051,6 +1082,11 @@ body.tree-hidden .files-layout > .file-tree { display: none; }
   font-size: 12px;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border);
+}
+/* On a phone the path takes the room the header has left, and wraps there, not one letter a line. */
+@media (max-width: 767px) {
+  .file-header .diffstat-blocks, .file-header > .flex-auto { display: none; }
+  .file-header > .file-path { flex: 1 1 0; min-width: 0; }
 }
 .file.is-collapsed .file-header { border-bottom: 0; border-radius: 0 0 6px 6px; }
 /* The sticky header's "…" menu stays in the header's stacking context, under the next file's header and corners.
