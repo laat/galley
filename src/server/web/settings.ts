@@ -29,7 +29,44 @@ function settingsLayout(s: Service, section: string, main: Safe): string {
 export async function settingsPage(s: Service): Promise<string> {
   const sections: Safe[] = [];
   for (const reviewer of s.builtInReviewers()) sections.push(await reviewerSection(reviewer));
+  sections.push(moreReviewersSection(s));
   return settingsLayout(s, '/settings', html`${sections}`);
+}
+
+/**
+ * More reviewers run by Codex and Claude, such as one per model: custom reviewers, which look for
+ * what Codex and Claude look for when they have no instructions of their own.
+ */
+function moreReviewersSection(s: Service): Safe {
+  const files = s.custom?.entries() ?? [];
+  const groups = s.builtInReviewers().map((builtIn) => {
+    const mine = files.filter((f) => f.definition?.engine === builtIn.engineId && f.definition.reviews === 'code');
+    const rows = mine.map((f) => {
+      const d = f.definition!;
+      const facts = [
+        d.model || `${builtIn.label} default`,
+        ...(d.effort ? [d.effort] : []),
+        d.instructions ? 'its own instructions' : null,
+        d.repos ? d.repos.join(', ') : null,
+        d.enabled ? null : 'automatic reviews off',
+      ].filter(Boolean);
+      return html`<li class="Box-row">
+      <a href="/settings/reviewers/${f.name}"><strong>${f.name}</strong></a>
+      <div class="note">${facts.join(' · ')}</div>
+      ${f.error ? html`<div class="flash flash-error">${icon('alert')} Not running: ${f.error}</div>` : ''}
+    </li>`;
+    });
+    return html`<div class="form-group">
+      <span class="form-label">${builtIn.label}</span>
+      ${rows.length ? html`<ul class="Box more-reviewers">${rows}</ul>` : ''}
+      <a class="btn" href="/settings/new-reviewer?engine=${builtIn.engineId}">${icon('plus')} Add a ${builtIn.label} reviewer</a>
+    </div>`;
+  });
+  return html`<div class="Subhead" id="more">
+      <h2 class="Subhead-heading">More reviewers</h2>
+      <p class="Subhead-description">Have more models review, each as a reviewer of its own: give it a name and a model, and leave its instructions empty to have it look for what Codex and Claude look for. They are <a href="/settings/reviewers">custom reviewers</a>, so you can also give them instructions of their own and the repositories they review.</p>
+    </div>
+    <div class="settings-form">${groups}</div>`;
 }
 
 /** A reviewer agent's settings. */
@@ -150,7 +187,7 @@ export function customReviewersPage(s: Service): string {
 }
 
 /** A custom reviewer's form, or a new one's (name null). */
-export async function customReviewerPage(s: Service, name: string | null): Promise<string> {
+export async function customReviewerPage(s: Service, name: string | null, engine?: string): Promise<string> {
   const file = name === null ? null : s.custom?.entry(name);
   if (name !== null && !file) return settingsLayout(s, '/settings/reviewers', html`<div class="flash flash-error">No reviewer called ${name}. <a href="/settings/reviewers">All custom reviewers</a></div>`);
   const title = name ?? 'New reviewer';
@@ -162,7 +199,23 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
   const remove = file ? html`<button type="button" class="btn btn-danger js-delete-reviewer" data-api="/api/settings/reviewers/${file.name}" data-next="/settings/reviewers">${icon('trash')} Delete</button>` : '';
   // A file that can not be read is fixed in the file, or deleted: saving the form would write over what is in it.
   if (file && !file.definition) return settingsLayout(s, '/settings/reviewers', html`${head}<p>Fix the file, or delete the reviewer.</p>${remove}`);
-  const d: Omit<Definition, 'name'> = file?.definition ?? { engine: 'claude', model: '', effort: '', repos: null, reviews: 'code', verdict: 'comment', max_iterations: 3, run_tests: true, enabled: true, instructions: '' };
+  // A new one is run by the tool it was added from (Settings → Code review), Claude otherwise.
+  const tool = s.builtInReviewers().find((r) => r.engineId === engine)?.engineId ?? 'claude';
+  const d: Omit<Definition, 'name'> = file?.definition ?? {
+    engine: tool,
+    model: '',
+    effort: '',
+    repos: null,
+    reviews: 'code',
+    verdict: 'comment',
+    max_iterations: 3,
+    run_tests: true,
+    localhost: false,
+    skip_own_kind: false,
+    enabled: true,
+    instructions: '',
+  };
+  const localServers = s.builtInReviewers().filter((r) => r.localServers).map((r) => r.engineId);
   const { models, efforts } = await modelChoices(s, d);
   const checked = (on: boolean) => (on ? raw(' checked') : '');
   const radio = (field: string, value: string, label: string, note: string, cls = '') =>
@@ -221,9 +274,19 @@ export async function customReviewerPage(s: Service, name: string | null): Promi
         <input class="form-control input-narrow" type="number" id="reviewer-iterations" name="max_iterations" min="0" max="${MAX_ITERATIONS_LIMIT}" value="${d.max_iterations}">
         <p class="note">At most this many per pull request. Asking it to review from a pull request is not limited.</p>
       </div>
-      <div class="form-checkbox js-code-only"${d.reviews === 'code' ? '' : raw(' hidden')}>
-        <label><input type="checkbox" name="run_tests"${checked(d.run_tests)}> Let it install dependencies and run tests</label>
-        <p class="note">As for Codex and Claude: galley installs the dependencies from the lockfile without their install scripts, and the reviewer may run the typecheck, tests or build without network access.</p>
+      <div class="js-code-only"${d.reviews === 'code' ? '' : raw(' hidden')}>
+        <div class="form-checkbox">
+          <label><input type="checkbox" name="run_tests"${checked(d.run_tests)}> Let it install dependencies and run tests</label>
+          <p class="note">As for Codex and Claude: galley installs the dependencies from the lockfile without their install scripts, and the reviewer may run the typecheck, tests or build without network access.</p>
+        </div>
+        <div class="form-checkbox js-local-servers" data-engines="${localServers.join(' ')}"${localServers.includes(d.engine) ? '' : raw(' hidden')}>
+          <label><input type="checkbox" name="localhost"${checked(d.localhost)}> Let its tests listen on localhost</label>
+          <p class="note">As for Claude, with the setting above: tests that start servers work, and code in the pull request can then reach anything on localhost, galley too. Turn it on only for repositories whose code you trust.</p>
+        </div>
+      </div>
+      <div class="form-checkbox">
+        <label><input type="checkbox" name="skip_own_kind"${checked(d.skip_own_kind)}> Skip pull requests by agents in its own tool</label>
+        <p class="note">Leave pull requests that an agent running in the same tool wrote (Codex, or Claude Code) to the other reviewers, so authors get a second opinion. Asking for it with <code>--reviewer</code>, or turning it on in a pull request's sidebar, still has it review.</p>
       </div>
       <div class="flash flash-error js-form-error" hidden></div>
       <div class="form-actions form-actions-left">${file ? remove : html`<button type="submit" class="btn btn-primary">Create reviewer</button>`}</div>

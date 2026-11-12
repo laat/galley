@@ -43,7 +43,11 @@ export function web(s: Service): Hono {
 
   app.get('/', (c) => c.html(pullList(s, { repo: null, state: c.req.query('state') ?? 'staged' })));
   // Registered before /:owner/:repo, which would otherwise match "settings".
-  app.get('/settings', async (c) => c.html(await settingsPage(s)));
+  app.get('/settings', async (c) => {
+    // Its list of more reviewers is of the custom reviewers' files, read as for their own pages.
+    s.custom?.load();
+    return c.html(await settingsPage(s));
+  });
   app.get('/settings/publishing', (c) => c.html(publishingSettingsPage(s)));
   app.get('/settings/desktop', (c) => c.html(desktopSettingsPage(s)));
   // The files are read again, for edits made while nothing followed the directory (made after the server started).
@@ -52,7 +56,7 @@ export function web(s: Service): Hono {
     return c.html(customReviewersPage(s));
   });
   // Not under /settings/reviewers/, where a reviewer could be called "new".
-  app.get('/settings/new-reviewer', async (c) => c.html(await customReviewerPage(s, null)));
+  app.get('/settings/new-reviewer', async (c) => c.html(await customReviewerPage(s, null, c.req.query('engine'))));
   app.get('/settings/reviewers/:name', async (c) => {
     s.custom?.load();
     return c.html(await customReviewerPage(s, c.req.param('name')));
