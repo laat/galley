@@ -704,13 +704,23 @@ test('more models review as reviewers of their own, added per tool from the code
 
   // Codex's sandbox can not let the tests listen on localhost alone, as for its built-in reviewer.
   assert.match((await human('POST', '/api/settings/reviewers', { name: 'astra-review', engine: 'codex', model: 'gpt-6-astra', localhost: true }, 422)).message, /Codex's sandbox can not let its tests listen on localhost/);
-  assert.match((await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'codex' }, 422)).message, /Codex's sandbox/);
-  await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'codex', model: '', localhost: false });
+  assert.match((await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'codex', localhost: true }, 422)).message, /Codex's sandbox/);
+  // Moved to Codex, it drops the setting.
+  await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'codex', model: '' });
   assert.equal(reviewer('fable-review').settings().localhost, false);
+  assert.doesNotMatch(readFileSync(join(reviewersDir, 'fable-review.md'), 'utf8'), /localhost/);
   await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'claude', model: 'fable', localhost: true });
 
-  // The code review settings list them under their tool, with a button to add another.
+  // A Codex file written with it by hand runs without it, and changes as any other.
+  writeFileSync(join(reviewersDir, 'astra-review.md'), '---\nengine: codex\nmodel: gpt-6-astra\nlocalhost: true\nenabled: false\n---\n');
+  // The code review settings read the files, as the custom reviewers' pages do.
   const settings = await page('/settings');
+  assert.equal(reviewer('astra-review').settings().localhost, false);
+  await human('PATCH', '/api/settings/reviewers/astra-review', { effort: 'high' });
+  assert.doesNotMatch(readFileSync(join(reviewersDir, 'astra-review.md'), 'utf8'), /localhost/);
+  assert.match(settings.slice(settings.indexOf('id="more"')), /<strong>astra-review<\/strong><\/a>\s*<div class="note">gpt-6-astra · automatic reviews off/);
+  await human('DELETE', '/api/settings/reviewers/astra-review');
+  // The code review settings list them under their tool, with a button to add another.
   const more = settings.slice(settings.indexOf('id="more"'));
   const claude = more.slice(more.indexOf('<span class="form-label">Claude</span>'));
   assert.match(claude, /<a href="\/settings\/reviewers\/fable-review"><strong>fable-review<\/strong><\/a>\s*<div class="note">fable · automatic reviews off<\/div>/);

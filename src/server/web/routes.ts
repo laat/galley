@@ -43,7 +43,11 @@ export function web(s: Service): Hono {
 
   app.get('/', (c) => c.html(pullList(s, { repo: null, state: c.req.query('state') ?? 'staged' })));
   // Registered before /:owner/:repo, which would otherwise match "settings".
-  app.get('/settings', async (c) => c.html(await settingsPage(s)));
+  app.get('/settings', async (c) => {
+    // Its list of more reviewers is of the custom reviewers' files, read as for their own pages.
+    s.custom?.load();
+    return c.html(await settingsPage(s));
+  });
   app.get('/settings/publishing', (c) => c.html(publishingSettingsPage(s)));
   app.get('/settings/desktop', (c) => c.html(desktopSettingsPage(s)));
   // The files are read again, for edits made while nothing followed the directory (made after the server started).

@@ -335,7 +335,7 @@ export class CustomReviewers {
     const taken = this.builtInName(d.name) ?? new CustomReviewer(this.s, this.engines[d.engine], d).nameTaken();
     if (taken) throw new HttpError(422, taken);
     this.checkEffort(d);
-    this.checkLocalhost(d);
+    this.checkLocalhost(d, fields);
     return this.save(d);
   }
 
@@ -350,7 +350,7 @@ export class CustomReviewers {
     // One whose file can not be read is written whole.
     const d = checkDefinition(name, settable(fields), file.definition ?? undefined);
     this.checkEffort(d);
-    this.checkLocalhost(d);
+    this.checkLocalhost(d, fields);
     order?.check();
     const saved = this.save(d);
     order?.made();
@@ -388,10 +388,16 @@ export class CustomReviewers {
     if (allowed && !allowed.includes(d.effort)) throw new HttpError(422, `${d.model || 'the default model'} does not support effort "${d.effort}" (it supports ${allowed.join(', ')})`);
   }
 
-  /** As for Codex's and Claude's settings: a tool whose sandbox can not let the tests listen on localhost alone does not get the setting. A file that has it anyway is run without it. */
-  private checkLocalhost(d: Definition): void {
+  /**
+   * As for Codex's and Claude's settings: a tool whose sandbox can not let the tests listen on
+   * localhost alone does not get the setting. A change that asks for it is refused; one that does
+   * not drops it, as from a file written with it by hand (run without it), or a change of tool.
+   */
+  private checkLocalhost(d: Definition, fields: Record<string, unknown>): void {
     const engine = this.engines[d.engine];
-    if (d.localhost && !engine.localServers) throw new HttpError(422, `${engine.label}'s sandbox can not let its tests listen on localhost without letting them connect to other hosts`);
+    if (engine.localServers) return;
+    if (fields.localhost === true || fields.localhost === 'true') throw new HttpError(422, `${engine.label}'s sandbox can not let its tests listen on localhost without letting them connect to other hosts`);
+    d.localhost = false;
   }
 
   /** A definition file as the API gives it (an extension): the definition, where its file is, and why it does not run when it does not. */
