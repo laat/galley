@@ -628,6 +628,7 @@ kbd {
 .Subhead-heading { margin: 0; font-size: 24px; font-weight: 400; }
 .Subhead-description { margin: 4px 0 0; color: var(--fg-muted); }
 .settings-form { max-width: 560px; }
+.more-reviewers { margin: 0 0 8px; padding: 0; }
 .form-group { margin: 16px 0; }
 .form-label { display: block; margin-bottom: 6px; font-weight: 600; }
 .form-checkbox { margin: 16px 0; }

@@ -43,14 +43,23 @@ test('a definition file is read from its front matter and body, and written back
     verdict: 'approve',
     max_iterations: 2,
     run_tests: true,
+    localhost: false,
+    skip_own_kind: false,
     enabled: true,
     instructions: 'Check the title and description against these rules: …',
   });
   assert.deepEqual(parseDefinition('nrk-house-rules', formatDefinition(d)), d);
+  // Another model for the code review, with the settings the built-in reviewers have; off, they are left out of the file.
+  const fable = parseDefinition('fable-review', '---\nengine: claude\nmodel: fable\nlocalhost: true\nskip_own_kind: true\n---\n');
+  assert.deepEqual([fable.localhost, fable.skip_own_kind, fable.instructions], [true, true, '']);
+  assert.match(formatDefinition(fable), /\nrun_tests: true\nlocalhost: true\nskip_own_kind: true\nenabled: true\n/);
+  assert.deepEqual(parseDefinition('fable-review', formatDefinition(fable)), fable);
+  assert.doesNotMatch(formatDefinition({ ...fable, run_tests: false }), /localhost/, 'only with the tests');
   // A glob that starts with * is quoted, as YAML would read it as an alias.
   const all = checkDefinition('all', { engine: 'codex', repos: ['*/*'], reviews: 'code' });
   assert.match(formatDefinition(all), /^repos: \["\*\/\*"\]$/m);
   assert.deepEqual(parseDefinition('all', formatDefinition(all)), all);
+  assert.doesNotMatch(formatDefinition(all), /localhost|skip_own_kind/);
   // Lists in line, and from a form one text a line or comma apart; none is every repository.
   assert.deepEqual(parseDefinition('x', '---\nengine: codex\nrepos: [a/b, "c/*"] # two\n---\n').repos, ['a/b', 'c/*']);
   assert.deepEqual(checkDefinition('x', { engine: 'codex', repos: 'a/b\nc/d, e/*' }).repos, ['a/b', 'c/d', 'e/*']);
@@ -681,6 +690,40 @@ test('a reviewer may be called anything a login may be, constructor too, and its
   assert.equal((Object as unknown as Record<string, unknown>).enabled, undefined, 'Object is left alone');
   await human('PATCH', '/api/repos/acme/widgets/pulls/1/reviewers/constructor', { enabled: null });
   await human('DELETE', '/api/settings/reviewers/constructor');
+});
+
+test('more models review as reviewers of their own, added per tool from the code review settings, with the settings the built-in reviewers have', async () => {
+  // Off, so that it reviews nothing the other tests stage.
+  const created = await human('POST', '/api/settings/reviewers', { name: 'fable-review', engine: 'claude', model: 'fable', reviews: 'code', localhost: true, skip_own_kind: true, enabled: false });
+  assert.deepEqual([created.error, created.instructions, created.localhost, created.skip_own_kind], [null, '', true, true]);
+  const fable = reviewer('fable-review');
+  assert.equal(fable.instructions, '', 'it looks for what Claude looks for');
+  assert.deepEqual([fable.settings().model, fable.settings().localhost, fable.settings().skipOwnKind], ['fable', true, true]);
+  assert.equal(fable.skipsAuthor({ id: 0, login: 'claude', type: 'User' }), true, 'it leaves pull requests by agents in Claude Code to the others');
+  assert.equal(fable.skipsAuthor({ id: 0, login: 'agent', type: 'User' }), false);
+
+  // Codex's sandbox can not let the tests listen on localhost alone, as for its built-in reviewer.
+  assert.match((await human('POST', '/api/settings/reviewers', { name: 'astra-review', engine: 'codex', model: 'gpt-6-astra', localhost: true }, 422)).message, /Codex's sandbox can not let its tests listen on localhost/);
+  assert.match((await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'codex' }, 422)).message, /Codex's sandbox/);
+  await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'codex', model: '', localhost: false });
+  assert.equal(reviewer('fable-review').settings().localhost, false);
+  await human('PATCH', '/api/settings/reviewers/fable-review', { engine: 'claude', model: 'fable', localhost: true });
+
+  // The code review settings list them under their tool, with a button to add another.
+  const settings = await page('/settings');
+  const more = settings.slice(settings.indexOf('id="more"'));
+  const claude = more.slice(more.indexOf('<span class="form-label">Claude</span>'));
+  assert.match(claude, /<a href="\/settings\/reviewers\/fable-review"><strong>fable-review<\/strong><\/a>\s*<div class="note">fable · automatic reviews off<\/div>/);
+  assert.doesNotMatch(more, /house-rules/, 'a reviewer of the description is no other model of the code review');
+  assert.match(more, /href="\/settings\/new-reviewer\?engine=codex"/);
+  assert.match(more, /href="\/settings\/new-reviewer\?engine=claude"/);
+  // Added from there, a new one is run by that tool, its localhost setting only for a tool that has it.
+  const fresh = await page('/settings/new-reviewer?engine=codex');
+  assert.match(fresh, /<option value="codex" selected>Codex<\/option>/);
+  assert.match(fresh, /class="form-checkbox js-local-servers" data-engines="claude" hidden>/);
+  assert.match(await page('/settings/new-reviewer'), /<option value="claude" selected>Claude<\/option>/);
+  assert.match(await page('/settings/reviewers/fable-review'), /class="form-checkbox js-local-servers" data-engines="claude">\s*<label><input type="checkbox" name="localhost" checked>/);
+  await human('DELETE', '/api/settings/reviewers/fable-review');
 });
 
 test('a reviewer keeps its name, which nobody else may have, and comes back with its reviews when defined again', async () => {

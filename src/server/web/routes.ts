@@ -52,7 +52,7 @@ export function web(s: Service): Hono {
     return c.html(customReviewersPage(s));
   });
   // Not under /settings/reviewers/, where a reviewer could be called "new".
-  app.get('/settings/new-reviewer', async (c) => c.html(await customReviewerPage(s, null)));
+  app.get('/settings/new-reviewer', async (c) => c.html(await customReviewerPage(s, null, c.req.query('engine'))));
   app.get('/settings/reviewers/:name', async (c) => {
     s.custom?.load();
     return c.html(await customReviewerPage(s, c.req.param('name')));

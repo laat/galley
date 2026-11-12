@@ -43,6 +43,10 @@ export interface Definition {
   max_iterations: number;
   /** Install the dependencies first, and let it run the tests (code reviewers only). */
   run_tests: boolean;
+  /** With run_tests, let the tests listen and connect on localhost, for a tool whose sandbox can (Engine.localServers). */
+  localhost: boolean;
+  /** Leave pull requests by an author agent running in its own tool to the other reviewers. */
+  skip_own_kind: boolean;
   /** Review automatically when the author waits for review. */
   enabled: boolean;
   /** What to look for, in Markdown: the file's body. Empty, a code reviewer looks for what the built-in reviewers do. */
@@ -50,7 +54,7 @@ export interface Definition {
 }
 
 /** The front matter's keys, in the order they are written. */
-const KEYS = ['name', 'engine', 'model', 'effort', 'repos', 'reviews', 'verdict', 'max_iterations', 'run_tests', 'enabled'] as const;
+const KEYS = ['name', 'engine', 'model', 'effort', 'repos', 'reviews', 'verdict', 'max_iterations', 'run_tests', 'localhost', 'skip_own_kind', 'enabled'] as const;
 
 /** A glob on a GitHub slug: `owner/name`, where `*` and `?` match within one of the two. */
 const GLOB = /^[A-Za-z0-9._*?-]+\/[A-Za-z0-9._*?-]+$/;
@@ -63,6 +67,8 @@ const DEFAULTS: Omit<Definition, 'name' | 'engine'> = {
   verdict: 'comment',
   max_iterations: 3,
   run_tests: true,
+  localhost: false,
+  skip_own_kind: false,
   enabled: true,
   instructions: '',
 };
@@ -126,6 +132,8 @@ export function checkDefinition(name: string, fields: Record<string, unknown>, b
         break;
       }
       case 'run_tests':
+      case 'localhost':
+      case 'skip_own_kind':
       case 'enabled':
         next[key] = flag(key, v);
         break;
@@ -175,6 +183,9 @@ export function formatDefinition(d: Definition): string {
     verdict: d.verdict,
     max_iterations: String(d.max_iterations),
     run_tests: d.reviews === 'code' ? String(d.run_tests) : null,
+    // Off, as most are, they are left out.
+    localhost: d.reviews === 'code' && d.run_tests && d.localhost ? 'true' : null,
+    skip_own_kind: d.skip_own_kind ? 'true' : null,
     enabled: String(d.enabled),
   };
   const lines = KEYS.flatMap((key) => (values[key] === null ? [] : [`${key}: ${values[key]}`]));

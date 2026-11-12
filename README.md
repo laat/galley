@@ -279,6 +279,10 @@ When you ask the agent for another review loop, before or after publishing, it s
 `galley pr edit --add-reviewer`: the reviewers it names review the head again, with their limit
 counted afresh.
 
+To have more models review, such as Fable next to Opus or Astra next to Sol, add a Codex or
+Claude reviewer under **Settings** → Code review → More reviewers: each is a reviewer of its own,
+with its own name and model, and without instructions it looks for what Codex and Claude look for.
+
 You can add reviewer agents of your own, each with its own instructions, in
 `~/.config/galley/reviewers/<name>.md` or under **Settings** → Custom reviewers (a change there
 rewrites the file without its comments). The front matter holds the settings, the body the
@@ -286,7 +290,8 @@ instructions:
 
 ```markdown
 ---
-engine: claude            # or codex; also model, effort, max_iterations
+engine: claude            # or codex; also model, effort, max_iterations, run_tests,
+                          # localhost (Claude), skip_own_kind, enabled
 repos: [nrkno/*]          # GitHub owner/name globs; left out: every repository
 reviews: description      # the title, description and commit messages; or code
 verdict: approve          # approve when it finds nothing; left out: comment only

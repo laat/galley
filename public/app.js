@@ -1771,6 +1771,12 @@
       model.value = '';
       tool.selected = true;
       $('.js-reviewer-effort', t.form).dataset.defaultLabel = tool.dataset.defaultLabel;
+      // Only a tool whose sandbox can let the tests listen on localhost alone has the setting.
+      const local = $('.js-local-servers', t.form);
+      const box = $('input', local);
+      local.hidden = !local.dataset.engines.split(' ').includes(t.value);
+      // Sent unchecked, not left out: the definition would keep it on otherwise.
+      if (local.hidden) box.checked = false;
       model.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (t.matches && t.matches('.js-reviewer-reviews')) {
       $('.js-code-only', t.form).hidden = t.value !== 'code';
