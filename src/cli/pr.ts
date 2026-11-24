@@ -490,7 +490,7 @@ FLAGS
 async function rereview(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v, positionals } = parse(args, REREVIEW_USAGE, { reviewer: { ...multi, short: 'r' } });
   // The server refuses agents too; refused here, an agent is not sent after a --reviewer first.
-  if (cliActor()?.type === 'Bot') throw new CliError('only the user can ask reviewer agents to review now; ask the user, or wait for their next automatic review with `galley pr wait`');
+  if (cliActor()?.type === 'Bot') throw new CliError('only the user can ask reviewer agents to review now; a failed review is not tried again on its own, so ask the user to retry it');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const agents = await client.get<ReviewerAgent[]>(`${repoPath(t.repo)}/reviewers`);
   const names = (v.reviewer as string[] | undefined) ?? [];
