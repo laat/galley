@@ -6,6 +6,7 @@ import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, s
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
 import { whoReviews, whoReviewsAgain, type ReviewerAgent } from './reviewers.ts';
 import { openPage } from './open.ts';
+import { cliActor } from '../config.ts';
 import { clearPushRemote, fetchBack, fetchHead, hasBranch, sendBase, sendHead, sendPull, setPushRemote } from './send.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
@@ -488,13 +489,17 @@ FLAGS
 
 async function rereview(client: Client, cwd: string, args: string[]): Promise<number> {
   const { values: v, positionals } = parse(args, REREVIEW_USAGE, { reviewer: { ...multi, short: 'r' } });
+  // The server refuses agents too; refused here, an agent is not sent after a --reviewer first.
+  if (cliActor()?.type === 'Bot') throw new CliError('only the user can ask reviewer agents to review now; ask the user, or wait for their next automatic review with `galley pr wait`');
   const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
   const agents = await client.get<ReviewerAgent[]>(`${repoPath(t.repo)}/reviewers`);
   const names = (v.reviewer as string[] | undefined) ?? [];
   let asked: ReviewerAgent[];
   if (names.length) {
     asked = names.map((n) => {
-      const agent = agents.find((a) => a.login === n || a.reviewer === n);
+      // Without regard to case, as the server takes --reviewer names (Reviewer.answersTo).
+      const l = n.toLowerCase();
+      const agent = agents.find((a) => a.login.toLowerCase() === l || a.reviewer.toLowerCase() === l);
       if (!agent) throw new CliError(`no reviewer agent reviews ${t.repo.owner}/${t.repo.name} by the name "${n}"; \`galley reviewers\` lists them`);
       return agent;
     });
