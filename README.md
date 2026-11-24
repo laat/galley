@@ -277,7 +277,9 @@ too. **Stop iterating** in the merge box ends the automatic reviews. You can
 also name reviewers when you ask an agent to stage; `galley reviewers` lists those that review a repository.
 When you ask the agent for another review loop, before or after publishing, it starts one with
 `galley pr edit --add-reviewer`: the reviewers it names review the head again, with their limit
-counted afresh.
+counted afresh. A review that failed, say on a login that ran out, is not tried again on its own:
+once you have fixed the cause, click **Retry** on its row, or run `galley pr rereview` in a
+terminal, which asks again each reviewer whose last review failed.
 
 To have more models review, such as Fable next to Opus or Astra next to Sol, add a Codex or
 Claude reviewer under **Settings** → Code review → More reviewers: each is a reviewer of its own,

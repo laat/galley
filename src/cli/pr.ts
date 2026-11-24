@@ -4,8 +4,9 @@ import { basename, resolve } from 'node:path';
 import { ApiError, CliError, Client, GATEWAY_DOWN, Help, currentBranch, git, repoPath, type RepoRef } from './client.ts';
 import { c, checkFields, err, isTTY, out, parseDuration, printJson, stagedRef, stagedNumber } from './output.ts';
 import { conflictsText, conversationItems, formatConversation, reviewersAtWork, stillReviewing, turnLine, viewPlain, viewTTY, type ImageRef } from './format.ts';
-import { whoReviews, whoReviewsAgain } from './reviewers.ts';
+import { whoReviews, whoReviewsAgain, type ReviewerAgent } from './reviewers.ts';
 import { openPage } from './open.ts';
+import { cliActor } from '../config.ts';
 import { clearPushRemote, fetchBack, fetchHead, hasBranch, sendBase, sendHead, sendPull, setPushRemote } from './send.ts';
 
 type Options = NonNullable<ParseArgsConfig['options']>;
@@ -470,6 +471,55 @@ async function edit(client: Client, cwd: string, args: string[]): Promise<number
   }
   out(pr.html_url);
   return 0;
+}
+
+// ------------------------------------------------------------------ rereview
+
+const REREVIEW_USAGE = `Have reviewer agents review a pull request's head now, whatever their limit, as "Ask to review"
+and "Retry" do on its page. Without --reviewer, those whose last review failed: a failed review
+is not tried again on its own. The user's only; agents are refused.
+
+USAGE
+  galley pr rereview ${PULL} [flags]
+
+FLAGS
+  -r, --reviewer <name>   The reviewer agent to ask, by the name \`galley reviewers\` lists (or
+                          codex, claude). Repeat for more
+`;
+
+async function rereview(client: Client, cwd: string, args: string[]): Promise<number> {
+  const { values: v, positionals } = parse(args, REREVIEW_USAGE, { reviewer: { ...multi, short: 'r' } });
+  // The server refuses agents too; refused here, an agent is not sent after a --reviewer first.
+  if (cliActor()?.type === 'Bot') throw new CliError('only the user can ask reviewer agents to review now; a failed review is not tried again on its own, so ask the user to retry it');
+  const t = await resolvePull(client, cwd, v.repo as string | undefined, positionals[0]);
+  const agents = await client.get<ReviewerAgent[]>(`${repoPath(t.repo)}/reviewers`);
+  const names = (v.reviewer as string[] | undefined) ?? [];
+  let asked: ReviewerAgent[];
+  if (names.length) {
+    asked = names.map((n) => {
+      // Without regard to case, as the server takes --reviewer names (Reviewer.answersTo).
+      const l = n.toLowerCase();
+      const agent = agents.find((a) => a.login.toLowerCase() === l || a.reviewer.toLowerCase() === l);
+      if (!agent) throw new CliError(`no reviewer agent reviews ${t.repo.owner}/${t.repo.name} by the name "${n}"; \`galley reviewers\` lists them`);
+      return agent;
+    });
+  } else {
+    const runs = await Promise.all(agents.map((a) => client.get<{ running: boolean; runs: { status: string }[] }>(`${pullPath(t)}/reviewers/${encodeURIComponent(a.reviewer)}`)));
+    asked = agents.filter((_, i) => !runs[i].running && runs[i].runs.at(-1)?.status === 'failed');
+    if (!asked.length) throw new CliError(`no reviewer agent's last review of ${named(t)} failed; name one with --reviewer`);
+  }
+  let failed = 0;
+  for (const a of new Set(asked)) {
+    try {
+      await client.json('POST', `${pullPath(t)}/reviewers/${encodeURIComponent(a.reviewer)}`);
+      err(`✓ Asked ${a.login} to review ${named(t)}`);
+    } catch (e) {
+      if (!(e instanceof CliError)) throw e;
+      err(`Could not ask ${a.login} to review ${named(t)}: ${e.message}`);
+      failed++;
+    }
+  }
+  return failed ? 1 : 0;
 }
 
 // ------------------------------------------------------------------ comment
@@ -1217,6 +1267,8 @@ GALLEY COMMANDS
                feedback, or until the reviewer agents are done with the latest commit.
                After publishing, pushes your commits to GitHub, and waits until it is
                merged or closed there. Several (as in s4 s5): whichever is first
+  rereview:    Have reviewer agents review the head now: by default those whose last
+               review failed (--reviewer <name> for others). The user's only
   publish:     Push the branch and open the pull request on GitHub (--auto: once the
                reviews are done; --auto-merge: and turn on auto-merge there)
 
@@ -1241,6 +1293,8 @@ export async function pr(client: Client, cwd: string, args: string[]): Promise<n
       return diff(client, cwd, rest);
     case 'edit':
       return edit(client, cwd, rest);
+    case 'rereview':
+      return rereview(client, cwd, rest);
     case 'comment':
       return comment(client, cwd, rest);
     case 'review':

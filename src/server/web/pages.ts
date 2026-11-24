@@ -1480,6 +1480,11 @@ function reviewerRow(p: PullPage, reviewer: Reviewer): Safe {
   } else if (last?.status === 'failed') {
     // The run's page has the whole error, also without a transcript.
     state = { mark: icon('x-circle-fill', { cls: 'color-fg-danger' }), text: html`Failed · ${since(last.finished_at)}`, title: `Review of ${shortSha(last.head_sha)} failed`, href: runUrl(runBase(p), last) };
+    // A failure is not tried again on its own (Reviewer.wouldReview): asking for a review now is the way past one, as once what failed it is fixed.
+    // Not once it is closed, here or on GitHub, or merged.
+    if (stagingState(pull) !== 'done') {
+      meta.push(html`<button type="button" class="btn-link js-run-reviewer" id="agent-${reviewer.key}:retry" data-api="${p.apiBase}/reviewers/${reviewer.key}" title="Ask ${actor.login} to review ${shortSha(pull.head_sha)} now">Retry</button>`);
+    }
     const error = (last.error ?? '').trim();
     if (error) meta.push(html`<span class="agent-error" title="${error}">${error.replace(/\s+/g, ' ')}</span>`);
   } else if (last?.status === 'cancelled') {
