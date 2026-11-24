@@ -178,6 +178,25 @@ test('codex-review reviews when the author waits, within the limits in settings'
     assert.match(runs[2].error, /model overloaded/);
     const page = await (await fetch(`${server.url}/acme/widgets/pull/${number}`)).text();
     assert.match(page, /failed/);
+    // A failure is not tried again on its own: the row has a Retry.
+    assert.match(page, /<button type="button" class="btn-link js-run-reviewer" id="agent-codex:retry" data-api="[^"]*\/reviewers\/codex"[^>]*>Retry<\/button>/);
+    // And the user's CLI asks again the reviewers whose last review failed; an agent's is refused.
+    // Without the tests, so that nothing is installed (installs, below).
+    await human('PUT', '/api/settings/codex', { runTests: false });
+    const byAgent = await cli(['pr', 'rereview', String(number)]);
+    assert.equal(byAgent.code, 1);
+    assert.match(byAgent.stderr, /Could not ask codex-review to review acme\/widgets s#\d+: only the user can do this/);
+    const asUser = { actor: 'reviewer', env: { GALLEY_ACTOR_TYPE: 'User' } };
+    assert.match((await cli(['pr', 'rereview', String(number), '-r', 'nobody'], asUser)).stderr, /no reviewer agent reviews acme\/widgets by the name "nobody"/);
+    const retried = await cli(['pr', 'rereview', String(number)], asUser);
+    assert.equal(retried.code, 0, retried.stderr);
+    assert.match(retried.stderr, /✓ Asked codex-review to review acme\/widgets s#\d+/);
+    await server.service.codex!.settle(pull.id);
+    assert.equal((await human('GET', `${base}/reviewers/codex`)).runs.at(-1).status, 'done');
+    assert.match((await cli(['pr', 'rereview', String(number)], asUser)).stderr, /no reviewer agent's last review of acme\/widgets s#\d+ failed; name one with --reviewer/);
+    assert.equal((await cli(['pr', 'rereview', String(number), '--reviewer', 'codex'], asUser)).code, 0);
+    await server.service.codex!.settle(pull.id);
+    await human('PUT', '/api/settings/codex', { runTests: true });
     assert.match(page, /<span class="agent-chunk">Automatic: 2 of 2<\/span>/);
     assert.match(page, /class="reviewer-limit" data-api="[^"]*\/reviewers\/codex" data-limit="2"/);
     assert.match(page, /js-reviewer-reset"[^>]* data-field="max_iterations"/);
